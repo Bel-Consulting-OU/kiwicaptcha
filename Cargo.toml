@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/kiwicaptcha",
+]
+exclude = [
+    "packages/kiwicaptcha-wasm",
+    "packages/kiwicaptcha-wasm/tools/embed",
+]
+
+# The wasm crate is excluded from the workspace because it targets
+# wasm32-unknown-unknown (build with packages/kiwicaptcha-wasm/build.sh).
