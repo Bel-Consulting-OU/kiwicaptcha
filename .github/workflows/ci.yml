@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: wasm32 build
+        run: cargo build --package kiwicaptcha-wasm --target wasm32-unknown-unknown
+
+  php:
+    name: PHP ${{ matrix.php }} core
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: phpunit
+        run: vendor/bin/phpunit
+
+  symfony:
+    name: Symfony bundle (container + KernelBrowser)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        symfony: ['6.4', '7.x']
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha/integrations/symfony
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: pin Symfony ${{ matrix.symfony }}
+        if: matrix.symfony == '6.4'
+        run: composer update "symfony/*:${{ matrix.symfony }}.*" --with-all-dependencies --no-interaction
+      - name: phpunit (container compilation + KernelBrowser + router)
+        run: vendor/bin/phpunit
+
+  redis:
+    name: Real-Redis concurrency (GETDEL, leases, rate limits)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha/integrations/symfony
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: real-redis integration tests
+        env:
+          KC_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit --filter RealRedis
+
+  cross-language:
+    name: Cross-language (PHP issue -> Rust verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer install (PHP core)
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: PHP issues a challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record.json
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record.json
+        run: cargo test --test cross_language -- --nocapture
