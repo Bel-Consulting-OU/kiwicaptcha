@@ -75,10 +75,13 @@ let ctx = VerifyContext { record: &record, secret_key: &config.secret_key,
 match verify_solution(&ctx) { VerifyOutcome::Valid => { /* allow */ }, _ => { /* reject */ } }
 ```
 
-Render the widget: `kiwicaptcha::kiwi_widget_html()` returns a self-contained
-HTML block (styles + WASM solver + driver). The driver also exposes
+Render the widget: `kiwicaptcha::kiwi_widget_html(endpoint, scope)` returns a
+self-contained HTML block (styles + WASM solver + driver). The endpoint is the
+challenge-issuing route, the scope is the challenge scope; both are
+HTML-attribute-escaped. For the defaults (`/api/kcaptcha/challenge`, `login`)
+use `kiwi_widget_html_default()`. The driver also exposes
 `window.KiwiCaptcha.init/render` for SPAs, and honors `data-kiwi-endpoint` /
-`data-kiwi-scope` attributes for standalone backends.
+`data-kiwi-scope` attributes on the container for standalone backends.
 
 ## Quick start (PHP/Symfony)
 
@@ -102,10 +105,17 @@ $outcome = $verifier->verify($token, $config->secretKey, 'login', $clientIp);
 if ($outcome->isOk()) { /* allow */ }
 ```
 
-Symfony: register `KiwiCaptcha\Symfony\KiwiCaptchaBundle`, configure
-`kiwicaptcha.secret`, then `{{ kiwi_captcha_widget('login') }}` in Twig, and
-validate with `KiwiCaptchaType` or the `#[KiwiCaptcha]` constraint.
-See `php/kiwicaptcha-php/README.md`.
+Symfony: two options —
+- `kiwicaptcha/kiwicaptcha-php` ships a self-contained Symfony bundle
+  (`KiwiCaptcha\Symfony\KiwiCaptchaBundle`).
+- `packages/kiwicaptcha/integrations/symfony` is a standalone bundle
+  (`BelConsulting\KiwiCaptchaBundle`, Composer package
+  `bel-consulting/kiwicaptcha-symfony`) that reuses the verified PHP core:
+  register it, configure `kiwi_captcha.secret_key`, add
+  `KiwiCaptchaType` to your form, and it ships its own challenge endpoint
+  (`POST /kiwi-captcha/challenge`) and inlined widget assets — zero external
+  requests, the secret key never leaves your server.
+  See `packages/kiwicaptcha/integrations/symfony/README.md`.
 
 ## Building the WASM solver
 

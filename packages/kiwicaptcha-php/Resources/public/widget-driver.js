@@ -1,3 +1,4 @@
+(function() {
   var encoder = new TextEncoder();
   
   // ── Global Telemetry ────────────────────────────────────────────────
@@ -125,13 +126,23 @@
       // chunks, eliminating malloc/free churn on every 50k-hash iteration
       // (the hottest loop in the SHA-256 solver).
       var pp = 0, sp = 0;
+      // wasm is usable when the solver AND an allocator export exist. The
+      // wasm-opt pipeline exports alloc/dealloc (stable names); wasm-bindgen's
+      // generated __wbindgen_malloc may be dead-code-eliminated, so it is not
+      // a reliable capability signal.
+      function wasmUsable() {
+        return !!(w && w.solve_sha256_chunk && (w.alloc || w.__wbindgen_malloc));
+      }
+      function wasmAllocatorPresent() {
+        return !!(w && (w.alloc || w.__wbindgen_malloc) && (w.dealloc || w.__wbindgen_free));
+      }
       function ensureBuffers() {
-        if (w && w.__wbindgen_malloc && pp === 0) {
+        if (wasmAllocatorPresent() && pp === 0) {
           pp = wasmAlloc(w, prefixBytes); sp = wasmAlloc(w, saltBytes);
         }
       }
       if (algorithm === "argon2id") {
-        if (!w || !w.solve_argon2_chunk || !w.__wbindgen_malloc || m_kib < 8 * p) { resolve(null); return; }
+        if (!w || !w.solve_argon2_chunk || !wasmAllocatorPresent() || m_kib < 8 * p) { resolve(null); return; }
         var argMax = Math.min(MAX_SHA_HASHES, Math.max(1024, expectedHashes * 8)), CHUNK = 16;
         ensureBuffers();
         function argon2Chunk() {
@@ -145,17 +156,18 @@
         }
         fastYield(argon2Chunk); return;
       }
-      var CHUNK = w && w.solve_sha256_chunk ? 50000 : 8000;
+      var useWasm = wasmUsable();
+      var CHUNK = useWasm ? 50000 : 8000;
       function chunk() {
-        if (w && w.solve_sha256_chunk && w.__wbindgen_malloc) {
+        if (useWasm) {
           try {
             ensureBuffers();
             var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, CHUNK);
             if (res !== -1) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
             counter += CHUNK;
-          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed", e); w = null; }
+          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed, falling back to JS", e); useWasm = false; }
         }
-        if (!w) {
+        if (!useWasm) {
           var end = Math.min(counter + CHUNK, MAX_SHA_HASHES);
           for (; counter < end; counter++) if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
             resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
@@ -172,10 +184,11 @@
   function initWidget(W) {
     if (!W || W.dataset.kiwiStarted) return;
     W.dataset.kiwiStarted = "1";
-    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]");
+    var container = W.closest(".kiwi-container") || W;
+    var statusEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]");
     function setStatus(label, pillText, state) { if (statusEl) statusEl.textContent = label; if (pillEl) pillEl.textContent = pillText; if (W) W.setAttribute("data-state", state); }
     function setHint(text) { if (hintEl) hintEl.textContent = text; }
-    function setProgress(pct) { if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)) + "%"; }
+    function setProgress(pct) { if (fillEl) fillEl.setAttribute("data-progress", String(Math.max(0, Math.min(100, pct)))); }
     
     var countdownTimer = null;
     function startCountdown(ttlSecs) {
@@ -189,12 +202,8 @@
     async function run() {
       try {
         setStatus("Connecting\u2026", "Wait", "connecting");
-        // The challenge endpoint and scope are configurable per widget via
-        // data-kiwi-endpoint / data-kiwi-scope (required for standalone
-        // backends like the PHP/Symfony SDK); defaults match the ApexMail
-        // api-server routes and pathname-derived scope.
-        var endpoint = W.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge";
-        var scope = W.getAttribute("data-kiwi-scope");
+        var endpoint = W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge";
+        var scope = W.getAttribute("data-kiwi-scope") || container.getAttribute("data-kiwi-scope");
         if (!scope) {
           scope = "login";
           var p = window.location.pathname.toLowerCase();
