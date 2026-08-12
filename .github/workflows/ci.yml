@@ -50,7 +50,7 @@ jobs:
       - name: composer validate
         run: composer validate --strict
       - name: composer install
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: composer audit (dependency/security)
         run: composer audit --locked
       - name: phpunit
@@ -74,7 +74,7 @@ jobs:
           extensions: json, openssl, sodium
           coverage: none
       - name: composer install
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: composer audit (dependency/security)
         run: composer audit --locked
       - name: pin Symfony 6.4
@@ -107,7 +107,7 @@ jobs:
           extensions: json, openssl, sodium
           coverage: none
       - name: composer install
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: real-redis integration tests
         env:
           KC_REDIS_URL: tcp://127.0.0.1:6379
@@ -157,7 +157,7 @@ jobs:
           extensions: json, openssl, sodium
           coverage: none
       - name: composer install
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: phpunit (incl. real-Redis suite)
         env:
           RISK_REDIS_URL: tcp://127.0.0.1:6379
@@ -177,7 +177,7 @@ jobs:
       - name: PHP fixture hash
         working-directory: packages/kiwicaptcha-risk-php
         run: |
-          composer install --no-interaction --prefer-dist
+          composer install --no-interaction --prefer-dist --no-audit
           php tools/fixture_hash.php
       - name: Rust fixture hash
         working-directory: packages/kiwicaptcha-risk
@@ -205,7 +205,7 @@ jobs:
           node-version: '22'
       - name: install PHP core (fixture server)
         working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: install Playwright
         working-directory: tests/browser
         run: |
@@ -294,7 +294,7 @@ jobs:
           coverage: none
       - name: composer install (PHP core)
         working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
+        run: composer install --no-interaction --prefer-dist --no-audit
       - name: PHP issues a SHA-256 challenge
         working-directory: packages/kiwicaptcha-php
         env:
