@@ -113,6 +113,83 @@ jobs:
           KC_REDIS_URL: tcp://127.0.0.1:6379
         run: vendor/bin/phpunit --filter RealRedis
 
+  risk-rust:
+    name: Risk Rust (fmt, clippy, test + Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test (incl. real-Redis suite)
+        env:
+          RISK_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test
+
+  risk-php:
+    name: Risk PHP (phpunit + Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk-php
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: phpunit (incl. real-Redis suite)
+        env:
+          RISK_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit
+
+  risk-parity:
+    name: Risk parity (Rust == PHP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: PHP fixture hash
+        working-directory: packages/kiwicaptcha-risk-php
+        run: |
+          composer install --no-interaction --prefer-dist
+          php tools/fixture_hash.php
+      - name: Rust fixture hash
+        working-directory: packages/kiwicaptcha-risk
+        run: cargo run --example fixture_hash
+      - name: assert identical hashes
+        working-directory: packages/kiwicaptcha-risk
+        run: |
+          PHP_HASH=$(cd ../kiwicaptcha-risk-php && php tools/fixture_hash.php)
+          RUST_HASH=$(cargo run --quiet --example fixture_hash)
+          echo "php=$PHP_HASH rust=$RUST_HASH"
+          test "$PHP_HASH" = "$RUST_HASH"
+
   browser:
     name: Browser solver
     runs-on: ubuntu-latest
