@@ -78,6 +78,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     return true;
 }
 
+if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js') {
+    $name = $path === '/kiwi-worker.js' ? 'kiwi-worker.js' : 'kiwicaptcha-wasm.js';
+    $file = $repo.'/packages/kiwicaptcha-wasm/assets/'.$name;
+    if (!is_file($file)) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    header('Content-Type: application/javascript');
+    header('Cache-Control: no-store');
+    echo file_get_contents($file);
+
+    return true;
+}
+
 if ($path === '/' || $path === '/index.html') {
     $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
     $css = file_get_contents($assets.'/widget.css');
@@ -86,9 +102,11 @@ if ($path === '/' || $path === '/index.html') {
     $csp = ($_GET['csp'] ?? '') === 'strict'
         ? '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; style-src \'unsafe-inline\'">'
         : '';
+    $algorithm = ($_GET['algorithm'] ?? '') === 'argon2id' ? 'argon2id' : 'sha256';
+    $workerAttr = ($_GET['worker'] ?? '') === '1' ? ' data-kiwi-worker-src="/kiwi-worker.js"' : '';
     header('Content-Type: text/html');
     echo "<!DOCTYPE html><html><head><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\">
+<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

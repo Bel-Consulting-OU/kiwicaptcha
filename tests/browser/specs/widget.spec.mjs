@@ -33,6 +33,21 @@ test.describe('KiwiCaptcha browser solver', () => {
     await solveAndVerify(page, 'argon2id');
   });
 
+  test('external same-origin worker is used (data-kiwi-worker-src)', async ({ page }) => {
+    // The standalone worker path (CSP-friendly: no blob:) must load its WASM
+    // glue via importScripts("kiwicaptcha-wasm.js") — a typo in that name
+    // silently loses off-main-thread Argon. This test pins the flag the
+    // driver sets when the external worker is actually used.
+    await page.goto('/?worker=1&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
+    expect(workerUsed, 'the external worker must be used for Argon2id').toBe(true);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+  });
+
   test('Privacy Strict: zero external requests and empty telemetry', async ({ page }) => {
     const external = [];
     page.on('request', (req) => {

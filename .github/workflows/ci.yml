@@ -215,6 +215,68 @@ jobs:
         working-directory: tests/browser
         run: npx playwright test
 
+  package-cargo:
+    name: Package (cargo publish readiness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo package (risk crate)
+        working-directory: packages/kiwicaptcha-risk
+        run: |
+          cargo package --allow-dirty --no-verify
+          cargo package --list | grep -q 'resources/risk-v1.lua' || { echo 'resources/risk-v1.lua missing from the .crate'; exit 1; }
+      - name: build the unpacked .crate standalone (no monorepo)
+        working-directory: packages/kiwicaptcha-risk
+        run: |
+          CRATE=$(ls target/package/kiwicaptcha-risk-*.crate | head -1)
+          tar xzf "$CRATE" -C target/package
+          # kiwicaptcha 1.1.0 is not on crates.io yet: verify the packaged
+          # crate builds with the local core as the versioned dependency.
+          cargo check --manifest-path target/package/kiwicaptcha-risk-0.1.0/Cargo.toml \
+            --config 'patch.crates-io.kiwicaptcha.path="'$PWD'/../kiwicaptcha"'
+      - name: cargo package (core crate)
+        working-directory: packages/kiwicaptcha
+        run: cargo package --allow-dirty --no-verify
+
+  package-composer:
+    name: Package (composer clean-room install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: clean-room install outside the monorepo
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/composer-clean/packages
+          cp -r packages/kiwicaptcha-php /tmp/composer-clean/packages/
+          cp -r packages/kiwicaptcha-risk-php /tmp/composer-clean/packages/
+          rm -rf /tmp/composer-clean/packages/*/vendor /tmp/composer-clean/packages/*/composer.lock
+          cd /tmp/composer-clean
+          composer init --no-interaction --name=ci/smoke
+          composer config repositories.packages path /tmp/composer-clean/packages/*
+          composer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist
+          test -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \
+            || { echo 'risk-v1.lua not shipped in the published package'; exit 1; }
+          # Smoke: the store constructor resolves the bundled Lua without
+          # the monorepo (no Redis needed — Predis connects lazily).
+          php -r 'require "vendor/autoload.php"; $s = new KiwiCaptcha\Risk\Storage\RedisRiskStateStore(new Predis\Client(), "smoke"); echo "OK\n";'
+
+  lua-sha256:
+    name: Package (canonical Lua sha256 parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: all three copies must be identical
+        run: |
+          set -euo pipefail
+          test "$(shasum -a 256 protocol/risk-v1/risk.lua packages/kiwicaptcha-risk/resources/risk-v1.lua packages/kiwicaptcha-risk-php/resources/risk-v1.lua | awk '{print $1}' | sort -u | wc -l)" = "1"
+
+
   cross-language:
     name: Cross-language (both directions)
     runs-on: ubuntu-latest
