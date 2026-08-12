@@ -237,7 +237,7 @@ jobs:
           # resolution would once kiwicaptcha 1.1.0 is published). The
           # include_str!("../resources/risk-v1.lua") must resolve here.
           sed -i 's|path = "../kiwicaptcha"|path = "'$GITHUB_WORKSPACE'/packages/kiwicaptcha"|' Cargo.toml
-          cargo check --offline
+          cargo check
       - name: cargo package (core crate)
         working-directory: packages/kiwicaptcha
         run: cargo package --allow-dirty --no-verify
