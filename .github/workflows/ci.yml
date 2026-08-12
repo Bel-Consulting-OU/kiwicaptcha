@@ -224,17 +224,20 @@ jobs:
       - name: cargo package (risk crate)
         working-directory: packages/kiwicaptcha-risk
         run: |
-          cargo package --allow-dirty --no-verify
           cargo package --list | grep -q 'resources/risk-v1.lua' || { echo 'resources/risk-v1.lua missing from the .crate'; exit 1; }
-      - name: build the unpacked .crate standalone (no monorepo)
-        working-directory: packages/kiwicaptcha-risk
+      - name: standalone build outside the monorepo (no include_str escape)
         run: |
-          CRATE=$(ls target/package/kiwicaptcha-risk-*.crate | head -1)
-          tar xzf "$CRATE" -C target/package
-          # kiwicaptcha 1.1.0 is not on crates.io yet: verify the packaged
-          # crate builds with the local core as the versioned dependency.
-          cargo check --manifest-path target/package/kiwicaptcha-risk-0.1.0/Cargo.toml \
-            --config 'patch.crates-io.kiwicaptcha.path="'$PWD'/../kiwicaptcha"'
+          set -euo pipefail
+          rm -rf /tmp/crate-check
+          mkdir -p /tmp/crate-check
+          cp -r packages/kiwicaptcha-risk /tmp/crate-check/
+          cd /tmp/crate-check/kiwicaptcha-risk
+          rm -rf target
+          # Point the versioned dependency at the local core (as crates.io
+          # resolution would once kiwicaptcha 1.1.0 is published). The
+          # include_str!("../resources/risk-v1.lua") must resolve here.
+          sed -i 's|path = "../kiwicaptcha"|path = "'$GITHUB_WORKSPACE'/packages/kiwicaptcha"|' Cargo.toml
+          cargo check --offline
       - name: cargo package (core crate)
         working-directory: packages/kiwicaptcha
         run: cargo package --allow-dirty --no-verify
@@ -258,7 +261,8 @@ jobs:
           rm -rf /tmp/composer-clean/packages/*/vendor /tmp/composer-clean/packages/*/composer.lock
           cd /tmp/composer-clean
           composer init --no-interaction --name=ci/smoke
-          composer config repositories.packages path /tmp/composer-clean/packages/*
+          composer config repositories.php path /tmp/composer-clean/packages/kiwicaptcha-php
+          composer config repositories.risk path /tmp/composer-clean/packages/kiwicaptcha-risk-php
           composer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist
           test -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \
             || { echo 'risk-v1.lua not shipped in the published package'; exit 1; }
