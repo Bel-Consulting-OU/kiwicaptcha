@@ -21,7 +21,10 @@ jobs:
       - name: test
         run: cargo test --workspace
       - name: wasm32 build
-        run: cargo build --package kiwicaptcha-wasm --target wasm32-unknown-unknown
+        # kiwicaptcha-wasm is a STANDALONE crate (not a workspace member), so
+        # the build runs from its own directory.
+        working-directory: packages/kiwicaptcha-wasm
+        run: cargo build --target wasm32-unknown-unknown
 
   php:
     name: PHP ${{ matrix.php }} core
