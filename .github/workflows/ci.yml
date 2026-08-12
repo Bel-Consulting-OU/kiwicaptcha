@@ -27,8 +27,8 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown
       - name: cargo audit (dependency/security)
         run: |
-          cargo install cargo-audit --locked --quiet
-          cargo audit --fail-on high
+          cargo install cargo-audit --locked --quiet || true
+          cargo audit
 
   php:
     name: PHP ${{ matrix.php }} core
@@ -125,7 +125,7 @@ jobs:
           coverage: none
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: install PHP core (fixture server)
         working-directory: packages/kiwicaptcha-php
         run: composer install --no-interaction --prefer-dist
