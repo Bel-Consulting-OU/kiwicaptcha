@@ -66,9 +66,14 @@ jobs:
           coverage: none
       - name: composer install
         run: composer install --no-interaction --prefer-dist
-      - name: pin Symfony ${{ matrix.symfony }}
+      - name: pin Symfony 6.4
         if: matrix.symfony == '6.4'
-        run: composer update "symfony/*:${{ matrix.symfony }}.*" --with-all-dependencies --no-interaction
+        # `--with` (temporary constraints) is required: a wildcard
+        # `composer update "symfony/*:6.4.*"` does NOT constrain anything.
+        # The transitive packages (property-info, error-handler) are also
+        # pinned — Symfony 6.4's validator loader is incompatible with the
+        # 8.x line they would otherwise resolve to.
+        run: composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
       - name: phpunit (container compilation + KernelBrowser + router)
         run: vendor/bin/phpunit
 
