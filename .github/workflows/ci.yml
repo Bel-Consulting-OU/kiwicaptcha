@@ -25,6 +25,10 @@ jobs:
         # the build runs from its own directory.
         working-directory: packages/kiwicaptcha-wasm
         run: cargo build --target wasm32-unknown-unknown
+      - name: cargo audit (dependency/security)
+        run: |
+          cargo install cargo-audit --locked --quiet
+          cargo audit --fail-on high
 
   php:
     name: PHP ${{ matrix.php }} core
@@ -47,6 +51,8 @@ jobs:
         run: composer validate --strict
       - name: composer install
         run: composer install --no-interaction --prefer-dist
+      - name: composer audit (dependency/security)
+        run: composer audit --locked
       - name: phpunit
         run: vendor/bin/phpunit
 
@@ -69,6 +75,8 @@ jobs:
           coverage: none
       - name: composer install
         run: composer install --no-interaction --prefer-dist
+      - name: composer audit (dependency/security)
+        run: composer audit --locked
       - name: pin Symfony 6.4
         if: matrix.symfony == '6.4'
         # `--with` (temporary constraints) is required: a wildcard
@@ -105,8 +113,33 @@ jobs:
           KC_REDIS_URL: tcp://127.0.0.1:6379
         run: vendor/bin/phpunit --filter RealRedis
 
+  browser:
+    name: Browser solver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install PHP core (fixture server)
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: install Playwright
+        working-directory: tests/browser
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install chromium
+      - name: run browser tests
+        working-directory: tests/browser
+        run: npx playwright test
+
   cross-language:
-    name: Cross-language (PHP issue -> Rust verify)
+    name: Cross-language (both directions)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,13 +152,47 @@ jobs:
       - name: composer install (PHP core)
         working-directory: packages/kiwicaptcha-php
         run: composer install --no-interaction --prefer-dist
-      - name: PHP issues a challenge
+      - name: PHP issues a SHA-256 challenge
         working-directory: packages/kiwicaptcha-php
         env:
           KC_PHP_RECORD: /tmp/kc_php_record.json
+          KC_PHP_ALGO: sha256
         run: php tests/CrossLanguageIssue.php
-      - name: Rust verifies the PHP-issued challenge
+      - name: Rust verifies the PHP-issued SHA-256 challenge
         working-directory: packages/kiwicaptcha
         env:
           KC_PHP_RECORD: /tmp/kc_php_record.json
-        run: cargo test --test cross_language -- --nocapture
+        run: cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+      - name: PHP issues an Argon2id challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_argon.json
+          KC_PHP_ALGO: argon2id
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued Argon2id challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_argon.json
+        run: cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+      - name: Rust issues a SHA-256 challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record.json
+          KC_RUST_ALGO: sha256
+        run: cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued SHA-256 challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record.json
+        run: php tests/CrossLanguageVerify.php
+      - name: Rust issues an Argon2id challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
+          KC_RUST_ALGO: argon2id
+        run: cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued Argon2id challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
+        run: php tests/CrossLanguageVerify.php
