@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "packages/kiwicaptcha",
+    "packages/kiwicaptcha-risk",
 ]
 exclude = [
     "packages/kiwicaptcha-wasm",
