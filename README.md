@@ -113,7 +113,8 @@ let mut ctx = VerifyContext {
     min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);
                                        // 0 = use only the record's floor
     expected_scope: Some("login"),     // reject cross-scope replay
-    client_ip: Some(&client_ip),       // IP binding (None disables the check)
+    client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
+    //                                        only BindingMode::None records verify without an IP
     telemetry: Some(&solution.telemetry), // supplementary behavioral signal
     enforce_telemetry: true,           // reject on hard bot signals
     max_attempts: 10,                  // per-nonce attempt cap (0 = unlimited)
