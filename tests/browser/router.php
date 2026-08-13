@@ -25,8 +25,12 @@ $secret = '0123456789abcdef0123456789abcdef';
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
 // php -S re-includes this router per request, so in-process state is lost —
-// the record is persisted to a temp file (single-use: consumed on verify).
-$recordFile = sys_get_temp_dir().'/kiwicaptacha-browser-record.json';
+// the record is persisted to a temp file PER NONCE (single-use: consumed
+// on verify; a shared file would race when tests issue challenges).
+function recordFile(string $nonce): string
+{
+    return sys_get_temp_dir().'/kiwicaptacha-record-'.preg_replace('/[^A-Za-z0-9_-]/', '', $nonce).'.json';
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/challenge') {
     $body = json_decode((string) file_get_contents('php://input'), true);
@@ -52,7 +56,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/challenge') {
 
         return true;
     }
-    file_put_contents($recordFile, json_encode($record->toArray()));
+    $tmp = tempnam(sys_get_temp_dir(), 'kiw'); 
+    file_put_contents($tmp, json_encode($record->toArray()));
+    rename($tmp, recordFile($challenge->nonce));
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
     echo json_encode($challenge->toArray());
@@ -63,14 +69,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/challenge') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $body = json_decode((string) file_get_contents('php://input'), true);
     header('Content-Type: application/json');
-    if (!is_file($recordFile)) {
+    $nonce = (string) (explode('.', (string) base64_decode((string) ($body['token'] ?? ''), true))[0] ?? '');
+    if ($nonce === '' || !is_file(recordFile($nonce))) {
         echo json_encode(['ok' => false, 'code' => 'record_not_found']);
 
         return true;
     }
     $storage = new ArrayStorage();
-    $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents($recordFile), true)));
-    @unlink($recordFile);
+    $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
+    @unlink(recordFile($nonce));
     $verifier = new Verifier($storage);
     $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, 'login', (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
     echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
