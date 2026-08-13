@@ -24,4 +24,6 @@ enum VerifyError: string
     case TelemetryRejected = 'telemetry_rejected';
     case CapacityExceeded = 'verification capacity exceeded — try again shortly';
     case AdmissionUnavailable = 'verification admission backend unavailable — try again shortly';
+    case StorageUnavailable = 'verification storage backend unavailable — try again shortly';
+    case ConsumeIndeterminate = 'verification storage response indeterminate — the challenge may or may not have been consumed';
 }

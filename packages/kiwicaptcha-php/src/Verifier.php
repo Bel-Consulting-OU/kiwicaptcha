@@ -158,7 +158,13 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
-        $peek = $this->storage->find($token->nonce);
+        try {
+            $peek = $this->storage->find($token->nonce);
+        } catch (\Throwable) {
+            // Backend failure: typed result, challenge presumed intact
+            // (the client can retry once storage recovers).
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+        }
         if ($peek === null) {
             return VerifyOutcome::invalid(VerifyError::RecordNotFound);
         }
@@ -292,7 +298,14 @@ final class Verifier
 
         try {
             // 9. Consume (one-shot) and re-derive the proof.
-            $record = $this->storage->consume($token->nonce);
+            try {
+                $record = $this->storage->consume($token->nonce);
+            } catch (\Throwable) {
+                // A lost GETDEL response is intrinsically ambiguous: the
+                // challenge may or may not have been consumed. Report the
+                // indeterminate state instead of RecordNotFound.
+                return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+            }
             if ($record === null) {
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
@@ -321,7 +334,13 @@ final class Verifier
             return VerifyOutcome::valid();
         } finally {
             if ($lease !== null) {
-                $this->argonGate?->release($lease);
+                try {
+                    $this->argonGate?->release($lease);
+                } catch (\Throwable) {
+                    // Best-effort: a failed release must NEVER override the
+                    // verification result (the challenge is already
+                    // consumed). A leaked lease is recovered by its TTL.
+                }
             }
         }
     }
