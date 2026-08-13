@@ -85,8 +85,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     return true;
 }
 
-if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js') {
-    $name = $path === '/kiwi-worker.js' ? 'kiwi-worker.js' : 'kiwicaptcha-wasm.js';
+if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path === '/kiwi-worker-stale.js') {
+    $name = $path === '/kiwi-worker.js' ? 'kiwi-worker.js' : ($path === '/kiwicaptcha-wasm.js' ? 'kiwicaptcha-wasm.js' : 'kiwi-worker.js');
     $file = $repo.'/packages/kiwicaptcha-wasm/assets/'.$name;
     if (!is_file($file)) {
         http_response_code(404);
@@ -96,7 +96,14 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js') {
     }
     header('Content-Type: application/javascript');
     header('Cache-Control: no-store');
-    echo file_get_contents($file);
+    $body = file_get_contents($file);
+    // /kiwi-worker-stale.js serves the real worker with the solver build id
+    // rewritten (audit #53): the driver must refuse it with the controlled
+    // kiwi:solver-mismatch state instead of accepting a stale worker.
+    if ($path === '/kiwi-worker-stale.js') {
+        $body = str_replace('2026-08-r1', '2026-08-r0', (string) $body);
+    }
+    echo $body;
 
     return true;
 }
@@ -110,10 +117,13 @@ if ($path === '/' || $path === '/index.html') {
         ? '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; style-src \'unsafe-inline\'">'
         : '';
     $algorithm = ($_GET['algorithm'] ?? '') === 'argon2id' ? 'argon2id' : 'sha256';
-    $workerAttr = ($_GET['worker'] ?? '') === '1' ? ' data-kiwi-worker-src="/kiwi-worker.js"' : '';
+    $workerAttr = '';
+    if (($_GET['worker'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker.js"';
+    if (($_GET['worker-stale'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker-stale.js"';
+    $binding = ($_GET['binding'] ?? '') !== '' ? ' data-kiwi-request-binding="'.htmlspecialchars((string) $_GET['binding'], ENT_QUOTES).'"' : '';
     header('Content-Type: text/html');
     echo "<!DOCTYPE html><html><head><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}>
+<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
