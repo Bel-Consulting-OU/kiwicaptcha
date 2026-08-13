@@ -23,4 +23,5 @@ enum VerifyError: string
     case TooManyAttempts = 'too_many_attempts';
     case TelemetryRejected = 'telemetry_rejected';
     case CapacityExceeded = 'verification capacity exceeded — try again shortly';
+    case AdmissionUnavailable = 'verification admission backend unavailable — try again shortly';
 }

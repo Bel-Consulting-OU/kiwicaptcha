@@ -37,7 +37,8 @@ namespace KiwiCaptcha;
  *   4. Scope: challenge scope matches the expected flow.
  *   5. IP binding: v2 records recompute the nonce-bound binding tag; v1
  *      records compare the legacy IP hash. An empty binding tag disables
- *      the check; a null client IP skips it.
+ *      the check; with a nonempty binding tag a missing client IP fails
+ *      closed (MissingClientIp) — a null IP NEVER skips the binding.
  *   6. Minimum duration: measured SERVER-SIDE from the record's issued_at_ns
  *      (epoch microseconds) to the verification receipt time — the
  *      client-reported duration can no longer be forged to bypass the
@@ -275,7 +276,15 @@ final class Verifier
         //    consuming or deleting the record — the client can retry.
         $lease = null;
         if ($peek->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
-            $lease = $this->argonGate->acquire();
+            try {
+                $lease = $this->argonGate->acquire();
+            } catch (\Throwable) {
+                // Backend failure: report a typed, NON-CONSUMING result so
+                // the challenge stays intact and can be retried after the
+                // admission backend recovers (never propagate, never treat
+                // the failure as full free capacity).
+                return VerifyOutcome::invalid(VerifyError::AdmissionUnavailable);
+            }
             if ($lease === null) {
                 return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
             }
