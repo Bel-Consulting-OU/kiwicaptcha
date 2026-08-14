@@ -53,11 +53,15 @@ jobs:
           fi
           echo "tagged commit $sha is reachable from protected main"
           # Wait for the tag-SHA CI check runs and require ALL to pass.
+          # The release job's OWN check run is excluded — it cannot
+          # complete while this gate waits on it (audit round 18: the
+          # first v1.6.0 run deadlocked on exactly that).
           deadline=$((SECONDS + 1800))
           while :; do
-            total="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '.total_count')"
-            incomplete="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.status != "completed")] | length')"
-            failed="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")] | length')"
+            checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.name != "Gate, build, attest and publish release assets")]')"
+            total="$(jq 'length' <<<"$checks")"
+            incomplete="$(jq '[.[] | select(.status != "completed")] | length' <<<"$checks")"
+            failed="$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")] | length' <<<"$checks")"
             echo "checks: total=$total incomplete=$incomplete failed=$failed"
             if [[ "$failed" != "0" ]]; then
               echo "refusing to release: CI check runs failed for $sha" >&2
