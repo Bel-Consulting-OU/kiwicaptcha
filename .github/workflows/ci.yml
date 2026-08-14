@@ -66,7 +66,22 @@ jobs:
       - name: composer install
         run: composer install --no-interaction --prefer-dist
       - name: composer audit (dependency/security)
-        run: composer audit --locked
+        # Audit round 19: packagist's security-advisories API is
+        # occasionally flaky (502s/timeouts). The audit retries with
+        # backoff and only then fails closed — a transient packagist
+        # outage must not block unrelated CI (or the release gate), while
+        # a genuinely failing audit still blocks.
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if composer audit --locked; then
+              exit 0
+            fi
+            echo "composer audit attempt $i failed — retrying in 30s" >&2
+            sleep 30
+          done
+          echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
+          exit 1
       - name: phpunit
         run: vendor/bin/phpunit
 
@@ -91,7 +106,19 @@ jobs:
       - name: composer install
         run: composer install --no-interaction --prefer-dist
       - name: composer audit (dependency/security)
-        run: composer audit --locked
+        # Retry wrapper (audit round 19): packagist's advisories API is
+        # occasionally flaky; fail closed only after 5 attempts.
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if composer audit --locked; then
+              exit 0
+            fi
+            echo "composer audit attempt $i failed — retrying in 30s" >&2
+            sleep 30
+          done
+          echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
+          exit 1
       - name: pin Symfony 6.4
         if: matrix.symfony == '6.4'
         # `--with` (temporary constraints) is required: a wildcard
