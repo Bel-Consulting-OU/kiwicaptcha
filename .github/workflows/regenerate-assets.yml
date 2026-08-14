@@ -42,9 +42,9 @@ jobs:
         with:
           name: canonical-assets
           path: |
-            assets/kiwicaptcha-wasm.js
-            assets/kiwi-worker.js
-            assets/widget-driver.js
-            assets/widget.css
+            packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
+            packages/kiwicaptcha-wasm/assets/kiwi-worker.js
+            packages/kiwicaptcha-wasm/assets/widget-driver.js
+            packages/kiwicaptcha-wasm/assets/widget.css
           if-no-files-found: error
           retention-days: 30
