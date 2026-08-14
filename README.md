@@ -44,7 +44,8 @@ kiwicaptcha = { git = "https://github.com/Bel-Consulting-OU/kiwicaptcha" }
 
 The whole quick-start — issue → solve → verify — is one **executable
 example** that CI runs and asserts ends in `VerifyOutcome::Valid`
-(`examples/quickstart.rs`); these snippets are its exact mirror. There is no
+(`examples/quickstart.rs`); these snippets are its API/semantic mirror.
+There is no
 `Default` for `ChallengeConfig`: every field is explicit, including
 `binding_mode`, `policy_version`, `region`, `issuer` and `kid`:
 

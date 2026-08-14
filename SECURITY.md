@@ -57,10 +57,12 @@ glue/solver must come from the **same build**:
 - The wasm glue (`kiwicaptcha-wasm.js`) is built by the release pipeline
   (`.github/workflows/release.yml` on every `v*` tag): strict deterministic
   build, SHA-256 + SRI manifests, SLSA provenance attestation, and asset
-  upload to the GitHub release. The release process also publishes the
-  solver wasm under the content-addressed name `argon-solver.<sha256>.wasm`
-  (see `packages/kiwicaptcha-wasm/SECURITY.md`); the glue and the
-  driver/worker of the same build id must be paired.
+  upload to the GitHub release. The release publishes the immutable
+  tag-bound JS/CSS artifacts plus the manifests; integrators who want
+  content-addressed names (e.g. `argon-solver.<sha256>.wasm` extracted
+  from the glue) apply that pattern at their CDN layer (see
+  `packages/kiwicaptcha-wasm/SECURITY.md`); the glue and the driver/worker
+  of the same build id must be paired.
 
 Operational requirements:
 

@@ -27,6 +27,13 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: quick-start end-to-end
+        # Audit round 16/17: the public quick-start is an executable
+        # behavioral test (issue -> solve -> verify -> VerifyOutcome::Valid)
+        # — cargo test --workspace only COMPILES examples; this step
+        # EXECUTES the example's #[test] so a compilable-but-broken
+        # quick-start can never ship again.
+        run: cargo test -p kiwicaptcha --example quickstart
       - name: wasm32 build
         # kiwicaptcha-wasm is a STANDALONE crate (not a workspace member), so
         # the build runs from its own directory.
@@ -259,6 +266,12 @@ jobs:
           # include_str!("../resources/risk-v1.lua") must resolve here.
           sed -i 's|path = "../kiwicaptcha"|path = "'"$GITHUB_WORKSPACE"'/packages/kiwicaptcha"|' Cargo.toml
           cargo check
+      - name: quick-start end-to-end
+        # Audit round 17: the example's #[test] is also executed in the
+        # package-readiness job (the artifact a publisher ships must pass
+        # the documented flow).
+        working-directory: packages/kiwicaptcha
+        run: cargo test -p kiwicaptcha --example quickstart
       - name: cargo package (core crate)
         working-directory: packages/kiwicaptcha
         run: cargo package --allow-dirty --no-verify

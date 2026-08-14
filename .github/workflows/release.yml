@@ -1,14 +1,14 @@
 name: Release
 
-# Audit round 16: the actual release pipeline — the browser assets are
-# first-class security artifacts. On every v* tag push this workflow:
-#   1. builds the assets under the STRICT deterministic pipeline (pinned
-#      toolchain, --locked, verified wasm-opt, wasm-bindgen version lock);
-#   2. generates the SHA-256 manifest;
-#   3. attaches SLSA provenance via GitHub artifact attestation;
-#   4. uploads the assets + manifest to the tagged GitHub release.
-# The release notes (cut with `gh release create`) carry the component
-# versions and the manifest hashes from this build.
+# Audit round 16/17: the actual release pipeline — the browser assets are
+# first-class security artifacts. The workflow OWNS the entire immutable
+# release lifecycle on every v* tag push:
+#   tag -> strict pinned build -> manifests -> SLSA attestation ->
+#   idempotent GitHub Release creation -> asset upload.
+#
+# One auditable chain: the release is created HERE (if missing) with the
+# build's own artifacts; nothing is uploaded to a release the workflow did
+# not itself see created or verified.
 on:
   push:
     tags:
@@ -37,6 +37,10 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@cf5f2d6ce2cd38747fbf86826444a99f14452ec2 # v6.0.0 (node24)
+        with:
+          # Audit round 17: pinned Node for the SRI manifest generator.
+          node-version: 22
       - name: strict deterministic build
         env:
           WASM_OPT_STRICT: "1"
@@ -50,16 +54,30 @@ jobs:
           cat SHA256SUMS
           cat SRI.txt
       - name: attest the release artifacts (SLSA provenance)
+        # Audit round 17: `defaults.run.working-directory` applies to run
+        # steps only — a `uses:` action resolves subjects against the
+        # Actions workspace, so the paths must be workspace-rooted.
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
-            assets/kiwicaptcha-wasm.js
-            assets/kiwi-worker.js
-            assets/widget-driver.js
-            assets/widget.css
-      - name: upload assets + manifest to the tagged release
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwi-worker.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget-driver.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget.css
+      - name: create the release (idempotent) + upload assets + manifest
+        # Audit round 17: the workflow OWNS the release lifecycle — the
+        # GitHub Release is created here (with --verify-tag so it can only
+        # ever reference the tag that triggered this run) and never assumed
+        # to pre-exist. A concurrent/recreated release is tolerated
+        # (--clobber upload), so the chain stays deterministic.
         run: |
           set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "KiwiCaptcha $GITHUB_REF_NAME" \
+              --notes "Release built and attested by .github/workflows/release.yml (strict pinned pipeline, Rust 1.96.0, wasm-bindgen 0.2.127, binaryen version_119, --locked). Manifests: SHA256SUMS (sha256) + SRI.txt (sha384)." \
+              --verify-tag
+          fi
           gh release upload "$GITHUB_REF_NAME" \
             assets/kiwicaptcha-wasm.js \
             assets/kiwi-worker.js \
