@@ -1,34 +1,40 @@
 name: Release
 
-# Audit round 18: the release pipeline is CI-GATED and publishes
-# ATOMICALLY. On every v* tag push:
-#   gate (all CI jobs passed for the EXACT tag SHA, commit on protected
-#         main) -> strict pinned build -> released==committed byte proof ->
-#   manifests -> SLSA attestation -> single atomic publish.
+# Audit round 19: the release pipeline is CI-GATED on the EXACT tag-
+# triggered ci.yml run, split into a blast-radius-limited build job and an
+# attest/publish job, and publishes ATOMICALLY:
 #
-# The published release is IMMUTABLE by policy: v* tags are protected by a
-# repository ruleset (no update/delete outside admins), immutable releases
-# are enabled, and the publish step fails instead of clobbering an
-# existing release.
+#   job 1 (contents: read, actions: write — cannot publish/attest):
+#     gate (exact tag CI run succeeded; commit on protected main; release
+#     does not exist yet) -> strict pinned build -> released==committed
+#     byte proof -> manifests -> workflow artifact
+#
+#   job 2 (contents: write, id-token: write, attestations: write — only
+#     runs after job 1):
+#     download the immutable artifact -> SLSA attestation -> atomic
+#     `gh release create` (draft -> upload -> publish, no clobber).
+#
+# v* tags are protected by a repository ruleset; the release object is
+# immutable (verified after publication).
 on:
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
-  release-assets:
-    name: Gate, build, attest and publish release assets
+  gate-and-build:
+    name: Gate and build release assets
     runs-on: ubuntu-latest
+    # Audit round 19: this job can NEVER publish or attest — it only has
+    # read access to contents plus the actions permission required to
+    # upload the workflow artifact. The blast radius of repo-controlled
+    # bash build.sh is bounded to artifact production.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-      checks: read
+      contents: read
+      actions: write
     defaults:
       run:
         working-directory: packages/kiwicaptcha-wasm
@@ -36,46 +42,66 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
           fetch-depth: 0
-      - name: gate — the exact tag SHA must have passed ALL CI jobs
-        # Audit round 18: publication is gated on the FULL security/test
-        # matrix for EXACTLY this tagged commit (the tag push also triggers
-        # ci.yml on the same SHA; we wait for its check runs and require
-        # every one to be success). A tag accidentally placed on a commit
-        # with failing parity/Redis/browser tests can never publish.
+      - name: gate — exact tag CI, protected-main reachability, no existing release
+        # Audit round 19: the gate selects the SPECIFIC ci.yml workflow run
+        # triggered by THIS tag push (head_sha == GITHUB_SHA AND
+        # head_branch == GITHUB_REF_NAME AND event == push) and requires it
+        # to be completed with success. Querying all check runs for the SHA
+        # is wrong twice over: the release job's own run can never complete
+        # while it waits (the v1.6.0 deadlock), and the same SHA carries
+        # both a main-push and a tag-push CI copy — only the tag-triggered
+        # run proves "the CI workflow triggered by this tag passed".
+        # An existing release is also refused HERE, before any build,
+        # manifest or attestation work (never create attestations for a
+        # release that cannot be published).
         run: |
           set -euo pipefail
           sha="$GITHUB_SHA"
-          # The tagged commit must be reachable from protected main.
+          tag="$GITHUB_REF_NAME"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "refusing to publish: release $tag already exists (releases are immutable)" >&2
+            exit 1
+          fi
+          echo "release $tag does not exist yet"
+
           ahead="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq '.ahead_by')"
           if [[ "$ahead" != "0" ]]; then
             echo "refusing to release: $sha is not reachable from protected main (ahead_by=$ahead)" >&2
             exit 1
           fi
           echo "tagged commit $sha is reachable from protected main"
-          # Wait for the tag-SHA CI check runs and require ALL to pass.
-          # The release job's OWN check run is excluded — it cannot
-          # complete while this gate waits on it (audit round 18: the
-          # first v1.6.0 run deadlocked on exactly that).
+
           deadline=$((SECONDS + 1800))
           while :; do
-            checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.name != "Gate, build, attest and publish release assets")]')"
-            total="$(jq 'length' <<<"$checks")"
-            incomplete="$(jq '[.[] | select(.status != "completed")] | length' <<<"$checks")"
-            failed="$(jq '[.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")] | length' <<<"$checks")"
-            echo "checks: total=$total incomplete=$incomplete failed=$failed"
-            if [[ "$failed" != "0" ]]; then
-              echo "refusing to release: CI check runs failed for $sha" >&2
-              exit 1
-            fi
-            if [[ "$total" -gt 0 && "$incomplete" == "0" ]]; then
-              echo "all $total CI check runs passed for $sha"
-              break
+            ci_run="$(
+              gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&per_page=100" \
+                | jq -c --arg sha "$sha" --arg tag "$tag" '
+                    [.workflow_runs[]
+                     | select(.head_sha == $sha and .head_branch == $tag and .event == "push")]
+                    | sort_by(.run_number)
+                    | last // empty'
+            )"
+            if [[ -n "$ci_run" && "$ci_run" != "null" ]]; then
+              status="$(jq -r '.status' <<<"$ci_run")"
+              conclusion="$(jq -r '.conclusion // ""' <<<"$ci_run")"
+              echo "tag CI: status=$status conclusion=$conclusion"
+              if [[ "$status" == "completed" ]]; then
+                if [[ "$conclusion" != "success" ]]; then
+                  echo "refusing release: the exact tag CI did not succeed (conclusion=$conclusion)" >&2
+                  exit 1
+                fi
+                echo "exact tag CI succeeded for $sha"
+                break
+              fi
+            else
+              echo "tag CI run not found yet (head_sha=$sha head_branch=$tag)"
             fi
             if (( SECONDS > deadline )); then
-              echo "timed out waiting for CI on $sha (release gate)" >&2
+              echo "timed out waiting for the exact tag CI run" >&2
               exit 1
             fi
-            sleep 30
+            sleep 15
           done
         env:
           GH_TOKEN: ${{ github.token }}
@@ -86,15 +112,14 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24) — same pin as ci.yml
         with:
-          # Audit round 18: pinned Node for the SRI manifest generator.
           node-version: "22"
       - name: strict deterministic build
         env:
           WASM_OPT_STRICT: "1"
         run: bash build.sh
       - name: released bytes must equal the committed (browser-tested) bytes
-        # Audit round 18: the committed assets are what the browser suite
-        # and the Symfony byte-parity job test. The strict rebuild must
+        # Audit round 19: the committed assets are what the browser suite
+        # and the Symfony/core parity jobs test. The strict rebuild must
         # reproduce them EXACTLY — any drift fails the release, so tested
         # bytes == released bytes by construction.
         run: |
@@ -106,33 +131,67 @@ jobs:
             assets/widget.css
           echo "strict rebuild == committed/tested assets"
       - name: release manifest (SHA-256 + SRI)
-        # Audit round 18: SHA256SUMS uses BASENAMES so `shasum -c
-        # SHA256SUMS` works in a flat download folder; SRI covers all four
-        # release assets (widget.css is SRI-capable via <link>).
+        # SHA256SUMS uses BASENAMES so `shasum -c SHA256SUMS` works in a
+        # flat download folder; SRI covers all four release assets
+        # (widget.css is SRI-capable via <link>).
         run: |
           set -euo pipefail
           ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css ) > SHA256SUMS
           node tools/sri-hashes.mjs > SRI.txt
           cat SHA256SUMS
           cat SRI.txt
+      - name: upload the immutable build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: |
+            assets/kiwicaptcha-wasm.js
+            assets/kiwi-worker.js
+            assets/widget-driver.js
+            assets/widget.css
+            SHA256SUMS
+            SRI.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  attest-and-publish:
+    name: Attest and publish the release
+    runs-on: ubuntu-latest
+    needs: gate-and-build
+    # Audit round 19: ONLY this job holds publish/attestation capability,
+    # and it runs only after the gated build produced the artifact.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: download the immutable build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: release-artifacts
       - name: attest the release artifacts (SLSA provenance)
-        # Audit round 17: `defaults.run.working-directory` applies to run
-        # steps only — a `uses:` action resolves subjects against the
-        # Actions workspace, so the paths must be workspace-rooted.
+        # Producer: actions/attest-build-provenance (the only supported
+        # producer); consumer: `gh attestation verify`. Subject paths are
+        # workspace-rooted (defaults.run.working-directory does not apply
+        # to uses: actions).
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
-            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
-            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwi-worker.js
-            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget-driver.js
-            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget.css
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/release-artifacts/kiwicaptcha-wasm.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/release-artifacts/kiwi-worker.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/release-artifacts/widget-driver.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/release-artifacts/widget.css
       - name: publish the release atomically (draft -> upload -> publish)
-        # Audit round 18: assets are passed DIRECTLY to `gh release create`
+        # Audit round 19: assets are passed DIRECTLY to `gh release create`
         # — GitHub CLI creates the release as a DRAFT, uploads the assets,
         # and only then publishes it; a failure never leaves a public
-        # partial release. An EXISTING release is a HARD FAILURE (no
-        # --clobber): a rerun with different bytes must never silently
-        # replace published artifacts.
+        # partial release. An EXISTING release was already refused in the
+        # gate (and is refused again here) — no --clobber, ever.
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -140,14 +199,14 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
-            assets/kiwicaptcha-wasm.js \
-            assets/kiwi-worker.js \
-            assets/widget-driver.js \
-            assets/widget.css \
-            SHA256SUMS \
-            SRI.txt \
+            release-artifacts/kiwicaptcha-wasm.js \
+            release-artifacts/kiwi-worker.js \
+            release-artifacts/widget-driver.js \
+            release-artifacts/widget.css \
+            release-artifacts/SHA256SUMS \
+            release-artifacts/SRI.txt \
             --verify-tag \
             --title "KiwiCaptcha $GITHUB_REF_NAME" \
-            --notes "Release CI-gated, strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes). Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY"
+            --notes "Release CI-gated (exact tag CI), strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes). Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
