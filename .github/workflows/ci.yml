@@ -272,9 +272,16 @@ jobs:
         # the documented flow).
         working-directory: packages/kiwicaptcha
         run: cargo test -p kiwicaptcha --example quickstart
-      - name: cargo package (core crate)
+      - name: cargo package (core crate, REAL verification)
+        # Audit round 18: `cargo package --locked` runs Cargo's full
+        # verification build of the PACKAGED representation (tarball ->
+        # unpack -> compile), not just `--no-verify` list checks. The core
+        # crate's dependencies are all registry crates, so verification is
+        # genuine. (The risk crate keeps --no-verify until kiwicaptcha
+        # 1.1.0 is on the registry — its path+version dependency cannot be
+        # verified from the tarball alone.)
         working-directory: packages/kiwicaptcha
-        run: cargo package --allow-dirty --no-verify
+        run: cargo package --locked
 
   package-composer:
     name: Package (composer clean-room install)
@@ -363,7 +370,11 @@ jobs:
         run: cargo test --features redis --test redis_verify
 
   build-reproducibility:
-    name: Build reproducibility (two clean strict builds)
+    # Audit round 18 wording: two fully clean build-tree/cache runs in ONE
+    # controlled runner (same Rust env + registry). Truly independent
+    # environments would require separate containers + a comparing job —
+    # tracked as a future refinement.
+    name: Build reproducibility (two clean strict builds, one runner)
     runs-on: ubuntu-latest
     permissions:
       contents: read

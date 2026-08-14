@@ -40,6 +40,29 @@ assessment. We ask for a 90-day coordinated-disclosure window from the
 report before public disclosure, unless the issue is already being
 exploited.
 
+## Release immutability
+
+- **`refs/tags/v*` are protected by a repository ruleset** (created via
+  the rulesets API): deletion and non-fast-forward updates are blocked,
+  and creation is restricted to organization admins. A tag is a promise —
+  "these exact bytes, forever".
+- **Immutable Releases** must be enabled in the repository settings (the
+  toggle is not exposed via the REST API): after publication, release
+  tags and assets cannot be replaced. The release workflow additionally
+  fails instead of clobbering an existing release (`--clobber` is never
+  used).
+- **Publication is CI-gated**: `.github/workflows/release.yml` verifies
+  that every CI check run for the exact tagged SHA succeeded and that the
+  commit is reachable from protected `main` before building, attesting, or
+  publishing anything.
+- **Tested bytes == released bytes**: the release pipeline rebuilds the
+  assets under the strict pinned toolchain and fails unless `git diff
+  --exit-code` shows they are byte-identical to the committed assets that
+  the browser suite and Symfony byte-parity job tested.
+- Releases are published atomically (`gh release create` with the assets
+  inline: draft → upload → publish); a failure never leaves a public
+  partial release.
+
 [GitHub Security Advisories]: https://github.com/Bel-Consulting-OU/kiwicaptcha/security/advisories
 
 ## Asset / build-id coupling
