@@ -112,7 +112,7 @@ identical in:
      `b"prin"`; no epoch.
 
 9. State — leaky fixed-point counters (1000 = one unit) with the canonical
-   Lua in `risk.lua` (embedded verbatim by both implementations, loaded via
+   Lua in `risk-v1.lua` (embedded verbatim by both implementations, loaded via
    EVALSHA with NOSCRIPT fallback). Redis keys use the hash tag
    `{kiwi:<deployment>}`:
 
@@ -131,7 +131,7 @@ identical in:
 
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
-- `risk.lua` — canonical Redis state script (authoritative, embedded).
+- `risk-v1.lua` — canonical Redis state script (authoritative, embedded).
 
 12. Request vs feedback — ONLY `PreIssue` (1) counts as a REQUEST: it
    increments `rf`/`rs` and the scope-switch channel. Feedback events

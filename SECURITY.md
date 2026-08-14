@@ -14,6 +14,13 @@ line** of each artifact:
 | `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r1` solver build id — older build ids are NOT patched; upgrade the asset set |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major |
 
+Repository releases are **monorepo snapshots**: each artifact keeps its
+own independent version. For example, the `v1.2.0` repository release
+contains Rust core `1.1.0`, `kiwicaptcha-php` `1.x`, the risk engines
+`0.1.x`, the `2026-08-r1` solver build, and the current Symfony bundle
+release. Advisories always name the **artifact and its version** (e.g.
+"kiwicaptcha (Rust core) 1.1.0"), never a bare repository tag.
+
 Users are expected to run the newest supported release. When a vulnerability
 is fixed, the fix is backported to all supported lines; unsupported lines
 receive no fixes and should be upgraded or removed.
@@ -22,15 +29,11 @@ receive no fixes and should be upgraded or removed.
 
 Please do **not** open a public issue for a suspected vulnerability.
 
-- **Preferred:** report through [GitHub Security Advisories] — "Report a
-  vulnerability" on this repository — which is private until triaged.
-- **Fallback:** email the maintainers at
-  `security@kiwicaptcha.invalid` *(placeholder — the maintainers replace
-  this address with their real security contact)* with the subject prefix
-  `[kiwicaptcha-security]`. Please include:
-  - the affected component and version (commit or build id);
-  - a description of the vulnerability and its impact;
-  - reproduction steps, ideally with a minimal proof of concept.
+Report through [GitHub Security Advisories] — "Report a vulnerability" on
+this repository — which is private until triaged. Please include:
+- the affected component and version (commit or build id);
+- a description of the vulnerability and its impact;
+- reproduction steps, ideally with a minimal proof of concept.
 
 You will receive an acknowledgment within 3 business days and a triage
 assessment. We ask for a 90-day coordinated-disclosure window from the
@@ -117,12 +120,15 @@ Assumptions operators must verify:
   `X-Real-IP` are security-singular — duplicates are rejected with HTTP
   400 `DUPLICATE_HEADER` before any header-derived identity is trusted.
   The edge/WAF should also refuse duplicated headers.
-- **QUIC migration policy:** HTTP/3 clients legitimately change source IPs
-  mid-session. Exact-IP solves verify normally; same-network migrations
-  (same /24 or /56) are accepted with a risk penalty; different networks
-  fail closed (`IpMismatch`, challenge burned) and the client re-solves.
-  Mobile deployments should prefer `request_binding` (per-page nonce)
-  over IP binding for high-value scopes.
+- **Exact-IP binding (no network tolerance):** verification derives the
+  nonce-bound binding HMAC from the CURRENT canonical client IP and
+  compares it with `hash_equals` — an exact match only. There is NO /24 or
+  /56 migration tolerance: any different IP, including a legitimate HTTP/3
+  QUIC migration mid-session, fails closed (`IpMismatch`, challenge
+  burned) and the client re-solves from the new address. Deployments that
+  must tolerate legitimate network changes should prefer
+  `request_binding` (per-page nonce) over IP binding for high-value
+  scopes.
 - IP binding is **relay mitigation, not a guarantee** — it never leaks a
   stable IP-derived identifier, and operators may disable it.
 
@@ -140,17 +146,23 @@ counters, risk-v1 state, calibration buckets, admission leases) is a
   headroom). Alert on `evicted_keys > 0` and `used_memory` > 70% of
   `maxmemory` — **observed eviction is a security incident**, not a
   capacity event.
-- **`WAIT` + TTL margin for replay safety:** with async replication,
-  configure `wait_replicas` (WAIT after storing a challenge) and
-  `wait_timeout_ms`, and `ttl_margin_secs` beyond token validity so
-  consumed-state guards outlive validity + clock skew + failover margin.
-  Without them, a failover can lose the consumed marker and a captured
-  token replays against a "fresh" record.
+- **Verified `WAIT` barriers + TTL margin for replay safety:** with async
+  replication, configure `wait_replicas` (a Redis `WAIT` follows EVERY
+  durability-critical write — challenge issuance, the pending→consumed
+  transition, and the deterministic-result commit) and `wait_timeout_ms`.
+  The acknowledgement count is VERIFIED: fewer than `wait_replicas` acked
+  replicas fails the operation closed (`ReplicaWaitException` /
+  `replica wait not satisfied`), so a promotion can never resurrect a
+  consumed record from a stale replica. Configure `ttl_margin_secs`
+  beyond token validity so consumed-state guards outlive validity + clock
+  skew + failover margin. On a replica-less server a configured barrier
+  fails closed by design — `wait_replicas` is a hard durability contract.
 - **Script versioning:** the risk engine runs the canonical
   `risk-v1.lua` (protocol/risk-v1) verbatim via `EVALSHA` with an
   automatic `NOSCRIPT` fallback — the script's SHA is a protocol artifact,
   pinned by the `risk-v1` protocol directory and mirrored byte-identically
-  into the Rust and PHP packages (CI enforces sha256 parity). The Lua is
+  into the Rust and PHP packages (CI enforces explicit `cmp` byte parity
+  across all nine protocol scripts on every push). The Lua is
   versioned (`v4` semantics at the time of writing); never hand-edit any
   of the three copies, and never load a modified script into a
   deployment whose stores were written by the canonical one.
@@ -185,8 +197,9 @@ The following are **outside its guarantees**:
   against accidental leakage, not against a compromised page.
 - **Transport-level 0-RTT replay caveat.** Where the application enables
   TLS 1.3 0-RTT early data, an attacker can replay a captured early-data
-  request. KiwiCaptcha's server-side single-use consumption (GETDEL) and
-  replay guards mitigate the *effects* of such replays, but the transport
+  request. KiwiCaptcha's server-side single-use consumption (the atomic
+  pending→consumed transition) and replay guards mitigate the *effects* of
+  such replays, but the transport
   behavior itself is the application's TLS configuration.
 - **Human-vs-bot discrimination.** This is a cost-imposing PoW system, not
   a CAPTCHA in the Turing-test sense; behavioral telemetry is a
