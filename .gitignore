@@ -5,4 +5,5 @@ composer.lock
 .phpunit.result.cache
 .phpunit.cache/
 *.rs.bk
-vendor/
+test-results/
+playwright-report/

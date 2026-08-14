@@ -42,8 +42,14 @@ kiwicaptcha = { git = "https://github.com/Bel-Consulting-OU/kiwicaptcha" }
 
 ### 1. Issue a challenge
 
+The whole quick-start — issue → solve → verify — is one **executable
+example** that CI runs and asserts ends in `VerifyOutcome::Valid`
+(`examples/quickstart.rs`); these snippets are its exact mirror. There is no
+`Default` for `ChallengeConfig`: every field is explicit, including
+`binding_mode`, `policy_version`, `region`, `issuer` and `kid`:
+
 ```rust
-use kiwicaptcha::{ChallengeConfig, PoWAlgorithm, issue_challenge};
+use kiwicaptcha::{BindingMode, ChallengeConfig, PoWAlgorithm, issue_challenge};
 
 let config = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(), // >= 16 bytes required
@@ -58,17 +64,33 @@ let config = ChallengeConfig {
     auto_tune: false,                // scale target_bits with active solver load?
     auto_tune_min_bits: 10,
     auto_tune_max_bits: 20,
+    binding_mode: BindingMode::Bound, // nonce-bound IP binding (relay mitigation)
+    policy_version: 1,               // the security-policy epoch
+    region: None,                    // Some("eu") for region-bound deployments
+    issuer: None,                    // Some("auth-gateway") to pin the issuer
+    kid: 1,                          // key id of the signing secret
 };
 
-// issue_challenge(&config, scope, client_ip, now_unix, now_ns, active_solves)
-//   scope        — 1..=128 bytes, no '|' (e.g. "login", "signup")
-//   client_ip    — hashed before storage (never stored raw)
-//   now_unix     — current Unix time in SECONDS (signed payload + TTL)
-//   now_ns       — high-resolution issuance timestamp in EPOCH MICROSECONDS
-//                  (the name keeps the historical `_ns` suffix; the unit is
-//                  microseconds — use the crate's now_epoch_micros() helper)
-//   active_solves — current solver load (auto-tuning input)
-let issued = issue_challenge(&config, "login", &client_ip, now_unix, now_ns, active_solves)?;
+// issue_challenge(&config, scope, client_ip, now_unix, now_ns, active_solves, request_binding)
+//   scope            — 1..=128 bytes, no '|' (e.g. "login", "signup")
+//   client_ip        — hashed before storage (never stored raw)
+//   now_unix         — current Unix time in SECONDS (signed payload + TTL)
+//   now_ns           — high-resolution issuance timestamp in EPOCH
+//                      MICROSECONDS (the name keeps the historical `_ns`
+//                      suffix; the unit is microseconds — use the crate's
+//                      now_epoch_micros() helper)
+//   active_solves    — current solver load (auto-tuning input)
+//   request_binding  — Option<&str>: the application transaction binding
+//                      (None = no binding)
+let issued = issue_challenge(
+    &config,
+    "login",
+    &client_ip,
+    now_unix,
+    now_ns,
+    active_solves,
+    None,
+)?;
 
 // Persist issued.record in Redis, keyed by nonce (kcaptcha:{nonce}).
 // Send issued.challenge to the client as JSON.
@@ -96,7 +118,6 @@ honors `data-kiwi-endpoint` / `data-kiwi-scope` attributes.
 ### 3. Verify the solution
 
 ```rust
-use std::collections::{HashMap, HashSet};
 use kiwicaptcha::{ChallengeRecord, SolutionToken, VerifyContext, VerifyOutcome, verify_solution};
 
 let solution = SolutionToken::decode(&body.kiwi_token)?; // nonce, counter, duration_ms, telemetry
@@ -105,13 +126,17 @@ let mut record: ChallengeRecord = redis.get(&format!("kcaptcha:{}", solution.non
 // record: &mut ChallengeRecord — verification performs attempt accounting on
 // the record, which the caller must persist back (on failure) or consume
 // atomically (the consumed-state transition) on success.
-let secrets_by_kid: HashMap<u32, String> = HashMap::new(); // kid -> master secret (audit #91)
-let revoked_kids: HashSet<u32> = HashSet::new();            // compromise-revoked kids (audit #117)
 let mut ctx = VerifyContext {
     record: &mut record,
-    secret_key: &config.secret_key,   // must match issuance; >= 16 bytes
-    secrets_by_kid: Some(&secrets_by_kid),
-    revoked_kids: Some(&revoked_kids),
+    secret_key: &config.secret_key, // must match issuance; >= 16 bytes
+    // SINGLE-KEY deployment: secrets_by_kid / revoked_kids are None.
+    // Passing Some(empty_map) REJECTS the normal challenge — the verifier
+    // treats a present map as authoritative, and kid 1 (or any future kid)
+    // would be UnknownKid (max_kid = 0). Only rotation deployments provide
+    // a populated map such as {1 => master_secret} (audit #91), plus the
+    // revoked-kid set (audit #117).
+    secrets_by_kid: None,
+    revoked_kids: None,
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
     now_unix,                          // TTL check (seconds)
@@ -127,7 +152,11 @@ let mut ctx = VerifyContext {
     client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
     //                                        only BindingMode::None records verify without an IP
     telemetry: Some(&solution.telemetry), // supplementary behavioral signal
-    enforce_telemetry: true,           // reject on hard bot signals
+    // enforce_telemetry: false — the DEFAULT widget sends NO telemetry
+    // (mode "off"), and enforcement rejects a client that supplied none.
+    // Opt into telemetry on the widget (data-kiwi-telemetry="minimal"|"full")
+    // AND set this true only when your page actually collects it.
+    enforce_telemetry: false,
     accept_legacy_v1: false,           // v2 is the only issued format — reject legacy
     max_attempts: 10,                  // per-nonce attempt cap (0 = unlimited)
 };
@@ -143,8 +172,9 @@ match verify_solution(&mut ctx) {
     VerifyOutcome::Invalid(reason) => { /* reject */ }
 }
 ```
-This example is compile-checked by CI (`examples/readme_verify.rs` mirrors
-it — any field or variant change breaks the build instead of new consumers).
+The full flow — issue → solve → verify → `VerifyOutcome::Valid` — is
+`examples/quickstart.rs`, which CI RUNS (`cargo test --example quickstart`),
+so the quick-start is proven to behave, not merely to compile.
 
 ## PHP & Symfony
 

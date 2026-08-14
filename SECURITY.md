@@ -54,19 +54,27 @@ glue/solver must come from the **same build**:
   (`ready` / `done` messages). The driver validates it; a mismatch enters
   the controlled `kiwi:solver-mismatch` state and the driver **never**
   accepts a solution from a mismatched worker.
-- The wasm glue (`kiwicaptcha-wasm.js`) is content-addressed in the
-  release pipeline (`argon-solver.<sha256>.wasm`) and must be paired with
-  the driver/worker of the same build id.
+- The wasm glue (`kiwicaptcha-wasm.js`) is built by the release pipeline
+  (`.github/workflows/release.yml` on every `v*` tag): strict deterministic
+  build, SHA-256 + SRI manifests, SLSA provenance attestation, and asset
+  upload to the GitHub release. The release process also publishes the
+  solver wasm under the content-addressed name `argon-solver.<sha256>.wasm`
+  (see `packages/kiwicaptcha-wasm/SECURITY.md`); the glue and the
+  driver/worker of the same build id must be paired.
 
 Operational requirements:
 
 - Serve the assets from **immutable, versioned URLs** — never a mutable
   `latest.js` alias.
-- Pin every served asset with **SRI** (`integrity` sha384 + `crossorigin`)
-  — see `packages/kiwicaptcha-wasm/SECURITY.md` for the hash tooling and
-  the exact patterns. A mixed-version set (cached worker from an old
-  release next to a new driver) must never reach a page; the mismatch
-  state is the controlled failure, not a silent fallback.
+- Pin every `<script>`-loaded asset with **SRI** (`integrity` sha384 +
+  `crossorigin`) — see `packages/kiwicaptcha-wasm/SECURITY.md` for the
+  hash tooling and the exact patterns. A `new Worker(url)` has no
+  `integrity=` facility, so the standalone worker (`kiwi-worker.js`) is
+  protected by the immutable versioned URL + the content-addressed release
+  hash + the worker's build-id handshake (the driver refuses a mismatched
+  worker). A mixed-version set (cached worker from an old release next to
+  a new driver) must never reach a page; the mismatch state is the
+  controlled failure, not a silent fallback.
 - Recompute the SRI hashes and the content-addressed names on every
   rebuild, and record them in the release notes.
 
