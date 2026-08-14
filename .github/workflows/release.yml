@@ -37,7 +37,7 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@cf5f2d6ce2cd38747fbf86826444a99f14452ec2 # v6.0.0 (node24)
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.0 (node24)
         with:
           # Audit round 17: pinned Node for the SRI manifest generator.
           node-version: 22
