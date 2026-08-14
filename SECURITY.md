@@ -1,0 +1,194 @@
+# Security Policy
+
+## Supported versions
+
+Security fixes are released for the **latest minor of every supported major
+line** of each artifact:
+
+| Artifact | Supported lines |
+|---|---|
+| `kiwicaptcha` (Rust core) | latest `1.x` (currently `1.1.0`) |
+| `kiwicaptcha-php` | latest `1.x` |
+| `kiwicaptcha-risk` (Rust) | latest `0.1.x` — pre-1.0: fixes land on `0.1` |
+| `kiwicaptcha-risk-php` | latest `0.1.x` — pre-1.0: fixes land on `0.1` |
+| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r1` solver build id — older build ids are NOT patched; upgrade the asset set |
+| Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major |
+
+Users are expected to run the newest supported release. When a vulnerability
+is fixed, the fix is backported to all supported lines; unsupported lines
+receive no fixes and should be upgraded or removed.
+
+## Reporting a vulnerability
+
+Please do **not** open a public issue for a suspected vulnerability.
+
+- **Preferred:** report through [GitHub Security Advisories] — "Report a
+  vulnerability" on this repository — which is private until triaged.
+- **Fallback:** email the maintainers at
+  `security@kiwicaptcha.invalid` *(placeholder — the maintainers replace
+  this address with their real security contact)* with the subject prefix
+  `[kiwicaptcha-security]`. Please include:
+  - the affected component and version (commit or build id);
+  - a description of the vulnerability and its impact;
+  - reproduction steps, ideally with a minimal proof of concept.
+
+You will receive an acknowledgment within 3 business days and a triage
+assessment. We ask for a 90-day coordinated-disclosure window from the
+report before public disclosure, unless the issue is already being
+exploited.
+
+[GitHub Security Advisories]: https://github.com/Bel-Consulting-OU/kiwicaptcha/security/advisories
+
+## Asset / build-id coupling
+
+The three browser assets in `packages/kiwicaptcha-wasm/assets/` are
+**version-locked as a set** — the widget driver, the worker, and the WASM
+glue/solver must come from the **same build**:
+
+- `widget-driver.js` embeds `KIWI_SOLVER_BUILD_ID` (currently
+  `2026-08-r1`) and embeds a copy of the worker source plus the build id.
+- The worker declares the same constant and reports it in its handshake
+  (`ready` / `done` messages). The driver validates it; a mismatch enters
+  the controlled `kiwi:solver-mismatch` state and the driver **never**
+  accepts a solution from a mismatched worker.
+- The wasm glue (`kiwicaptcha-wasm.js`) is content-addressed in the
+  release pipeline (`argon-solver.<sha256>.wasm`) and must be paired with
+  the driver/worker of the same build id.
+
+Operational requirements:
+
+- Serve the assets from **immutable, versioned URLs** — never a mutable
+  `latest.js` alias.
+- Pin every served asset with **SRI** (`integrity` sha384 + `crossorigin`)
+  — see `packages/kiwicaptcha-wasm/SECURITY.md` for the hash tooling and
+  the exact patterns. A mixed-version set (cached worker from an old
+  release next to a new driver) must never reach a page; the mismatch
+  state is the controlled failure, not a silent fallback.
+- Recompute the SRI hashes and the content-addressed names on every
+  rebuild, and record them in the release notes.
+
+## CSP / Worker requirements
+
+The memory-hard solver runs off the main thread in a Web Worker:
+
+- **Blob-worker default:** the driver builds the worker from a Blob URL of
+  locally embedded code (`URL.createObjectURL`). A CSP with
+  `worker-src 'self'` and no `blob:` allowance blocks it — allow
+  `worker-src blob:` (a nonce'd/self-inlined driver creates the Blob, so
+  no network origin is involved).
+- **Explicit worker URL:** set `data-kiwi-worker-src` on the widget
+  container to a **same-origin** asset URL, and allow that origin in
+  `worker-src` (or use `worker-src 'self'` when serving it yourself).
+  Cross-origin worker URLs are never fetched by the driver.
+- **No synchronous Argon2id on the main thread.** Argon2id has no JS
+  fallback and is never executed synchronously in the page; it runs only
+  inside the worker (WASM). When the worker is unavailable, SHA-256 mode
+  falls back to the chunked JS solver — Argon2id mode simply cannot solve.
+  A CSP that blocks the worker therefore disables Argon2id challenges;
+  choose `worker-src` accordingly.
+- **WASM compilation:** a strict CSP3 policy must also allow
+  `'wasm-unsafe-eval'` in `script-src` for the WASM solver (optional in
+  SHA-256 mode thanks to the JS fallback, required for Argon2id).
+- Style/script inline rules are unchanged: with a CSP nonce the emitted
+  `<style>`/`<script>` carry `nonce="..."`; without one, `'unsafe-inline'`
+  or application post-processing is required (see the root README).
+
+## Proxy / IP-binding assumptions
+
+Challenge issuance and verification bind the record to the issuing client
+IP via a nonce-bound HMAC tag. The **canonical client IP** is decided by
+exactly one knob, `risk.client_ip_mode`:
+
+- `symfony_trusted_proxies` (default): forwarding headers
+  (`X-Forwarded-For`, `Forwarded`) are honored only from
+  `risk.trusted_proxies` (CIDRs/exact IPs; empty by default — nothing is
+  trusted unless the operator configures it). Trusted-proxy configuration
+  is global Symfony state once set.
+- `direct`: forwarding headers are always ignored; the socket peer
+  (`REMOTE_ADDR`) is the canonical IP.
+
+Assumptions operators must verify:
+
+- **Trusted proxies only:** any proxy in front must be listed in
+  `risk.trusted_proxies`; an unlisted proxy means solves verify against
+  the proxy's IP, not the client's — weakening relay mitigation and rate
+  attribution.
+- **Header singularity:** `Origin`, `Forwarded`, `X-Forwarded-For` and
+  `X-Real-IP` are security-singular — duplicates are rejected with HTTP
+  400 `DUPLICATE_HEADER` before any header-derived identity is trusted.
+  The edge/WAF should also refuse duplicated headers.
+- **QUIC migration policy:** HTTP/3 clients legitimately change source IPs
+  mid-session. Exact-IP solves verify normally; same-network migrations
+  (same /24 or /56) are accepted with a risk penalty; different networks
+  fail closed (`IpMismatch`, challenge burned) and the client re-solves.
+  Mobile deployments should prefer `request_binding` (per-page nonce)
+  over IP binding for high-value scopes.
+- IP binding is **relay mitigation, not a guarantee** — it never leaks a
+  stable IP-derived identifier, and operators may disable it.
+
+## Redis requirements
+
+The security Redis (challenge storage, replay guards, rate/outstanding
+counters, risk-v1 state, calibration buckets, admission leases) is a
+**trusted control-plane component**, not a cache:
+
+- **`maxmemory-policy noeviction` is mandatory.** KiwiCaptcha state must
+  never be evicted mid-window: an evicted challenge record or
+  consumed-state guard silently re-enables replay and stockpiling windows.
+  Size `maxmemory` for the worst case (`max_outstanding_challenges_global`
+  outstanding records × record size, plus risk state and lease sets, with
+  headroom). Alert on `evicted_keys > 0` and `used_memory` > 70% of
+  `maxmemory` — **observed eviction is a security incident**, not a
+  capacity event.
+- **`WAIT` + TTL margin for replay safety:** with async replication,
+  configure `wait_replicas` (WAIT after storing a challenge) and
+  `wait_timeout_ms`, and `ttl_margin_secs` beyond token validity so
+  consumed-state guards outlive validity + clock skew + failover margin.
+  Without them, a failover can lose the consumed marker and a captured
+  token replays against a "fresh" record.
+- **Script versioning:** the risk engine runs the canonical
+  `risk-v1.lua` (protocol/risk-v1) verbatim via `EVALSHA` with an
+  automatic `NOSCRIPT` fallback — the script's SHA is a protocol artifact,
+  pinned by the `risk-v1` protocol directory and mirrored byte-identically
+  into the Rust and PHP packages (CI enforces sha256 parity). The Lua is
+  versioned (`v4` semantics at the time of writing); never hand-edit any
+  of the three copies, and never load a modified script into a
+  deployment whose stores were written by the canonical one.
+- **Bounded pool, fail fast:** a bounded connection pool (5–10 per
+  worker) with short command timeouts; the engine treats a slow/failed
+  Redis command as a typed refusal (429 / temporary_unavailable), never a
+  hang.
+- **Cluster safety:** all keys share the hash tag `{kiwi:<deployment>}`,
+  so the state script stays single-node atomic and Redis Cluster safe.
+
+## What KiwiCaptcha explicitly does NOT protect against
+
+KiwiCaptcha is anti-abuse protection with a bounded, honest threat model.
+The following are **outside its guarantees**:
+
+- **Proof-of-work outsourcing.** The protocol verifies that *some* client
+  paid the computational cost — it cannot verify the cost was paid
+  locally. Farms, click services, and device pools that solve on behalf of
+  others pass, and open-source solvers make custom clients trivial.
+- **IP-rotation anonymity.** Attackers rotating through many IPs evade
+  per-source attribution; the subnet dimension and global pressure limit
+  the damage but cannot identify a rotating adversary.
+- **Network-level metadata.** ISPs, TLS-terminating proxies, and anyone
+  between the client and your origin can observe challenge issuance,
+  token traffic, and behavioral telemetry endpoints — KiwiCaptcha adds no
+  transport-level confidentiality beyond what the application's own
+  HTTPS/TLS provides.
+- **Compromised hosts and customer code.** If the application server,
+  the Redis instance, or the page's own JavaScript is compromised, all
+  KiwiCaptcha state and verification logic is attacker-controlled. The
+  widget's in-memory-only token and worker isolation are defense-in-depth
+  against accidental leakage, not against a compromised page.
+- **Transport-level 0-RTT replay caveat.** Where the application enables
+  TLS 1.3 0-RTT early data, an attacker can replay a captured early-data
+  request. KiwiCaptcha's server-side single-use consumption (GETDEL) and
+  replay guards mitigate the *effects* of such replays, but the transport
+  behavior itself is the application's TLS configuration.
+- **Human-vs-bot discrimination.** This is a cost-imposing PoW system, not
+  a CAPTCHA in the Turing-test sense; behavioral telemetry is a
+  client-controlled, forgeable supplement and never the security
+  boundary.
