@@ -15,7 +15,7 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Difficulty derived per algorithm** — SHA-256 scales to 20 bits (~1M hashes, the browser solver ceiling); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum. It is measured **server-side** with epoch-microsecond timing (issuance timestamp vs receipt time, both in microseconds in Rust and PHP) — the client-reported duration is forgeable and is used **only as telemetry**.
 - **HMAC-signed, IP-bound challenges** — the challenge records an HMAC hash of the issuing client IP, and verification compares the hash of the current request's IP (`VerifyContext.client_ip`). This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
-- **Single-use with bounded verification cost** — verification consumes the challenge, with intrinsic per-nonce attempt accounting (`max_attempts` in Rust; the PHP core's one-shot consume-on-verify model). Per-nonce caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle ships both (`rate_limit` per-IP issuance window and `argon2_max_concurrent_verifications`). For strict single-use under concurrency, consume the record with an atomic storage operation (e.g. Redis `GETDEL`).
+- **Single-use with bounded verification cost** — verification consumes the challenge, with intrinsic per-nonce attempt accounting (`max_attempts` in Rust; the PHP core's one-shot consume-on-verify model). Per-nonce caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle ships both (`rate_limit` per-IP issuance window and `argon2_max_concurrent_verifications`). For strict single-use under concurrency, consume the record with an atomic storage operation — the Redis stores use a Lua pending→consumed TRANSITION that keeps the record until TTL (same-result retry semantics, crash/indeterminate handling, failover guards), not a plain `GETDEL` delete.
 - **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (as ApexMail does).
 - **First-party behavioral telemetry (off by default)** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application**: the widget collects NO hardware-capability, device-memory, or screen signals; `minimal` mode reports only aggregate widget interaction counts and `full` adds `navigator.webdriver` and at most 20 coarse 250 ms timing samples. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
 - **Auto-tuning difficulty** — SHA-256 target bits scale with solver load; Argon2id difficulty is static (each hash is expensive).
@@ -96,6 +96,7 @@ honors `data-kiwi-endpoint` / `data-kiwi-scope` attributes.
 ### 3. Verify the solution
 
 ```rust
+use std::collections::{HashMap, HashSet};
 use kiwicaptcha::{ChallengeRecord, SolutionToken, VerifyContext, VerifyOutcome, verify_solution};
 
 let solution = SolutionToken::decode(&body.kiwi_token)?; // nonce, counter, duration_ms, telemetry
@@ -103,10 +104,14 @@ let mut record: ChallengeRecord = redis.get(&format!("kcaptcha:{}", solution.non
 
 // record: &mut ChallengeRecord — verification performs attempt accounting on
 // the record, which the caller must persist back (on failure) or consume
-// atomically (GETDEL) on success.
+// atomically (the consumed-state transition) on success.
+let secrets_by_kid: HashMap<u32, String> = HashMap::new(); // kid -> master secret (audit #91)
+let revoked_kids: HashSet<u32> = HashSet::new();            // compromise-revoked kids (audit #117)
 let mut ctx = VerifyContext {
     record: &mut record,
     secret_key: &config.secret_key,   // must match issuance; >= 16 bytes
+    secrets_by_kid: Some(&secrets_by_kid),
+    revoked_kids: Some(&revoked_kids),
     counter: solution.counter,
     duration_ms: solution.duration_ms, // client-reported — telemetry only
     now_unix,                          // TTL check (seconds)
@@ -115,21 +120,31 @@ let mut ctx = VerifyContext {
     min_duration_ms: 0,                // floor is max(ctx, record.min_duration_ms);
                                        // 0 = use only the record's floor
     expected_scope: Some("login"),     // reject cross-scope replay
+    expected_region: None,             // Some("eu") for region-bound deployments
+    expected_issuer: None,             // Some("auth-gateway") to pin the issuer (audit #67)
+    expected_policy_version: Some(1),  // the CURRENT security-policy epoch — a record
+                                       // issued under a revoked policy dies immediately
     client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
     //                                        only BindingMode::None records verify without an IP
     telemetry: Some(&solution.telemetry), // supplementary behavioral signal
     enforce_telemetry: true,           // reject on hard bot signals
+    accept_legacy_v1: false,           // v2 is the only issued format — reject legacy
     max_attempts: 10,                  // per-nonce attempt cap (0 = unlimited)
 };
 
 match verify_solution(&mut ctx) {
-    VerifyOutcome::Valid => {
+    VerifyOutcome::Valid { nonce, request_binding } => {
         // Consume the challenge atomically for strict single-use under
-        // concurrency (e.g. Redis GETDEL), then allow login.
+        // concurrency (e.g. the RedisChallengeStore Lua transition), then
+        // allow login. `nonce` is the consumed challenge's canonical id
+        // (jti); `request_binding` is the application transaction binding
+        // to correlate with the final protected POST.
     }
     VerifyOutcome::Invalid(reason) => { /* reject */ }
 }
 ```
+This example is compile-checked by CI (`examples/readme_verify.rs` mirrors
+it — any field or variant change breaks the build instead of new consumers).
 
 ## PHP & Symfony
 
@@ -172,9 +187,9 @@ implement `AtomicStorageInterface`.
 |---------|----------|
 | `ArrayStorage` | tests, CLI, single-worker only — never production |
 | `Psr6Storage` | any PSR-6 pool. PSR-6 cannot express atomic get-and-delete, so single-use under concurrency is **best-effort** (read-then-delete) — it implements `StorageInterface`, not `AtomicStorageInterface` |
-| `RedisStorage` | atomic single-use via `GETDEL` (Redis 6.2+) — implements `AtomicStorageInterface` — **recommended for production** |
+| `RedisStorage` | atomic single-use via the Lua pending→consumed TRANSITION (record retained until TTL; deterministic-result commit; `ReplicaWaitException` barriers when `wait_replicas > 0`) — implements `AtomicStorageInterface` — **recommended for production** |
 
-In production, use `RedisStorage` (or any atomic `GETDEL`-style backend) so
+In production, use `RedisStorage` (or any atomic consumed-state-transition backend) so
 challenges are shared across workers and consumed exactly once. Records are
 persisted as **language-neutral JSON** (keys matching the Rust crate's serde
 schema one-to-one, with `issued_at_ns` in epoch microseconds), so a PHP service
@@ -238,7 +253,7 @@ Argon2id difficulty is capped at 10 bits.
 GitHub Actions is the source of truth for test status: Rust (fmt, clippy with
 `-D warnings`, tests, wasm32 build), PHP 8.1–8.4 (composer validation +
 PHPUnit), Symfony 6.4/7.x (container compilation + KernelBrowser), real-Redis
-concurrency (GETDEL atomicity, tokenized leases, rate-limit caps) and a
+concurrency (consumed-transition atomicity, tokenized leases, rate-limit caps) and a
 cross-language compatibility suite that runs **in BOTH directions — PHP
 issues → Rust verifies, and Rust issues → PHP verifies — for both
 algorithms (argon2id and sha256)**. The PHP and Symfony suites are pinned to

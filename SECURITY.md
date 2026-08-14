@@ -152,11 +152,20 @@ counters, risk-v1 state, calibration buckets, admission leases) is a
   transition, and the deterministic-result commit) and `wait_timeout_ms`.
   The acknowledgement count is VERIFIED: fewer than `wait_replicas` acked
   replicas fails the operation closed (`ReplicaWaitException` /
-  `replica wait not satisfied`), so a promotion can never resurrect a
-  consumed record from a stale replica. Configure `ttl_margin_secs`
-  beyond token validity so consumed-state guards outlive validity + clock
-  skew + failover margin. On a replica-less server a configured barrier
-  fails closed by design — `wait_replicas` is a hard durability contract.
+  `replica wait not satisfied`). Configure `ttl_margin_secs` beyond token
+  validity so consumed-state guards outlive validity + clock skew +
+  failover margin. On a replica-less server a configured barrier fails
+  closed by design — `wait_replicas` is a hard durability contract.
+  **Promotion invariant (audit round 15):** `WAIT N` proves that at least
+  N replicas acknowledged the write — it does NOT constrain WHICH replicas
+  your failover manager may promote. For replay-safe promotion, operators
+  must either set the acknowledgement threshold to cover EVERY eligible
+  failover target during the challenge lifetime, or configure the
+  failover policy/topology so a lagging/non-current replica can never be
+  promoted (promotion-eligibility gates, `min-replicas-to-write` style
+  replication gating, or a quorum/consensus design whose semantics you
+  can actually guarantee). Without that deployment invariant, a
+  promotion can resurrect a consumed record from a stale replica.
 - **Script versioning:** the risk engine runs the canonical
   `risk-v1.lua` (protocol/risk-v1) verbatim via `EVALSHA` with an
   automatic `NOSCRIPT` fallback — the script's SHA is a protocol artifact,
