@@ -514,26 +514,32 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
     expect(bodies[0].algorithm).toBe('argon2id');
   });
 
-  test('WASM unavailable: bounded retries keep requesting argon2id and settle in the controlled error state (runtime)', async ({ page }) => {
+  test('WASM unavailable: argon2id settles in the controlled worker-unavailable state, never downgraded (runtime)', async ({ page }) => {
     // ?csp=strict blocks wasm compilation AND blob workers (script-src
     // without blob:/wasm-unsafe-eval), so the argon2id challenge cannot be
-    // solved at all — there is no pure-JS argon2id fallback. The driver must
-    // fail (bounded retries, then idle), and EVERY challenge request must
-    // still ask for argon2id: never a downgrade to sha256.
+    // solved at all — there is no pure-JS argon2id fallback and NO
+    // main-thread Argon2 (round-13/14 invariant: the memory-hard solver
+    // never runs in the page). The driver must enter the controlled
+    // kiwi:worker-unavailable state — a single challenge request, because
+    // retrying a permanent worker condition would only spam the endpoint —
+    // and the request must still ask for argon2id: never a downgrade to
+    // sha256.
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});
       await route.continue();
     });
     await page.goto('/?csp=strict&algorithm=argon2id');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', {
       timeout: 60_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('Worker unavailable', {
+      timeout: 60_000,
+    });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
-    expect(bodies.length, 'bounded retries must re-attempt the challenge').toBeGreaterThanOrEqual(3);
+    expect(bodies.length, 'exactly one challenge request — no retry storm on a permanent worker condition').toBe(1);
     for (const body of bodies) {
-      expect(body.algorithm, 'every challenge request must stay argon2id — no wasm-downgrade fallback').toBe('argon2id');
+      expect(body.algorithm, 'the challenge request must stay argon2id — no wasm-downgrade fallback').toBe('argon2id');
     }
   });
 });
@@ -551,7 +557,7 @@ test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
     // own search range (argMax), and every worker path terminates in a
     // done/failed terminal message.
     expect(src).toMatch(/maxHashes: MAX_SHA_HASHES/);
-    expect(src).toMatch(/argMax = Math\.min\(MAX_SHA_HASHES/);
+    expect(src).toMatch(/argMax = Math\.min\(maxHashes, Math\.max\(1024, expected \* 8\)\)/);
   });
 
   test('a stalled challenge endpoint is aborted and the widget settles in the controlled idle error state (runtime)', async ({ page }) => {
