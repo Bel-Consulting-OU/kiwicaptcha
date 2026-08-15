@@ -80,7 +80,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: docker://rhysd/actionlint:v1.7.7
+      - uses: docker://rhysd/actionlint:1.7.12 # pinned (Docker tags have no v prefix)
         with:
           args: -color
 
