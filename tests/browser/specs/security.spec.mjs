@@ -162,7 +162,7 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
         (r) => r.type === 'failed' && r.reason === 'protocol-mismatch'
       );
       worker.terminate();
-      return { repliesAtGuard, handshakeSeen };
+      return { repliesAtGuard, handshakeSeen, failClosedSeen };
     }, workerSource());
     expect(guardResult.repliesAtGuard, 'no rogue message may produce a worker reply').toBe(0);
     // In a wasm-less harness the worker must fail closed (protocol
