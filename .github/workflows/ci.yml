@@ -223,11 +223,17 @@ jobs:
         env:
           RISK_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
       - name: risk PHP real-Redis suite on Redis 8
         working-directory: packages/kiwicaptcha-risk-php
-        env:
-          RISK_REDIS_URL: tcp://127.0.0.1:6379
-        run: vendor/bin/phpunit
+        run: |
+          composer install --no-interaction --prefer-dist
+          RISK_REDIS_URL=tcp://127.0.0.1:6379 vendor/bin/phpunit
 
   risk-rust:
     name: Risk Rust (fmt, clippy, test + Redis)

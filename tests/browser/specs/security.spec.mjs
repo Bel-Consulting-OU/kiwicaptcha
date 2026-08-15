@@ -147,15 +147,32 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
       worker.postMessage({ v: 1, type: 'solve', prefix: 'p' });
       await sleep(150);
 
-      const repliesAtGuard = replies.filter((r) => r.type !== 'ready').length;
+      // Round 23: `ready` now requires the wasm glue's protocol id to
+      // match — in this harness the standalone worker cannot load the
+      // glue, so its legitimate startup outcome is the controlled
+      // protocol-mismatch failure (a handshake message, never a reply to
+      // a posted rogue message).
+      const repliesAtGuard = replies.filter(
+        (r) => r.type !== 'ready' && !(r.type === 'failed' && r.reason === 'protocol-mismatch')
+      ).length;
       const handshakeSeen = replies.some(
         (r) => r.type === 'ready' && typeof r.buildId === 'string'
+      );
+      const failClosedSeen = replies.some(
+        (r) => r.type === 'failed' && r.reason === 'protocol-mismatch'
       );
       worker.terminate();
       return { repliesAtGuard, handshakeSeen };
     }, workerSource());
     expect(guardResult.repliesAtGuard, 'no rogue message may produce a worker reply').toBe(0);
-    expect(guardResult.handshakeSeen, 'the worker must announce its build id on startup (audit #53)').toBe(true);
+    // In a wasm-less harness the worker must fail closed (protocol
+    // mismatch); in a real embedding it announces ready with the protocol
+    // id (audit #53/23). Either startup outcome is correct — a rogue
+    // message reply is not.
+    expect(
+      guardResult.handshakeSeen || guardResult.failClosedSeen,
+      'the worker must announce ready (with the protocol id) or fail closed on startup'
+    ).toBe(true);
   });
 });
 
@@ -425,26 +442,30 @@ test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
     const src = driverSource();
     const worker = workerSource();
 
-    // The build id constant must exist in the driver and the worker, and
-    // both must agree.
-    const driverBuildId = src.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
-    const workerBuildId = worker.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
-    expect(driverBuildId).toBeTruthy();
-    expect(workerBuildId).toBe(driverBuildId);
+    // The PROTOCOL id constant must exist in the driver and the worker,
+    // and both must agree (audit round 23: renamed from 'build id' — it
+    // proves protocol compatibility; exact identity is the release
+    // SHA256SUMS/SRI/attestation chain).
+    const driverProtocolId = src.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
+    const workerProtocolId = worker.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
+    expect(driverProtocolId).toBeTruthy();
+    expect(workerProtocolId).toBe(driverProtocolId);
 
-    // The worker reports the id on startup (ready) and on success (done);
-    // the embedded copy in the driver matches the standalone asset.
-    const handshake = /post\(\{ type: "ready", buildId: KIWI_SOLVER_BUILD_ID \}\)/;
-    expect(worker).toMatch(handshake);
-    expect(src).toMatch(handshake);
-    expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
-    expect(src).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
-    expect(src).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID/);
+    // The worker verifies the wasm glue's exported solver_protocol_id()
+    // BEFORE ready (driver+worker+wasm must agree), then reports the id on
+    // startup (ready) and on success (done); the embedded copy in the
+    // driver matches the standalone asset.
+    expect(worker).toMatch(/solver_protocol_id/);
+    expect(worker).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
+    expect(src).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
+    expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
+    expect(src).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
+    expect(src).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID/);
 
     // The driver validates against its own constant and enters a controlled
     // mismatch state — a mismatched worker must never yield a solution.
     expect(src).toMatch(/msg\.type === "ready"/);
-    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_BUILD_ID/);
+    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_PROTOCOL_ID/);
     expect(src).toMatch(/mismatch: true/);
     expect(src).toMatch(/kiwi:solver-mismatch/);
   });
