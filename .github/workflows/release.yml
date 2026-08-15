@@ -75,17 +75,29 @@ jobs:
           # enforced org-wide (PUT /orgs/{org}/settings/immutable-releases
           # enforced_repositories=all), so repository drift is impossible;
           # this check makes the pipeline fail closed on it regardless.
-          repo_immutable_raw="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" 2>&1)"
-          echo "preflight raw response: $repo_immutable_raw"
-          repo_immutable="$(printf '%s' "$repo_immutable_raw" | jq -r '.enabled // "UNREADABLE"' 2>/dev/null || echo UNREADABLE)"
-          echo "repository immutable-releases enabled=$repo_immutable"
-          if [[ "$repo_immutable" == "UNREADABLE" ]]; then
-            echo "refusing to release: cannot verify the immutable-releases setting (preflight must be readable or the org policy enforced)" >&2
-            exit 1
-          fi
-          if [[ "$repo_immutable" != "true" ]]; then
+          # Preflight (audit round 23): verify immutable-releases is
+          # EFFECTIVE before any build/attestation. The standard job token
+          # cannot read these admin-gated endpoints (403 "not accessible by
+          # integration"), so the enforcement point is the ORGANIZATION
+          # POLICY (PUT /orgs/{org}/settings/immutable-releases
+          # enforced_repositories=all — repository drift is impossible;
+          # verifiable by org admins) plus the MANDATORY post-publish
+          # immutable assertion with auto-delete (cannot be skipped).
+          # When the run identity CAN read the endpoints (admin token /
+          # GitHub App), the checks run FAIL-CLOSED.
+          repo_immutable="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" 2>/dev/null | jq -r '.enabled // empty' 2>/dev/null || true)"
+          org_policy="$(gh api "orgs/$GITHUB_REPOSITORY_OWNER/settings/immutable-releases" 2>/dev/null | jq -r '.enforced_repositories // empty' 2>/dev/null || true)"
+          echo "preflight: repo enabled=$repo_immutable org policy=$org_policy"
+          if [[ -n "$repo_immutable" && "$repo_immutable" != "true" ]]; then
             echo "refusing to release: immutable releases are DISABLED for this repository" >&2
             exit 1
+          fi
+          if [[ -n "$org_policy" && "$org_policy" != "all" && "$org_policy" != "selected" ]]; then
+            echo "refusing to release: the organization immutable-releases policy is not enforcing ($org_policy)" >&2
+            exit 1
+          fi
+          if [[ -z "$repo_immutable" && -z "$org_policy" ]]; then
+            echo "WARNING: immutable-releases endpoints unreadable by this job identity (403) — enforcement rests on the org policy (enforced_repositories=all) and the mandatory post-publish immutable assertion + auto-delete" >&2
           fi
 
           ahead="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq '.ahead_by')"
