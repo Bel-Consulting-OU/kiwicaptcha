@@ -1,12 +1,13 @@
 # KiwiCaptcha WASM — Security & Supply-Chain Notes
 
-This package ships three browser assets (`assets/`):
+This package ships four browser assets (`assets/`):
 
 | Asset | Purpose |
 |---|---|
 | `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64 |
 | `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`) |
 | `widget-driver.js` | the widget driver; embeds the worker source and the solver build id |
+| `widget.css` | the widget stylesheet (first-class release asset since round 18; SRI-capable via `<link>`) |
 
 Everything below is guidance for integrators who serve these assets (self-hosted
 or via a CDN). The exact release URLs are the integrator's choice — this file
@@ -20,12 +21,13 @@ Compute the sha384-base64 hashes with the bundled tool:
 node packages/kiwicaptcha-wasm/tools/sri-hashes.mjs
 ```
 
-Example output (run against a build):
+Example output (run against a build — all FOUR release assets):
 
 ```
 kiwicaptcha-wasm.js  sha384-lYQhEK3o/D8piurwe1556/gKHmzDoNv5gumBBIKUCsKQ0ogSvB1HySZm6NeNVdzq
 kiwi-worker.js       sha384-bz5IPxD4I2OK/gEaeUsMGXB0A5caYw5LwU/fQXbxpzQ048kk8K2NsWM/GO3EL9Ii
 widget-driver.js     sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR
+widget.css           sha384-rNPQbDhqKmTBO3cn6mUfG5zR4OeKjMsJ5i1lPv9d9YvTdm1g5iw4yLfRo0PYT8
 ```
 
 Use the SRI script-tag pattern for every asset you serve:

@@ -46,7 +46,9 @@ exploited.
   requests are required (1 approving review, stale-review dismissal,
   last-push approval, review-thread resolution, CODEOWNERS review for
   `.github/workflows/**`, `protocol/**`, verifier/Redis code and build
-  tooling), the complete security CI matrix (20 jobs) must pass (strict),
+  tooling), ALL required security CI checks must pass (strict; the set is
+  maintained in the ruleset — currently 21 check contexts including the
+  standalone quick-start end-to-end job and the workflow-lint job),
   deletion/force-push are blocked, linear history is required, and commits
   must be signed. The trust model: organization admins retain an explicit
   always-bypass — this is operational protection, not mathematical

@@ -20,7 +20,6 @@ name: Release
 # release-level attestation; the publish step verifies both
 # (immutable:true API assertion + gh release verify, audited round 21).
 on:
-on:
   push:
     tags:
       - "v*"
@@ -75,6 +74,19 @@ jobs:
             exit 1
           fi
           echo "tagged commit $sha is reachable from protected main"
+
+          # Audit round 22: release provenance must survive an
+          # administrator bypass of branch protection — the EXACT tagged
+          # commit must be GitHub-VERIFIED (signed with a key GitHub
+          # recognizes as the committer's) before anything is built or
+          # published. An unsigned or unknown-key tag is refused.
+          ver="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '{verified: .commit.verification.verified, reason: .commit.verification.reason, signature: .commit.verification.signature}')"
+          echo "tag commit verification: $ver"
+          verified="$(jq -r '.verified' <<<"$ver")"
+          if [[ "$verified" != "true" ]]; then
+            echo "refusing to release: the exact tag commit $sha is not GitHub-verified (signed-commit provenance required)" >&2
+            exit 1
+          fi
 
           deadline=$((SECONDS + 1800))
           while :; do

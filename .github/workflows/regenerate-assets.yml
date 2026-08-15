@@ -3,8 +3,9 @@ name: Regenerate canonical assets
 # Audit round 19: the committed browser assets must be byte-identical to
 # what the release pipeline produces. wasm-opt output is machine-dependent
 # (thread-count/parallel-scheduling sensitive), so the canonical bytes are
-# generated ON THE SAME runner platform as the release (ubuntu-latest,
-# x86_64, 4 vCPU) instead of any developer machine. Run this workflow
+# generated in the SAME controlled runner environment as the release
+# (ubuntu-latest, pinned toolchain 1.96.0, pinned wasm-bindgen, verified
+# binaryen) instead of any developer machine. Run this workflow
 # (workflow_dispatch), download the `canonical-assets` artifact, verify,
 # and commit the bytes.
 on:
