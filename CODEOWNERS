@@ -1,0 +1,13 @@
+# Code owners (audit round 20): security-sensitive paths require a code
+# owner's review before PRs into main merge (enforced by the main branch
+# ruleset's require_code_owner_review).
+*                                             @sbelakho2
+.github/workflows/                            @sbelakho2
+protocol/                                     @sbelakho2
+packages/kiwicaptcha/src/verify.rs            @sbelakho2
+packages/kiwicaptcha/src/redis_verify.rs      @sbelakho2
+packages/kiwicaptcha-php/src/Verifier.php     @sbelakho2
+packages/kiwicaptcha-risk/src/                @sbelakho2
+packages/kiwicaptcha-risk-php/src/            @sbelakho2
+packages/kiwicaptcha-wasm/                    @sbelakho2
+packages/kiwicaptcha/integrations/symfony/src/ @sbelakho2
