@@ -170,10 +170,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - name: download the immutable build artifact
+        # Extracts into the workspace preserving the artifact's layout
+        # (packages/kiwicaptcha-wasm/assets/..., .../SHA256SUMS, .../SRI.txt),
+        # overwriting the byte-identical committed copies.
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-assets
-          path: release-artifacts
       - name: attest the release artifacts (SLSA provenance)
         # Producer: actions/attest-build-provenance (the only supported
         # producer); consumer: `gh attestation verify`. Subject paths are
@@ -182,10 +184,10 @@ jobs:
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: |
-            ${{ github.workspace }}/release-artifacts/kiwicaptcha-wasm.js
-            ${{ github.workspace }}/release-artifacts/kiwi-worker.js
-            ${{ github.workspace }}/release-artifacts/widget-driver.js
-            ${{ github.workspace }}/release-artifacts/widget.css
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/kiwi-worker.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget-driver.js
+            ${{ github.workspace }}/packages/kiwicaptcha-wasm/assets/widget.css
       - name: publish the release atomically (draft -> upload -> publish)
         # Audit round 19: assets are passed DIRECTLY to `gh release create`
         # — GitHub CLI creates the release as a DRAFT, uploads the assets,
@@ -199,12 +201,12 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
-            "$GITHUB_WORKSPACE/release-artifacts/kiwicaptcha-wasm.js" \
-            "$GITHUB_WORKSPACE/release-artifacts/kiwi-worker.js" \
-            "$GITHUB_WORKSPACE/release-artifacts/widget-driver.js" \
-            "$GITHUB_WORKSPACE/release-artifacts/widget.css" \
-            "$GITHUB_WORKSPACE/release-artifacts/SHA256SUMS" \
-            "$GITHUB_WORKSPACE/release-artifacts/SRI.txt" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/assets/kiwi-worker.js" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/assets/widget-driver.js" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/assets/widget.css" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/SHA256SUMS" \
+            "$GITHUB_WORKSPACE/packages/kiwicaptcha-wasm/SRI.txt" \
             --verify-tag \
             --title "KiwiCaptcha $GITHUB_REF_NAME" \
             --notes "Release CI-gated (exact tag CI), strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes). Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY"
