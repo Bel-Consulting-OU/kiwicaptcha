@@ -256,8 +256,8 @@ jobs:
                   | sort_by(.run_number) | last // empty'
           )"
           ci_run_id="$(jq -r '.id' <<<"$ci_run")"
-          jobs_total="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs" --jq '.total_count')"
-          jobs_success="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs" --jq '[.jobs[] | select(.conclusion == "success")] | length')"
+          jobs_total="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" --jq '.total_count')"
+          jobs_success="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" --jq '[.jobs[] | select(.conclusion == "success")] | length')"
           verified="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified')"
           cat > "$GITHUB_WORKSPACE/RELEASE_NOTES.md" <<NOTES
           Release CI-gated, strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes).

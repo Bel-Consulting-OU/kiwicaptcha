@@ -35,15 +35,16 @@ function recordFile(string $nonce): string
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/challenge') {
     $body = json_decode((string) file_get_contents('php://input'), true);
     $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
     $config = new Config(
         secretKey: $secret,
         algorithm: $algorithm,
+        ttlSecs: $ttlOverride ?? 120,
         mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
         t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
         p: 1,
         targetBits: 8,
         argon2TargetBits: 4,
-        ttlSecs: 120,
         minDurationMs: 0,
     );
     $issueStorage = new ArrayStorage();
@@ -104,6 +105,31 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
         $body = str_replace('2026-08-r1', '2026-08-r0', (string) $body);
     }
     echo $body;
+
+    return true;
+}
+
+// Round 24: incumbent-compatibility loader + migration fixtures.
+$assets = $repo.'/packages/kiwicaptcha-wasm/assets';
+
+if ($path === '/kiwi-captcha/api.js') {
+    header('Content-Type: application/javascript');
+    header('Cache-Control: no-store');
+    echo file_get_contents($assets.'/kiwicaptcha-wasm.js')."\n".file_get_contents($assets.'/widget-driver.js');
+
+    return true;
+}
+if ($path === '/kiwi-captcha/widget.css') {
+    header('Content-Type: text/css');
+    header('Cache-Control: no-store');
+    echo file_get_contents($assets.'/widget.css');
+
+    return true;
+}
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
+    header('Content-Type: text/html');
+    header('Cache-Control: no-store');
+    echo file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
 
     return true;
 }

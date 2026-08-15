@@ -11,7 +11,7 @@ line** of each artifact:
 | `kiwicaptcha-php` | latest `1.x` |
 | `kiwicaptcha-risk` (Rust) | latest `0.1.x` — pre-1.0: fixes land on `0.1` |
 | `kiwicaptcha-risk-php` | latest `0.1.x` — pre-1.0: fixes land on `0.1` |
-| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r1` solver build id — older build ids are NOT patched; upgrade the asset set |
+| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r1` solver protocol id — older protocol ids are NOT patched; upgrade the asset set |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its
@@ -31,7 +31,7 @@ Please do **not** open a public issue for a suspected vulnerability.
 
 Report through [GitHub Security Advisories] — "Report a vulnerability" on
 this repository — which is private until triaged. Please include:
-- the affected component and version (commit or build id);
+- the affected component and version (commit or release);
 - a description of the vulnerability and its impact;
 - reproduction steps, ideally with a minimal proof of concept.
 
@@ -81,14 +81,16 @@ exploited.
 
 [GitHub Security Advisories]: https://github.com/Bel-Consulting-OU/kiwicaptcha/security/advisories
 
-## Asset / build-id coupling
+## Asset / protocol-id coupling
 
-The three browser assets in `packages/kiwicaptcha-wasm/assets/` are
+The four browser assets in `packages/kiwicaptcha-wasm/assets/` are
 **version-locked as a set** — the widget driver, the worker, and the WASM
 glue/solver must come from the **same build**:
 
-- `widget-driver.js` embeds `KIWI_SOLVER_BUILD_ID` (currently
-  `2026-08-r1`) and embeds a copy of the worker source plus the build id.
+- `widget-driver.js` embeds `KIWI_SOLVER_PROTOCOL_ID` (currently
+  `2026-08-r1`) and embeds a copy of the worker source; the worker
+  verifies the wasm glue's exported `solver_protocol_version()` before
+  `ready`.
 - The worker declares the same constant and reports it in its handshake
   (`ready` / `done` messages). The driver validates it; a mismatch enters
   the controlled `kiwi:solver-mismatch` state and the driver **never**
@@ -101,7 +103,7 @@ glue/solver must come from the **same build**:
   content-addressed names (e.g. `argon-solver.<sha256>.wasm` extracted
   from the glue) apply that pattern at their CDN layer (see
   `packages/kiwicaptcha-wasm/SECURITY.md`); the glue and the driver/worker
-  of the same build id must be paired.
+  of the same protocol id must be paired.
 
 Operational requirements:
 
@@ -112,7 +114,7 @@ Operational requirements:
   hash tooling and the exact patterns. A `new Worker(url)` has no
   `integrity=` facility, so the standalone worker (`kiwi-worker.js`) is
   protected by the immutable versioned URL + the content-addressed release
-  hash + the worker's build-id handshake (the driver refuses a mismatched
+  hash + the worker's protocol-id handshake (the driver refuses a mismatched
   worker). A mixed-version set (cached worker from an old release next to
   a new driver) must never reach a page; the mismatch state is the
   controlled failure, not a silent fallback.

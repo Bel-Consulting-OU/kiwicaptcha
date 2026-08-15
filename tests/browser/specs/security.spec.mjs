@@ -451,11 +451,12 @@ test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
     expect(driverProtocolId).toBeTruthy();
     expect(workerProtocolId).toBe(driverProtocolId);
 
-    // The worker verifies the wasm glue's exported solver_protocol_id()
-    // BEFORE ready (driver+worker+wasm must agree), then reports the id on
-    // startup (ready) and on success (done); the embedded copy in the
-    // driver matches the standalone asset.
-    expect(worker).toMatch(/solver_protocol_id/);
+    // The worker verifies the wasm glue's exported solver_protocol_version()
+    // (an integer — clean at the raw ABI) BEFORE ready (driver+worker+wasm
+    // must agree), then reports the protocol id on startup (ready) and on
+    // success (done); the embedded copy in the driver matches the
+    // standalone asset.
+    expect(worker).toMatch(/solver_protocol_version/);
     expect(worker).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
     expect(src).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
     expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
