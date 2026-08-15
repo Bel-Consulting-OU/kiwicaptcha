@@ -14,8 +14,12 @@ name: Release
 #     download the immutable artifact -> SLSA attestation -> atomic
 #     `gh release create` (draft -> upload -> publish, no clobber).
 #
-# v* tags are protected by a repository ruleset; the release object is
-# immutable (verified after publication).
+# v* tags are protected by a repository ruleset; GitHub Immutable
+# Releases is ENABLED (PUT /repos/{owner}/{repo}/immutable-releases), so
+# every published release object locks its tag and assets and carries a
+# release-level attestation; the publish step verifies both
+# (immutable:true API assertion + gh release verify, audited round 21).
+on:
 on:
   push:
     tags:
