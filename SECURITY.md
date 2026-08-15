@@ -40,26 +40,35 @@ assessment. We ask for a 90-day coordinated-disclosure window from the
 report before public disclosure, unless the issue is already being
 exploited.
 
-## Release immutability
+## Release and branch governance (audit round 20)
 
-- **`refs/tags/v*` are protected by a repository ruleset** (created via
-  the rulesets API): deletion and non-fast-forward updates are blocked,
-  and creation is restricted to organization admins. A tag is a promise —
-  "these exact bytes, forever".
-- **Immutable Releases** must be enabled in the repository settings
-  (Settings -> General -> Immutable Releases; the toggle is NOT exposed
-  via the REST API, so it cannot be set from CI). **Live status: the
-  toggle is currently OFF** — the `v*` tag ruleset enforces tag
-  immutability (deletion/non-fast-forward blocked, creation restricted to
-  org admins), the release workflow fails instead of clobbering an
-  existing release, and release metadata is checked for `immutable: true`
-  after publication, but the repository-level release-object immutability
-  requires the manual settings toggle. The workflow additionally fails
-  instead of clobbering an existing release (`--clobber` is never used).
+- **`refs/heads/main` is protected by an active branch ruleset**: pull
+  requests are required (1 approving review, stale-review dismissal,
+  last-push approval, review-thread resolution, CODEOWNERS review for
+  `.github/workflows/**`, `protocol/**`, verifier/Redis code and build
+  tooling), the complete security CI matrix (20 jobs) must pass (strict),
+  deletion/force-push are blocked, linear history is required, and commits
+  must be signed. The trust model: organization admins retain an explicit
+  always-bypass — this is operational protection, not mathematical
+  impossibility.
+- **`refs/tags/v*` are protected by an active tag ruleset**: deletion and
+  non-fast-forward updates are blocked, creation is restricted to
+  organization admins (the same documented trust model).
+- **GitHub Immutable Releases is ENABLED** (`PUT
+  /repos/{owner}/{repo}/immutable-releases` — the setting is also
+  available in Settings -> General -> Immutable Releases). It applies to
+  FUTURE releases only: the release object locks its tag and assets after
+  publication and carries a release-level attestation. `v1.6.10` and
+  earlier were published while the setting was off and remain mutable;
+  `v1.6.11` is the first release published under it. The release workflow
+  verifies every published release: `immutable: true` via the API and
+  `gh release verify`.
+- The workflow additionally fails instead of clobbering an existing
+  release (`--clobber` is never used).
 - **Publication is CI-gated**: `.github/workflows/release.yml` verifies
-  that every CI check run for the exact tagged SHA succeeded and that the
-  commit is reachable from protected `main` before building, attesting, or
-  publishing anything.
+  that the exact tag-triggered CI run succeeded (head_sha + head_branch +
+  event) and that the commit is reachable from protected `main` before
+  building, attesting, or publishing anything.
 - **Tested bytes == released bytes**: the release pipeline rebuilds the
   assets under the strict pinned toolchain and fails unless `git diff
   --exit-code` shows they are byte-identical to the committed assets that

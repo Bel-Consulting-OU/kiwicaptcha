@@ -207,3 +207,20 @@ jobs:
             --notes "Release CI-gated (exact tag CI), strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes). Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: verify the published release (immutability + attestation)
+        # Audit round 20: with GitHub Immutable Releases ENABLED, the
+        # publish step must PROVE the release object is immutable and its
+        # release-level attestation verifies — a release that fails either
+        # assertion is a broken pipeline, not a release.
+        run: |
+          set -euo pipefail
+          immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.immutable')"
+          echo "release $GITHUB_REF_NAME immutable=$immutable"
+          if [[ "$immutable" != "true" ]]; then
+            echo "refusing to consider the release published: immutable != true (Immutable Releases not effective)" >&2
+            exit 1
+          fi
+          gh release verify "$GITHUB_REF_NAME"
+          echo "release verified: immutable + attestation OK"
+        env:
+          GH_TOKEN: ${{ github.token }}

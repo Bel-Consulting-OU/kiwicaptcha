@@ -70,8 +70,10 @@ Notes:
   that follows the URL.
 - Content-addressed naming is the strongest form: the runtime wasm is
   EMBEDDED inside `kiwicaptcha-wasm.js` (the release pipeline publishes
-  the immutable tag-bound JS/CSS artifacts + SHA256SUMS + SRI + provenance
-  — there is currently no standalone raw `.wasm` artifact on the release).
+  the tag-bound JS/CSS artifacts + SHA256SUMS + SRI + SLSA provenance;
+  the release object is immutable under GitHub's Immutable Releases
+  setting, enabled as of v1.6.11 — there is currently no standalone raw
+  `.wasm` artifact on the release).
   Integrators who need the raw wasm may extract it once and serve it under
   a content-addressed name such as `argon-solver.<sha256>.wasm` at their
   CDN layer, or apply the `<name>.<hash>.<ext>` pattern to the
@@ -114,8 +116,10 @@ For each release:
    shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js
    node tools/sri-hashes.mjs
    ```
-2. Publish the hash list in the release notes (SHA-256 for artifact
-   verification, sha384 SRI form for script tags).
+2. Publish the hash list as the attached `SHA256SUMS`/`SRI.txt` manifests
+   (SHA-256 for artifact verification, sha384 SRI form for script tags) —
+   both manifests are SLSA-attested release assets; the release notes
+   reference them.
 3. Attest the artifacts with GitHub artifact attestations. The
    PRODUCER is the release workflow — `actions/attest-build-provenance`
    (SLSA provenance, tied to the OIDC identity of the repository/runner);
