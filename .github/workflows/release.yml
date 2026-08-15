@@ -75,7 +75,9 @@ jobs:
           # enforced org-wide (PUT /orgs/{org}/settings/immutable-releases
           # enforced_repositories=all), so repository drift is impossible;
           # this check makes the pipeline fail closed on it regardless.
-          repo_immutable="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled' 2>/dev/null || echo UNREADABLE)"
+          repo_immutable_raw="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" 2>&1)"
+          echo "preflight raw response: $repo_immutable_raw"
+          repo_immutable="$(printf '%s' "$repo_immutable_raw" | jq -r '.enabled // "UNREADABLE"' 2>/dev/null || echo UNREADABLE)"
           echo "repository immutable-releases enabled=$repo_immutable"
           if [[ "$repo_immutable" == "UNREADABLE" ]]; then
             echo "refusing to release: cannot verify the immutable-releases setting (preflight must be readable or the org policy enforced)" >&2
