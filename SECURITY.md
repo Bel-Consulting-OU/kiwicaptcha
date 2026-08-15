@@ -46,11 +46,16 @@ exploited.
   the rulesets API): deletion and non-fast-forward updates are blocked,
   and creation is restricted to organization admins. A tag is a promise —
   "these exact bytes, forever".
-- **Immutable Releases** must be enabled in the repository settings (the
-  toggle is not exposed via the REST API): after publication, release
-  tags and assets cannot be replaced. The release workflow additionally
-  fails instead of clobbering an existing release (`--clobber` is never
-  used).
+- **Immutable Releases** must be enabled in the repository settings
+  (Settings -> General -> Immutable Releases; the toggle is NOT exposed
+  via the REST API, so it cannot be set from CI). **Live status: the
+  toggle is currently OFF** — the `v*` tag ruleset enforces tag
+  immutability (deletion/non-fast-forward blocked, creation restricted to
+  org admins), the release workflow fails instead of clobbering an
+  existing release, and release metadata is checked for `immutable: true`
+  after publication, but the repository-level release-object immutability
+  requires the manual settings toggle. The workflow additionally fails
+  instead of clobbering an existing release (`--clobber` is never used).
 - **Publication is CI-gated**: `.github/workflows/release.yml` verifies
   that every CI check run for the exact tagged SHA succeeded and that the
   commit is reachable from protected `main` before building, attesting, or
