@@ -211,7 +211,11 @@ jobs:
         # Audit round 20: with GitHub Immutable Releases ENABLED, the
         # publish step must PROVE the release object is immutable and its
         # release-level attestation verifies — a release that fails either
-        # assertion is a broken pipeline, not a release.
+        # assertion is a broken pipeline, not a release. Audit round 21:
+        # the release-level attestation is created ASYNCHRONOUSLY after
+        # publication (the v1.6.11 immediate check failed while the
+        # release itself verifies fine), so the check is polled for up to
+        # three minutes.
         run: |
           set -euo pipefail
           immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.immutable')"
@@ -220,7 +224,18 @@ jobs:
             echo "refusing to consider the release published: immutable != true (Immutable Releases not effective)" >&2
             exit 1
           fi
-          gh release verify "$GITHUB_REF_NAME"
-          echo "release verified: immutable + attestation OK"
+          deadline=$((SECONDS + 180))
+          while :; do
+            if gh release verify "$GITHUB_REF_NAME"; then
+              echo "release verified: immutable + attestation OK"
+              exit 0
+            fi
+            echo "release-level attestation not ready yet — retrying" >&2
+            if (( SECONDS > deadline )); then
+              echo "release attestation did not appear within 180s" >&2
+              exit 1
+            fi
+            sleep 15
+          done
         env:
           GH_TOKEN: ${{ github.token }}
