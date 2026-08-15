@@ -68,6 +68,24 @@ jobs:
           fi
           echo "release $tag does not exist yet"
 
+          # Audit round 23 (P1): PREFLIGHT repository immutability BEFORE
+          # any build/attestation — publishing must never be able to leave
+          # behind a public MUTABLE release because the setting was
+          # accidentally disabled. The organization policy is additionally
+          # enforced org-wide (PUT /orgs/{org}/settings/immutable-releases
+          # enforced_repositories=all), so repository drift is impossible;
+          # this check makes the pipeline fail closed on it regardless.
+          repo_immutable="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled' 2>/dev/null || echo UNREADABLE)"
+          echo "repository immutable-releases enabled=$repo_immutable"
+          if [[ "$repo_immutable" == "UNREADABLE" ]]; then
+            echo "refusing to release: cannot verify the immutable-releases setting (preflight must be readable or the org policy enforced)" >&2
+            exit 1
+          fi
+          if [[ "$repo_immutable" != "true" ]]; then
+            echo "refusing to release: immutable releases are DISABLED for this repository" >&2
+            exit 1
+          fi
+
           ahead="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq '.ahead_by')"
           if [[ "$ahead" != "0" ]]; then
             echo "refusing to release: $sha is not reachable from protected main (ahead_by=$ahead)" >&2
@@ -213,6 +231,27 @@ jobs:
             echo "refusing to publish: release $GITHUB_REF_NAME already exists (releases are immutable)" >&2
             exit 1
           fi
+          # Audit round 23: the release evidence is GENERATED from the API
+          # (never hand-written): the exact tag CI job counts and the
+          # verified-commit state are computed here and embedded in the
+          # notes, so the evidence cannot go stale.
+          ci_run="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&per_page=100" \
+              | jq -c --arg sha "$GITHUB_SHA" --arg tag "$GITHUB_REF_NAME" '
+                  [.workflow_runs[] | select(.head_sha == $sha and .head_branch == $tag and .event == "push")]
+                  | sort_by(.run_number) | last // empty'
+          )"
+          ci_run_id="$(jq -r '.id' <<<"$ci_run")"
+          jobs_total="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs" --jq '.total_count')"
+          jobs_success="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/jobs" --jq '[.jobs[] | select(.conclusion == "success")] | length')"
+          verified="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.commit.verification.verified')"
+          cat > "$GITHUB_WORKSPACE/RELEASE_NOTES.md" <<NOTES
+          Release CI-gated, strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes).
+
+          CI evidence (API-generated): exact tag CI run #$ci_run_id — $jobs_success/$jobs_total jobs successful. Tag commit $GITHUB_SHA GitHub-verified: $verified.
+
+          Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY
+          NOTES
           gh release create "$GITHUB_REF_NAME" \
             "$GITHUB_WORKSPACE/kiwicaptcha-wasm.js" \
             "$GITHUB_WORKSPACE/kiwi-worker.js" \
@@ -222,7 +261,7 @@ jobs:
             "$GITHUB_WORKSPACE/SRI.txt" \
             --verify-tag \
             --title "KiwiCaptcha $GITHUB_REF_NAME" \
-            --notes "Release CI-gated (exact tag CI), strict-built and SLSA-attested by .github/workflows/release.yml (Rust 1.96.0, wasm-bindgen 0.2.127 --locked, binaryen version_119 verified, released bytes == browser-tested bytes). Manifests: SHA256SUMS (sha256, basenames) + SRI.txt (sha384). Verify: gh attestation verify <asset> --repo $GITHUB_REPOSITORY"
+            --notes-file "$GITHUB_WORKSPACE/RELEASE_NOTES.md"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: verify the published release (immutability + attestation)
@@ -239,7 +278,13 @@ jobs:
           immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.immutable')"
           echo "release $GITHUB_REF_NAME immutable=$immutable"
           if [[ "$immutable" != "true" ]]; then
-            echo "refusing to consider the release published: immutable != true (Immutable Releases not effective)" >&2
+            # Audit round 23: a post-publication immutability failure
+            # immediately deletes the release (best-effort containment —
+            # the org-level policy and the preflight make this path
+            # unreachable in practice) and then fails.
+            echo "immutable != true — deleting the failed release immediately" >&2
+            gh release delete "$GITHUB_REF_NAME" --yes || true
+            echo "refusing to consider the release published: immutable != true" >&2
             exit 1
           fi
           deadline=$((SECONDS + 180))

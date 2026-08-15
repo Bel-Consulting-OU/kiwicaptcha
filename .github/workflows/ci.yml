@@ -80,7 +80,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: docker://rhysd/actionlint:1.7.12 # pinned (Docker tags have no v prefix)
+      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # actionlint 1.7.12, digest-pinned (audit round 23)
         with:
           args: -color
 
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned (audit round 23)
         ports:
           - 6379:6379
     defaults:
@@ -196,12 +196,45 @@ jobs:
           KC_REDIS_URL: tcp://127.0.0.1:6379
         run: vendor/bin/phpunit --filter RealRedis
 
+  redis-compat:
+    # Audit round 23: NON-GATING forward-compatibility probe — runs the
+    # risk real-Redis suites against NEWER Redis (8.x, digest-pinned) so
+    # future Redis behavior changes surface as visible warnings, while the
+    # release gate keeps testing the deterministic pinned Redis 7 digest.
+    # Deliberately NOT in the protected-main required-check set.
+    name: Redis 8 compatibility (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      redis:
+        image: redis@sha256:344e3945a0b431c8ff1eecd58c5573538126bd756f02fc7e218ddf1fc2546366 # Redis 8.x (digest of the redis:8 tag as of 2026-08-15)
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned (audit round 16) — matches rust-toolchain.toml
+          components: rustfmt, clippy
+      - name: risk Rust real-Redis suite on Redis 8
+        env:
+          RISK_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test
+      - name: risk PHP real-Redis suite on Redis 8
+        working-directory: packages/kiwicaptcha-risk-php
+        env:
+          RISK_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit
+
   risk-rust:
     name: Risk Rust (fmt, clippy, test + Redis)
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned (audit round 23)
         ports:
           - 6379:6379
     defaults:
@@ -227,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned (audit round 23)
         ports:
           - 6379:6379
     defaults:
@@ -415,7 +448,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:7
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned (audit round 23)
         ports:
           - 6379:6379
     defaults:
