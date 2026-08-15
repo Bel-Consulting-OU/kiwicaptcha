@@ -183,6 +183,8 @@ jobs:
             ${{ github.workspace }}/kiwi-worker.js
             ${{ github.workspace }}/widget-driver.js
             ${{ github.workspace }}/widget.css
+            ${{ github.workspace }}/SHA256SUMS
+            ${{ github.workspace }}/SRI.txt
       - name: publish the release atomically (draft -> upload -> publish)
         # Audit round 19: assets are passed DIRECTLY to `gh release create`
         # — GitHub CLI creates the release as a DRAFT, uploads the assets,
