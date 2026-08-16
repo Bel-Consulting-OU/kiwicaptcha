@@ -489,9 +489,12 @@ test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly ONE fetch exists in the whole driver: there can be no
-    // "retry with a weaker challenge" code path to fetch a second time.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(1);
+    // Exactly TWO fetch calls exist in the whole driver: the loader-glue
+    // fetch (round 26 — the external /api.js path fetches its own source
+    // to hand the wasm glue to the Blob worker) and the challenge fetch.
+    // There can be no "retry with a weaker challenge" code path to fetch
+    // a second challenge.
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(2);
     // The algorithm variable is declared exactly twice in the file: once in
     // the driver (from the container/widget attributes only) and once in the
     // embedded worker source (from the solve request). No other declaration.
