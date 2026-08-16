@@ -112,17 +112,27 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
 // Round 24: incumbent-compatibility loader + migration fixtures.
 $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
 
-if ($path === '/kiwi-captcha/api.js') {
-    header('Content-Type: application/javascript');
-    header('Cache-Control: no-store');
-    echo file_get_contents($assets.'/kiwicaptcha-wasm.js')."\n/*KIWI_COMPAT_SPLIT*/\n".file_get_contents($assets.'/widget-driver.js');
-
-    return true;
-}
-if ($path === '/kiwi-captcha/widget.css') {
-    header('Content-Type: text/css');
-    header('Cache-Control: no-store');
-    echo file_get_contents($assets.'/widget.css');
+// Round 27 (P1): the compat endpoints go through the REAL bundle
+// controller — the previous hard-coded concat hid a production route
+// failure (a missing Request import broke the actual routes).
+$symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
+if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') && is_file($symfonyAutoload)) {
+    require $symfonyAutoload;
+    $api = new \BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController($assets);
+    $srequest = \Symfony\Component\HttpFoundation\Request::create(
+        $_SERVER['REQUEST_URI'],
+        $_SERVER['REQUEST_METHOD'] ?? 'GET',
+        [],
+        [],
+        [],
+        $_SERVER,
+    );
+    $sresponse = $path === '/kiwi-captcha/api.js' ? $api->apiJs($srequest) : $api->widgetCss($srequest);
+    foreach ($sresponse->headers->all() as $name => $values) {
+        header($name.': '.implode(', ', $values));
+    }
+    http_response_code($sresponse->getStatusCode());
+    echo $sresponse->getContent();
 
     return true;
 }

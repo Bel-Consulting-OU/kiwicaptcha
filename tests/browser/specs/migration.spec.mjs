@@ -135,6 +135,42 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(token.length).toBeGreaterThan(10);
   });
 
+  test('the visible .kiwi-widget carries the done state (round 27 state fix)', async ({ page }) => {
+    // Round 27 (P2): the state attribute must live on the INNER
+    // .kiwi-widget (the stylesheet keys the pulse/success/failure styling
+    // and Retry visibility on .kiwi-widget[data-state=...]) — the outer
+    // incumbent wrapper previously took the state while the widget stayed
+    // frozen at idle.
+    await page.goto('/migration/recaptcha-v2.html');
+    await waitVerified(page);
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done');
+  });
+
+  test('a failed compat widget shows the failed state and the Retry button', async ({ page }) => {
+    // The endpoint 404s -> the challenge fails -> the inner widget enters
+    // the failed state and the Retry button becomes visible (previously
+    // hidden because the state never landed on .kiwi-widget).
+    await page.goto('/migration/recaptcha-v2.html');
+    await page.evaluate(() => {
+      document.querySelector('.g-recaptcha').setAttribute('data-kiwi-endpoint', '/definitely-missing-endpoint');
+    });
+    // The page already rendered with the default endpoint before the
+    // attribute was set — force a fresh widget by navigating with the
+    // broken endpoint baked in via the compat passthrough (reload with a
+    // query the fixture passes through).
+    await page.goto('/migration/recaptcha-v2.html');
+    await page.evaluate(() => {
+      const el = document.querySelector('.g-recaptcha');
+      el.setAttribute('data-kiwi-endpoint', '/definitely-missing-endpoint');
+      // Re-init by resetting through the provider API (the attribute is
+      // read at init).
+      const wid = el.dataset.kiwiInstance;
+      if (wid) window.grecaptcha.reset(wid);
+    });
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    await expect(page.locator('.g-recaptcha [data-kiwi-retry]')).toBeVisible({ timeout: 15_000 });
+  });
+
   test('the provider alias and the native token carry the SAME credential', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2.html');
     const native = await waitVerified(page, 'kiwi__token');
