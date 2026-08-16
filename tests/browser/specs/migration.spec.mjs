@@ -25,7 +25,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     await expect(page.locator('#out')).toHaveText('cb:' + token.slice(0, 8));
   });
 
-  test('reCAPTCHA v2: widget ids + getResponse + explicit render', async ({ page }) => {
+  test('reCAPTCHA v2: widget ids + getResponse + REAL explicit render (string id, element, selector)', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2.html');
     const token = await waitVerified(page);
     const id = await page.evaluate(() => {
@@ -36,6 +36,99 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(typeof id.wid).toBe('string');
     expect(id.wid.length).toBeGreaterThan(0);
     expect(id.response).toBe(token);
+  });
+
+  test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render (round 28)', async ({ page }) => {
+    // Round 28 (P2): the previous "explicit render" test never CALLED
+    // grecaptcha.render() — it inspected the auto-rendered widget. The
+    // compat API must resolve string ids/selectors through the same target
+    // resolver as the native API and return a working widget id.
+    await page.goto('/migration/recaptcha-v2.html');
+    await waitVerified(page);
+    const result = await page.evaluate(async () => {
+      const out = {};
+      const targetA = document.createElement('div');
+      targetA.id = 'explicit-a';
+      document.body.appendChild(targetA);
+      const idA = window.grecaptcha.render('explicit-a', { sitekey: '6Lc_explicit_login' });
+      out.idA = idA;
+      const targetB = document.createElement('div');
+      targetB.className = 'explicit-b';
+      document.body.appendChild(targetB);
+      const idB = window.grecaptcha.render(targetB, { sitekey: '6Lc_explicit_login' });
+      out.idB = idB;
+      out.selectorId = window.grecaptcha.render('.explicit-b', { sitekey: '6Lc_explicit_login' });
+      out.unknownId = window.grecaptcha.render('no-such-element', { sitekey: 'x' });
+      out.containers = document.querySelectorAll('.kiwi-container').length;
+      await new Promise((r) => setTimeout(r, 6000));
+      out.responseA = window.grecaptcha.getResponse(idA);
+      out.responseB = window.grecaptcha.getResponse(idB);
+      return out;
+    });
+    expect(typeof result.idA).toBe('string');
+    expect(result.idA.length).toBeGreaterThan(0);
+    expect(typeof result.idB).toBe('string');
+    expect(result.idB.length).toBeGreaterThan(0);
+    expect(result.selectorId).toBe(result.idB);
+    expect(result.unknownId).toBe(0);
+    expect(result.containers).toBe(3);
+    expect(result.responseA.length).toBeGreaterThan(10);
+    expect(result.responseB.length).toBeGreaterThan(10);
+  });
+
+  test('reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure (round 28)', async ({ page }) => {
+    // Round 28 (P2): the fixture's data-error-callback was parsed but never
+    // invoked — fail()/workerUnavailable()/solverMismatch() now call it.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    await page.goto('/migration/recaptcha-v2.html');
+    await expect(page.locator('#out')).toHaveText('err-cb', { timeout: 30_000 });
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
+    await expect(page.locator('.g-recaptcha [data-kiwi-retry]')).toBeVisible();
+    // Exactly once: no further callback invocation after the terminal state.
+    await page.waitForTimeout(4000);
+    await expect(page.locator('#out')).toHaveText('err-cb');
+  });
+
+  test('reCAPTCHA v2: reset during an in-flight challenge cancels generation 1 (round 28)', async ({ page }) => {
+    // Round 28 (P2): reset() must abort the old generation's fetch and the
+    // delayed response must never write a token or invoke a callback.
+    let calls = 0;
+    await page.route('**/challenge', async (route) => {
+      calls++;
+      if (calls === 1) {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          nonce: 'cancel-nonce-' + calls, salt: btoa(String(calls).padStart(16, '0')), prefix: 'x',
+          targetBits: 6, algorithm: 'sha256', mKib: 0, t: 1, p: 1, ttlSecs: 120, minDurationMs: 0,
+        }),
+      });
+    });
+    await page.goto('/migration/recaptcha-v2.html');
+    const result = await page.evaluate(async () => {
+      const el = document.querySelector('.g-recaptcha');
+      const wid = el.dataset.kiwiInstance;
+      // Count the widget's own lifecycle events (the fixture's global
+      // callback was captured at render time, so reassigning it here would
+      // not observe the generations).
+      let verified = 0;
+      // kiwi:verified dispatches on the rendered container (W) and bubbles.
+      el.addEventListener('kiwi:verified', () => { verified++; });
+      await new Promise((r) => setTimeout(r, 600));
+      window.grecaptcha.reset(wid);
+      await new Promise((r) => setTimeout(r, 8000));
+      return { verified, response: window.grecaptcha.getResponse(wid) };
+    });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    // Exactly ONE verified event (generation 2 only — generation 1 was
+    // cancelled mid-fetch and can never complete) + a valid gen-2 token.
+    expect(result.verified).toBe(1);
+    expect(result.response.length).toBeGreaterThan(10);
   });
 
   test('reCAPTCHA v2: reset clears and reacquires', async ({ page }) => {
@@ -63,6 +156,79 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
       return window.grecaptcha.execute(wid);
     });
     expect(viaExecute).toBe(token);
+  });
+
+  test('reCAPTCHA v2 Argon: grecaptcha.ready() queues behind glue readiness for explicit render (round 28)', async ({ page }) => {
+    // Round 28 (P2): ready() must not race the loader-glue self-fetch — an
+    // explicit render() inside ready() immediately starts an Argon worker
+    // that needs the glue (no inline script exists on the external-loader
+    // page). The api.js response is DELIBERATELY delayed so the race is
+    // observable: without the fix the worker starts glue-less and fails.
+    await page.route('**/api.js?*', async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+    await page.goto('/migration/recaptcha-v2-argon.html');
+    const result = await page.evaluate(async () => {
+      return new Promise((resolve) => {
+        window.grecaptcha.ready(() => {
+          const holder = document.createElement('div');
+          document.body.appendChild(holder);
+          const id = window.grecaptcha.render(holder, { sitekey: '6Lc_ready_explicit' });
+          resolve({ id, phase: 'rendered' });
+        });
+        setTimeout(() => resolve({ id: null, phase: 'timeout' }), 20_000);
+      });
+    });
+    expect(result.phase).toBe('rendered');
+    expect(typeof result.id).toBe('string');
+    await expect(page.locator('input[name="g-recaptcha-response"]').nth(1)).not.toHaveValue('', { timeout: 90_000 });
+    const response = await page.evaluate((id) => window.grecaptcha.getResponse(id), result.id);
+    expect(response.length).toBeGreaterThan(10);
+  });
+
+  test('reCAPTCHA v2: v3-style execute(sitekey) tears down the hidden widget (round 28)', async ({ page }) => {
+    // Round 28 (P3): repeated execute(sitekey, {action}) calls must not
+    // accumulate hidden DOM, registry entries or reset hooks.
+    await page.goto('/migration/recaptcha-v2.html');
+    await waitVerified(page);
+    const result = await page.evaluate(async () => {
+      const baseline = document.querySelectorAll('.kiwi-container').length;
+      await window.grecaptcha.execute('6Lc_v3_checkout', { action: 'checkout' });
+      const afterOne = document.querySelectorAll('.kiwi-container').length;
+      await window.grecaptcha.execute('6Lc_v3_checkout', { action: 'checkout' });
+      await window.grecaptcha.execute('6Lc_v3_checkout', { action: 'checkout' });
+      await new Promise((r) => setTimeout(r, 500));
+      return {
+        baseline,
+        afterOne,
+        afterThree: document.querySelectorAll('.kiwi-container').length,
+        hiddenHolders: Array.from(document.querySelectorAll('div')).filter((d) => d.style.display === 'none').length,
+      };
+    });
+    // Every execute() cleans up its holder: no accumulation whatsoever.
+    expect(result.afterOne).toBe(result.baseline);
+    expect(result.afterThree).toBe(result.baseline);
+    expect(result.hiddenHolders).toBe(0);
+  });
+
+  test('reCAPTCHA v2: execute() rejects with the ACTUAL failure reason (round 28)', async ({ page }) => {
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    await page.goto('/migration/recaptcha-v2.html');
+    const message = await page.evaluate(async () => {
+      try {
+        await window.grecaptcha.execute('6Lc_fail_reason', { action: 'checkout' });
+        return 'resolved';
+      } catch (err) {
+        return String(err && err.message);
+      }
+    });
+    // fail() dispatches {error: msg} — the promise must surface the real
+    // reason ("Challenge failed"), not the generic fallback.
+    expect(message).toContain('Challenge failed');
+    expect(message).not.toContain('solve failed');
   });
 
   test('reCAPTCHA v2: expiry clears the token + field + fires the expired callback', async ({ page }) => {

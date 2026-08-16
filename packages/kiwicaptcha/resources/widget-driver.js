@@ -588,7 +588,8 @@
     return null;
   }
   function solveWithWorker(data, onProgress, container) {
-    return new Promise(function(resolve) {
+    var terminateHandle = function () {};
+    var promise = new Promise(function(resolve) {
       if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
       var worker = null;
       var blobUrl = null;
@@ -608,6 +609,13 @@
       if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
       if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
       kiwiActiveBlobUrl = blobUrl;
+      // Round 28 (P2): explicit termination handle — a cancelled
+      // generation terminates the worker outright (revoking the blob URL
+      // alone would NOT stop it).
+      terminateHandle = function () {
+        try { worker.terminate(); } catch (e) {}
+        teardown();
+      };
       window.__kiwiWorkerUsed = true;
       var workerStart = performance.now();
       var expectedHashes = Math.pow(2, data.targetBits);
@@ -713,6 +721,7 @@
         if (!settled) { settled = true; worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
       }
     });
+    return { promise: promise, terminate: terminateHandle };
   }
 
   // ── Privacy-aware telemetry (widget-local, mode-gated) ──────────────
@@ -809,7 +818,33 @@
     return b;
   }
 
-  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, expiryTimer}
+  // Round 28 (P2): per-widget generation + cancellation handles. Every
+  // async continuation (fetch, worker, retry, expiry) captures the
+  // generation it started under and refuses to touch state once the
+  // generation is no longer current — reset()/remove()/destroy() bump the
+  // generation and abort/terminate/clear the handles, so a stale
+  // generation can never write a token, invoke a callback or flip state.
+  // Handles: gen (generation counter), abortController/abortTimer (challenge
+  // fetch), worker (active solver worker), retryTimer (backoff retry),
+  // countdownTimer/expiryTimer (timers), errorFired (one error callback per
+  // generation).
+  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, gen, abortController, abortTimer, worker, retryTimer, countdownTimer, expiryTimer, errorFired}
+  function kiwiGenerationCurrent(id, gen) {
+    var r = kiwiWidgets[id];
+    return !!(r && r.gen === gen);
+  }
+  function kiwiCancelGeneration(id) {
+    var r = kiwiWidgets[id];
+    if (!r) return;
+    r.gen++; // any in-flight generation is stale from here on
+    r.errorFired = false;
+    if (r.abortController) { try { r.abortController.abort(); } catch (e) {} r.abortController = null; }
+    if (r.abortTimer) { clearTimeout(r.abortTimer); r.abortTimer = null; }
+    if (r.worker) { try { r.worker.terminate(); } catch (e) {} r.worker = null; }
+    if (r.retryTimer) { clearTimeout(r.retryTimer); r.retryTimer = null; }
+    if (r.countdownTimer) { clearInterval(r.countdownTimer); r.countdownTimer = null; }
+    if (r.expiryTimer) { clearTimeout(r.expiryTimer); r.expiryTimer = null; }
+  }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
     options = options || {};
@@ -823,7 +858,13 @@
     }
     // Round 24: formal widget instances — widgetId == data-kiwi-instance.
     var widgetId = W.dataset.kiwiInstance;
-    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", expiryTimer: null };
+    // Round 28 (P2): the generation COUNTER MUST CONTINUE across re-inits —
+    // a re-init that restarts at 1 would let a stale in-flight run see
+    // itself as current again after a reset cancelled it (the record is
+    // replaced, so the old captured generation must never match).
+    var prevRecord = kiwiWidgets[widgetId];
+    var newGen = prevRecord ? prevRecord.gen + 1 : 1;
+    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
     if (!W.getAttribute("role")) W.setAttribute("role", "group");
@@ -953,6 +994,8 @@
       var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : "expired"; };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = countdownTimer;
     }
     // Request binding (audit #41): a hidden input carrying the bound value,
     // placed next to the token input (mirroring how the token is written).
@@ -970,6 +1013,8 @@
     }
     function resetToIdle() {
       clearInterval(countdownTimer);
+      var rc = kiwiWidgets[widgetId];
+      if (rc) rc.countdownTimer = null;
       clearExpiryTimer();
       writeResponseAlias("");
       kiwiRecordState("idle", "");
@@ -988,6 +1033,12 @@
     // in "failed" — it resets to idle, retries a bounded number of times
     // with backoff, then settles idle and reacquires on the next
     // interaction (click the widget, the Retry button, or a page re-init).
+    function fireErrorCallback(msg) {
+      var r = kiwiWidgets[widgetId];
+      if (!r || r.errorFired || !options.errorCallback) return;
+      r.errorFired = true;
+      try { options.errorCallback(msg || "challenge-failed"); } catch (e) {}
+    }
     function fail(msg) {
       resetToIdle();
       announce("Verification failed");
@@ -995,7 +1046,11 @@
       if (retryCount < RETRY_LIMIT) {
         retryCount++;
         setHint("Challenge failed (" + msg + ") \u2014 retrying\u2026");
-        setTimeout(run, 1000 * retryCount);
+        // Round 28 (P2): the retry is a cancellable handle — a reset that
+        // lands during the backoff must never start a stale run().
+        var r = kiwiWidgets[widgetId];
+        if (r && r.retryTimer) clearTimeout(r.retryTimer);
+        if (r) r.retryTimer = setTimeout(function () { if (r) r.retryTimer = null; run(); }, 1000 * retryCount);
       } else {
         setHint("Challenge failed (" + msg + ") \u2014 click the widget to retry.");
         delete W.dataset.kiwiStarted;
@@ -1005,6 +1060,9 @@
         // because the state was never set on failure).
         setStatus("Challenge failed", "Failed", "failed");
         if (retryEl) retryEl.style.display = "";
+        // Round 28 (P2): the provider error callback fires exactly once
+        // per generation, at automatic-retry exhaustion.
+        fireErrorCallback(msg);
       }
     }
     // Build-id mismatch (audit #53): the worker reported a solver build id
@@ -1020,6 +1078,7 @@
       setStatus("Solver version mismatch", "Version Error", "kiwi:solver-mismatch");
       setHint("The solver worker is out of date \u2014 reload the page to load the current version.");
       setProgress(0);
+      fireErrorCallback("solver-mismatch");
     }
     // Round-13 invariant: worker creation failure or a worker solve failure
     // for a memory-hard challenge enters this controlled state. The token
@@ -1040,11 +1099,18 @@
       announce("Worker unavailable");
       dispatch("worker-unavailable", { reason: reason || "worker-creation-failed" });
       delete W.dataset.kiwiStarted;
+      // Round 28 (P2): worker conditions are non-retryable within the
+      // flow — the provider error callback fires immediately.
+      fireErrorCallback("worker-unavailable");
     }
     // BFCache restore (audit #54): a persisted pageshow must NOT auto-solve —
     // it clears the solved state and leaves the widget idle, ready to
-    // reacquire on the next interaction or page re-init.
+    // reacquire on the next interaction or page re-init. Round 28 (P2): the
+    // restore also CANCELS the in-flight generation (abort fetch, terminate
+    // worker, clear retry/expiry timers) — a solve from before the restore
+    // can never write a token afterwards.
     function reset() {
+      kiwiCancelGeneration(widgetId);
       resetToIdle();
       delete W.dataset.kiwiStarted;
     }
@@ -1063,6 +1129,12 @@
     kiwiCleanups.set(W, function () { resetToIdle(); });
 
     async function run() {
+      // Round 28 (P2): every continuation is generation-guarded — a reset
+      // that lands while this run is in flight bumps the generation and
+      // aborts/terminates the handles; this run then bails without ever
+      // touching state.
+      var gen = (kiwiWidgets[widgetId] || {}).gen || 1;
+      if (!kiwiGenerationCurrent(widgetId, gen)) return;
       try {
         setStatus("Connecting\u2026", "Wait", "connecting");
         var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
@@ -1084,6 +1156,8 @@
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
         var abortController = new AbortController();
         var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
+        var rw = kiwiWidgets[widgetId];
+        if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         var resp, data;
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
@@ -1091,12 +1165,16 @@
           data = await resp.json();
         } finally {
           clearTimeout(abortTimer);
+          var rw2 = kiwiWidgets[widgetId];
+          if (rw2 && rw2.abortTimer === abortTimer) rw2.abortTimer = null;
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // No weaker challenge (audit #62): the response algorithm may only
         // be equal or stronger than requested — a server downgrade (argon2id
         // requested, sha256 returned) is a FAILED challenge, never a weaker
         // solve. The client may only ever accept what it asked for or more.
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (data.ttlSecs) startCountdown(data.ttlSecs);
         setStatus("Verifying\u2026", "Working", "solving");
         announce("Checking\u2026");
@@ -1107,13 +1185,23 @@
           // same-origin worker. There is no synchronous CHUNK=1 fallback
           // and no weaker-profile retry — a missing or failed worker enters
           // the controlled kiwi:worker-unavailable state.
-          result = await solveWithWorker(data, setProgress, container);
+          // Round 28 (P2): the worker handle is stored on the widget record
+          // so a cancelled generation can terminate() it outright.
+          var workerHandle = solveWithWorker(data, setProgress, container);
+          var wr = kiwiWidgets[widgetId];
+          if (wr) wr.worker = workerHandle.terminate;
+          result = await workerHandle.promise;
+          var wr2 = kiwiWidgets[widgetId];
+          if (wr2 && wr2.worker === workerHandle.terminate) wr2.worker = null;
+          if (!kiwiGenerationCurrent(widgetId, gen)) return;
           if (result && result.mismatch) { solverMismatch(); return; }
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
           result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress);
         }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (!result) throw new Error("Exhausted");
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setBinding(requestBinding || "");
         retryCount = 0;
@@ -1130,7 +1218,10 @@
         scheduleExpiry(data.ttlSecs || 0);
         if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
-      } catch (e) { fail(e.message); }
+      } catch (e) {
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        fail(e.message);
+      }
     }
     dispatch("ready");
     run();
@@ -1173,6 +1264,9 @@
       if (!W || W.nodeType !== 1) continue;
       W.dataset.kiwiDestroyed = "1";
       kiwiResetHooks = kiwiResetHooks.filter(function (h) { return h.el !== W; });
+      if (W.dataset.kiwiInstance && kiwiWidgets[W.dataset.kiwiInstance]) {
+        kiwiCancelGeneration(W.dataset.kiwiInstance);
+      }
       var cleanup = kiwiCleanups.get(W);
       if (cleanup) { try { cleanup(); } catch (err) {} kiwiCleanups.delete(W); }
       kiwiRemoveListeners(W);
@@ -1250,7 +1344,10 @@
   function kiwiReset(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    clearTimeout(r.expiryTimer); r.expiryTimer = null;
+    // Round 28 (P2): reset is cancellation — the old generation's fetch is
+    // aborted, its worker terminated, its retry/expiry timers cleared; the
+    // new initWidget starts generation +1.
+    kiwiCancelGeneration(id);
     var W = r.W;
     if (W) {
       var t = W.querySelector("[data-kiwi-token]");
@@ -1287,7 +1384,11 @@
         resolve(cur ? (cur.token || "") : "");
       };
       var onError = function (ev) {
-        reject(new Error((ev && ev.detail && ev.detail.reason) || "kiwicaptcha: solve failed"));
+        // Round 28 (P3): fail() dispatches {error: msg} — the promise must
+        // reject with the ACTUAL reason, not the generic fallback.
+        var detail = (ev && ev.detail) || {};
+        var reason = detail.error || detail.reason || "kiwicaptcha: solve failed";
+        reject(new Error(String(reason)));
       };
       if (W) {
         W.addEventListener("kiwi:verified", onVerified, { once: true });
@@ -1305,7 +1406,7 @@
   function kiwiRemove(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
-    if (r.expiryTimer) clearTimeout(r.expiryTimer);
+    kiwiCancelGeneration(id);
     if (r.W) {
       kiwiDestroy(r.W);
       // Provider parity (Turnstile remove()): the widget markup leaves the
@@ -1408,8 +1509,25 @@
         errorCallback: cb("error-callback")
       };
     }
-    function compatRender(el, params) {
+    function compatRender(target, params) {
+      // Round 28 (P2): grecaptcha.render("id", ...) / render(selector, ...)
+      // resolve through the same target resolver as the native API — an
+      // explicit string id previously returned 0 silently.
+      var el = kiwiResolveTarget(target);
       if (!el || el.nodeType !== 1) return 0;
+      // Round 28 (P2): re-rendering an already-rendered container must be
+      // idempotent — the existing widget instance is returned instead of
+      // double-initializing the same container (a second solve on the same
+      // element would race the first). initWidget keys the instance on the
+      // CONTAINER (el.dataset.kiwiInstance); the inner [data-kiwi-widget]
+      // markup carries no instance id of its own.
+      if (el.dataset.kiwiInstance && kiwiWidgets[el.dataset.kiwiInstance]) {
+        return el.dataset.kiwiInstance;
+      }
+      var existingWidget = el.querySelector ? el.querySelector("[data-kiwi-widget]") : null;
+      if (existingWidget && existingWidget.dataset.kiwiInstance && kiwiWidgets[existingWidget.dataset.kiwiInstance]) {
+        return existingWidget.dataset.kiwiInstance;
+      }
       if (!el.querySelector("[data-kiwi-widget]")) {
         if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
           // Invisible-style controls keep their label; the widget is
@@ -1462,11 +1580,32 @@
       var inner = document.createElement("div");
       inner.className = "kiwi-container";
       inner.setAttribute("data-kiwi-scope", action);
-      inner.innerHTML = compatMarkup();
       holder.appendChild(inner);
       document.body.appendChild(holder);
-      var id2 = kiwiRender(inner, { scope: action, responseField: COMPAT_FIELD });
-      return kiwiExecute(id2);
+      // Round 28 (P3): render through compatRender so the same endpoint/
+      // scope/response-field defaults land on the holder (an explicit
+      // native-default endpoint would 404 on a compat deployment).
+      var id2 = compatRender(inner, { sitekey: action });
+      if (!id2) {
+        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+        return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
+      }
+      var p = kiwiExecute(id2);
+      // Round 28 (P3): a long-lived SPA repeatedly calling execute()
+      // must not accumulate hidden DOM, registry entries or reset hooks —
+      // the holder is removed and the widget destroyed on BOTH paths.
+      if (p && typeof p.then === "function") {
+        return p.then(function (tok) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          return tok;
+        }, function (err) {
+          if (id2 && kiwiWidgets[id2]) kiwiRemove(id2);
+          if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+          throw err;
+        });
+      }
+      return p;
     }
     var compatApi = {
       render: compatRender,
@@ -1489,7 +1628,14 @@
     };
     if (compat === "recaptcha") {
       window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
-        ready: function (fn) { if (typeof fn === "function") { try { fn(); } catch (e) {} } },
+        // Round 28 (P2): ready() queues until the compat loader's glue
+        // self-fetch resolves — an explicit render() inside ready() that
+        // immediately starts an Argon challenge can no longer race the
+        // glue bootstrap (implicit rendering already waited).
+        ready: function (fn) {
+          if (typeof fn !== "function") return;
+          (kiwiCompatGlueReady || Promise.resolve()).then(function () { try { fn(); } catch (e) {} });
+        },
         enterprise: undefined
       });
     } else if (compat === "hcaptcha") {

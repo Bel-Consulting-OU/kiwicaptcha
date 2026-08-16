@@ -6,7 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
-use KiwiCaptcha\StorageInterface;
+use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\VerifyOutcome;
@@ -51,7 +51,7 @@ final class SiteVerifyController
         private readonly Verifier $verifier,
         private readonly string $secretKey,
         private readonly array $siteverifySecrets,
-        private readonly ?StorageInterface $storage = null,
+        private readonly ?AtomicStorageInterface $storage = null,
         private readonly ?LoggerInterface $logger = null,
     ) {
     }
@@ -60,6 +60,16 @@ final class SiteVerifyController
     {
         if ($this->siteverifySecrets === []) {
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
+        }
+
+        // Round 28 (P3): the endpoint is PUBLIC until the secret check —
+        // a narrow body ceiling (16 KiB covers every legitimate provider
+        // envelope: response+secret+remoteip) keeps an oversized-body
+        // flood from ever reaching the parser or the verifier. The ACTUAL
+        // body is measured (getContent() is cached by Symfony), not the
+        // client-settable Content-Length header.
+        if (\strlen((string) $request->getContent()) > self::MAX_BODY_BYTES) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
         }
 
         $body = $this->parseBody($request);
@@ -81,7 +91,8 @@ final class SiteVerifyController
         // secret can never reach the verifier.
         $expectedScope = null;
         if (!\is_string($secret)) {
-            $this->logger?->warning('kiwicaptcha siteverify: missing secret');
+            $this->noteInvalidSecret('missing');
+            $this->flushInvalidSecretLog(1);
 
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
@@ -92,7 +103,8 @@ final class SiteVerifyController
             }
         }
         if ($expectedScope === null) {
-            $this->logger?->warning('kiwicaptcha siteverify: invalid secret');
+            $this->noteInvalidSecret('invalid');
+            $this->flushInvalidSecretLog(1);
 
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
@@ -189,6 +201,40 @@ final class SiteVerifyController
     /**
      * @return array<string, mixed>|null
      */
+    private const MAX_BODY_BYTES = 16 * 1024;
+
+    /**
+     * Round 28 (P3): invalid/missing-secret attempts are AGGREGATED into a
+     * single log line per burst instead of one warning per attack request —
+     * an unauthenticated bot flood must not become an inexpensive public
+     * log-flood surface. The window is deliberately short (a burst is
+     * bounded in time) and the counter resets when the window elapses.
+     */
+    private int $invalidSecretCount = 0;
+    private float $invalidSecretWindowStart = 0.0;
+    private const INVALID_SECRET_LOG_EVERY = 32;
+    private const INVALID_SECRET_WINDOW_SECS = 5.0;
+
+    private function noteInvalidSecret(string $kind): void
+    {
+        $now = microtime(true);
+        if ($this->invalidSecretWindowStart === 0.0 || $now - $this->invalidSecretWindowStart > self::INVALID_SECRET_WINDOW_SECS) {
+            $this->invalidSecretWindowStart = $now;
+            $this->invalidSecretCount = 0;
+        }
+        ++$this->invalidSecretCount;
+    }
+
+    private function flushInvalidSecretLog(int $attempts): void
+    {
+        // The first burst member logs immediately (operators see the first
+        // attempt); every 32nd attempt logs the running total instead of
+        // one line per request.
+        if ($this->invalidSecretCount <= 1 || $this->invalidSecretCount % self::INVALID_SECRET_LOG_EVERY === 0) {
+            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%d in this burst, %d requests)', $this->invalidSecretCount, $attempts));
+        }
+    }
+
     private function parseBody(Request $request): ?array
     {
         $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
