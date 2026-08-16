@@ -38,6 +38,45 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(id.response).toBe(token);
   });
 
+  test('reCAPTCHA v2: omitted widget id defaults to the first created widget (round 29 P1)', async ({ page }) => {
+    // Google's API: reset()/getResponse()/execute() with NO id target the
+    // FIRST created widget. Kiwi previously required an explicit id/element
+    // (no argument produced no reset / empty response).
+    await page.goto('/migration/recaptcha-v2.html');
+    const token = await waitVerified(page);
+    const result = await page.evaluate(async () => {
+      const first = document.querySelector('.g-recaptcha').dataset.kiwiInstance;
+      const noArgResponse = window.grecaptcha.getResponse();
+      const noArgExecute = await window.grecaptcha.execute();
+      window.grecaptcha.reset();
+      await new Promise((r) => setTimeout(r, 6000));
+      return { first, noArgResponse, noArgExecute, responseAfterReset: window.grecaptcha.getResponse() };
+    });
+    expect(result.noArgResponse).toBe(token);
+    expect(result.noArgExecute).toBe(token);
+    expect(result.responseAfterReset).toBeTruthy();
+    expect(result.responseAfterReset).not.toBe(token);
+  });
+
+  test('reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders (round 29 P1)', async ({ page }) => {
+    // The fixture is the DOCUMENTED integration pattern (onload +
+    // render=explicit) with only the provider URL changed. Without the
+    // fix, render=explicit still auto-rendered (double widgets) and
+    // onload never ran.
+    await page.goto('/migration/recaptcha-v2-explicit.html');
+    await expect(page.locator('#out')).toHaveText(/^cb:/, { timeout: 60_000 });
+    const state = await page.evaluate(() => ({
+      onloadRan: window.kiwiExplicitRendered === true,
+      containerCount: document.querySelectorAll('.kiwi-container').length,
+      response: window.grecaptcha.getResponse(),
+    }));
+    expect(state.onloadRan).toBe(true);
+    // Exactly ONE widget: the explicit render, not an auto-rendered
+    // duplicate of the same container.
+    expect(state.containerCount).toBe(1);
+    expect(state.response.length).toBeGreaterThan(10);
+  });
+
   test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render (round 28)', async ({ page }) => {
     // Round 28 (P2): the previous "explicit render" test never CALLED
     // grecaptcha.render() — it inspected the auto-rendered widget. The

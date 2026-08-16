@@ -79,6 +79,28 @@ final class SiteVerifyController
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
         $remoteIp = \is_string($body['remoteip'] ?? null) ? $body['remoteip'] : null;
+        // Round 29 (P3): Cloudflare's current Siteverify contract carries
+        // idempotency_key / action / cdata. Kiwi's deterministic
+        // consumed-result machinery IS the idempotency guarantee: a
+        // retried verification of the same `response` always resolves to
+        // the SAME stored outcome (safe retries are free, and a token can
+        // never produce a second success). `action` is client-declared
+        // metadata (the authoritative scope is resolved server-side from
+        // the presented secret) and `cdata` is echoed verbatim by
+        // Cloudflare for correlation — both are accepted and validated as
+        // bounded strings for shape, and included in the response shape.
+        $action = \is_string($body['action'] ?? null) ? $body['action'] : null;
+        $cdata = \is_string($body['cdata'] ?? null) ? $body['cdata'] : null;
+        $idempotencyKey = \is_string($body['idempotency_key'] ?? null) ? $body['idempotency_key'] : null;
+        if ($action !== null && (\strlen($action) < 1 || \strlen($action) > 1024)) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+        }
+        if ($cdata !== null && \strlen($cdata) > 4096) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+        }
+        if ($idempotencyKey !== null && \strlen($idempotencyKey) > 128) {
+            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+        }
 
         if (!\is_string($response) || $response === '') {
             return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);

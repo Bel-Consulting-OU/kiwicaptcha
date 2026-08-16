@@ -195,7 +195,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
@@ -215,7 +215,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
@@ -231,7 +231,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
       'data-kiwi-endpoint': 'http://127.0.0.1:9999/challenge',
       'data-kiwi-scope': 'login',
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
@@ -344,7 +344,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
@@ -375,7 +375,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
     expect(token.length).toBeGreaterThan(0);
   });
 
-  test('after settling idle the widget reacquires on the next interaction (click-to-retry)', async ({ page }) => {
+  test('after settling idle the widget reacquires via the Retry button (round-29 click activation)', async ({ page }) => {
     let failing = true;
     await page.route('**/challenge', async (route) => {
       if (failing) {
@@ -389,11 +389,13 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
       }
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     failing = false;
-    await page.locator('[data-kiwi-widget]').click();
+    // Round 29 (WCAG 2.5.2): the Retry BUTTON is the reacquire control
+    // (click activation); the passive widget is not a pointer target.
+    await page.locator('[data-kiwi-retry]').click();
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
       timeout: 60_000,
     });
@@ -598,7 +600,7 @@ test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
       'data-kiwi-scope': 'login',
       'data-kiwi-fetch-timeout-ms': '1500',
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 40_000,
     });
     const elapsed = Date.now() - start;

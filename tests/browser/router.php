@@ -136,7 +136,7 @@ if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') &
 
     return true;
 }
-if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
     echo file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
@@ -157,15 +157,16 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['worker'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker.js"';
     if (($_GET['worker-stale'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker-stale.js"';
     $binding = ($_GET['binding'] ?? '') !== '' ? ' data-kiwi-request-binding="'.htmlspecialchars((string) $_GET['binding'], ENT_QUOTES).'"' : '';
+    $lang = ($_GET['lang'] ?? '') !== '' ? ' data-kiwi-lang="'.htmlspecialchars((string) $_GET['lang'], ENT_QUOTES).'"' : '';
     header('Content-Type: text/html');
-    echo "<!DOCTYPE html><html><head><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}>
+    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}</head><body>
+<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
-  <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"status\" aria-live=\"polite\">
+  <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
     <div class=\"kiwi-main\">
       <div class=\"kiwi-top\"><span class=\"kiwi-label\" data-kiwi-label>Security Check</span><span class=\"kiwi-badge\" data-kiwi-badge>Idle</span></div>
-      <div class=\"kiwi-track\"><div class=\"kiwi-bar\" data-kiwi-bar></div></div>
+      <div class=\"kiwi-track\" aria-hidden=\"true\"><div class=\"kiwi-bar\" data-kiwi-bar></div></div>
       <div class=\"kiwi-bottom\"><p class=\"kiwi-info\" data-kiwi-info>Protected</p><span class=\"kiwi-timer\" data-kiwi-timer></span></div>
     </div>
   </div>

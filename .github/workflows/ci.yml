@@ -131,7 +131,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        symfony: ['6.4', '7.x']
+        symfony: ['6.4', '7.x', '8.x']
     defaults:
       run:
         working-directory: packages/kiwicaptcha/integrations/symfony
@@ -140,7 +140,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
-          php-version: '8.2'
+          php-version: ${{ matrix.symfony == '8.x' && '8.4' || '8.2' }}
           extensions: json, openssl, sodium
           coverage: none
       - name: composer install
@@ -159,6 +159,9 @@ jobs:
           done
           echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
           exit 1
+      - name: pin Symfony 8.x (round 29 lane; PHP 8.4 for the 8.x line)
+        if: matrix.symfony == '8.x'
+        run: composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.* --with symfony/config:8.1.* --with symfony/dependency-injection:8.1.* --with symfony/twig-bridge:8.1.* --with symfony/routing:8.1.* --with symfony/cache:8.1.* --with symfony/property-info:8.1.* --with symfony/error-handler:8.1.*
       - name: pin Symfony 6.4
         if: matrix.symfony == '6.4'
         # `--with` (temporary constraints) is required: a wildcard
