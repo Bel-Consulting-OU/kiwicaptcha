@@ -32,7 +32,7 @@ function recordFile(string $nonce): string
     return sys_get_temp_dir().'/kiwicaptacha-record-'.preg_replace('/[^A-Za-z0-9_-]/', '', $nonce).'.json';
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/challenge') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path === '/kiwi-captcha/challenge')) {
     $body = json_decode((string) file_get_contents('php://input'), true);
     $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
@@ -115,7 +115,7 @@ $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
 if ($path === '/kiwi-captcha/api.js') {
     header('Content-Type: application/javascript');
     header('Cache-Control: no-store');
-    echo file_get_contents($assets.'/kiwicaptcha-wasm.js')."\n".file_get_contents($assets.'/widget-driver.js');
+    echo file_get_contents($assets.'/kiwicaptcha-wasm.js')."\n/*KIWI_COMPAT_SPLIT*/\n".file_get_contents($assets.'/widget-driver.js');
 
     return true;
 }
@@ -126,7 +126,7 @@ if ($path === '/kiwi-captcha/widget.css') {
 
     return true;
 }
-if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
     echo file_get_contents(__DIR__.'/migration/'.$m[1].'.html');

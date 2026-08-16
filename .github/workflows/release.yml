@@ -115,12 +115,29 @@ jobs:
           fi
           if [[ "$org_policy" == "selected" ]]; then
             # 'selected' only proves enforcement when THIS repository is in
-            # the selected set — verify membership when readable.
+            # the selected set. Round 26: the membership check walks the
+            # documented response shape ({total_count, repositories:[{id,...}]})
+            # with pagination — the previous jq index() against the raw
+            # response silently proved nothing (and swallowed errors).
             repo_id="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.id' 2>/dev/null || echo '')"
-            selected="$(gh api "orgs/$GITHUB_REPOSITORY_OWNER/settings/immutable-releases/repositories" 2>/dev/null | jq -r 'index('"$repo_id"') != null' 2>/dev/null || true)"
-            if [[ -n "$repo_id" && -n "$selected" && "$selected" != "true" ]]; then
-              echo "refusing to release: org policy is 'selected' but this repository is NOT in the selected set" >&2
-              exit 1
+            if [[ -n "$repo_id" ]]; then
+              member="false"
+              page=1
+              while :; do
+                body="$(gh api "orgs/$GITHUB_REPOSITORY_OWNER/settings/immutable-releases/repositories?per_page=100&page=$page" 2>/dev/null || true)"
+                [[ -z "$body" ]] && break
+                found="$(printf '%s' "$body" | jq -r --argjson id "$repo_id" '[.repositories[].id] | index($id) != null' 2>/dev/null || echo false)"
+                if [[ "$found" == "true" ]]; then member="true"; break; fi
+                total="$(printf '%s' "$body" | jq -r '.total_count // 0' 2>/dev/null || echo 0)"
+                fetched="$(printf '%s' "$body" | jq -r '[.repositories[]] | length' 2>/dev/null || echo 0)"
+                [[ "$fetched" == "0" || $((page * 100)) -ge "$total" ]] && break
+                page=$((page + 1))
+              done
+              echo "selected-set membership: repo $repo_id member=$member"
+              if [[ "$member" != "true" ]]; then
+                echo "refusing to release: org policy is 'selected' but this repository is NOT in the selected set" >&2
+                exit 1
+              fi
             fi
           fi
 

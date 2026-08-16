@@ -150,8 +150,9 @@ Operational requirements:
   worker). A mixed-version set (cached worker from an old release next to
   a new driver) must never reach a page; the mismatch state is the
   controlled failure, not a silent fallback.
-- Recompute the SRI hashes and the content-addressed names on every
-  rebuild, and record them in the release notes.
+- Recompute the SRI hashes on every rebuild; the ATTACHED
+  `SHA256SUMS`/`SRI.txt` release manifests are the authoritative record
+  (the release notes reference them).
 
 ## CSP / Worker requirements
 

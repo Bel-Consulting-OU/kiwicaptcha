@@ -123,6 +123,18 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     await expect(page.locator('#out')).toHaveText('cb:' + token.slice(0, 8));
   });
 
+  test('Argon2id solves through the external compatibility loader (worker glue path)', async ({ page }) => {
+    // Round 26 (P1): with the driver loaded as the external /api.js, the
+    // Blob worker has no inline glue element to copy — the loader's own
+    // fetched source supplies it. Argon2id must therefore solve
+    // end-to-end through the one-script migration path (SHA-256-only
+    // fixtures would mask a broken glue handoff).
+    await page.goto('/migration/recaptcha-v2-argon.html');
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toBeVisible();
+    const token = await waitVerified(page);
+    expect(token.length).toBeGreaterThan(10);
+  });
+
   test('the provider alias and the native token carry the SAME credential', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2.html');
     const native = await waitVerified(page, 'kiwi__token');

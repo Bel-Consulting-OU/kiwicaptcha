@@ -9,7 +9,7 @@
 <body>
   <form id="checkout" action="/submit" method="post">
     <label>Email <input name="email" type="email"></label>
-    <div class="g-recaptcha" data-sitekey="6Lc_checkout_login" data-kiwi-endpoint="/kiwi-captcha/challenge?ttl=2" data-callback="onCheckoutCaptcha" data-expired-callback="onCheckoutExpired" data-error-callback="onCheckoutError"></div>
+    <div class="g-recaptcha" data-sitekey="6Lc_checkout_login" data-kiwi-algorithm="argon2id" data-callback="onCheckoutCaptcha" data-expired-callback="onCheckoutExpired" data-error-callback="onCheckoutError"></div>
     <button type="submit">Submit</button>
   </form>
   <p id="out"></p>
