@@ -65,8 +65,40 @@ exploited.
   `v1.6.11` is the first release published under it. The release workflow
   verifies every published release: `immutable: true` via the API and
   `gh release verify`.
+
+  **Immutability enforcement chain (audit round 25 — no silent gaps).**
+  The plain `GITHUB_TOKEN` has NO `administration` scope, so the
+  admin-gated immutable-releases endpoints are unreadable by the release
+  workflow's job identity (403 "not accessible by integration"). The
+  pipeline therefore enforces immutability through a four-layer chain, in
+  which every layer is either a hard failure or a live proof:
+
+  1. **Organization policy**: `PUT /orgs/{org}/settings/immutable-releases`
+     with `enforced_repositories=all` (verified live: the org currently
+     reports `all`) — repository-level drift is impossible; changing it
+     requires an org-admin action.
+  2. **Admin-declared gate**: the repository VARIABLE
+     `IMMUTABLE_RELEASES_ENFORCED` must equal `true`. It is set by an org
+     admin as part of the governance contract, and the release gate
+     REFUSES the release (before any build/attestation) when the variable
+     is unset or not `true`. A release can never proceed unless an org
+     admin has declared the governance in place.
+  3. **Direct preflight (fail-closed when readable)**: when the run
+     identity CAN read the admin-gated endpoints (a GitHub App or an
+     admin-token run), the workflow additionally requires the repository
+     setting `enabled: true` AND the org policy to be `all` — or
+     `selected` WITH this repository verified in the selected set. The
+     App-based read-only principal is the documented upgrade path for
+     fully-privileged direct preflights; the plain token's 403 is not a
+     silent gap because layers 1, 2 and 4 carry the guarantee.
+  4. **Mandatory post-publish proof**: every published release is checked
+     for `immutable: true` via the API and with `gh release verify`; a
+     failure AUTO-DELETES the release and fails the run (containment), so
+     a public mutable release can never be the outcome of a successful
+     release run.
 - The workflow additionally fails instead of clobbering an existing
-  release (`--clobber` is never used).
+  release (`--clobber` is never used), and it refuses an existing release
+  in the gate before any build or attestation work.
 - **Publication is CI-gated**: `.github/workflows/release.yml` verifies
   that the exact tag-triggered CI run succeeded (head_sha + head_branch +
   event) and that the commit is reachable from protected `main` before
