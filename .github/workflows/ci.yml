@@ -334,6 +334,13 @@ jobs:
       - name: install PHP core (fixture server)
         working-directory: packages/kiwicaptcha-php
         run: composer install --no-interaction --prefer-dist
+      - name: install Symfony bundle (real ApiJsController for the compat endpoints)
+        # Round 27 (P1): the fixture router serves /kiwi-captcha/api.js and
+        # /kiwi-captcha/widget.css through the REAL bundle controller — the
+        # bundle vendor must exist so the production code path (not a
+        # hard-coded concat) is what the browser tests exercise.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: composer install --no-interaction --no-scripts --prefer-dist
       - name: install Playwright
         working-directory: tests/browser
         run: |
