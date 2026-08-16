@@ -198,7 +198,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
     await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(challenged.length).toBeGreaterThanOrEqual(1);
   });
@@ -234,7 +234,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
     await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(foreign, 'the cross-origin endpoint must be refused before any request').toEqual([]);
   });
@@ -347,7 +347,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
     await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(calls, 'bounded retries must have been attempted before settling').toBeGreaterThanOrEqual(1);
   });
@@ -602,7 +602,7 @@ test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
       timeout: 40_000,
     });
     const elapsed = Date.now() - start;
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     // Bounded retries re-attempt (3 fetches), each aborted by its own
     // timeout — the widget must never be left stuck on a hung server.
