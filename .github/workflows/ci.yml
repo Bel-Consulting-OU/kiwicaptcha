@@ -160,8 +160,15 @@ jobs:
           echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
           exit 1
       - name: pin Symfony 8.x (round 29 lane; PHP 8.4 for the 8.x line)
+        # Only the five DECLARED packages are pinned: --with requires the
+        # temporary constraint to be a subset of composer.json, and the
+        # transitive packages (config, dependency-injection, twig-bridge,
+        # routing, cache, property-info, error-handler) resolve to the
+        # correct 8.1 line automatically when the direct deps are pinned
+        # (unlike the 6.4 lane, where the older validator forces explicit
+        # transitive pins to prevent 8.x transitive drift).
         if: matrix.symfony == '8.x'
-        run: composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.* --with symfony/config:8.1.* --with symfony/dependency-injection:8.1.* --with symfony/twig-bridge:8.1.* --with symfony/routing:8.1.* --with symfony/cache:8.1.* --with symfony/property-info:8.1.* --with symfony/error-handler:8.1.*
+        run: composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
       - name: pin Symfony 6.4
         if: matrix.symfony == '6.4'
         # `--with` (temporary constraints) is required: a wildcard
