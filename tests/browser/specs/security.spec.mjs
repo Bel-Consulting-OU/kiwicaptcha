@@ -634,15 +634,19 @@ test.describe('KiwiCaptcha host-header independence (audit #78)', () => {
 });
 
 test.describe('KiwiCaptcha narrow request shape (audit #77)', () => {
-  test('the challenge POST body is built from exactly {scope, algorithm, request_binding} (static source assertion)', () => {
+  test('the challenge POST body is built from exactly the documented fields (static source assertion)', () => {
     const src = driverSource();
-    // scope enters via the object literal; algorithm and request_binding via
-    // the only two reqBody assignments that exist in the file. A fourth
-    // field would have to appear here.
+    // scope enters via the object literal; algorithm/request_binding via
+    // assignments; round 30 adds the OPTIONAL provider-metadata fields
+    // (action/cdata/sitekey) — a field outside this closed set would have
+    // to appear here.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
     expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
       'reqBody.algorithm',
       'reqBody.request_binding',
+      'reqBody.action',
+      'reqBody.cdata',
+      'reqBody.sitekey',
     ]);
   });
 

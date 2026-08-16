@@ -65,7 +65,14 @@ final class SiteVerifyController
         // wire the stores for provider-style retries).
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
+        /** Round 30 (item 16): shared Redis log gate (optional). */
+        private readonly \Predis\Client|\Redis|null $logGate = null,
     ) {
+    }
+
+    private function logGateKey(): string
+    {
+        return '{kiwicaptcha}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
     }
 
     public function siteverify(Request $request): Response
@@ -130,8 +137,7 @@ final class SiteVerifyController
         // INVALID are distinct provider codes.
         $expectedScope = null;
         if (!\is_string($secret) || $secret === '') {
-            $this->noteInvalidSecret('missing');
-            $this->flushInvalidSecretLog(1);
+            $this->noteInvalidSecret('missing', $this->logGateKey());
 
             return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-secret']]);
         }
@@ -142,8 +148,7 @@ final class SiteVerifyController
             }
         }
         if ($expectedScope === null) {
-            $this->noteInvalidSecret('invalid');
-            $this->flushInvalidSecretLog(1);
+            $this->noteInvalidSecret('invalid', $this->logGateKey());
 
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
@@ -345,36 +350,51 @@ final class SiteVerifyController
     private const MAX_BODY_BYTES = 16 * 1024;
 
     /**
-     * Round 28 (P3): invalid/missing-secret attempts are AGGREGATED into a
-     * single log line per burst instead of one warning per attack request —
-     * an unauthenticated bot flood must not become an inexpensive public
-     * log-flood surface. The window is deliberately short (a burst is
-     * bounded in time) and the counter resets when the window elapses.
+     * Round 30 (item 16): invalid-secret diagnostics are gated by a SHARED
+     * log gate (Redis INCR + EXPIRE) so the aggregation is deployment-wide
+     * — the round-28 per-controller-instance counters were useless across
+     * PHP-FPM workers (a fresh controller per request). Logging is
+     * logarithmic (1, 2, 4, 8...): early visibility + bounded flood
+     * amplification. Log-gate failure NEVER affects verification: on
+     * Redis errors the detailed log is suppressed (requests are still
+     * rejected).
      */
-    private int $invalidSecretCount = 0;
-    private float $invalidSecretWindowStart = 0.0;
-    private const INVALID_SECRET_LOG_EVERY = 32;
-    private const INVALID_SECRET_WINDOW_SECS = 5.0;
+    private const INVALID_SECRET_LOG_GATE_TTL_SECS = 5;
+    private const INVALID_SECRET_LOG_INTERVAL = 5.0;
 
-    private function noteInvalidSecret(string $kind): void
+    private function noteInvalidSecret(string $kind, string $gateKey): void
     {
-        $now = microtime(true);
-        if ($this->invalidSecretWindowStart === 0.0 || $now - $this->invalidSecretWindowStart > self::INVALID_SECRET_WINDOW_SECS) {
-            $this->invalidSecretWindowStart = $now;
-            $this->invalidSecretCount = 0;
+        $count = null;
+        if ($this->logGate instanceof \Predis\Client) {
+            try {
+                $count = $this->logGate->eval(self::LOG_GATE_LUA, 1, $gateKey, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
+            } catch (\Throwable) {
+                $count = null; // telemetry failure must not affect verification
+            }
+        } elseif ($this->logGate instanceof \Redis) {
+            try {
+                $count = $this->logGate->eval(self::LOG_GATE_LUA, [$gateKey], 1, self::INVALID_SECRET_LOG_GATE_TTL_SECS);
+            } catch (\Throwable) {
+                $count = null;
+            }
         }
-        ++$this->invalidSecretCount;
+        $count = $count !== null ? (int) $count : null;
+        // Log on the powers of two (1, 2, 4, 8...) and never per-request.
+        $isLogStep = $count !== null && ($count === 1 || ($count & ($count - 1)) === 0);
+        if ($isLogStep) {
+            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%s) — %s secret', $kind, $count));
+        }
     }
 
-    private function flushInvalidSecretLog(int $attempts): void
-    {
-        // The first burst member logs immediately (operators see the first
-        // attempt); every 32nd attempt logs the running total instead of
-        // one line per request.
-        if ($this->invalidSecretCount <= 1 || $this->invalidSecretCount % self::INVALID_SECRET_LOG_EVERY === 0) {
-            $this->logger?->warning(sprintf('kiwicaptcha siteverify: invalid-secret attempts (%d in this burst, %d requests)', $this->invalidSecretCount, $attempts));
-        }
-    }
+    private const LOG_GATE_LUA = <<<'LUA'
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local n = redis.call('INCR', key)
+if n == 1 then
+  redis.call('EXPIRE', key, ttl)
+end
+return n
+LUA;
 
     private function parseBody(Request $request): ?array
     {

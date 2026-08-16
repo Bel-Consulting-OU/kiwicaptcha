@@ -13,6 +13,13 @@ declare(strict_types=1);
 $repo = dirname(__DIR__, 2); // tests/browser -> repo root
 
 require $repo.'/packages/kiwicaptcha-php/vendor/autoload.php';
+// The Siteverify e2e route (round 30) uses the REAL Symfony bundle
+// controller + SiteVerify stores — load the bundle's autoloader when its
+// vendor is installed (CI installs it for exactly this fixture fidelity).
+$symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
+if (is_file($symfonyAutoload)) {
+    require $symfonyAutoload;
+}
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -30,6 +37,10 @@ $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 function recordFile(string $nonce): string
 {
     return sys_get_temp_dir().'/kiwicaptacha-record-'.preg_replace('/[^A-Za-z0-9_-]/', '', $nonce).'.json';
+}
+function metadataFile(string $nonce): string
+{
+    return sys_get_temp_dir().'/kiwicaptacha-meta-'.preg_replace('/[^A-Za-z0-9_-]/', '', $nonce).'.json';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path === '/kiwi-captcha/challenge')) {
@@ -49,7 +60,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     );
     $issueStorage = new ArrayStorage();
     $issuer = new Issuer($config, $issueStorage, now: static fn (): int => time());
-    $challenge = $issuer->issue((string) ($body['scope'] ?? 'login'), (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    // The bundle maps incumbent sitekeys -> policy scopes server-side
+    // (sitekey_allowlist); the fixture mirrors that mapping so compat
+    // challenges are issued under the intended scope.
+    $sitekeyAllowlist = [
+        '6Lc_turnstile_meta' => 'login',
+        '0x4AAAAAAABC' => 'login',
+        '6Lc_turnstile' => 'login',
+        '6Lc_dynamic_explicit' => 'login',
+        '6Lc_dynamic_implicit' => 'login',
+        '6Lc_explicit_checkout_login' => 'login',
+        '6Lc_explicit_login' => 'login',
+        '6Lc_ready_explicit' => 'login',
+    ];
+    $scope = $sitekeyAllowlist[(string) ($body['scope'] ?? '')] ?? (string) ($body['scope'] ?? 'login');
+    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
     $record = $issueStorage->find($challenge->nonce);
     if ($record === null) {
         http_response_code(500);
@@ -60,9 +85,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $tmp = tempnam(sys_get_temp_dir(), 'kiw'); 
     file_put_contents($tmp, json_encode($record->toArray()));
     rename($tmp, recordFile($challenge->nonce));
+    // Round 30 (P1): provider-compatible metadata bound at issuance —
+    // action/cData from the widget's challenge request are stored against
+    // the nonce (server-owned; validated provider shapes).
+    $action = isset($body['action']) && is_string($body['action']) ? $body['action'] : null;
+    $cdata = isset($body['cdata']) && is_string($body['cdata']) ? $body['cdata'] : null;
+    if ($action !== null || $cdata !== null) {
+        if ($action !== null && !preg_match('/^[a-z0-9_-]{1,32}$/i', $action)) {
+            http_response_code(422);
+            echo '{"error":{"code":"INVALID_METADATA"}}';
+
+            return true;
+        }
+        if ($cdata !== null && !preg_match('/^[a-z0-9_-]{1,255}$/i', $cdata)) {
+            http_response_code(422);
+            echo '{"error":{"code":"INVALID_METADATA"}}';
+
+            return true;
+        }
+        $metaTmp = tempnam(sys_get_temp_dir(), 'kiwm');
+        file_put_contents($metaTmp, json_encode(['action' => $action, 'cdata' => $cdata]));
+        rename($metaTmp, metadataFile($challenge->nonce));
+    }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
     echo json_encode($challenge->toArray());
+
+    return true;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path === '/kiwi-captcha/siteverify')) {
+    // Round 30 (P1) e2e: the REAL SiteVerifyController against the record
+    // + metadata persisted at issuance (the fixture's file-based storage
+    // stands in for the shared store).
+    $body = json_decode((string) file_get_contents('php://input'), true);
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store, private, max-age=0');
+    $nonce = (string) (explode('.', (string) base64_decode((string) ($body['response'] ?? ''), true))[0] ?? '');
+    if ($nonce === '' || !is_file(recordFile($nonce))) {
+        echo json_encode(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+
+        return true;
+    }
+    $storage = new ArrayStorage();
+    $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
+    $metadataStore = new \BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore();
+    if (is_file(metadataFile($nonce))) {
+        $m = json_decode((string) file_get_contents(metadataFile($nonce)), true);
+        $metadataStore->store($nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata($m['action'] ?? null, $m['cdata'] ?? null, null), 300);
+        @unlink(metadataFile($nonce));
+    }
+    $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController(
+        new Verifier($storage),
+        $secret,
+        ['compat-secret-42' => 'login'],
+        $storage,
+        null,
+        $metadataStore,
+    );
+    // A successful verification consumes the record (single-use); the
+    // retained consumed-state machinery is per-request here (the fixture's
+    // file stands in for the shared store), so the file is removed after
+    // the first redemption.
+    @unlink(recordFile($nonce));
+    $response = $controller->siteverify(\Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [
+        'secret' => (string) ($body['secret'] ?? ''),
+        'response' => (string) ($body['response'] ?? ''),
+        'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
+        'action' => $body['action'] ?? null,
+    ]));
+    $decoded = SolutionToken::decode((string) ($body['response'] ?? ''));
+    error_log('SV-DEBUG nonce='.$nonce.' decode='.(($decoded instanceof SolutionToken) ? 'ok' : 'FAIL').' recordFile='.(is_file(recordFile($nonce)) ? 'yes' : 'no').' remoteip='.(string) ($body['remoteip'] ?? 'none'));
+    echo $response->getContent();
 
     return true;
 }
@@ -136,10 +230,27 @@ if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') &
 
     return true;
 }
-if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|hcaptcha|turnstile)\.html$~', $path, $m) === 1) {
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|hcaptcha|turnstile|turnstile-meta)\.html$~', $path, $m) === 1) {
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
-    echo file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
+    $html = file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
+    // Round 30: page-level loader parameters (hl, render, onload) are
+    // propagated into the fixture's api.js URL — the incumbent pattern
+    // puts them on the SCRIPT URL, and the fixture HTML cannot know the
+    // test's query string.
+    $pageParams = $_GET;
+    if (isset($pageParams['hl']) || isset($pageParams['render']) || isset($pageParams['onload'])) {
+        $extra = [];
+        foreach (['hl', 'render', 'onload'] as $p) {
+            if (isset($pageParams[$p]) && is_string($pageParams[$p])) {
+                $extra[] = $p.'='.rawurlencode($pageParams[$p]);
+            }
+        }
+        if ($extra !== []) {
+            $html = preg_replace('~(<script src=")([^"]*api\.js)([^"]*)(")~', '$1$2$3&'.implode('&', $extra).'$4', $html, 1);
+        }
+    }
+    echo $html;
 
     return true;
 }

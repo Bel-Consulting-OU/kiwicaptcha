@@ -77,6 +77,82 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(state.response.length).toBeGreaterThan(10);
   });
 
+  test('Turnstile: action/cData bound at issuance, returned from verified server state, request forging ignored (round 30 P1 e2e)', async ({ page, request }) => {
+    // The FULL trust chain: data-action/data-cdata on the container ->
+    // the driver sends them in the challenge request -> the server binds
+    // them to the nonce -> Siteverify returns the SERVER-STORED values.
+    // A backend request that tries action=admin gets the REAL action.
+    await page.goto('/migration/turnstile-meta.html');
+    await expect(page.locator('#out')).toHaveText(/^cb:/, { timeout: 60_000 });
+    const token = await page.evaluate(() => {
+      const w = document.querySelector('.cf-turnstile [data-kiwi-widget]');
+      return window.turnstile.getResponse(w.dataset.kiwiInstance);
+    });
+    expect(token.length).toBeGreaterThan(10);
+
+    const verified = await request.post('/siteverify', {
+      data: { secret: 'compat-secret-42', response: token, remoteip: '127.0.0.1', action: 'admin', cdata: 'forged' },
+    });
+    const body = await verified.json();
+    expect(body.success).toBe(true);
+    expect(body.action, 'the response action must come from SERVER state, never the request').toBe('checkout');
+    expect(body.cdata, 'the response cdata must come from SERVER state, never the request').toBe('order_19382');
+
+    // Ordinary replay (no idempotency): the token is single-use.
+    const replay = await request.post('/siteverify', {
+      data: { secret: 'compat-secret-42', response: token, remoteip: '127.0.0.1' },
+    });
+    const replayBody = await replay.json();
+    expect(replayBody.success).toBe(false);
+    expect(replayBody['error-codes']).toContain('timeout-or-duplicate');
+  });
+
+  test('reCAPTCHA v2 explicit mode: dynamically inserted containers NEVER auto-render until an explicit render() (round 30 P1)', async ({ page }) => {
+    // render=explicit means the application controls rendering — the
+    // MutationObserver must not auto-render a later .g-recaptcha node.
+    await page.goto('/migration/recaptcha-v2-explicit.html');
+    await expect(page.locator('#out')).toHaveText(/^cb:/, { timeout: 60_000 });
+    const dynamic = await page.evaluate(async () => {
+      const el = document.createElement('div');
+      el.className = 'g-recaptcha';
+      el.dataset.sitekey = '6Lc_dynamic_explicit';
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 600));
+      const before = { autoRendered: !!el.querySelector('[data-kiwi-widget]'), containers: document.querySelectorAll('.kiwi-container').length };
+      const id = window.grecaptcha.render(el, { sitekey: '6Lc_dynamic_explicit' });
+      await new Promise((r) => setTimeout(r, 8000));
+      return { before, id, containers: document.querySelectorAll('.kiwi-container').length, response: window.grecaptcha.getResponse(id) };
+    });
+    expect(dynamic.before.autoRendered, 'explicit mode must NOT auto-render dynamic containers').toBe(false);
+    expect(dynamic.before.containers).toBe(1);
+    expect(typeof dynamic.id).toBe('string');
+    expect(dynamic.containers).toBe(2);
+    expect(dynamic.response.length).toBeGreaterThan(10);
+  });
+
+  test('reCAPTCHA v2 implicit mode: dynamically inserted containers still auto-render (round 30 P1)', async ({ page }) => {
+    // The implicit-mode dynamic convenience is retained and proven.
+    await page.goto('/migration/recaptcha-v2.html');
+    await waitVerified(page);
+    const dynamic = await page.evaluate(async () => {
+      const el = document.createElement('div');
+      el.className = 'g-recaptcha';
+      el.dataset.sitekey = '6Lc_dynamic_implicit';
+      document.body.appendChild(el);
+      await new Promise((r) => setTimeout(r, 7000));
+      return {
+        autoRendered: !!el.querySelector('[data-kiwi-widget]'),
+        response: (() => {
+          const w = el.querySelector('[data-kiwi-widget]');
+          const id = w ? w.dataset.kiwiInstance : null;
+          return id ? window.grecaptcha.getResponse(id) : '';
+        })(),
+      };
+    });
+    expect(dynamic.autoRendered).toBe(true);
+    expect(dynamic.response.length).toBeGreaterThan(10);
+  });
+
   test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render (round 28)', async ({ page }) => {
     // Round 28 (P2): the previous "explicit render" test never CALLED
     // grecaptcha.render() — it inspected the auto-rendered widget. The
