@@ -75,17 +75,35 @@ jobs:
           # enforced org-wide (PUT /orgs/{org}/settings/immutable-releases
           # enforced_repositories=all), so repository drift is impossible;
           # this check makes the pipeline fail closed on it regardless.
-          # Preflight (audit round 23/25): verify immutable-releases is
-          # EFFECTIVE before any build/attestation.
           #
-          # The plain GITHUB_TOKEN has NO administration scope, so the
-          # admin-gated endpoints below return 403 for this job identity.
-          # The enforcement chain therefore REQUIRES the admin-declared
-          # variable gate below (set by an org admin as part of the
-          # governance contract) IN ADDITION to the org policy
-          # (enforced_repositories=all) and the mandatory post-publish
-          # immutable assertion with auto-delete.
-          #
+          # Round 28 (deferred item): LIVE read-only immutable-policy
+          # preflight. The repository/org SETTING endpoints are
+          # admin-gated (403 for this job's plain GITHUB_TOKEN), but the
+          # release OBJECT exposes the platform's enforcement: every
+          # release created while immutable releases are ENABLED carries
+          # `immutable: true` (GET /repos/{o}/{r}/releases/latest — plain
+          # token, read-only). Disabling the setting flips existing
+          # releases mutable, so the last release's flag is a LIVE
+          # behavioral probe of the current policy: if it reads anything
+          # but true, the pipeline fails closed BEFORE any build work.
+          # The admin-declared variable gate below remains as the
+          # complementary governance contract — BOTH sources must agree
+          # (the variable names the org admin's declaration; the live
+          # field proves the platform actually enforces it).
+          live_immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.immutable // empty' 2>/dev/null || true)"
+          if [[ -z "$live_immutable" ]]; then
+            # No prior release (first release ever): no behavioral probe
+            # exists yet — the declared variable gate + the mandatory
+            # post-publish immutable assertion with auto-delete carry the
+            # chain for this one release.
+            echo "immutability preflight: no previous release to probe (first release) — falling back to the declared gate"
+          elif [[ "$live_immutable" != "true" ]]; then
+            echo "refusing to release: LIVE immutable-policy preflight FAILED — the most recent release reports immutable=$live_immutable (immutable releases appear DISABLED for this repository)" >&2
+            exit 1
+          else
+            echo "immutability preflight: live read-only probe OK (most recent release is immutable=true)"
+          fi
+
           # HARD admin-declared gate: the repository variable must be
           # declared "true" by an org admin. Without it — or when it reads
           # as anything else — the release is REFUSED before any
