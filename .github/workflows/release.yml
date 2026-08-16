@@ -93,7 +93,7 @@ jobs:
           # warn-and-continue into a strict contract: a release can never
           # proceed unless an org admin has declared the immutability
           # governance in place.
-          declared="$(gh variable get IMMUTABLE_RELEASES_ENFORCED -q .value --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo UNSET)"
+          declared="$(gh variable get IMMUTABLE_RELEASES_ENFORCED --repo "$GITHUB_REPOSITORY" 2>/dev/null | tr -d '[:space:]' || echo UNSET)"
           echo "immutability gate: IMMUTABLE_RELEASES_ENFORCED=$declared"
           if [[ "$declared" != "true" ]]; then
             echo "refusing to release: IMMUTABLE_RELEASES_ENFORCED is not declared 'true' (admin governance gate) — an org admin must set the repository variable" >&2
