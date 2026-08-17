@@ -225,10 +225,12 @@ test.describe('KiwiCaptcha cross-browser critical paths', () => {
       expect(state.wrapper.role, `${p.path}: the wrapper must not be a second group`).toBeNull();
       expect(state.wrapper.lang, `${p.path}: the wrapper must not carry a language`).toBeNull();
       expect(state.wrapper.aria, `${p.path}: the wrapper must not carry an accessible label`).toBeNull();
-      // The inner widget's label must be the LOCALIZED string, not the
-      // static English template.
+      // The inner widget's accessible name must be the LOCALIZED string,
+      // not the static English template. (The visible label element
+      // carries transient status text during a solve, so the accessible
+      // name — set from the same translated pack — is the stable check.)
       if (p.path.includes('hl=de')) {
-        expect(state.innerText).toContain('Sicherheitspr');
+        expect(state.inner.aria).toContain('Sicherheitspr');
       }
       if (p.path.includes('hl=ar')) {
         expect(state.inner.aria).not.toBe('KiwiCaptcha security check');
