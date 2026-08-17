@@ -259,7 +259,7 @@ jobs:
             $store = new BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore($r);
             $backendId = hash("sha256", "smoke-secret");
             $uuid = "8f2a1c3e-4b5d-4e6f-9a0b-1c2d3e4f5a6b";
-            $key = "{kiwicaptcha}:siteverify-idem:{$backendId}:{$uuid}";
+            $key = "{kiwicaptcha}:siteverify-idem:" . $backendId . ":" . $uuid;
             $r->del($key);
             [$claim, $owner] = $store->claim($backendId, $uuid, "smoke-response-hash", 60);
             if ($claim !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed || !is_string($owner)) {
@@ -278,14 +278,12 @@ jobs:
             echo "OK\n";
           '
       - name: siteverify + idempotency suites (real Redis)
+        # The smoke above already proved the \Redis branch of the
+        # idempotency store; this step runs the full Siteverify +
+        # concurrency coverage once (the standard Symfony lane owns the
+        # full-suite regression run).
         working-directory: packages/kiwicaptcha/integrations/symfony
         run: vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
-      - name: phpunit (full bundle suite)
-        # The PhpRedis smoke above already proved the \Redis branch; the
-        # full suite adds regression coverage (the real-Redis-gated tests
-        # skip without KC_REDIS_URL, exactly like every other lane).
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: vendor/bin/phpunit
 
   redis-compat:
     # Audit round 23: NON-GATING forward-compatibility probe — runs the
