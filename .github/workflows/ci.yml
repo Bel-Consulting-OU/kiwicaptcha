@@ -251,6 +251,7 @@ jobs:
         # real Redis at 127.0.0.1:6399 BEFORE the suites run.
         working-directory: packages/kiwicaptcha/integrations/symfony
         run: |
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
           php -r '
             require "vendor/autoload.php";
             $r = new \Redis();
