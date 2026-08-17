@@ -200,8 +200,11 @@ migrating pages actually use, and the differences below are intentional.
   with its own pre-issue and post-solve risk decisions, and the
   application validates the expected action server-side exactly as it
   validates any scope. `execute(sitekey, {action})` renders a hidden
-  widget scoped to the action and resolves with the real Kiwi token; the
-  server-side verification then applies the scope's policy.
+  v3 widget that transmits the REAL public sitekey and the requested
+  action independently in the challenge request; the SERVER resolves the
+  (sitekey, action) pair to the security scope — an unknown action is
+  rejected server-side — and the widget resolves with the real Kiwi
+  token; the server-side verification then applies the scope's policy.
 - **Turnstile subset**: `render` (with `action`/`cData` accepted and
   mapped to the Kiwi scope, and `response-field-name` honored),
   `reset`, `getResponse`, `execute`, `remove`, `ready`, `isExpired`.

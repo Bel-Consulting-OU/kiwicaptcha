@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
-// Round 29/30: WCAG 2.2 AA acceptance evidence within the widget's
+// Round 29-32: WCAG 2.2 AA acceptance evidence within the widget's
 // component scope. The functional solver behavior is covered by
 // widget.spec.mjs / security.spec.mjs; this suite is the accessibility
 // acceptance set:
 //  - computed-color badge contrast, light AND dark, every state (1.4.3)
+//  - computed non-text contrast: Retry boundary + focus indicator >= 3:1 (1.4.11)
 //  - axe scans per state, light and dark
 //  - keyboard-only operation (real sequential Tab/Shift+Tab, Enter+Space)
 //  - live-region contract (exactly one widget-local status in every renderer)
@@ -72,7 +73,7 @@ const AXE_RULES = [
   'label', 'link-in-text-block', 'select-name', 'valid-lang', 'document-title',
 ];
 
-test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30)', () => {
+test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
   test('badge contrast (WCAG 1.4.3): COMPUTED colors, light AND dark, every state >= 4.5:1 (target >= 5:1)', async ({ page }) => {
     const themes = ['light', 'dark'];
     const states = ['idle', 'solving', 'done', 'failed'];
@@ -233,6 +234,85 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30)', () => {
     expect(box.height).toBeGreaterThanOrEqual(24);
     // The audit's 32px recommendation for an accessibility/security control.
     expect(box.height).toBeGreaterThanOrEqual(32);
+  });
+
+  test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark (round 31/32)', async ({ page }) => {
+    // Round 31/32: WCAG 1.4.11 requires UI-component boundaries and the
+    // focus indicator to be >= 3:1 against the adjacent surface. The test
+    // COMPUTES the colors in the browser (getComputedStyle border/outline,
+    // button background composited over the widget surface) — it never
+    // hard-codes expected colors, so a palette regression in EITHER theme
+    // fails here. The suite computes it; a CSS comment does not.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto('/');
+      await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+      await page.evaluate(() => {
+        const w = document.querySelector('[data-kiwi-widget]');
+        const container = w.closest('.kiwi-container');
+        const before = document.createElement('input');
+        before.id = 'kiwi-before';
+        before.setAttribute('aria-label', 'before');
+        container.parentNode.insertBefore(before, container);
+      });
+      // Real keyboard Tab reaches the Retry (Chromium + Firefox); WebKit's
+      // platform Tab default skips buttons, so programmatic focus stands in
+      // for Full Keyboard Access, mirroring the keyboard-only test.
+      const engine = test.info().project.name;
+      if (engine !== 'webkit') {
+        await page.locator('#kiwi-before').focus();
+        await page.keyboard.press('Tab');
+      } else {
+        await page.locator('[data-kiwi-retry]').focus();
+      }
+      const focused = await page.evaluate(() => {
+        const ae = document.activeElement;
+        return !!ae && ae.getAttribute('data-kiwi-retry') !== null && ae.matches(':focus-visible');
+      });
+      expect(focused, `theme=${theme}: the Retry button must be focused with :focus-visible`).toBe(true);
+
+      const colors = await page.evaluate(() => {
+        const w = document.querySelector('[data-kiwi-widget]');
+        const retry = w.querySelector('[data-kiwi-retry]');
+        const parse = (c) => {
+          const m = c.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/);
+          if (!m) return null;
+          return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] !== undefined ? Number(m[4]) : 1 };
+        };
+        const composite = (fgc, bgc) => ({ r: fgc.r * fgc.a + bgc.r * (1 - fgc.a), g: fgc.g * fgc.a + bgc.g * (1 - fgc.a), b: fgc.b * fgc.a + bgc.b * (1 - fgc.a) });
+        const toHex = ({ r, g, b }) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+        const cs = (el) => getComputedStyle(el);
+        const surface = parse(cs(w).backgroundColor);
+        const retryBg = parse(cs(retry).backgroundColor);
+        const border = parse(cs(retry).borderTopColor);
+        let indicator = null;
+        let indicatorKind = null;
+        const outlineStyle = cs(retry).outlineStyle;
+        const outlineWidth = parseFloat(cs(retry).outlineWidth);
+        if (outlineStyle !== 'none' && outlineWidth > 0) {
+          indicator = parse(cs(retry).outlineColor);
+          indicatorKind = 'outline';
+        } else {
+          const shadowColors = (cs(retry).boxShadow.match(/rgba?\([^)]*\)/g) || []).map(parse).filter((c) => c && c.a > 0);
+          if (shadowColors.length) { indicator = shadowColors[0]; indicatorKind = 'box-shadow'; }
+        }
+        if (!surface || !retryBg || !border || !indicator) {
+          return { error: JSON.stringify({ surface: cs(w).backgroundColor, retryBg: cs(retry).backgroundColor, border: cs(retry).borderTopColor, outline: cs(retry).outlineColor, boxShadow: cs(retry).boxShadow }) };
+        }
+        return {
+          boundary: { border: toHex(border), adjacent: toHex(composite(retryBg, surface)) },
+          indicator: { color: toHex(indicator), adjacent: toHex(surface), kind: indicatorKind },
+        };
+      });
+      expect(colors.error, `theme=${theme}: ${colors.error}`).toBeUndefined();
+      const boundaryRatio = contrastRatio(colors.boundary.border, colors.boundary.adjacent);
+      const indicatorRatio = contrastRatio(colors.indicator.color, colors.indicator.adjacent);
+      expect(boundaryRatio, `theme=${theme}: Retry control boundary must be >= 3:1 (WCAG 1.4.11; measured ${boundaryRatio.toFixed(2)}:1 ${colors.boundary.border} vs ${colors.boundary.adjacent})`).toBeGreaterThanOrEqual(3);
+      expect(indicatorRatio, `theme=${theme}: focus indicator (${colors.indicator.kind}) must be >= 3:1 (WCAG 1.4.11; measured ${indicatorRatio.toFixed(2)}:1 ${colors.indicator.color} vs ${colors.indicator.adjacent})`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   test('semantics: progress track hidden from AT, status live region polite + meaningful only', async ({ page }) => {

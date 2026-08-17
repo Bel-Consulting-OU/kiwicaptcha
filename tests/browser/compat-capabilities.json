@@ -30,6 +30,7 @@
     "reset": true,
     "getResponse": true,
     "execute": true,
+    "async_execute": false,
     "remove": true
   },
   "siteverify": {

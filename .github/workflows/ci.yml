@@ -206,6 +206,87 @@ jobs:
           KC_REDIS_URL: tcp://127.0.0.1:6379
         run: vendor/bin/phpunit --filter RealRedis
 
+  phpredis-siteverify:
+    # Audit round 32: the Siteverify idempotency store and the
+    # invalid-secret log gate accept BOTH Predis and native PhpRedis, but
+    # every real-Redis lane only ever exercised Predis — the \Redis branch
+    # (Redis::eval with the array-argument form) was never validated by
+    # CI. This REQUIRED lane runs the Siteverify + idempotency suites with
+    # the phpredis extension loaded and smokes the \Redis branch of the
+    # idempotency store directly against the real Redis container.
+    name: PhpRedis Siteverify (idempotency + log gate, real Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned (audit round 23)
+        ports:
+          - 6379:6379
+          # The Siteverify suites hard-code tcp://127.0.0.1:6399 (repo
+          # convention: docker run -d -p 6399:6379 redis:7-alpine) — the
+          # PhpRedis smoke and SiteVerify(Concurrency)Test need that host
+          # port; the container port stays 6379 like every other lane.
+          - 6399:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.3'
+          extensions: redis, json, openssl, sodium
+          coverage: none
+      - name: install PHP core
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: install Symfony bundle
+        # predis is a DEV dependency of the bundle (composer.json
+        # require-dev) — the install brings it without an explicit require.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: composer install --no-interaction --no-scripts --prefer-dist
+      - name: verify phpredis extension is loaded
+        run: php -r 'if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";'
+      - name: phpredis idempotency-store smoke (real Redis, \Redis branch)
+        # The Siteverify suites construct Predis clients explicitly and the
+        # store branches on the client type — this smoke proves the \Redis
+        # branch (Redis::eval with the array-argument form) against the
+        # real Redis at 127.0.0.1:6399 BEFORE the suites run.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: |
+          php -r '
+            require "vendor/autoload.php";
+            $r = new \Redis();
+            $r->connect("127.0.0.1", 6399);
+            $r->ping();
+            $store = new BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore($r);
+            $backendId = hash("sha256", "smoke-secret");
+            $uuid = "8f2a1c3e-4b5d-4e6f-9a0b-1c2d3e4f5a6b";
+            $key = "{kiwicaptcha}:siteverify-idem:{$backendId}:{$uuid}";
+            $r->del($key);
+            [$claim, $owner] = $store->claim($backendId, $uuid, "smoke-response-hash", 60);
+            if ($claim !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed || !is_string($owner)) {
+                fwrite(STDERR, "first claim was not CLAIMED\n"); exit(1);
+            }
+            $store->finalize($backendId, $uuid, "smoke-response-hash", $owner, ["success" => true]);
+            [$claim2, $owner2] = $store->claim($backendId, $uuid, "smoke-response-hash", 60);
+            if ($claim2 !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::CompleteSame || $owner2 !== null) {
+                fwrite(STDERR, "re-claim was not COMPLETE_SAME\n"); exit(1);
+            }
+            $stored = $store->stored($backendId, $uuid);
+            if (!is_array($stored) || ($stored["success"] ?? null) !== true) {
+                fwrite(STDERR, "stored canonical response missing\n"); exit(1);
+            }
+            $r->del($key);
+            echo "OK\n";
+          '
+      - name: siteverify + idempotency suites (real Redis)
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
+      - name: phpunit (full bundle suite)
+        # The PhpRedis smoke above already proved the \Redis branch; the
+        # full suite adds regression coverage (the real-Redis-gated tests
+        # skip without KC_REDIS_URL, exactly like every other lane).
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: vendor/bin/phpunit
+
   redis-compat:
     # Audit round 23: NON-GATING forward-compatibility probe — runs the
     # risk real-Redis suites against NEWER Redis (8.x, digest-pinned) so

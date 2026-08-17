@@ -259,4 +259,146 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $first = json_decode($responses[0], true);
         self::assertSame([], $first['error-codes'] ?? null);
     }
+
+
+    /**
+     * Round 31 (item 12, P2): provider retry contract under a DELIBERATELY
+     * SLOW Argon solve — 20 concurrent requests with the same token and
+     * the same UUID must ALL receive the identical canonical response
+     * (the PENDING_SAME wait follows the owner to completion instead of
+     * re-deriving) with exactly one redemption. The round-31 (P2) lease
+     * loop makes the wait structural: the test's elapsed time stays under
+     * the bound because the waiters POLL the store instead of each
+     * re-deriving the Argon proof (20 re-derivations at ~5-15s each would
+     * blow the bound), and the challenge record ends consumed exactly once
+     * with the winner's committed result.
+     */
+    public function testSlowArgonSameIdempotencyKeyYieldsIdenticalResponses(): void
+    {
+        if (!\function_exists('pcntl_fork') || !\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('pcntl/predis not available');
+        }
+        try {
+            $probe = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+            $probe->ping();
+        } catch (\Throwable) {
+            self::markTestSkipped('no Redis at 127.0.0.1:6399');
+        }
+
+        // Argon2id with a deliberately high verification cost: the winner's
+        // verification takes seconds — exactly the window where a short
+        // PENDING_SAME wait would fall through.
+        $config = new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Argon2id,
+            ttlSecs: 180,
+            mKib: 64,
+            t: 3,
+            p: 1,
+            targetBits: 8,
+            argon2TargetBits: 10,
+        );
+        $issuer = new Issuer($config, new RedisStorage($probe));
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $h = sodium_crypto_pwhash(32, $challenge->prefix.$counter, $saltBytes, 3, 64 * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+            $counter++;
+        } while (Verifier::leadingZeroBits($h) < $challenge->targetBits);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
+        $uuid = 'a7c2c4a0-9f4b-4d1e-9c8a-0f3d5e7b1a2b';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET);
+        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->disconnect();
+
+        $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-slow-');
+        $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-slow-start-');
+        $workers = 20;
+        $children = [];
+        $startedAt = microtime(true);
+        for ($i = 0; $i < $workers; $i++) {
+            $pid = pcntl_fork();
+            if ($pid === -1) {
+                self::markTestSkipped('pcntl_fork failed');
+            }
+            if ($pid === 0) {
+                $fp = @fopen($startBarrier, 'r');
+                if ($fp !== false) {
+                    flock($fp, LOCK_SH);
+                    fread($fp, 1);
+                    fclose($fp);
+                }
+                $line = 'error';
+                try {
+                    $client = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 60.0, 'read_write_timeout' => 60.0]);
+                    $storage = new RedisStorage($client);
+                    $controller = new SiteVerifyController(
+                        new Verifier($storage),
+                        self::SECRET,
+                        [self::SITEVERIFY_SECRET => 'login'],
+                        $storage,
+                        null,
+                        null,
+                        new RedisSiteVerifyIdempotencyStore($client),
+                    );
+                    $response = $controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [
+                        'secret' => self::SITEVERIFY_SECRET,
+                        'response' => $token,
+                        'remoteip' => '127.0.0.1',
+                        'idempotency_key' => $uuid,
+                    ]));
+                    $line = (string) $response->getContent();
+                    $client->disconnect();
+                } catch (\Throwable $e) {
+                    fwrite(STDERR, 'CHILDERR: '.$e->getMessage()."\n");
+                }
+                $out = fopen($outFile, 'a');
+                flock($out, LOCK_EX);
+                fwrite($out, $line."\n");
+                fclose($out);
+                exit(0);
+            }
+            $children[] = $pid;
+        }
+        $barrierFile = fopen($startBarrier, 'w');
+        fwrite($barrierFile, 'go');
+        fclose($barrierFile);
+        $crashed = false;
+        foreach ($children as $pid) {
+            pcntl_waitpid($pid, $status);
+            if (pcntl_wexitstatus($status) !== 0) {
+                $crashed = true;
+            }
+        }
+        $elapsed = microtime(true) - $startedAt;
+        self::assertFalse($crashed, 'every worker must exit cleanly');
+        $raw = (string) file_get_contents($outFile);
+        $responses = array_values(array_filter(explode("\n", $raw), static fn (string $l): bool => $l !== ''));
+        @unlink($outFile);
+        @unlink($startBarrier);
+
+        self::assertCount($workers, $responses, 'all workers must report an outcome');
+        $successes = \count(array_filter($responses, static fn (string $r): bool => str_contains($r, '"success":true')));
+        self::assertSame($workers, $successes, 'same-key retries must all succeed: '.implode(' || ', array_slice($responses, 0, 3)));
+        self::assertSame(1, \count(array_unique($responses)), 'all responses must be byte-identical');
+        // Round 31 (P2): the waiters must NOT re-derive the Argon proof —
+        // 20 re-derivations at ~5-15s each would take ~100-300s. Bounded
+        // elapsed time is the proof they polled the store instead.
+        self::assertLessThan(
+            90.0,
+            $elapsed,
+            sprintf('waiters must wait on the store instead of each re-deriving the Argon proof; elapsed %.1fs', $elapsed),
+        );
+        // Exactly ONE redemption: the winner's consume left the record
+        // consumed with its committed valid result.
+        $check = new \Predis\Client('tcp://127.0.0.1:6399', ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $record = $check->get('kiwicaptcha:'.$challenge->nonce);
+        $check->disconnect();
+        self::assertIsString($record, 'the winner must leave the challenge record in place (consumed, not deleted)');
+        self::assertStringContainsString('"state":"consumed"', $record, 'the winner must consume the token exactly once');
+        self::assertStringContainsString('"consumed_result":{"valid":1', $record, 'the winner must commit its valid result for replay safety');
+    }
 }
+
