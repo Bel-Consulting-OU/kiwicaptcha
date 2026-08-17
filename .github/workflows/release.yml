@@ -159,12 +159,16 @@ jobs:
             fi
           fi
 
-          ahead="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq '.ahead_by')"
-          if [[ "$ahead" != "0" ]]; then
-            echo "refusing to release: $sha is not reachable from protected main (ahead_by=$ahead)" >&2
+          # Round 32: the GitHub compare endpoint started returning 404 for
+          # every ref pair on this repository (API-side change, all
+          # variants) — the reachability proof moved to LOCAL git: the
+          # tag's commit must be an ancestor of protected origin/main.
+          git fetch --quiet --depth=100 origin main
+          if ! git merge-base --is-ancestor "$sha" FETCH_HEAD 2>/dev/null; then
+            echo "refusing to release: $sha is not reachable from protected main" >&2
             exit 1
           fi
-          echo "tagged commit $sha is reachable from protected main"
+          echo "reachability: $sha is an ancestor of origin/main (local git)"
 
           # Audit round 22: release provenance must survive an
           # administrator bypass of branch protection — the EXACT tagged
