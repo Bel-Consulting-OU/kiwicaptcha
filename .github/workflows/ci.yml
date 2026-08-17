@@ -413,7 +413,7 @@ jobs:
           grep -q '^# KiwiCaptcha' README.md || { echo "README is not the KiwiCaptcha README" >&2; exit 1; }
           if grep -q '^# ApexMail' README.md; then echo "README contains the wrong product header" >&2; exit 1; fi
           grep -q 'packages/kiwicaptcha' README.md || { echo "README lost the package references" >&2; exit 1; }
-          grep -q '"name": "bel-consulting/kiwicaptacha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
+          grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
           grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml || { echo "Cargo package name wrong" >&2; exit 1; }
           for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css; do
             test -f "packages/kiwicaptcha-wasm/assets/$asset" || { echo "missing release asset $asset" >&2; exit 1; }

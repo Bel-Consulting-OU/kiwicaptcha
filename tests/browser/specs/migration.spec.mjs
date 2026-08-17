@@ -139,15 +139,18 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
       el.className = 'g-recaptcha';
       el.dataset.sitekey = '6Lc_dynamic_implicit';
       document.body.appendChild(el);
-      await new Promise((r) => setTimeout(r, 7000));
-      return {
-        autoRendered: !!el.querySelector('[data-kiwi-widget]'),
-        response: (() => {
-          const w = el.querySelector('[data-kiwi-widget]');
-          const id = w ? w.dataset.kiwiInstance : null;
-          return id ? window.grecaptcha.getResponse(id) : '';
-        })(),
-      };
+      // Wait for the auto-rendered widget to solve (bounded poll — CI
+      // machines are slower than the local run).
+      const deadline = Date.now() + 30_000;
+      let response = '';
+      while (Date.now() < deadline) {
+        const w = el.querySelector('[data-kiwi-widget]');
+        const id = w ? w.dataset.kiwiInstance : null;
+        response = id ? window.grecaptcha.getResponse(id) : '';
+        if (response.length > 10) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return { autoRendered: !!el.querySelector('[data-kiwi-widget]'), response };
     });
     expect(dynamic.autoRendered).toBe(true);
     expect(dynamic.response.length).toBeGreaterThan(10);
