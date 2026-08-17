@@ -144,8 +144,9 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
       const deadline = Date.now() + 30_000;
       let response = '';
       while (Date.now() < deadline) {
-        const w = el.querySelector('[data-kiwi-widget]');
-        const id = w ? w.dataset.kiwiInstance : null;
+        // The instance id lives on the RENDERED CONTAINER (compat mode),
+        // not on the inner widget element.
+        const id = el.dataset.kiwiInstance;
         response = id ? window.grecaptcha.getResponse(id) : '';
         if (response.length > 10) break;
         await new Promise((r) => setTimeout(r, 500));
