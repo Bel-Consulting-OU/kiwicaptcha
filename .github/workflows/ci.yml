@@ -507,6 +507,46 @@ jobs:
           done
           echo "product identity OK"
 
+  doc-hygiene:
+    # Static-doc hygiene gate: production source, browser release assets
+    # and public READMEs must never carry internal-history commentary
+    # (audit IDs, round labels, severity tags, previous-behavior narration
+    # or references to the upstream ApexMail codebase). Changelogs,
+    # release notes and the workflows themselves are the designated home
+    # for history and are excluded from the scan; an informational step
+    # surfaces drift in those excluded categories without failing.
+    name: Doc hygiene (no internal-history commentary in product source)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: scan product source for internal-history commentary
+        run: |
+          set -euo pipefail
+          # Production source, browser release assets and public READMEs must not
+          # carry internal-history commentary (audit IDs, round labels, severity
+          # tags, previous-behavior narration, or references to the upstream
+          # ApexMail codebase). Changelogs, release notes and the workflows
+          # themselves are the home for history.
+          if rg -n -i \
+            --glob '!CHANGELOG*' \
+            --glob '!**/CHANGELOG*' \
+            --glob '!.github/**' \
+            --glob '!**/vendor/**' \
+            --glob '!**/node_modules/**' \
+            --glob '!**/target/**' \
+            'audit( round)? #[0-9]+|audit round|round[- ]?[0-9]+|\bP[0-3]\b|the old|previously|previous implementation|catastrophic|ApexMail' \
+            packages tests README.md SECURITY.md; then
+            echo "internal-history commentary found in product source/docs (see matches above)" >&2
+            exit 1
+          fi
+          echo "doc hygiene OK: no internal-history commentary in product source"
+      - name: excluded-category match count (changelogs/workflows, informational)
+        run: |
+          echo "excluded-category matches (changelogs/workflows):"
+          rg -n -i --glob '*CHANGELOG*' --glob '.github/**' 'audit( round)? #[0-9]+|audit round|round[- ]?[0-9]+|\bP[0-3]\b' . 2>/dev/null | wc -l
+
   package-cargo:
     name: Package (cargo publish readiness)
     runs-on: ubuntu-latest

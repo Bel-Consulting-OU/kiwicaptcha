@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// Round 24: incumbent migration is a CI CONTRACT. These fixtures are
+// Incumbent migration is a CI CONTRACT. These fixtures are
 // structurally copied from standard reCAPTCHA v2 / invisible / hCaptcha /
 // Turnstile integrations — the ONLY difference is the provider script URL
 // (kiwi /kiwi-captcha/api.js?compat=...). The migration-diff budget: a
@@ -16,7 +16,7 @@ async function waitVerified(page, field = 'g-recaptcha-response') {
   return value;
 }
 
-test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
+test.describe('KiwiCaptcha migration compatibility', () => {
   test('reCAPTCHA v2: implicit render, data-callback, g-recaptcha-response alias', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2.html');
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toBeVisible();
@@ -38,10 +38,10 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(id.response).toBe(token);
   });
 
-  test('reCAPTCHA v2: omitted widget id defaults to the first created widget (round 29 P1)', async ({ page }) => {
+  test('reCAPTCHA v2: omitted widget id defaults to the first created widget', async ({ page }) => {
     // Google's API: reset()/getResponse()/execute() with NO id target the
-    // FIRST created widget. Kiwi previously required an explicit id/element
-    // (no argument produced no reset / empty response).
+    // FIRST created widget. Kiwi requires an explicit id/element
+    // (no argument produces no reset / empty response).
     await page.goto('/migration/recaptcha-v2.html');
     const token = await waitVerified(page);
     const result = await page.evaluate(async () => {
@@ -58,7 +58,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(result.responseAfterReset).not.toBe(token);
   });
 
-  test('reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders (round 29 P1)', async ({ page }) => {
+  test('reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders', async ({ page }) => {
     // The fixture is the DOCUMENTED integration pattern (onload +
     // render=explicit) with only the provider URL changed. Without the
     // fix, render=explicit still auto-rendered (double widgets) and
@@ -77,7 +77,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(state.response.length).toBeGreaterThan(10);
   });
 
-  test('Turnstile: action/cData bound at issuance, returned from verified server state, request forging ignored (round 30 P1 e2e)', async ({ page, request }) => {
+  test('Turnstile: action/cData bound at issuance, returned from verified server state, request forging ignored', async ({ page, request }) => {
     // The FULL trust chain: data-action/data-cdata on the container ->
     // the driver sends them in the challenge request -> the server binds
     // them to the nonce -> Siteverify returns the SERVER-STORED values.
@@ -107,8 +107,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(replayBody['error-codes']).toContain('timeout-or-duplicate');
   });
 
-  test('reCAPTCHA v3: execute(sitekey, {action}) transmits the REAL pair and the server-owned policy resolves the scope (round 31 P1)', async ({ page, request }) => {
-    // The critical regression: the hidden v3 render previously passed the
+  test('reCAPTCHA v3: execute(sitekey, {action}) transmits the REAL pair and the server-owned policy resolves the scope', async ({ page, request }) => {
+    // The critical regression: the hidden v3 render passed the
     // ACTION as the sitekey, disconnecting the server-owned policy. The
     // challenge request must carry sitekey AND action independently, the
     // server must resolve (sitekey, action) -> commerce_high_value, and an
@@ -158,7 +158,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(refused).not.toBe('resolved');
   });
 
-  test('reCAPTCHA v2: Retry after terminal failure preserves the FULL security configuration (round 31 P1)', async ({ page }) => {
+  test('reCAPTCHA v2: Retry after terminal failure preserves the FULL security configuration', async ({ page }) => {
     // A mapped sitekey -> sensitive scope must survive the Retry path:
     // reacquisition reinitializes from the PRESERVED options, never a
     // blank initWidget(W) that falls back to the default scope.
@@ -190,7 +190,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     }
   });
 
-  test('reCAPTCHA v2: expiry -> Retry keyboard reacquisition preserves host form fields (round 31 P1)', async ({ page }) => {
+  test('reCAPTCHA v2: expiry -> Retry keyboard reacquisition preserves host form fields', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2-ttl.html');
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
     // Fill unrelated host-form data BEFORE expiry.
@@ -205,7 +205,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(await page.inputValue('input[name="email"]')).toBe('user@example.com');
   });
 
-  test('reCAPTCHA v2 explicit mode: dynamically inserted containers NEVER auto-render until an explicit render() (round 30 P1)', async ({ page }) => {
+  test('reCAPTCHA v2 explicit mode: dynamically inserted containers NEVER auto-render until an explicit render()', async ({ page }) => {
     // render=explicit means the application controls rendering — the
     // MutationObserver must not auto-render a later .g-recaptcha node.
     await page.goto('/migration/recaptcha-v2-explicit.html');
@@ -228,7 +228,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(dynamic.response.length).toBeGreaterThan(10);
   });
 
-  test('reCAPTCHA v2 implicit mode: dynamically inserted containers still auto-render (round 30 P1)', async ({ page }) => {
+  test('reCAPTCHA v2 implicit mode: dynamically inserted containers still auto-render', async ({ page }) => {
     // The implicit-mode dynamic convenience is retained and proven.
     await page.goto('/migration/recaptcha-v2.html');
     await waitVerified(page);
@@ -255,8 +255,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(dynamic.response.length).toBeGreaterThan(10);
   });
 
-  test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render (round 28)', async ({ page }) => {
-    // Round 28 (P2): the previous "explicit render" test never CALLED
+  test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render', async ({ page }) => {
+    // The earlier "explicit render" test never CALLED
     // grecaptcha.render() — it inspected the auto-rendered widget. The
     // compat API must resolve string ids/selectors through the same target
     // resolver as the native API and return a working widget id.
@@ -293,8 +293,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(result.responseB.length).toBeGreaterThan(10);
   });
 
-  test('reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure (round 28)', async ({ page }) => {
-    // Round 28 (P2): the fixture's data-error-callback was parsed but never
+  test('reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure', async ({ page }) => {
+    // The fixture's data-error-callback was parsed but never
     // invoked — fail()/workerUnavailable()/solverMismatch() now call it.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
@@ -308,8 +308,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     await expect(page.locator('#out')).toHaveText('err-cb');
   });
 
-  test('reCAPTCHA v2: reset during an in-flight challenge cancels generation 1 (round 28)', async ({ page }) => {
-    // Round 28 (P2): reset() must abort the old generation's fetch and the
+  test('reCAPTCHA v2: reset during an in-flight challenge cancels generation 1', async ({ page }) => {
+    // reset() must abort the in-flight generation's fetch and the
     // delayed response must never write a token or invoke a callback.
     let calls = 0;
     await page.route('**/challenge', async (route) => {
@@ -375,8 +375,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(viaExecute).toBe(token);
   });
 
-  test('reCAPTCHA v2 Argon: grecaptcha.ready() queues behind glue readiness for explicit render (round 28)', async ({ page }) => {
-    // Round 28 (P2): ready() must not race the loader-glue self-fetch — an
+  test('reCAPTCHA v2 Argon: grecaptcha.ready() queues behind glue readiness for explicit render', async ({ page }) => {
+    // ready() must not race the loader-glue self-fetch — an
     // explicit render() inside ready() immediately starts an Argon worker
     // that needs the glue (no inline script exists on the external-loader
     // page). The api.js response is DELIBERATELY delayed so the race is
@@ -404,8 +404,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(response.length).toBeGreaterThan(10);
   });
 
-  test('reCAPTCHA v2: v3-style execute(sitekey) tears down the hidden widget (round 28)', async ({ page }) => {
-    // Round 28 (P3): repeated execute(sitekey, {action}) calls must not
+  test('reCAPTCHA v2: v3-style execute(sitekey) tears down the hidden widget', async ({ page }) => {
+    // Repeated execute(sitekey, {action}) calls must not
     // accumulate hidden DOM, registry entries or reset hooks.
     await page.goto('/migration/recaptcha-v2.html');
     await waitVerified(page);
@@ -429,7 +429,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(result.hiddenHolders).toBe(0);
   });
 
-  test('reCAPTCHA v2: execute() rejects with the ACTUAL failure reason (round 28)', async ({ page }) => {
+  test('reCAPTCHA v2: execute() rejects with the ACTUAL failure reason', async ({ page }) => {
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
     });
@@ -507,7 +507,7 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
   });
 
   test('Argon2id solves through the external compatibility loader (worker glue path)', async ({ page }) => {
-    // Round 26 (P1): with the driver loaded as the external /api.js, the
+    // With the driver loaded as the external /api.js, the
     // Blob worker has no inline glue element to copy — the loader's own
     // fetched source supplies it. Argon2id must therefore solve
     // end-to-end through the one-script migration path (SHA-256-only
@@ -518,11 +518,11 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(token.length).toBeGreaterThan(10);
   });
 
-  test('the visible .kiwi-widget carries the done state (round 27 state fix)', async ({ page }) => {
-    // Round 27 (P2): the state attribute must live on the INNER
+  test('the visible .kiwi-widget carries the done state', async ({ page }) => {
+    // The state attribute must live on the INNER
     // .kiwi-widget (the stylesheet keys the pulse/success/failure styling
     // and Retry visibility on .kiwi-widget[data-state=...]) — the outer
-    // incumbent wrapper previously took the state while the widget stayed
+    // incumbent wrapper took the state while the widget stayed
     // frozen at idle.
     await page.goto('/migration/recaptcha-v2.html');
     await waitVerified(page);
@@ -531,8 +531,8 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
 
   test('a failed compat widget shows the failed state and the Retry button', async ({ page }) => {
     // The endpoint 404s -> the challenge fails -> the inner widget enters
-    // the failed state and the Retry button becomes visible (previously
-    // hidden because the state never landed on .kiwi-widget).
+    // the failed state and the Retry button becomes visible (the state
+    // lands on .kiwi-widget).
     await page.goto('/migration/recaptcha-v2.html');
     await page.evaluate(() => {
       document.querySelector('.g-recaptcha').setAttribute('data-kiwi-endpoint', '/definitely-missing-endpoint');
@@ -559,5 +559,131 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     const native = await waitVerified(page, 'kiwi__token');
     const alias = await page.locator('input[name="g-recaptcha-response"]').inputValue();
     expect(alias).toBe(native);
+  });
+
+  test('Turnstile execution=execute: render registers a pending widget, zero challenge hits until execute(id), getResponse works', async ({ page }) => {
+    // Cloudflare's explicit-execution model: with execution "execute" the
+    // widget renders and registers but does NOT start a challenge — the
+    // widget carries data-state "pending" (distinct from "idle") and no
+    // **/challenge request may fire until turnstile.execute().
+    let challengeHits = 0;
+    await page.route('**/challenge', async (route) => {
+      challengeHits++;
+      await route.continue();
+    });
+    await page.goto('/migration/turnstile.html');
+    await expect(page.locator('input[name="cf-turnstile-response"]')).not.toHaveValue('', { timeout: 60_000 });
+    const baseline = challengeHits;
+    expect(baseline).toBeGreaterThan(0);
+    const id = await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.id = 'ts-exec';
+      el.className = 'cf-turnstile';
+      el.setAttribute('data-sitekey', '0x4AAAAAAABC');
+      document.body.appendChild(el);
+      return window.turnstile.render(el, { sitekey: '0x4AAAAAAABC', execution: 'execute' });
+    });
+    expect(typeof id).toBe('string');
+    await expect(page.locator('#ts-exec [data-kiwi-widget]')).toHaveAttribute('data-state', 'pending');
+    await page.waitForTimeout(2500);
+    expect(challengeHits, 'a pending execution=execute widget must issue ZERO challenge requests').toBe(baseline);
+    const token = await page.evaluate(async (wid) => window.turnstile.execute(wid), id);
+    expect(token.length).toBeGreaterThan(10);
+    expect(challengeHits).toBeGreaterThan(baseline);
+    const response = await page.evaluate((wid) => window.turnstile.getResponse(wid), id);
+    expect(response).toBe(token);
+  });
+
+  test('Turnstile execution=execute: execute(container-id) and execute(selector) resolve and fire', async ({ page }) => {
+    // String arguments resolve as a widget id first, then an element id,
+    // then a selector matching an existing .cf-turnstile container.
+    await page.goto('/migration/turnstile.html');
+    await expect(page.locator('input[name="cf-turnstile-response"]')).not.toHaveValue('', { timeout: 60_000 });
+    const setup = await page.evaluate(() => {
+      // Drop the implicit widget so '.cf-turnstile' matches only ours.
+      window.turnstile.remove();
+      const el = document.createElement('div');
+      el.id = 'ts-sel';
+      el.className = 'cf-turnstile';
+      el.setAttribute('data-sitekey', '0x4AAAAAAABC');
+      document.body.appendChild(el);
+      const id = window.turnstile.render(el, { sitekey: '0x4AAAAAAABC', execution: 'execute' });
+      return id;
+    });
+    await expect(page.locator('#ts-sel [data-kiwi-widget]')).toHaveAttribute('data-state', 'pending');
+    const viaSelector = await page.evaluate(async () => window.turnstile.execute('.cf-turnstile'));
+    expect(viaSelector.length).toBeGreaterThan(10);
+    expect(await page.evaluate((wid) => window.turnstile.getResponse(wid), setup)).toBe(viaSelector);
+
+    const setup2 = await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.id = 'ts-el';
+      el.className = 'cf-turnstile';
+      el.setAttribute('data-sitekey', '0x4AAAAAAABC');
+      document.body.appendChild(el);
+      return window.turnstile.render(el, { sitekey: '0x4AAAAAAABC', execution: 'execute' });
+    });
+    await expect(page.locator('#ts-el [data-kiwi-widget]')).toHaveAttribute('data-state', 'pending');
+    const viaId = await page.evaluate(async () => window.turnstile.execute('ts-el'));
+    expect(viaId.length).toBeGreaterThan(10);
+    expect(await page.evaluate((wid) => window.turnstile.getResponse(wid), setup2)).toBe(viaId);
+  });
+
+  test('Turnstile execution=auto (default) still auto-solves without execute()', async ({ page }) => {
+    // Regression: execution "auto" (and the absent option) keeps the
+    // incumbent auto-solving behavior — the challenge starts at render.
+    await page.goto('/migration/turnstile.html');
+    await expect(page.locator('input[name="cf-turnstile-response"]')).not.toHaveValue('', { timeout: 60_000 });
+    const id = await page.evaluate(() => {
+      const el = document.createElement('div');
+      el.id = 'ts-auto';
+      el.className = 'cf-turnstile';
+      el.setAttribute('data-sitekey', '0x4AAAAAAABC');
+      document.body.appendChild(el);
+      return window.turnstile.render(el, { sitekey: '0x4AAAAAAABC', execution: 'auto' });
+    });
+    await page.waitForFunction((wid) => window.turnstile.getResponse(wid).length > 10, id, { timeout: 60_000 });
+    await expect(page.locator('#ts-auto [data-kiwi-widget]')).toHaveAttribute('data-state', 'done');
+  });
+
+  test('hCaptcha: getRespKey returns a distinct, stable, non-empty per-widget key, never the token', async ({ page }) => {
+    await page.goto('/migration/hcaptcha.html');
+    const token = await waitVerified(page, 'h-captcha-response');
+    const result = await page.evaluate(() => {
+      const first = document.querySelector('.h-captcha').dataset.kiwiInstance;
+      const keyNoArg = window.hcaptcha.getRespKey();
+      const keyById = window.hcaptcha.getRespKey(first);
+      const el = document.createElement('div');
+      el.id = 'hcap-2';
+      document.body.appendChild(el);
+      const id2 = window.hcaptcha.render(el, { sitekey: '10000000-aaaa-bbbb-cccc-000000000001' });
+      const key2 = window.hcaptcha.getRespKey(id2);
+      const token1 = window.hcaptcha.getResponse(first);
+      return { first, keyNoArg, keyById, id2, key2, token1 };
+    });
+    expect(result.keyNoArg).toBeTruthy();
+    expect(result.keyNoArg).toMatch(/^hkey-/);
+    expect(result.keyNoArg).toBe(result.keyById);
+    expect(result.keyNoArg).not.toBe(result.token1);
+    expect(result.key2).toBeTruthy();
+    expect(result.key2).not.toBe(result.keyNoArg);
+    expect(token).toBe(result.token1);
+  });
+
+  test('hCaptcha async execute resolves {response, key} with key === getRespKey(id)', async ({ page }) => {
+    await page.goto('/migration/hcaptcha.html');
+    await waitVerified(page, 'h-captcha-response');
+    const result = await page.evaluate(async () => {
+      const first = document.querySelector('.h-captcha').dataset.kiwiInstance;
+      const token = window.hcaptcha.getResponse(first);
+      const asyncRes = await window.hcaptcha.execute(first, { async: true });
+      const bare = await window.hcaptcha.execute(first);
+      return { token, asyncRes, bare, key: window.hcaptcha.getRespKey(first) };
+    });
+    expect(result.asyncRes).toEqual({ response: result.token, key: result.key });
+    expect(result.asyncRes.key).toBe(result.key);
+    expect(result.asyncRes.response).toBe(result.token);
+    expect(result.asyncRes.response).not.toBe(result.key);
+    expect(result.bare).toBe(result.token);
   });
 });

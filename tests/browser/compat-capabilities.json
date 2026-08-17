@@ -21,7 +21,7 @@
     "cData": true,
     "responseField": true,
     "responseFieldName": true,
-    "execution": false,
+    "execution": true,
     "language": true,
     "idempotencyKey": true
   },
@@ -30,7 +30,7 @@
     "reset": true,
     "getResponse": true,
     "execute": true,
-    "async_execute": false,
+    "async_execute": true,
     "remove": true
   },
   "siteverify": {

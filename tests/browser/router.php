@@ -13,7 +13,7 @@ declare(strict_types=1);
 $repo = dirname(__DIR__, 2); // tests/browser -> repo root
 
 require $repo.'/packages/kiwicaptcha-php/vendor/autoload.php';
-// The Siteverify e2e route (round 30) uses the REAL Symfony bundle
+// The Siteverify e2e route uses the REAL Symfony bundle
 // controller + SiteVerify stores — load the bundle's autoloader when its
 // vendor is installed (CI installs it for exactly this fixture fidelity).
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -74,7 +74,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         '6Lc_ready_explicit' => 'login',
     ];
     $scope = $sitekeyAllowlist[(string) ($body['scope'] ?? '')] ?? (string) ($body['scope'] ?? 'login');
-    // Round 31 (P1): the fixture mirrors the bundle's SERVER-OWNED
+    // The fixture mirrors the bundle's SERVER-OWNED
     // (sitekey, action) -> scope policy — the v3 browser e2e proves the
     // pair travels separately and resolves server-side.
     $sitekeyPolicy = [
@@ -105,7 +105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $tmp = tempnam(sys_get_temp_dir(), 'kiw'); 
     file_put_contents($tmp, json_encode($record->toArray()));
     rename($tmp, recordFile($challenge->nonce));
-    // Round 30 (P1): provider-compatible metadata bound at issuance —
+    // Provider-compatible metadata bound at issuance —
     // action/cData from the widget's challenge request are stored against
     // the nonce (server-owned; validated provider shapes).
     $action = isset($body['action']) && is_string($body['action']) ? $body['action'] : null;
@@ -135,7 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path === '/kiwi-captcha/siteverify')) {
-    // Round 30 (P1) e2e: the REAL SiteVerifyController against the record
+    // e2e: the REAL SiteVerifyController against the record
     // + metadata persisted at issuance (the fixture's file-based storage
     // stands in for the shared store).
     $body = json_decode((string) file_get_contents('php://input'), true);
@@ -214,7 +214,7 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     header('Cache-Control: no-store');
     $body = file_get_contents($file);
     // /kiwi-worker-stale.js serves the real worker with the solver build id
-    // rewritten (audit #53): the driver must refuse it with the controlled
+    // rewritten: the driver must refuse it with the controlled
     // kiwi:solver-mismatch state instead of accepting a stale worker.
     if ($path === '/kiwi-worker-stale.js') {
         $body = str_replace('2026-08-r1', '2026-08-r0', (string) $body);
@@ -224,11 +224,11 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     return true;
 }
 
-// Round 24: incumbent-compatibility loader + migration fixtures.
+// Incumbent-compatibility loader + migration fixtures.
 $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
 
-// Round 27 (P1): the compat endpoints go through the REAL bundle
-// controller — the previous hard-coded concat hid a production route
+// The compat endpoints go through the REAL bundle
+// controller — the hard-coded concat hid a production route
 // failure (a missing Request import broke the actual routes).
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
 if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') && is_file($symfonyAutoload)) {
@@ -255,7 +255,7 @@ if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|r
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
     $html = file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
-    // Round 30: page-level loader parameters (hl, render, onload) are
+    // Page-level loader parameters (hl, render, onload) are
     // propagated into the fixture's api.js URL — the incumbent pattern
     // puts them on the SCRIPT URL, and the fixture HTML cannot know the
     // test's query string.

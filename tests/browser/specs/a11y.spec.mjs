@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
-// Round 29-32: WCAG 2.2 AA acceptance evidence within the widget's
+// WCAG 2.2 AA acceptance evidence within the widget's
 // component scope. The functional solver behavior is covered by
 // widget.spec.mjs / security.spec.mjs; this suite is the accessibility
 // acceptance set:
@@ -10,8 +10,9 @@ import AxeBuilder from '@axe-core/playwright';
 //  - axe scans per state, light and dark
 //  - keyboard-only operation (real sequential Tab/Shift+Tab, Enter+Space)
 //  - live-region contract (exactly one widget-local status in every renderer)
-//  - responsive: TRUE 200% enlargement, 320px reflow, all four 1.4.12
-//    text-spacing conditions
+//  - responsive: 2x component font-scale enlargement (custom-property stress
+//    test; actual 200% browser zoom stays in manual qualification),
+//    320px reflow, all four 1.4.12 text-spacing conditions
 //  - reduced motion + forced colors
 //  - RTL + long-translation rendering (locale contract, 3.1.2)
 //  - pointer-target minimums (2.5.8)
@@ -34,7 +35,7 @@ function contrastRatio(a, b) {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-// Round 30: composite the badge's COMPUTED background (which may be an
+// Composite the badge's COMPUTED background (which may be an
 // rgba tint) over the ACTUAL surface behind it (the widget's computed
 // background), then contrast the COMPUTED foreground against the result.
 // The test interrogates the browser — it never hard-codes surfaces or
@@ -73,7 +74,7 @@ const AXE_RULES = [
   'label', 'link-in-text-block', 'select-name', 'valid-lang', 'document-title',
 ];
 
-test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
+test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
   test('badge contrast (WCAG 1.4.3): COMPUTED colors, light AND dark, every state >= 4.5:1 (target >= 5:1)', async ({ page }) => {
     const themes = ['light', 'dark'];
     const states = ['idle', 'solving', 'done', 'failed'];
@@ -106,7 +107,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
   });
 
   test('keyboard-only: REAL sequential navigation — Tab from a preceding control reaches Retry, Enter + Space reacquire, Tab/S-Tab traverse without trap', async ({ page }) => {
-    // Round 30: proves sequential keyboard navigation, not programmatic
+    // Proves sequential keyboard navigation, not programmatic
     // focus. The fixture wraps the widget between #kiwi-before and
     // #kiwi-after so Tab order is genuinely exercised.
     let failing = true;
@@ -236,8 +237,8 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
     expect(box.height).toBeGreaterThanOrEqual(32);
   });
 
-  test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark (round 31/32)', async ({ page }) => {
-    // Round 31/32: WCAG 1.4.11 requires UI-component boundaries and the
+  test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark', async ({ page }) => {
+    // WCAG 1.4.11 requires UI-component boundaries and the
     // focus indicator to be >= 3:1 against the adjacent surface. The test
     // COMPUTES the colors in the browser (getComputedStyle border/outline,
     // button background composited over the widget surface) — it never
@@ -337,7 +338,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
     await expect(page.locator('[data-kiwi-status]')).toHaveText('Verification complete', { timeout: 60_000 });
   });
 
-  test('semantics (round 30 P1): exactly ONE widget-local live region, in the static AND initialized markup', async ({ page }) => {
+  test('semantics: exactly ONE widget-local live region, in the static AND initialized markup', async ({ page }) => {
     await page.goto('/');
     const before = await page.evaluate(() => {
       const w = document.querySelector('[data-kiwi-widget]');
@@ -406,11 +407,14 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence (round 30-32)', () => {
     expect(reflow.liveRegion).toBe(true);
   });
 
-  test('responsive: TRUE 200% text enlargement (WCAG 1.4.4) loses no content or function', async ({ page }) => {
-    // Round 30: the widget typography derives from --kiwi-font-scale;
-    // doubling it is an actual 200% enlargement (the old test only
-    // shrank the viewport). overflow:hidden on the widget is tested
-    // explicitly — enlarged content must not be clipped by it.
+  test('responsive: 2x component font-scale enlargement loses no content or function', async ({ page }) => {
+    // Component-level custom-property stress test: the widget typography
+    // derives from --kiwi-font-scale, and doubling the custom property is
+    // a 2x component font-scale enlargement. This is NOT actual browser/
+    // user text zoom — real 200% browser zoom (WCAG 1.4.4) remains part
+    // of the manual accessibility qualification. overflow:hidden on the
+    // widget is tested explicitly — enlarged content must not be clipped
+    // by it.
     await page.setViewportSize({ width: 900, height: 900 });
     await page.goto('/');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });

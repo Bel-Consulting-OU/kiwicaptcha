@@ -16,7 +16,7 @@ Browser behavioral telemetry is a **supplement, not the security boundary** — 
 - **Server-side minimum solve duration** — a **timing-anomaly heuristic**, not a proof of human behavior: PoW is probabilistic (a valid solution can occur at counter 0) and a fast bot can wait before submitting, so the floor only rejects solves that **arrive** faster than the theoretical minimum. It is measured **server-side** with epoch-microsecond timing (issuance timestamp vs receipt time, both in microseconds in Rust and PHP) — the client-reported duration is forgeable and is used **only as telemetry**.
 - **HMAC-signed, IP-bound challenges** — the challenge records an HMAC hash of the issuing client IP, and verification compares the hash of the current request's IP (`VerifyContext.client_ip`). This is a **relay mitigation, not a guarantee**: IPs legitimately change behind NAT/proxies, and operators can disable the check.
 - **Single-use with bounded verification cost** — verification consumes the challenge, with intrinsic per-nonce attempt accounting (`max_attempts` in Rust; the PHP core's one-shot consume-on-verify model). Per-nonce caps bound repeated verification of **one** challenge; deployments must additionally **rate-limit challenge issuance** and cap **aggregate Argon2id verification concurrency** (e.g. a semaphore sized to available memory) — otherwise an attacker who mints many challenges can still drive unbounded aggregate memory-hard work. The Symfony bundle ships both (`rate_limit` per-IP issuance window and `argon2_max_concurrent_verifications`). For strict single-use under concurrency, consume the record with an atomic storage operation — the Redis stores use a Lua pending→consumed TRANSITION that keeps the record until TTL (same-result retry semantics, crash/indeterminate handling, failover guards), not a plain `GETDEL` delete.
-- **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML (as ApexMail does).
+- **Premium UI** — modern, responsive widget with native dark mode and zero external dependencies (no external JS, no iframes, no third-party hosts). The emitted markup takes an optional CSP nonce: with a nonce, `<style nonce>` / `<script nonce>` are emitted; without one, the widget still works under CSP policies that allow `'unsafe-inline'` or where the application post-processes the HTML.
 - **First-party behavioral telemetry (off by default)** — **no third-party tracking. No third-party requests. First-party behavioral signals never leave your application**: the widget collects NO hardware-capability, device-memory, or screen signals; `minimal` mode reports only aggregate widget interaction counts and `full` adds `navigator.webdriver` and at most 20 coarse 250 ms timing samples. Telemetry is a **supplementary** signal: it is client-controlled and forgeable, so it is never treated as the security boundary.
 - **Auto-tuning difficulty** — SHA-256 target bits scale with solver load; Argon2id difficulty is static (each hash is expensive).
 
@@ -107,7 +107,7 @@ use kiwicaptcha::{kiwi_widget_html, kiwi_widget_html_default};
 let html = kiwi_widget_html("/api/kcaptcha/challenge", "login", Some("your-base64-nonce"));
 
 // Without a nonce (works under CSP that allows 'unsafe-inline', or where the
-// application post-processes the HTML — as ApexMail does).
+// application post-processes the HTML).
 let html_default = kiwi_widget_html_default();
 ```
 
@@ -134,8 +134,8 @@ let mut ctx = VerifyContext {
     // Passing Some(empty_map) REJECTS the normal challenge — the verifier
     // treats a present map as authoritative, and kid 1 (or any future kid)
     // would be UnknownKid (max_kid = 0). Only rotation deployments provide
-    // a populated map such as {1 => master_secret} (audit #91), plus the
-    // revoked-kid set (audit #117).
+    // a populated map such as {1 => master_secret}, plus the
+    // revoked-kid set.
     secrets_by_kid: None,
     revoked_kids: None,
     counter: solution.counter,
@@ -147,7 +147,7 @@ let mut ctx = VerifyContext {
                                        // 0 = use only the record's floor
     expected_scope: Some("login"),     // reject cross-scope replay
     expected_region: None,             // Some("eu") for region-bound deployments
-    expected_issuer: None,             // Some("auth-gateway") to pin the issuer (audit #67)
+    expected_issuer: None,             // Some("auth-gateway") to pin the issuer
     expected_policy_version: Some(1),  // the CURRENT security-policy epoch — a record
                                        // issued under a revoked policy dies immediately
     client_ip: Some(&client_ip),       // IP binding: None + a bound record => MissingClientIp;
@@ -177,41 +177,51 @@ The full flow — issue → solve → verify → `VerifyOutcome::Valid` — is
 `examples/quickstart.rs`, which CI RUNS (`cargo test --example quickstart`),
 so the quick-start is proven to behave, not merely to compile.
 
-## Migration compatibility bridge (round 24+)
+## Migration compatibility bridge
 
-KiwiCaptcha's `/kiwi-captcha/api.js?compat=...` loader lets an incumbent
-page (reCAPTCHA v2/v3, hCaptcha, Turnstile) migrate by changing ONLY the
-provider script URL. The bridge is a **migration bridge, not a universal
-drop-in replacement** — it covers the incumbent lifecycle surface the
-migrating pages actually use, and the differences below are intentional.
+KiwiCaptcha's `/kiwi-captcha/api.js?compat=...` loader is the migration
+surface for incumbent pages (reCAPTCHA v2/v3, hCaptcha, Turnstile). Many
+incumbent front ends can begin migration by replacing the provider script
+URL while retaining their existing widget markup; backend verification and
+provider-specific policy logic may require the documented migration
+changes. The bridge is a **migration bridge, not a universal drop-in
+replacement** — it covers the incumbent lifecycle surface the migrating
+pages actually use, and the differences below are intentional.
 
 - **Covered surface**: `render` (element / string id / selector, with
   `onload=` + `render=explicit` loader semantics), `reset`, `getResponse`,
   `execute` (widget id, or the omitted-id first-widget default),
   `remove`, `ready`, `isExpired`, provider response-field aliases, and
   the configurable Turnstile `response-field-name`.
-- **Omitted-id semantics (round 29)**: per Google's API, `reset()`,
+- **Omitted-id semantics**: per Google's API, `reset()`,
   `getResponse()` and `execute()` with NO argument target the FIRST
   created widget — not a no-op and not the hidden-v3 path.
 - **v3 (score) is intentionally NOT emulated**: Google v3's backend
-  contract carries a fabricated risk score; KiwiCaptcha will not invent
-  one. A v3 installation migrates its score/action rules onto
+  contract carries a provider-specific risk score; KiwiCaptcha will not
+  invent one. A v3 installation migrates its score/action rules onto
   KiwiCaptcha's **adaptive-risk policy** — the sitekey maps to a scope
   with its own pre-issue and post-solve risk decisions, and the
   application validates the expected action server-side exactly as it
-  validates any scope. `execute(sitekey, {action})` renders a hidden
-  v3 widget that transmits the REAL public sitekey and the requested
-  action independently in the challenge request; the SERVER resolves the
-  (sitekey, action) pair to the security scope — an unknown action is
-  rejected server-side — and the widget resolves with the real Kiwi
-  token; the server-side verification then applies the scope's policy.
+  validates any scope. The real sitekey and the requested action are
+  transmitted independently in the challenge request —
+  `execute(sitekey, {action})` renders a hidden v3 widget that sends
+  both; the SERVER resolves the (sitekey, action) pair to the security
+  scope, rejecting unknown actions server-side, and the widget resolves
+  with the real Kiwi token; the server-side verification then applies
+  the scope's policy.
 - **Turnstile subset**: `render` (with `action`/`cData` accepted and
-  mapped to the Kiwi scope, and `response-field-name` honored),
-  `reset`, `getResponse`, `execute`, `remove`, `ready`, `isExpired`.
-  The Siteverify endpoint accepts Cloudflare's `idempotency_key`,
-  `action` and `cdata` fields; Kiwi's deterministic consumed-result
-  machinery is the idempotency guarantee (a retried `response` always
-  resolves to the SAME stored outcome).
+  mapped to the Kiwi scope), `reset`, `getResponse`, `remove`, `ready`,
+  `isExpired`; `execute` (explicit/deferred execution) and the
+  configurable `response-field-name` response-field control are
+  supported.
+- **Siteverify**: accepts `secret`, `response`, optional `remoteip`, and
+  optional `idempotency_key`. `action` and `cdata` are bound at challenge
+  issuance and returned from trusted server-side metadata after
+  successful verification — a verification request can never supply
+  them. An ordinary replay without the matching idempotency identity
+  resolves to timeout-or-duplicate; a retry of the same logical request
+  (matching idempotency key and response) returns the identical
+  canonical stored response.
 - **Honest limits**: server-side v3 score validation, exact Cloudflare
   token shapes, and provider-specific edge behaviors outside the surface
   above are not emulated — pages relying on them must migrate those
@@ -273,7 +283,7 @@ in-memory default outside `test`/`dev`.
 `kiwi_widget_html(endpoint, scope, csp_nonce)` emits `<style nonce="...">` and
 `<script nonce="...">` when a nonce is supplied; without a nonce the widget
 still works under CSP that allows `'unsafe-inline'`, or where the application
-post-processes the HTML (as ApexMail does).
+post-processes the HTML.
 
 **WebAssembly requires `'wasm-unsafe-eval'`** — compiling the embedded WASM
 solver is a dynamic code-execution operation, so a strict CSP3 policy must
@@ -323,7 +333,7 @@ Argon2id difficulty is capped at 10 bits.
 
 GitHub Actions is the source of truth for test status: Rust (fmt, clippy with
 `-D warnings`, tests, wasm32 build), PHP 8.1–8.4 (composer validation +
-PHPUnit), Symfony 6.4/7.x (container compilation + KernelBrowser), real-Redis
+PHPUnit), Symfony 6.4/7.x/8.x (container compilation + KernelBrowser), real-Redis
 concurrency (consumed-transition atomicity, tokenized leases, rate-limit caps) and a
 cross-language compatibility suite that runs **in BOTH directions — PHP
 issues → Rust verifies, and Rust issues → PHP verifies — for both

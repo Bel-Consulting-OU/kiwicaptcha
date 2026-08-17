@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Round-8 security audits #25, #27, #28 + Round-9 audits #41, #53, #54, #55
-// + Round-10 audits #62 (no wasm-downgrade fallback), #66 (fetch timeout),
-// #77 (narrow request shape), #78 (host-header independence).
+// Security invariants: postMessage boundary, origin validation, calibration
+// floor, BFCache recovery, failure recovery, request binding, solver version
+// coupling, no wasm-downgrade fallback, fetch timeout, host-header
+// independence, narrow request shape.
 //
 // This file is canonical at packages/kiwicaptcha-wasm/tests/browser/specs/
 // and MUST be copied into the public repo's tests/browser/specs/ during
@@ -63,7 +64,7 @@ async function serveWidgetPage(page, attrs) {
   await page.goto('/widget-test');
 }
 
-test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
+test.describe('KiwiCaptcha postMessage boundary', () => {
   test('driver has NO parent-page postMessage and NO unguarded message listeners (static source assertion)', () => {
     const src = driverSource();
     const worker = workerSource();
@@ -73,7 +74,7 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
       // with a wildcard target origin.
       expect(
         source.match(/parent\.postMessage\s*\(/g) ?? [],
-        `${name}: parent.postMessage must not exist (audit #28)`
+        `${name}: parent.postMessage must not exist`
       ).toEqual([]);
       expect(
         source.match(/postMessage\([^)]*["']\*["']/g) ?? [],
@@ -147,7 +148,7 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
       worker.postMessage({ v: 1, type: 'solve', prefix: 'p' });
       await sleep(150);
 
-      // Round 23: `ready` now requires the wasm glue's protocol id to
+      // `ready` requires the wasm glue's protocol id to
       // match — in this harness the standalone worker cannot load the
       // glue, so its legitimate startup outcome is the controlled
       // protocol-mismatch failure (a handshake message, never a reply to
@@ -167,7 +168,7 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
     expect(guardResult.repliesAtGuard, 'no rogue message may produce a worker reply').toBe(0);
     // In a wasm-less harness the worker must fail closed (protocol
     // mismatch); in a real embedding it announces ready with the protocol
-    // id (audit #53/23). Either startup outcome is correct — a rogue
+    // id. Either startup outcome is correct — a rogue
     // message reply is not.
     expect(
       guardResult.handshakeSeen || guardResult.failClosedSeen,
@@ -176,7 +177,7 @@ test.describe('KiwiCaptcha postMessage boundary (audit #28)', () => {
   });
 });
 
-test.describe('KiwiCaptcha origin validation (audit #27)', () => {
+test.describe('KiwiCaptcha origin validation', () => {
   test('challenge fetch uses redirect:"error" and a redirecting endpoint fails closed (static + runtime)', async ({ page }) => {
     const src = driverSource();
     expect(src).toMatch(/credentials\s*:\s*["']same-origin["']/);
@@ -184,7 +185,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
 
     // redirect:"error" rejects ANY redirect — even a same-origin one. The
     // widget must fail closed (no token, idle state) instead of following
-    // the redirect (audit #55: the error path resets to idle; bounded
+    // the redirect (the error path resets to idle; bounded
     // retries may re-attempt, so at least one request is expected).
     const challenged = [];
     await page.route('**/challenge', async (route) => {
@@ -240,7 +241,7 @@ test.describe('KiwiCaptcha origin validation (audit #27)', () => {
   });
 });
 
-test.describe('KiwiCaptcha calibration floor (audit #25)', () => {
+test.describe('KiwiCaptcha calibration floor', () => {
   const FORBIDDEN = ['mKib', 'targetBits', 'capability', 'benchmark', 'benchmarkMs', 'maxHashes'];
 
   test('challenge request body carries only scope (SHA-256) and never difficulty-suggesting parameters (static + runtime)', async ({ page }) => {
@@ -290,7 +291,7 @@ test.describe('KiwiCaptcha calibration floor (audit #25)', () => {
   });
 });
 
-test.describe('KiwiCaptcha BFCache recovery (audit #54)', () => {
+test.describe('KiwiCaptcha BFCache recovery', () => {
   test('driver registers a persisted-pageshow reset and keeps the token in memory only (static source assertion)', () => {
     const src = driverSource();
     expect(src).toMatch(/addEventListener\(\s*["']pageshow["']\s*,\s*function\s*\(e\)/);
@@ -332,7 +333,7 @@ test.describe('KiwiCaptcha BFCache recovery (audit #54)', () => {
   });
 });
 
-test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
+test.describe('KiwiCaptcha failure recovery', () => {
   test('a rejected challenge response leaves the widget idle with no token (rejected-token recovery)', async ({ page }) => {
     let calls = 0;
     await page.route('**/challenge', async (route) => {
@@ -375,7 +376,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
     expect(token.length).toBeGreaterThan(0);
   });
 
-  test('after settling idle the widget reacquires via the Retry button (round-29 click activation)', async ({ page }) => {
+  test('after settling idle the widget reacquires via the Retry button (click activation)', async ({ page }) => {
     let failing = true;
     await page.route('**/challenge', async (route) => {
       if (failing) {
@@ -393,7 +394,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
       timeout: 30_000,
     });
     failing = false;
-    // Round 29 (WCAG 2.5.2): the Retry BUTTON is the reacquire control
+    // (WCAG 2.5.2): the Retry BUTTON is the reacquire control
     // (click activation); the passive widget is not a pointer target.
     await page.locator('[data-kiwi-retry]').click();
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
@@ -403,7 +404,7 @@ test.describe('KiwiCaptcha failure recovery (audit #55)', () => {
   });
 });
 
-test.describe('KiwiCaptcha request binding (audit #41)', () => {
+test.describe('KiwiCaptcha request binding', () => {
   test('data-kiwi-request-binding is forwarded in the challenge body and echoed as a hidden input next to the token (static + runtime)', async ({ page }) => {
     const src = driverSource();
     // Static: the driver reads the attribute and includes request_binding
@@ -439,13 +440,13 @@ test.describe('KiwiCaptcha request binding (audit #41)', () => {
   });
 });
 
-test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
+test.describe('KiwiCaptcha solver version coupling', () => {
   test('worker handshake carries the solver build id and the driver validates it (static source assertion)', () => {
     const src = driverSource();
     const worker = workerSource();
 
     // The PROTOCOL id constant must exist in the driver and the worker,
-    // and both must agree (audit round 23: renamed from 'build id' — it
+    // and both must agree (renamed from 'build id' — it
     // proves protocol compatibility; exact identity is the release
     // SHA256SUMS/SRI/attestation chain).
     const driverProtocolId = src.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
@@ -488,11 +489,11 @@ test.describe('KiwiCaptcha solver version coupling (audit #53)', () => {
   });
 });
 
-test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
+test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
     // Exactly TWO fetch calls exist in the whole driver: the loader-glue
-    // fetch (round 26 — the external /api.js path fetches its own source
+    // fetch (the external /api.js path fetches its own source
     // to hand the wasm glue to the Blob worker) and the challenge fetch.
     // There can be no "retry with a weaker challenge" code path to fetch
     // a second challenge.
@@ -545,7 +546,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
     // ?csp=strict blocks wasm compilation AND blob workers (script-src
     // without blob:/wasm-unsafe-eval), so the argon2id challenge cannot be
     // solved at all — there is no pure-JS argon2id fallback and NO
-    // main-thread Argon2 (round-13/14 invariant: the memory-hard solver
+    // main-thread Argon2 (invariant: the memory-hard solver
     // never runs in the page). The driver must enter the controlled
     // kiwi:worker-unavailable state — a single challenge request, because
     // retrying a permanent worker condition would only spam the endpoint —
@@ -571,7 +572,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback (audit #62)', () => {
   });
 });
 
-test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
+test.describe('KiwiCaptcha challenge fetch timeout', () => {
   test('the fetch is abortable: AbortController, 15 s default, data-kiwi-fetch-timeout-ms override, bounded worker solve (static source assertion)', () => {
     const src = driverSource();
     expect(src).toMatch(/AbortController/);
@@ -616,7 +617,7 @@ test.describe('KiwiCaptcha challenge fetch timeout (audit #66)', () => {
   });
 });
 
-test.describe('KiwiCaptcha host-header independence (audit #78)', () => {
+test.describe('KiwiCaptcha host-header independence', () => {
   test('same-origin enforcement uses window.location.origin only — never location.host/hostname or a Host header (static source assertion)', () => {
     const src = driverSource();
     // The endpoint check compares ORIGINS (the page's own scheme+host+port),
@@ -633,11 +634,11 @@ test.describe('KiwiCaptcha host-header independence (audit #78)', () => {
   });
 });
 
-test.describe('KiwiCaptcha narrow request shape (audit #77)', () => {
+test.describe('KiwiCaptcha narrow request shape', () => {
   test('the challenge POST body is built from exactly the documented fields (static source assertion)', () => {
     const src = driverSource();
     // scope enters via the object literal; algorithm/request_binding via
-    // assignments; round 30 adds the OPTIONAL provider-metadata fields
+    // assignments; the OPTIONAL provider-metadata fields
     // (action/cdata/sitekey) — a field outside this closed set would have
     // to appear here.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);

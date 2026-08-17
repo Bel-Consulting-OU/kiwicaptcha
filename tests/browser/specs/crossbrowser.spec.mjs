@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// Round 30 (item 19): curated three-engine functional smoke suite — the
+// Curated three-engine functional smoke suite — the
 // solver/lifecycle critical paths in Chromium + Firefox + WebKit (run via
 // playwright.a11y.config.mjs's projects alongside the accessibility
 // evidence). Argon2id is deliberately included on every engine: WASM,
@@ -13,7 +13,7 @@ async function waitToken(page, field = 'kiwi__token') {
   return token.inputValue();
 }
 
-test.describe('KiwiCaptcha cross-browser critical paths (round 30)', () => {
+test.describe('KiwiCaptcha cross-browser critical paths', () => {
   test('capability matrix (item 31): every declared flag is real on the live API surface', async ({ page }) => {
     // The source-controlled declaration is the single machine-readable
     // answer to "what does compatible mean in this release" — this test
@@ -179,7 +179,7 @@ test.describe('KiwiCaptcha cross-browser critical paths (round 30)', () => {
   });
 
   test('RTL/localization smoke: hl=ar forces dir=rtl on the visible widget', async ({ page }) => {
-    // Round 31 (item 9): ONE semantic root — the locale attributes land on
+    // ONE semantic root — the locale attributes land on
     // the visible inner [data-kiwi-widget]; the provider wrapper stays
     // semantically neutral.
     await page.goto('/migration/recaptcha-v2.html?hl=ar');
@@ -188,7 +188,7 @@ test.describe('KiwiCaptcha cross-browser critical paths (round 30)', () => {
     await expect(page.locator('.g-recaptcha')).toHaveAttribute('dir', '', { timeout: 5_000 }).catch(() => {});
   });
 
-  test('compat accessibility: ONE semantic root per provider — the visible widget carries role/lang/dir/aria-label, the wrapper stays neutral (round 31 P1)', async ({ page }) => {
+  test('compat accessibility: ONE semantic root per provider — the visible widget carries role/lang/dir/aria-label, the wrapper stays neutral', async ({ page }) => {
     // Item 9: compatibility rendering must not produce a localized outer
     // group wrapping a second inner group with a stale English label.
     const providers = [

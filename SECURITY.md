@@ -40,7 +40,7 @@ assessment. We ask for a 90-day coordinated-disclosure window from the
 report before public disclosure, unless the issue is already being
 exploited.
 
-## Release and branch governance (audit round 20)
+## Release and branch governance
 
 - **`refs/heads/main` is protected by an active branch ruleset**: pull
   requests are required (1 approving review, stale-review dismissal,
@@ -66,7 +66,7 @@ exploited.
   verifies every published release: `immutable: true` via the API and
   `gh release verify`.
 
-  **Immutability enforcement chain (audit round 25 — no silent gaps).**
+  **Immutability enforcement chain (no silent gaps).**
   The plain `GITHUB_TOKEN` has NO `administration` scope, so the
   admin-gated immutable-releases endpoints are unreadable by the release
   workflow's job identity (403 "not accessible by integration"). The
@@ -240,7 +240,7 @@ counters, risk-v1 state, calibration buckets, admission leases) is a
   validity so consumed-state guards outlive validity + clock skew +
   failover margin. On a replica-less server a configured barrier fails
   closed by design — `wait_replicas` is a hard durability contract.
-  **Promotion invariant (audit round 15):** `WAIT N` proves that at least
+  **Promotion invariant:** `WAIT N` proves that at least
   N replicas acknowledged the write — it does NOT constrain WHICH replicas
   your failover manager may promote. For replay-safe promotion, operators
   must either set the acknowledgement threshold to cover EVERY eligible

@@ -1,7 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-// Round 29 (accessibility evidence): the accessibility acceptance suite
-// runs across Chromium + Firefox + WebKit — the WCAG 2.2 AA evidence set
+// The accessibility acceptance suite runs across Chromium + Firefox + WebKit — the WCAG 2.2 AA evidence set
 // (axe/static checks, keyboard-only scenarios, live-region assertions,
 // 200% resize, 320px reflow, text spacing, reduced motion, forced colors,
 // RTL + long translations). The functional solver/privacy specs stay on
