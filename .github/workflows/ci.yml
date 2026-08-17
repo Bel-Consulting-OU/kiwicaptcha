@@ -578,7 +578,7 @@ jobs:
           bash build.sh
           mkdir -p /tmp/repro-a
           cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget.css /tmp/repro-a/
-      - uses: actions/upload-artifact@b9b4353db5b367ef36ad3d23dd51ac46b6e0cf32 # v5.0.1 (node24)
+      - uses: actions/upload-artifact@v5 # v5.0.1 (node24)
         with:
           name: repro-a
           path: /tmp/repro-a
@@ -606,7 +606,7 @@ jobs:
           bash build.sh
           mkdir -p /tmp/repro-b
           cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget.css /tmp/repro-b/
-      - uses: actions/upload-artifact@b9b4353db5b367ef36ad3d23dd51ac46b6e0cf32 # v5.0.1 (node24)
+      - uses: actions/upload-artifact@v5 # v5.0.1 (node24)
         with:
           name: repro-b
           path: /tmp/repro-b
@@ -619,11 +619,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v5.0.1 (node24)
+      - uses: actions/download-artifact@v5 # v5.0.1 (node24)
         with:
           name: repro-a
           path: /tmp/repro-a
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v5.0.1 (node24)
+      - uses: actions/download-artifact@v5 # v5.0.1 (node24)
         with:
           name: repro-b
           path: /tmp/repro-b

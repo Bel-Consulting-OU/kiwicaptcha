@@ -1370,6 +1370,10 @@
           || (options && options.cData ? String(options.cData) : null);
         if (kiwiAction) reqBody.action = kiwiAction;
         if (kiwiCdata) reqBody.cdata = kiwiCdata;
+        // Round 30 (item 14): the public sitekey travels with the request
+        // so the server resolves (sitekey, action) -> security scope —
+        // the client never chooses protected scope names.
+        if (options && options.sitekey) reqBody.sitekey = String(options.sitekey);
         var timeoutAttr = W.getAttribute("data-kiwi-fetch-timeout-ms") || container.getAttribute("data-kiwi-fetch-timeout-ms") || "";
         var fetchTimeoutMs = parseInt(timeoutAttr, 10);
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
@@ -1816,8 +1820,14 @@
         // Round 29 (P3): Turnstile's configurable response field
         // (response-field-name / params["response-field-name"]) — the
         // default stays the provider-named field.
-        responseField: (params && typeof params["response-field-name"] === "string" && params["response-field-name"])
-          || el.getAttribute("data-response-field-name") || COMPAT_FIELD,
+        // Round 30 (item 12): Turnstile's response-field=false keeps the
+        // internal Kiwi token field and SKIPS the provider alias input;
+        // response-field-name overrides the alias name.
+        responseField: (params && params["response-field"] === false)
+          || el.getAttribute("data-response-field") === "false"
+          ? false
+          : ((params && typeof params["response-field-name"] === "string" && params["response-field-name"])
+            || el.getAttribute("data-response-field-name") || COMPAT_FIELD),
         // Round 29 (WCAG 3.1.2): grecaptcha.render(el, {lang: "de"}) or
         // data-kiwi-lang on the incumbent container.
         lang: (params && typeof params.lang === "string" && params.lang)
@@ -1827,7 +1837,12 @@
         action: (params && typeof params.action === "string" && params.action)
           || el.getAttribute("data-action") || undefined,
         cData: (params && typeof params.cData === "string" && params.cData)
-          || el.getAttribute("data-cdata") || undefined
+          || el.getAttribute("data-cdata") || undefined,
+        // Round 30 (items 12+14): Turnstile language + the public sitekey
+        // (server-owned scope resolution).
+        language: (params && typeof params.language === "string" && params.language)
+          || el.getAttribute("data-language") || undefined,
+        sitekey: sitekey || undefined
       });
       if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
       return id || 0;
