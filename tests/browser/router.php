@@ -74,6 +74,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         '6Lc_ready_explicit' => 'login',
     ];
     $scope = $sitekeyAllowlist[(string) ($body['scope'] ?? '')] ?? (string) ($body['scope'] ?? 'login');
+    // Round 31 (P1): the fixture mirrors the bundle's SERVER-OWNED
+    // (sitekey, action) -> scope policy — the v3 browser e2e proves the
+    // pair travels separately and resolves server-side.
+    $sitekeyPolicy = [
+        '6Lc_v3_sitekey_a' => ['default_scope' => 'login', 'actions' => ['checkout' => 'commerce_high_value']],
+    ];
+    $sitekey = isset($body['sitekey']) && is_string($body['sitekey']) ? $body['sitekey'] : null;
+    if ($sitekey !== null && isset($sitekeyPolicy[$sitekey])) {
+        $actionKey = isset($body['action']) && is_string($body['action']) ? $body['action'] : '';
+        if ($actionKey !== '' && isset($sitekeyPolicy[$sitekey]['actions'][$actionKey])) {
+            $scope = $sitekeyPolicy[$sitekey]['actions'][$actionKey];
+        } elseif ($actionKey === '') {
+            $scope = $sitekeyPolicy[$sitekey]['default_scope'];
+        } else {
+            http_response_code(422);
+            echo '{"error":{"code":"UNKNOWN_ACTION"}}';
+
+            return true;
+        }
+    }
     $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
     $record = $issueStorage->find($challenge->nonce);
     if ($record === null) {
@@ -174,7 +194,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
     @unlink(recordFile($nonce));
     $verifier = new Verifier($storage);
-    $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, 'login', (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    $scope = (string) ($body['scope'] ?? 'login');
+    $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
     echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
 
     return true;
@@ -230,7 +251,7 @@ if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') &
 
     return true;
 }
-if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|hcaptcha|turnstile|turnstile-meta)\.html$~', $path, $m) === 1) {
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|recaptcha-v3|hcaptcha|turnstile|turnstile-meta)\.html$~', $path, $m) === 1) {
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
     $html = file_get_contents(__DIR__.'/migration/'.$m[1].'.html');

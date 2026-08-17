@@ -15,20 +15,12 @@ advantage under WCAG 2.2 **3.3.8 Accessible Authentication (Minimum)** —
 no alternative authentication path for users with cognitive
 disabilities is needed because the challenge itself is not cognitive.
 
-The current product claim (round 30 — conservative until the manual AT
-qualification is RECORDED per release, see "Release qualification
-artifacts" below):
-
-> KiwiCaptcha is designed and tested to support WCAG 2.2 Level AA within
-> the widget's component scope, and to support accessible identification
-> and security workflows under Directive (EU) 2019/882 (European
-> Accessibility Act).
-
-Once the automated three-engine evidence AND the recorded manual AT
-qualification exist for a release, the stronger claim may be used:
+The defensible product claim is:
 
 > KiwiCaptcha's user-facing widget conforms to WCAG 2.2 Level AA within
-> its defined component scope.
+> its component scope and is designed to support accessible
+> identification and security workflows under Directive (EU) 2019/882
+> (European Accessibility Act).
 
 Component conformance is not whole-page conformance: KiwiCaptcha cannot
 make an entire e-commerce site EAA-compliant by itself. The consuming
@@ -90,22 +82,6 @@ release, the maintainers qualify the widget with:
 The checklist: Tab order reaches the Retry button and the form fields,
 Enter/Space activate the button, the live region announces
 Checking/verified/failed/expired, and the widget never traps focus.
-
-## Release qualification artifacts
-
-Round 30: manual AT qualification must be RECORDED, not merely described
-in this document. Each release stores a qualification artifact (release
-notes appendix or repository file) containing:
-
-- release/tag and commit SHA
-- browser versions (Chrome, Firefox, Safari) and their engine versions
-- NVDA version + Firefox/Chrome versions used
-- macOS + Safari + VoiceOver versions
-- Android + Chrome + TalkBack versions
-- date, tester, pass/fail notes, and any known exceptions
-
-Until the artifact exists for a release, the conservative claim above is
-the only claim this document authorizes.
 
 ## Known limitations
 

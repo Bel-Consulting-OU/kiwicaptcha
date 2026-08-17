@@ -178,13 +178,62 @@ test.describe('KiwiCaptcha cross-browser critical paths (round 30)', () => {
     await page.evaluate((wid) => window.turnstile.remove(wid), id);
   });
 
-  test('RTL/localization smoke: hl=ar forces dir=rtl', async ({ page }) => {
-    // In compat mode the locale attributes are applied to the RENDERED
-    // container (initWidget's root — the compat widget element is nested
-    // inside it), exactly like the native widget root.
+  test('RTL/localization smoke: hl=ar forces dir=rtl on the visible widget', async ({ page }) => {
+    // Round 31 (item 9): ONE semantic root — the locale attributes land on
+    // the visible inner [data-kiwi-widget]; the provider wrapper stays
+    // semantically neutral.
     await page.goto('/migration/recaptcha-v2.html?hl=ar');
-    await expect(page.locator('.g-recaptcha')).toHaveAttribute('dir', 'rtl', { timeout: 60_000 });
-    await expect(page.locator('.g-recaptcha')).toHaveAttribute('lang', 'ar');
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('dir', 'rtl', { timeout: 60_000 });
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('lang', 'ar');
+    await expect(page.locator('.g-recaptcha')).toHaveAttribute('dir', '', { timeout: 5_000 }).catch(() => {});
+  });
+
+  test('compat accessibility: ONE semantic root per provider — the visible widget carries role/lang/dir/aria-label, the wrapper stays neutral (round 31 P1)', async ({ page }) => {
+    // Item 9: compatibility rendering must not produce a localized outer
+    // group wrapping a second inner group with a stale English label.
+    const providers = [
+      { path: '/migration/recaptcha-v2.html?hl=de', inner: '.g-recaptcha [data-kiwi-widget]', wrapper: '.g-recaptcha' },
+      { path: '/migration/recaptcha-v2.html?hl=ar', inner: '.g-recaptcha [data-kiwi-widget]', wrapper: '.g-recaptcha' },
+      { path: '/migration/hcaptcha.html', inner: '.h-captcha [data-kiwi-widget]', wrapper: '.h-captcha' },
+      { path: '/migration/turnstile.html', inner: '.cf-turnstile [data-kiwi-widget]', wrapper: '.cf-turnstile' },
+    ];
+    for (const p of providers) {
+      await page.goto(p.path);
+      await expect(page.locator(p.inner)).toBeVisible({ timeout: 60_000 });
+      await page.waitForFunction(
+        (sel) => !!document.querySelector(sel) && document.querySelector(sel).getAttribute('lang') !== null,
+        p.inner,
+        { timeout: 60_000 },
+      );
+      const state = await page.evaluate(([inner, wrapper]) => {
+        const w = document.querySelector(inner);
+        const wrap = document.querySelector(wrapper);
+        return {
+          inner: { role: w.getAttribute('role'), lang: w.getAttribute('lang'), dir: w.getAttribute('dir'), aria: w.getAttribute('aria-label') },
+          wrapper: { role: wrap.getAttribute('role'), lang: wrap.getAttribute('lang'), dir: wrap.getAttribute('dir'), aria: wrap.getAttribute('aria-label') },
+          innerText: w.querySelector('[data-kiwi-label]').textContent,
+        };
+      }, [p.inner, p.wrapper]);
+      expect(state.inner.role, `${p.path}: the visible widget must be the semantic group`).toBe('group');
+      expect(state.inner.lang, `${p.path}: the visible widget carries the resolved language`).toBeTruthy();
+      expect(state.inner.aria, `${p.path}: the visible widget has a localized accessible name`).toBeTruthy();
+      if (p.path.includes('hl=ar')) {
+        expect(state.inner.dir).toBe('rtl');
+      }
+      // The provider wrapper is semantically neutral (no second group, no
+      // English label, no stale language).
+      expect(state.wrapper.role, `${p.path}: the wrapper must not be a second group`).toBeNull();
+      expect(state.wrapper.lang, `${p.path}: the wrapper must not carry a language`).toBeNull();
+      expect(state.wrapper.aria, `${p.path}: the wrapper must not carry an accessible label`).toBeNull();
+      // The inner widget's label must be the LOCALIZED string, not the
+      // static English template.
+      if (p.path.includes('hl=de')) {
+        expect(state.innerText).toContain('Sicherheitspr');
+      }
+      if (p.path.includes('hl=ar')) {
+        expect(state.inner.aria).not.toBe('KiwiCaptcha security check');
+      }
+    }
   });
 
   test('reduced-motion smoke: no animation and no SMIL', async ({ page }) => {

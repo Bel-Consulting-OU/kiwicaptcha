@@ -107,6 +107,104 @@ test.describe('KiwiCaptcha migration compatibility (round 24)', () => {
     expect(replayBody['error-codes']).toContain('timeout-or-duplicate');
   });
 
+  test('reCAPTCHA v3: execute(sitekey, {action}) transmits the REAL pair and the server-owned policy resolves the scope (round 31 P1)', async ({ page, request }) => {
+    // The critical regression: the hidden v3 render previously passed the
+    // ACTION as the sitekey, disconnecting the server-owned policy. The
+    // challenge request must carry sitekey AND action independently, the
+    // server must resolve (sitekey, action) -> commerce_high_value, and an
+    // unknown action must be refused.
+    const bodies = [];
+    const statuses = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      const response = await route.fetch();
+      statuses.push({ action: bodies[bodies.length - 1].action ?? null, status: response.status() });
+      await route.fulfill({ response });
+    });
+    await page.goto('/migration/recaptcha-v3.html');
+    // Capture the token from the execute PROMISE (the hidden holder is
+    // torn down on completion by design, so getResponse() afterwards is
+    // empty).
+    const token = await page.evaluate(async () => {
+      const t = await window.grecaptcha.execute('6Lc_v3_sitekey_a', { action: 'checkout' });
+      return t;
+    });
+    expect(token.length).toBeGreaterThan(10);
+
+    const v3 = bodies.find((b) => b.sitekey === '6Lc_v3_sitekey_a');
+    expect(v3, 'the challenge body must carry the real sitekey').toBeTruthy();
+    expect(v3.action, 'the challenge body must carry the requested action independently').toBe('checkout');
+    // The client scope is the public sitekey (the design): the SERVER maps
+    // (sitekey, action) to the protected scope.
+    expect(v3.scope).toBe('6Lc_v3_sitekey_a');
+    const verified = await request.post('/verify', { data: { token, scope: 'commerce_high_value' } });
+    const body = await verified.json();
+    expect(body.ok, 'the server-resolved scope must be what verifies').toBe(true);
+
+    // Unknown action -> REFUSED by the server policy (the 422 must reach
+    // the client; the raw body is intentionally not leaked into the
+    // widget's error message).
+    const refused = await page.evaluate(async () => {
+      try {
+        await window.grecaptcha.execute('6Lc_v3_sitekey_a', { action: 'admin' });
+        return 'resolved';
+      } catch (e) {
+        return String(e && e.message);
+      }
+    });
+    const adminRefusals = statuses.filter((s2) => s2.action === 'admin');
+    expect(adminRefusals.length).toBeGreaterThan(0);
+    expect(adminRefusals.every((s2) => s2.status >= 400), 'the unknown action must be refused server-side').toBe(true);
+    expect(refused).not.toBe('resolved');
+  });
+
+  test('reCAPTCHA v2: Retry after terminal failure preserves the FULL security configuration (round 31 P1)', async ({ page }) => {
+    // A mapped sitekey -> sensitive scope must survive the Retry path:
+    // reacquisition reinitializes from the PRESERVED options, never a
+    // blank initWidget(W) that falls back to the default scope.
+    let failing = true;
+    const scopes = [];
+    await page.route('**/challenge', async (route) => {
+      const body = route.request().postDataJSON() ?? {};
+      if (failing) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+      } else {
+        scopes.push(body.scope);
+        await route.continue();
+      }
+    });
+    await page.goto('/migration/recaptcha-v2.html');
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 60_000 });
+    // The initial render's scope identity (the container's data-kiwi-scope,
+    // which is the mapped sitekey — the fixture allowlist maps it to
+    // 'login' server-side; a downgrade would show a DIFFERENT scope here).
+    const containerScope = await page.evaluate(() => document.querySelector('.g-recaptcha').dataset.sitekey || document.querySelector('.g-recaptcha').dataset.kiwiScope);
+    failing = false;
+    await page.locator('.g-recaptcha [data-kiwi-retry]').click();
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    // The retry's challenge MUST carry the same scope identity as the
+    // initial render — a blank re-init would fall back to "login".
+    expect(scopes.length).toBeGreaterThan(0);
+    for (const scope of scopes) {
+      expect(scope).toBe(containerScope);
+    }
+  });
+
+  test('reCAPTCHA v2: expiry -> Retry keyboard reacquisition preserves host form fields (round 31 P1)', async ({ page }) => {
+    await page.goto('/migration/recaptcha-v2-ttl.html');
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    // Fill unrelated host-form data BEFORE expiry.
+    await page.fill('input[name="email"]', 'user@example.com');
+    await expect(page.locator('input[name="g-recaptcha-response"]')).toHaveValue('', { timeout: 30_000 });
+    // The expired state exposes the Retry button.
+    await expect(page.locator('.g-recaptcha [data-kiwi-retry]')).toBeVisible();
+    await page.locator('.g-recaptcha [data-kiwi-retry]').focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('input[name="g-recaptcha-response"]')).not.toHaveValue('', { timeout: 60_000 });
+    // Host form state untouched by the reacquisition.
+    expect(await page.inputValue('input[name="email"]')).toBe('user@example.com');
+  });
+
   test('reCAPTCHA v2 explicit mode: dynamically inserted containers NEVER auto-render until an explicit render() (round 30 P1)', async ({ page }) => {
     // render=explicit means the application controls rendering — the
     // MutationObserver must not auto-render a later .g-recaptcha node.
