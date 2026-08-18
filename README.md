@@ -214,13 +214,18 @@ pages actually use, and the differences below are intentional.
   `isExpired`; `execute` (explicit/deferred execution) and the
   configurable `response-field-name` response-field control are
   supported.
+- **Token lifetime**: Turnstile documents 300s validity; KiwiCaptcha's
+  default challenge lifetime is 120s — for close parity, configure
+  `challenge_ttl_secs: 300` globally or `ttl_secs: 300` on the migrated
+  sitekey profile.
 - **Siteverify**: accepts `secret`, `response`, optional `remoteip`, and
   optional `idempotency_key`. `action` and `cdata` are bound at challenge
   issuance and returned from trusted server-side metadata after
   successful verification — a verification request can never supply
   them. An ordinary replay without the matching idempotency identity
   resolves to timeout-or-duplicate; a retry of the same logical request
-  (matching idempotency key and response) returns the identical
+  (matching idempotency key, response, and verification-relevant
+  remoteip) returns the identical
   canonical stored response.
 - **Honest limits**: server-side v3 score validation, exact Cloudflare
   token shapes, and provider-specific edge behaviors outside the surface
