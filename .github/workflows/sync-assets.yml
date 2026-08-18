@@ -28,16 +28,20 @@ jobs:
         env:
           WASM_OPT_STRICT: "1"
         run: bash packages/kiwicaptcha-wasm/build.sh
-      - name: commit refreshed assets when they differ
+      - name: package the built assets for the refresh commit
+        # The protected-main ruleset correctly refuses automated pushes, so
+        # the workflow delivers the CI-built assets as an artifact; a
+        # maintainer commits them locally (the byte-parity gate then passes
+        # because the committed assets equal the CI build).
         run: |
           set -euo pipefail
-          if ! git diff --exit-code --quiet -- packages/kiwicaptcha-wasm/assets packages/kiwicaptcha/resources packages/kiwicaptcha/integrations/symfony/Resources/public; then
-            git config user.name "kiwicaptcha-assets"
-            git config user.email "assets@kiwicaptcha.invalid"
-            git add packages/kiwicaptcha-wasm/assets packages/kiwicaptcha/resources packages/kiwicaptcha/integrations/symfony/Resources/public
-            git commit -m "chore(assets): refresh release assets from the CI build"
-            git push origin main
-            echo "release assets refreshed from the CI build — create the release tag now"
-          else
-            echo "release assets are current — no changes"
-          fi
+          mkdir -p /tmp/refreshed/packages/kiwicaptcha-wasm/assets /tmp/refreshed/packages/kiwicaptcha/resources /tmp/refreshed/packages/kiwicaptcha/integrations/symfony/Resources/public
+          cp packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js packages/kiwicaptcha-wasm/assets/widget-driver.js packages/kiwicaptcha-wasm/assets/widget.css packages/kiwicaptcha-wasm/assets/kiwi-worker.js /tmp/refreshed/packages/kiwicaptcha-wasm/assets/
+          cp packages/kiwicaptcha/resources/kiwicaptcha-wasm.js packages/kiwicaptcha/resources/widget-driver.js packages/kiwicaptcha/resources/widget.css /tmp/refreshed/packages/kiwicaptcha/resources/
+          cp packages/kiwicaptcha/integrations/symfony/Resources/public/kiwicaptcha-wasm.js packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js packages/kiwicaptcha/integrations/symfony/Resources/public/widget.css /tmp/refreshed/packages/kiwicaptcha/integrations/symfony/Resources/public/
+          echo "refreshed assets staged at /tmp/refreshed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: refreshed-assets
+          path: /tmp/refreshed
+          if-no-files-found: error
