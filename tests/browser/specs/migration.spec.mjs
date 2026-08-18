@@ -684,6 +684,68 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     expect(result.bare).toBe(result.token);
   });
 
+  test('hCaptcha async execute(undefined) resolves {response, key} against the FIRST created widget', async ({ page }) => {
+    // widgetID is OPTIONAL in the incumbent API: with no argument the
+    // async form targets the first created widget and resolves the
+    // {response, key} pair — key === getRespKey() on the same default.
+    await page.goto('/migration/hcaptcha.html');
+    await waitVerified(page, 'h-captcha-response');
+    const result = await page.evaluate(async () => {
+      const token = window.hcaptcha.getResponse();
+      const asyncRes = await window.hcaptcha.execute(undefined, { async: true });
+      return { token, asyncRes, key: window.hcaptcha.getRespKey() };
+    });
+    expect(result.asyncRes).toEqual({ response: result.token, key: result.key });
+    expect(result.asyncRes.key).toBe(result.key);
+    expect(result.asyncRes.response).toBe(result.token);
+    expect(result.asyncRes.response).not.toBe(result.key);
+  });
+
+  test('hCaptcha async execute(undefined) rejects with the STRING "missing-captcha" when no widget exists', async ({ page }) => {
+    // A page that loads the hCaptcha compat API but never renders a
+    // widget: the fixture's .h-captcha container is removed before the
+    // driver's implicit render runs, so no first widget exists and the
+    // async form rejects with the incumbent's "missing-captcha" string —
+    // never an Error object.
+    await page.addInitScript(() => {
+      document.addEventListener('DOMContentLoaded', () => {
+        const el = document.querySelector('.h-captcha');
+        if (el) el.remove();
+      });
+    });
+    await page.goto('/migration/hcaptcha.html');
+    const result = await page.evaluate(async () => {
+      try {
+        await window.hcaptcha.execute(undefined, { async: true });
+        return { rejected: false, code: null };
+      } catch (code) {
+        return { rejected: true, code };
+      }
+    });
+    expect(result.rejected).toBe(true);
+    expect(typeof result.code).toBe('string');
+    expect(result.code).toBe('missing-captcha');
+  });
+
+  test('hCaptcha async execute(non-resolving target) rejects with the STRING "invalid-captcha-id"', async ({ page }) => {
+    // A string that is not a widget id, element id or container selector
+    // rejects with the incumbent's "invalid-captcha-id" string — never
+    // an Error object — even while a widget exists.
+    await page.goto('/migration/hcaptcha.html');
+    await waitVerified(page, 'h-captcha-response');
+    const result = await page.evaluate(async () => {
+      try {
+        await window.hcaptcha.execute('definitely-not-a-widget', { async: true });
+        return { rejected: false, code: null };
+      } catch (code) {
+        return { rejected: true, code };
+      }
+    });
+    expect(result.rejected).toBe(true);
+    expect(typeof result.code).toBe('string');
+    expect(result.code).toBe('invalid-captcha-id');
+  });
+
   test('hCaptcha async execute rejects with the STRING "network-error" when the challenge endpoint fails', async ({ page }) => {
     // Mapping: a non-2xx challenge response (status >= 400), an aborted
     // fetch (AbortError) and a fetch transport TypeError all reject with
