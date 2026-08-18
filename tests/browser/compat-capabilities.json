@@ -35,7 +35,7 @@
   },
   "siteverify": {
     "missing_vs_invalid_secret": true,
-    "remoteip_required": true,
+    "remoteip_required_when_ip_bound": true,
     "idempotency_key": true,
     "action_cdata_server_bound": true,
     "legacy_get": false

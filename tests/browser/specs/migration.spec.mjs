@@ -25,7 +25,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     await expect(page.locator('#out')).toHaveText('cb:' + token.slice(0, 8));
   });
 
-  test('reCAPTCHA v2: widget ids + getResponse + REAL explicit render (string id, element, selector)', async ({ page }) => {
+  test('reCAPTCHA v2: widget ids + getResponse resolve to a real widget', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2.html');
     const token = await waitVerified(page);
     const id = await page.evaluate(() => {
@@ -39,9 +39,10 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2: omitted widget id defaults to the first created widget', async ({ page }) => {
-    // Google's API: reset()/getResponse()/execute() with NO id target the
-    // FIRST created widget. Kiwi requires an explicit id/element
-    // (no argument produces no reset / empty response).
+    // The omitted id targets the FIRST created widget (the incumbent
+    // providers' documented default): reset()/getResponse()/execute()
+    // with no argument operate on that widget, and reset() reacquires a
+    // fresh response.
     await page.goto('/migration/recaptcha-v2.html');
     const token = await waitVerified(page);
     const result = await page.evaluate(async () => {
@@ -60,9 +61,9 @@ test.describe('KiwiCaptcha migration compatibility', () => {
 
   test('reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders', async ({ page }) => {
     // The fixture is the DOCUMENTED integration pattern (onload +
-    // render=explicit) with only the provider URL changed. Without the
-    // fix, render=explicit still auto-rendered (double widgets) and
-    // onload never ran.
+    // render=explicit) with only the provider URL changed. The invariant:
+    // render=explicit suppresses auto-render (exactly ONE widget) and the
+    // onload callback runs.
     await page.goto('/migration/recaptcha-v2-explicit.html');
     await expect(page.locator('#out')).toHaveText(/^cb:/, { timeout: 60_000 });
     const state = await page.evaluate(() => ({
@@ -108,11 +109,9 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v3: execute(sitekey, {action}) transmits the REAL pair and the server-owned policy resolves the scope', async ({ page, request }) => {
-    // The critical regression: the hidden v3 render passed the
-    // ACTION as the sitekey, disconnecting the server-owned policy. The
-    // challenge request must carry sitekey AND action independently, the
-    // server must resolve (sitekey, action) -> commerce_high_value, and an
-    // unknown action must be refused.
+    // The invariant: the challenge request must carry sitekey AND action
+    // independently, the server must resolve (sitekey, action) ->
+    // commerce_high_value, and an unknown action must be refused.
     const bodies = [];
     const statuses = [];
     await page.route('**/challenge', async (route) => {
@@ -256,10 +255,9 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2: grecaptcha.render("id", params) and render(element, params) actually render', async ({ page }) => {
-    // The earlier "explicit render" test never CALLED
-    // grecaptcha.render() — it inspected the auto-rendered widget. The
-    // compat API must resolve string ids/selectors through the same target
-    // resolver as the native API and return a working widget id.
+    // The invariant: the explicit render path must actually call
+    // grecaptcha.render() — string ids/selectors resolve through the same
+    // target resolver as the native API and return a working widget id.
     await page.goto('/migration/recaptcha-v2.html');
     await waitVerified(page);
     const result = await page.evaluate(async () => {
@@ -294,8 +292,9 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure', async ({ page }) => {
-    // The fixture's data-error-callback was parsed but never
-    // invoked — fail()/workerUnavailable()/solverMismatch() now call it.
+    // The invariant: the provider error callback fires exactly once on
+    // terminal failure (fail()/workerUnavailable()/solverMismatch() all
+    // invoke it).
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
     });
@@ -380,7 +379,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     // explicit render() inside ready() immediately starts an Argon worker
     // that needs the glue (no inline script exists on the external-loader
     // page). The api.js response is DELIBERATELY delayed so the race is
-    // observable: without the fix the worker starts glue-less and fails.
+    // observable.
     await page.route('**/api.js?*', async (route) => {
       await new Promise((r) => setTimeout(r, 1500));
       await route.continue();
@@ -520,10 +519,8 @@ test.describe('KiwiCaptcha migration compatibility', () => {
 
   test('the visible .kiwi-widget carries the done state', async ({ page }) => {
     // The state attribute must live on the INNER
-    // .kiwi-widget (the stylesheet keys the pulse/success/failure styling
-    // and Retry visibility on .kiwi-widget[data-state=...]) — the outer
-    // incumbent wrapper took the state while the widget stayed
-    // frozen at idle.
+    // .kiwi-widget — the stylesheet keys the pulse/success/failure styling
+    // and Retry visibility on .kiwi-widget[data-state=...].
     await page.goto('/migration/recaptcha-v2.html');
     await waitVerified(page);
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done');
@@ -630,8 +627,8 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('Turnstile execution=auto (default) still auto-solves without execute()', async ({ page }) => {
-    // Regression: execution "auto" (and the absent option) keeps the
-    // incumbent auto-solving behavior — the challenge starts at render.
+    // execution "auto" (and the absent option) keeps the incumbent
+    // auto-solving behavior — the challenge starts at render.
     await page.goto('/migration/turnstile.html');
     await expect(page.locator('input[name="cf-turnstile-response"]')).not.toHaveValue('', { timeout: 60_000 });
     const id = await page.evaluate(() => {
@@ -685,5 +682,72 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     expect(result.asyncRes.response).toBe(result.token);
     expect(result.asyncRes.response).not.toBe(result.key);
     expect(result.bare).toBe(result.token);
+  });
+
+  test('hCaptcha async execute rejects with the STRING "network-error" when the challenge endpoint fails', async ({ page }) => {
+    // Mapping: a non-2xx challenge response (status >= 400), an aborted
+    // fetch (AbortError) and a fetch transport TypeError all reject with
+    // the incumbent's "network-error" string — an Error object is never
+    // surfaced through the async form.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    await page.goto('/migration/hcaptcha.html');
+    const result = await page.evaluate(async () => {
+      const first = document.querySelector('.h-captcha').dataset.kiwiInstance;
+      try {
+        await window.hcaptcha.execute(first, { async: true });
+        return { rejected: false, code: null };
+      } catch (code) {
+        return { rejected: true, code };
+      }
+    });
+    expect(result.rejected).toBe(true);
+    expect(typeof result.code).toBe('string');
+    expect(result.code).toBe('network-error');
+  });
+
+  test('hCaptcha async execute rejects with the STRING "challenge-error" on a malformed challenge payload', async ({ page }) => {
+    // Mapping: a 200 response whose body is not parseable JSON is a
+    // challenge-content failure (the payload never yields a challenge) ->
+    // "challenge-error"; downgraded challenges and exhausted solves map
+    // the same way.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{not-json' });
+    });
+    await page.goto('/migration/hcaptcha.html');
+    const result = await page.evaluate(async () => {
+      const first = document.querySelector('.h-captcha').dataset.kiwiInstance;
+      try {
+        await window.hcaptcha.execute(first, { async: true });
+        return { rejected: false, code: null };
+      } catch (code) {
+        return { rejected: true, code };
+      }
+    });
+    expect(result.rejected).toBe(true);
+    expect(typeof result.code).toBe('string');
+    expect(result.code).toBe('challenge-error');
+  });
+
+  test('hCaptcha BARE execute still rejects with an Error object on failure', async ({ page }) => {
+    // The error-code normalization applies ONLY to the async form — the
+    // bare (non-async) execute keeps the native Error-object rejection.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    await page.goto('/migration/hcaptcha.html');
+    const result = await page.evaluate(async () => {
+      const first = document.querySelector('.h-captcha').dataset.kiwiInstance;
+      try {
+        await window.hcaptcha.execute(first);
+        return { rejected: false, isError: false, message: '' };
+      } catch (err) {
+        return { rejected: true, isError: err instanceof Error, message: String(err && err.message) };
+      }
+    });
+    expect(result.rejected).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(result.message).toContain('Challenge failed');
   });
 });

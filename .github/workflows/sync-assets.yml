@@ -6,8 +6,10 @@ name: sync-release-assets
 # macOS and Linux toolchains), so assets that change with source must be
 # refreshed by a CI (Linux) build before tagging. Run this workflow after
 # any change to the wasm crate, the driver, the worker or the stylesheet.
-# It builds strictly and commits the refreshed assets to main when they
-# differ; then create the release tag.
+# It builds strictly and uploads the refreshed assets as a CI artifact;
+# a maintainer commits them locally (the byte-parity gate then passes
+# because the committed assets equal the CI build), then create the
+# release tag.
 on:
   workflow_dispatch:
 

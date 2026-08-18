@@ -1,7 +1,7 @@
 name: Regenerate canonical assets
 
-# Audit round 19: the committed browser assets must be byte-identical to
-# what the release pipeline produces. wasm-opt output is machine-dependent
+# The committed browser assets must be byte-identical to what the release
+# pipeline produces. wasm-opt output is machine-dependent
 # (thread-count/parallel-scheduling sensitive), so the canonical bytes are
 # generated in the SAME controlled runner environment as the release
 # (ubuntu-latest, pinned toolchain 1.96.0, pinned wasm-bindgen, verified
