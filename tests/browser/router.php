@@ -29,6 +29,7 @@ use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 
 $secret = '0123456789abcdef0123456789abcdef';
+$GLOBALS['kiwi_secret'] = $secret;
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
 // php -S re-includes this router per request, so in-process state is lost —
@@ -58,6 +59,603 @@ function writeCapture(string $name, string $rawBody): void
     $tmp = tempnam(sys_get_temp_dir(), 'kiwc');
     file_put_contents($tmp, json_encode(['body' => $rawBody, 'at' => time()]));
     rename($tmp, captureFile($name));
+}
+// ── Chaining fixture (tests/browser/specs/chaining.spec.mjs) ────────────
+// The chain state of the chained-challenge fixture: php -S re-includes the
+// router per request, so the transactional chain state (chain records +
+// obligation mappings) persists in ONE temp file, mirroring the bundle's
+// Redis machine (available -> reserved(short lease) -> issued(stage2Nonce)
+// -> verified(stage2Nonce) — verified TERMINAL, obligation cleared
+// atomically). The chaining fixture is a FILE-BACKED stand-in for the
+// bundle's RedisChainedChallengeStateStore — same outcome strings, same
+// strict v2 record shape.
+function chainStateFile(): string
+{
+    return sys_get_temp_dir().'/kiwicaptacha-chain-state.json';
+}
+
+/**
+ * The chained-challenge state store of the fixture: the transactional
+ * machine persisted to one temp file (the strict v2 schema, the
+ * obligation index {obligationId => chainId}, the SHORT owner-scoped
+ * lease bounded by the record's own remaining TTL).
+ */
+final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore
+{
+    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed'];
+    private const CHAINABLE = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
+
+    /** @var array<string, array<string, mixed>> */
+    private array $chains = [];
+    /** @var array<string, string> */
+    private array $obligations = [];
+
+    public function __construct()
+    {
+        $this->load();
+    }
+
+    public function __destruct()
+    {
+        $this->save();
+    }
+
+    private function load(): void
+    {
+        $file = chainStateFile();
+        $raw = is_file($file) ? (string) file_get_contents($file) : '';
+        $data = json_decode($raw, true);
+        $now = time();
+        $this->chains = [];
+        $this->obligations = [];
+        if (!is_array($data)) {
+            return;
+        }
+        foreach (($data['chains'] ?? []) as $id => $record) {
+            if (is_array($record) && isset($record['expiresAt']) && (int) $record['expiresAt'] > $now) {
+                $this->chains[(string) $id] = $record;
+            }
+        }
+        foreach (($data['obligations'] ?? []) as $id => $chainId) {
+            if (isset($this->chains[(string) $chainId])) {
+                $this->obligations[(string) $id] = (string) $chainId;
+            }
+        }
+    }
+
+    private function save(): void
+    {
+        $tmp = tempnam(sys_get_temp_dir(), 'kiwc');
+        file_put_contents($tmp, json_encode(['chains' => $this->chains, 'obligations' => $this->obligations]));
+        rename($tmp, chainStateFile());
+    }
+
+    private function live(string $chainId): ?array
+    {
+        $record = $this->chains[$chainId] ?? null;
+        if ($record === null) {
+            return null;
+        }
+        if ((int) $record['expiresAt'] <= time()) {
+            unset($this->chains[$chainId]);
+
+            return null;
+        }
+
+        return $record;
+    }
+
+    private static function record(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $expiresAt): array
+    {
+        return [
+            'v' => 2,
+            'stage1Nonce' => $stage1Nonce,
+            'scope' => $scope,
+            'obligationId' => $obligationId,
+            'requiredAction' => $requiredAction,
+            'requiredRank' => \KiwiCaptcha\Risk\RiskAction::from($requiredAction)->rank(),
+            'policyVersion' => $policyVersion,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => $requestBinding,
+            'expiresAt' => $expiresAt,
+        ];
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
+    {
+        if ($requiredAction === null || !in_array($requiredAction, self::CHAINABLE, true)) {
+            throw new InvalidArgumentException('a chainable requiredAction is required');
+        }
+        $this->chains[$chainId] = self::record($chainId, hash('sha256', $chainId), $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, time() + max(1, $ttlSecs));
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        $this->chains[$chainId] = self::record($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, time() + max(1, $ttlSecs));
+        $this->obligations[$obligationId] = $chainId;
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        $existing = $this->obligations[$obligationId] ?? null;
+        if ($existing !== null) {
+            $record = $this->live($existing);
+            if ($record !== null) {
+                if ($requiredRank > (int) $record['requiredRank']) {
+                    $this->chains[$existing]['requiredRank'] = $requiredRank;
+                    $this->chains[$existing]['requiredAction'] = $requiredAction;
+                }
+
+                return $existing;
+            }
+            unset($this->obligations[$obligationId]);
+        }
+        $this->chains[$chainId] = self::record($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $expiresAt);
+        $this->obligations[$obligationId] = $chainId;
+
+        return $chainId;
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        $chainId = $this->obligations[$obligationId] ?? null;
+        if ($chainId === null || $this->live($chainId) === null) {
+            unset($this->obligations[$obligationId]);
+
+            return null;
+        }
+
+        return $chainId;
+    }
+
+    public function read(string $chainId): ?array
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return null;
+        }
+        unset($record['v']);
+
+        return $record;
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        $now = time();
+        if ($record['state'] === 'issued') {
+            return 'issued';
+        }
+        if ($record['state'] === 'verified') {
+            return 'verified';
+        }
+        if ($record['state'] === 'completed') {
+            return 'completed';
+        }
+        if ($record['state'] === 'reserved') {
+            if ($record['owner'] === $ownerToken) {
+                return 'retry';
+            }
+            if ((int) $record['leaseUntil'] > $now) {
+                return 'busy';
+            }
+            $this->chains[$chainId]['owner'] = $ownerToken;
+            $this->chains[$chainId]['leaseUntil'] = $now + min(max(1, $leaseSecs), max(1, (int) $record['expiresAt'] - $now));
+
+            return 'taken_over';
+        }
+        $this->chains[$chainId]['state'] = 'reserved';
+        $this->chains[$chainId]['owner'] = $ownerToken;
+        $this->chains[$chainId]['leaseUntil'] = $now + min(max(1, $leaseSecs), max(1, (int) $record['expiresAt'] - $now));
+
+        return 'available';
+    }
+
+    public function release(string $chainId, string $ownerToken): void
+    {
+        $record = $this->live($chainId);
+        if ($record === null || $record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
+            return;
+        }
+        $this->chains[$chainId]['state'] = 'available';
+        $this->chains[$chainId]['owner'] = null;
+        $this->chains[$chainId]['leaseUntil'] = null;
+    }
+
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'reserved') {
+            if ($record['owner'] !== $ownerToken) {
+                return 'not_owner';
+            }
+            $this->chains[$chainId]['state'] = 'issued';
+            $this->chains[$chainId]['stage2Nonce'] = $stage2Nonce;
+            $this->chains[$chainId]['owner'] = null;
+            $this->chains[$chainId]['leaseUntil'] = null;
+
+            return 'issued_new';
+        }
+        if ($record['state'] === 'issued' || $record['state'] === 'completed') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'issued_same' : 'conflict';
+        }
+        if ($record['state'] === 'verified') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
+        }
+
+        return 'not_owner';
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'verified') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->chains[$chainId]['state'] = 'verified';
+        if (($this->obligations[(string) $record['obligationId']] ?? null) === $chainId) {
+            unset($this->obligations[(string) $record['obligationId']]);
+        }
+
+        return 'verified_new';
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return false;
+        }
+        if (($record['state'] !== 'issued' && $record['state'] !== 'completed') || $record['stage2Nonce'] !== $expectedStage2Nonce) {
+            return false;
+        }
+        $this->chains[$chainId]['state'] = 'available';
+        $this->chains[$chainId]['owner'] = null;
+        $this->chains[$chainId]['leaseUntil'] = null;
+        $this->chains[$chainId]['stage2Nonce'] = null;
+
+        return true;
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        if (($this->obligations[$obligationId] ?? null) === $chainId) {
+            unset($this->obligations[$obligationId]);
+        }
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        $record = $this->live($chainId);
+        if ($record === null || $record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
+            return null;
+        }
+        $this->chains[$chainId]['state'] = 'completed';
+        $this->chains[$chainId]['stage2Nonce'] = $stage2Nonce;
+        $this->chains[$chainId]['owner'] = null;
+        $this->chains[$chainId]['leaseUntil'] = null;
+
+        return $this->read($chainId);
+    }
+}
+
+/**
+ * The fixture's authoritative transaction-binding resolver: the
+ * authoritative binding of a transaction IS the container's
+ * data-kiwi-request-binding value (the server-attested transaction id the
+ * fixture derives from the request itself — the same value at stage-1 and
+ * stage-2). A malformed value is refused; null = unbound.
+ */
+final class FixtureBindingAuthority implements \BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface
+{
+    public function resolve(?\Symfony\Component\HttpFoundation\Request $request, string $scope, ?string $presentedBinding): ?string
+    {
+        if ($presentedBinding === null || $presentedBinding === '') {
+            return null;
+        }
+        if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $presentedBinding) !== 1) {
+            throw new \InvalidArgumentException('malformed presented binding');
+        }
+
+        return $presentedBinding;
+    }
+}
+
+/**
+ * Rebuild the EXACT issuance response of an already-issued challenge from
+ * its stored record (the bundle controller's rebuildIssuanceResponse
+ * mapping — the response shape is camelCase, the record shape snake_case).
+ */
+function rebuildChallengeResponse(array $recordData): array
+{
+    return [
+        'nonce' => $recordData['nonce'],
+        'challenge' => $recordData['challenge'],
+        'salt' => $recordData['salt'],
+        'algorithm' => $recordData['algorithm'],
+        'mKib' => $recordData['m_kib'],
+        't' => $recordData['t'],
+        'p' => $recordData['p'],
+        'targetBits' => $recordData['target_bits'],
+        'ttlSecs' => $recordData['expires_at'] - $recordData['issued_at'],
+        'minDurationMs' => $recordData['min_duration_ms'],
+        'prefix' => $recordData['prefix'],
+    ];
+}
+
+/**
+ * The chained /challenge handler (mirror of the bundle controller's
+ * stage-2 gate): validates the presented ticket against the CURRENT
+ * transaction's obligation (a foreign ticket -> 422), AUTO-RESUMES an
+ * open chain when no ticket is presented, recovers/rearms the issued
+ * stage-2 challenge, claims the SHORT owner-scoped reservation and mints
+ * the stronger argon stage (markIssued idempotent). Returns
+ * [status, body] or null when the request is an ORDINARY stage-1 flow.
+ */
+function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
+{
+    if (($body['chain_ticket'] ?? null) === null && $ticket === null) {
+        $ticket = null;
+    }
+    $chainStore = new ChainFileStore();
+    $authority = new FixtureBindingAuthority();
+    $chainService = new \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService($chainStore, $GLOBALS['kiwi_secret'], 300, 15, $authority);
+    $presented = isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
+    try {
+        $binding = $authority->resolve(null, $scope, $presented);
+    } catch (\InvalidArgumentException) {
+        return [422, ['error' => ['code' => 'INVALID_REQUEST_BINDING', 'message' => 'The request binding does not match this transaction.']]];
+    }
+    $requirement = null;
+    try {
+        $requirement = $chainService->findOpenRequirement($scope, $binding ?? '', 1);
+    } catch (\Throwable) {
+        return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+    }
+
+    $chainId = null;
+    if (is_string($ticket) && $ticket !== '') {
+        $payload = $chainService->verify($ticket);
+        if ($payload === null) {
+            return [422, ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid or expired.']]];
+        }
+        if ($requirement === null || $requirement->chainId !== (string) $payload['chainId']) {
+            $direct = null;
+            try {
+                $direct = $chainService->requirementFor((string) $payload['chainId']);
+            } catch (\Throwable) {
+                return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+            }
+            if ($direct === null || $direct->scope !== $scope || $direct->requestBinding !== ($binding ?? '')) {
+                return [422, ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket does not match this transaction.']]];
+            }
+            $requirement = $direct;
+        }
+        $chainId = (string) $payload['chainId'];
+    } elseif ($requirement !== null) {
+        // AUTO-RESUME: no ticket, open obligation -> stage 2.
+        $chainId = $requirement->chainId;
+    }
+
+    if ($chainId === null) {
+        return null; // ordinary stage-1 flow
+    }
+
+    // STAGE-2 STATE ENTRY: recover / rearm / reserve.
+    $owner = bin2hex(random_bytes(16));
+    for ($i = 0; $i < 3; $i++) {
+        if ($requirement->state === 'verified') {
+            $recovered = recoverIssuedResponse((string) $requirement->stage2Nonce);
+            if ($recovered !== null) {
+                return [200, $recovered];
+            }
+
+            return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+        }
+        if ($requirement->state === 'issued') {
+            $inspection = inspectIssuedStage2($chainId, (string) $requirement->stage2Nonce, $chainService);
+            if ($inspection !== null) {
+                return $inspection;
+            }
+        }
+        $reservation = $chainService->reserveStage2($chainId, $owner);
+        if ($reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Available
+            || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::TakenOver
+            || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Retry
+        ) {
+            break;
+        }
+        if ($reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Busy) {
+            return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'A challenge for this chain ticket is already in progress. Try again later.']]];
+        }
+        if ($reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Issued
+            || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Verified
+        ) {
+            try {
+                $requirement = $chainService->requirementFor($chainId);
+            } catch (\Throwable) {
+                return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+            }
+            if ($requirement === null) {
+                return [422, ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']]];
+            }
+            continue;
+        }
+
+        return [422, ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']]];
+    }
+
+    // MINT THE STRONGER STAGE-2 (argon) + idempotent markIssued.
+    $stage2 = mintChallenge($scope, $binding, PoWAlgorithm::Argon2id);
+    if ($stage2 === null) {
+        return [500, ['error' => 'mint failed']];
+    }
+    $issued = $chainService->markIssued($chainId, $owner, $stage2['nonce']);
+    if (!in_array($issued, [\BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::IssuedNew, \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::IssuedSame, \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::VerifiedSame], true)) {
+        return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+    }
+
+    return [200, $stage2];
+}
+
+/**
+ * The issued-stage-2 inspection of the fixture: pending record -> recover
+ * the EXACT same challenge; missing record -> rearm for a fresh stage-2
+ * mint (never a stage-1); returns [status, body] or null when the chain
+ * was rearmed (the caller proceeds to the reservation + mint).
+ */
+function inspectIssuedStage2(string $chainId, string $stage2Nonce, \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainService): ?array
+{
+    $record = challengeRecordOf($stage2Nonce);
+    if ($record === null) {
+        try {
+            $rearmed = $chainService->rearmIssued($chainId, $stage2Nonce);
+        } catch (\Throwable) {
+            return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+        }
+        if (!$rearmed) {
+            return [503, ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable.']]];
+        }
+
+        return null;
+    }
+
+    return [200, rebuildChallengeResponse($record)];
+}
+
+/** The persisted record of a nonce (the record file), or null. */
+function challengeRecordOf(string $nonce): ?array
+{
+    $file = recordFile($nonce);
+    if (!is_file($file)) {
+        return null;
+    }
+    $raw = json_decode((string) file_get_contents($file), true);
+    if (!is_array($raw)) {
+        return null;
+    }
+
+    return $raw;
+}
+
+/** The recovered issuance response of an issued challenge, or null. */
+function recoverIssuedResponse(string $stage2Nonce): ?array
+{
+    $record = challengeRecordOf($stage2Nonce);
+    if ($record === null) {
+        return null;
+    }
+
+    return rebuildChallengeResponse($record);
+}
+
+/**
+ * Mint a challenge (sha256-8 stage-1 or the stronger argon stage-2) and
+ * persist its record file, mirroring the bundle's /challenge issuance.
+ */
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm): ?array
+{
+    $config = new Config(
+        secretKey: $GLOBALS['kiwi_secret'],
+        algorithm: $algorithm,
+        ttlSecs: 120,
+        mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
+        t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
+        p: 1,
+        targetBits: 8,
+        argon2TargetBits: 4,
+        minDurationMs: 0,
+    );
+    $storage = new ArrayStorage();
+    $issuer = new Issuer($config, $storage, now: static fn (): int => time());
+    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
+    $record = $storage->find($challenge->nonce);
+    if ($record === null) {
+        return null;
+    }
+    $tmp = tempnam(sys_get_temp_dir(), 'kiw');
+    file_put_contents($tmp, json_encode($record->toArray()));
+    rename($tmp, recordFile($challenge->nonce));
+
+    return $challenge->toArray();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
+    // The chaining form-submission fixture: verifies a solved token and
+    // resolves the transaction disposition — a stage-1 solve opens the
+    // chain (CHAIN_REQUIRED + the one-shot ticket), a stage-2 solve (with
+    // the ticket) VERIFIES the chain (the obligation is cleared).
+    $body = json_decode((string) file_get_contents('php://input'), true);
+    header('Content-Type: application/json');
+    $token = is_array($body) && isset($body['token']) && is_string($body['token']) ? $body['token'] : '';
+    $chainTicket = is_array($body) && isset($body['chain_ticket']) && is_string($body['chain_ticket']) ? $body['chain_ticket'] : null;
+    $scope = is_array($body) && isset($body['scope']) && is_string($body['scope']) ? $body['scope'] : 'login';
+    $binding = is_array($body) && isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
+    $nonce = (string) (explode('.', (string) base64_decode($token, true))[0] ?? '');
+    if ($nonce === '' || !is_file(recordFile($nonce))) {
+        echo json_encode(['ok' => false, 'code' => 'record_not_found']);
+
+        return true;
+    }
+    $storage = new ArrayStorage();
+    $storage->store(\KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true)));
+    $outcome = (new Verifier($storage))->verify($token, $GLOBALS['kiwi_secret'], $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'));
+    if (!$outcome->isOk()) {
+        echo json_encode(['ok' => false, 'code' => $outcome->code()]);
+
+        return true;
+    }
+    $chainStore = new ChainFileStore();
+    $chainService = new \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService($chainStore, $GLOBALS['kiwi_secret'], 300, 15, new FixtureBindingAuthority());
+    if (is_string($chainTicket) && $chainTicket !== '') {
+        // STAGE-2 SOLVE: the chain is marked verified (the obligation is
+        // cleared atomically) and the consumed record is retired.
+        $payload = $chainService->verify($chainTicket);
+        if ($payload === null) {
+            echo json_encode(['ok' => false, 'code' => 'invalid_ticket']);
+
+            return true;
+        }
+        $requirement = $chainService->findOpenRequirement($scope, $binding ?? '', 1);
+        if ($requirement === null || $requirement->chainId !== (string) $payload['chainId']) {
+            echo json_encode(['ok' => false, 'code' => 'ticket_mismatch']);
+
+            return true;
+        }
+        $verified = $chainService->markVerified((string) $payload['chainId'], $nonce);
+        if (!in_array($verified, [\BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::VerifiedNew, \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::VerifiedSame], true)) {
+            echo json_encode(['ok' => false, 'code' => 'chain_verification_refused']);
+
+            return true;
+        }
+        @unlink(recordFile($nonce));
+        echo json_encode(['ok' => true, 'chain_ended' => true]);
+
+        return true;
+    }
+    // STAGE-1 SOLVE: the reassessment demands the stronger argon stage —
+    // the chain opens (one obligation per transaction).
+    $requirement = $chainService->requireStage2($nonce, $scope, $binding ?? '', 1, \KiwiCaptcha\Risk\RiskAction::Argon32, time() + 300);
+    $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+    echo json_encode(['ok' => false, 'chain_required' => true, 'chain_ticket' => $ticket]);
+
+    return true;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && preg_match('~^/capture/([A-Za-z0-9_-]{1,64})$~', $path, $m) === 1) {
@@ -132,6 +730,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         } else {
             http_response_code(422);
             echo '{"error":{"code":"UNKNOWN_ACTION"}}';
+
+            return true;
+        }
+    }
+    // CHAINING FIXTURE (?chaining=1): the transaction-obligation stage-2
+    // gate — a presented chain_ticket must match the CURRENT
+    // transaction's obligation (a foreign ticket -> 422), an open
+    // obligation AUTO-RESUMES the chain WITHOUT a ticket (never issue
+    // stage 1), the issued stage-2 challenge is recovered/rearmed, and
+    // the stronger argon stage is minted + durably issued (markIssued).
+    // Without ?chaining=1 the ticket is ignored (a deployment without
+    // risk.chaining — the risk-v2 evidence specs rely on that).
+    $chainTicket = isset($body['chain_ticket']) && is_string($body['chain_ticket']) ? $body['chain_ticket'] : null;
+    if (($_GET['chaining'] ?? '') === '1') {
+        $chained = chainedChallenge($body, $scope, $chainTicket);
+        if ($chained !== null) {
+            http_response_code($chained[0]);
+            header('Cache-Control: no-store, private, max-age=0');
+            echo json_encode($chained[1]);
 
             return true;
         }
@@ -348,6 +965,7 @@ if ($path === '/' || $path === '/index.html') {
     // (without it the driver never sends client_context).
     $endpointQuery = [];
     if (($_GET['decoy'] ?? '') === '1') $endpointQuery[] = 'decoy=1';
+    if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
