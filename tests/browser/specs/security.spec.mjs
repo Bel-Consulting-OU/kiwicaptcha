@@ -266,9 +266,11 @@ test.describe('KiwiCaptcha calibration floor', () => {
     });
     expect(bodies).toHaveLength(1);
     const body = bodies[0];
-    // The coarse risk-v2 client_context descriptor is always present; it
-    // never carries difficulty-suggesting parameters.
-    expect(Object.keys(body).sort()).toEqual(['client_context', 'scope']);
+    // Without the data-kiwi-risk-context="coarse" opt-in the coarse
+    // risk-v2 client_context descriptor is NEVER sent (telemetry and
+    // client context are off by default); the request never carries
+    // difficulty-suggesting parameters.
+    expect(Object.keys(body).sort()).toEqual(['scope']);
     for (const field of FORBIDDEN) {
       expect(body, `the challenge request must not suggest ${field}`).not.toHaveProperty(field);
     }
@@ -285,7 +287,7 @@ test.describe('KiwiCaptcha calibration floor', () => {
     await page.goto('/?algorithm=argon2id');
     await expect.poll(() => bodies.length).toBeGreaterThanOrEqual(1);
     const body = bodies[0];
-    expect(Object.keys(body).sort()).toEqual(['algorithm', 'client_context', 'scope']);
+    expect(Object.keys(body).sort()).toEqual(['algorithm', 'scope']);
     expect(body.algorithm).toBe('argon2id');
     for (const field of FORBIDDEN) {
       expect(body, `the argon2id request must not suggest ${field}`).not.toHaveProperty(field);
@@ -643,7 +645,8 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     // assignments; the risk-v2 evidence fields (chain_ticket /
     // client_context / decoy_field / honeypot) and the OPTIONAL
     // provider-metadata fields (action/cdata/sitekey) — a field outside
-    // this closed set would have to appear here.
+    // this closed set would have to appear here. client_context is sent
+    // only under the explicit data-kiwi-risk-context="coarse" opt-in.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
     expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
       'reqBody.algorithm',
@@ -658,7 +661,7 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     ]);
   });
 
-  test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} plus the coarse client_context (runtime)', async ({ page }) => {
+  test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} — no client_context without the opt-in (runtime)', async ({ page }) => {
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});
@@ -674,10 +677,10 @@ test.describe('KiwiCaptcha narrow request shape', () => {
       timeout: 60_000,
     });
     expect(bodies).toHaveLength(1);
-    expect(Object.keys(bodies[0]).sort()).toEqual(['algorithm', 'client_context', 'request_binding', 'scope']);
+    expect(Object.keys(bodies[0]).sort()).toEqual(['algorithm', 'request_binding', 'scope']);
   });
 
-  test('without an algorithm the wire body is exactly {scope, request_binding} plus the coarse client_context — no algorithm field, no extras (runtime)', async ({ page }) => {
+  test('without an algorithm the wire body is exactly {scope, request_binding} — no client_context without the opt-in, no algorithm field, no extras (runtime)', async ({ page }) => {
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});
@@ -692,6 +695,6 @@ test.describe('KiwiCaptcha narrow request shape', () => {
       timeout: 60_000,
     });
     expect(bodies).toHaveLength(1);
-    expect(Object.keys(bodies[0]).sort()).toEqual(['client_context', 'request_binding', 'scope']);
+    expect(Object.keys(bodies[0]).sort()).toEqual(['request_binding', 'scope']);
   });
 });

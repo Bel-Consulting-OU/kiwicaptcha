@@ -342,17 +342,20 @@ if ($path === '/' || $path === '/index.html') {
     // Risk-v2 fixture knobs: ?decoy=1 emits the decoy field in the
     // challenge response, ?ttl=<s> shortens the challenge lifetime (the
     // expiry-driven re-solve test), ?capture=<name> records the challenge
-    // request bodies, and ?chain=<ticket> seeds the container with
-    // data-kiwi-chain-ticket.
+    // request bodies, ?chain=<ticket> seeds the container with
+    // data-kiwi-chain-ticket, and ?risk-context=coarse seeds the container
+    // with the explicit data-kiwi-risk-context="coarse" opt-in attribute
+    // (without it the driver never sends client_context).
     $endpointQuery = [];
     if (($_GET['decoy'] ?? '') === '1') $endpointQuery[] = 'decoy=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
     $chainAttr = ($_GET['chain'] ?? '') !== '' ? ' data-kiwi-chain-ticket="'.htmlspecialchars((string) $_GET['chain'], ENT_QUOTES).'"' : '';
+    $riskContextAttr = ($_GET['risk-context'] ?? '') === 'coarse' ? ' data-kiwi-risk-context="coarse"' : '';
     header('Content-Type: text/html');
     echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}>
+<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

@@ -4,7 +4,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Risk-v2 driver evidence: the challenge request carries the coarse
-// client_context capability descriptor; a decoy_field issuance response
+// client_context capability descriptor ONLY when the widget container or
+// widget element carries the explicit data-kiwi-risk-context="coarse"
+// opt-in attribute (the default is off); a decoy_field issuance response
 // renders a hidden honeypot input next to the token input whose fill rides
 // BOTH the protected form submission and a later challenge request; and
 // data-kiwi-chain-ticket presents the one-shot chain ticket exactly once,
@@ -34,8 +36,8 @@ async function readCapture(page, name) {
 }
 
 test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
-  test('the challenge request carries the coarse client_context descriptor', async ({ page }) => {
-    await page.goto('/?capture=cc1');
+  test('the challenge request carries the coarse client_context descriptor under the explicit opt-in', async ({ page }) => {
+    await page.goto('/?capture=cc1&risk-context=coarse');
     await solve(page);
 
     const body = JSON.parse(await readCapture(page, 'cc1'));
@@ -49,6 +51,21 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.client_context).toMatch(/t[01]/);
     expect(body.client_context).toMatch(/l[a-z]{2,3}/);
     expect(body.client_context).toMatch(/z[0-4]/);
+    // No decoy markers when no decoy was rendered.
+    expect(body.decoy_field).toBeUndefined();
+    expect(body.honeypot).toBeUndefined();
+  });
+
+  test('without the opt-in attribute no client_context is ever sent', async ({ page }) => {
+    await page.goto('/?capture=cc2');
+    await solve(page);
+
+    const body = JSON.parse(await readCapture(page, 'cc2'));
+    expect(body, 'the challenge request must be captured').toBeTruthy();
+    // The default is OFF: a container without
+    // data-kiwi-risk-context="coarse" must not send any device-capability
+    // or screen-size signal with the challenge request.
+    expect(body.client_context).toBeUndefined();
     // No decoy markers when no decoy was rendered.
     expect(body.decoy_field).toBeUndefined();
     expect(body.honeypot).toBeUndefined();
