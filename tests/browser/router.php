@@ -42,9 +42,51 @@ function metadataFile(string $nonce): string
 {
     return sys_get_temp_dir().'/kiwicaptacha-meta-'.preg_replace('/[^A-Za-z0-9_-]/', '', $nonce).'.json';
 }
+// Risk-v2 fixture capture: challenge requests (and form submissions) are
+// recorded to a temp file per capture name so Playwright can assert the
+// driver's evidence fields (client_context / decoy_field / honeypot /
+// chain_ticket) against the REAL requests the browser sends.
+function captureFile(string $name): string
+{
+    return sys_get_temp_dir().'/kiwicaptacha-capture-'.preg_replace('/[^A-Za-z0-9_-]/', '', $name).'.json';
+}
+function writeCapture(string $name, string $rawBody): void
+{
+    if (preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $name) !== 1) {
+        return;
+    }
+    $tmp = tempnam(sys_get_temp_dir(), 'kiwc');
+    file_put_contents($tmp, json_encode(['body' => $rawBody, 'at' => time()]));
+    rename($tmp, captureFile($name));
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && preg_match('~^/capture/([A-Za-z0-9_-]{1,64})$~', $path, $m) === 1) {
+    header('Content-Type: application/json');
+    $f = captureFile($m[1]);
+    echo json_encode(is_file($f) ? json_decode((string) file_get_contents($f), true) : null);
+
+    return true;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/form-submit') {
+    // The form-submission honeypot fixture endpoint: records the raw POST
+    // body exactly as the browser sent it (the decoy field rides the
+    // form's application/x-www-form-urlencoded payload).
+    writeCapture('form', http_build_query($_POST));
+    header('Content-Type: application/json');
+    echo json_encode(['ok' => true]);
+
+    return true;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path === '/kiwi-captcha/challenge')) {
-    $body = json_decode((string) file_get_contents('php://input'), true);
+    $rawBody = (string) file_get_contents('php://input');
+    // Risk-v2 fixture capture: ?capture=<name> records the raw challenge
+    // request body for the Playwright assertions.
+    if (isset($_GET['capture']) && is_string($_GET['capture'])) {
+        writeCapture($_GET['capture'], $rawBody);
+    }
+    $body = json_decode($rawBody, true);
     $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
     $config = new Config(
@@ -129,7 +171,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
-    echo json_encode($challenge->toArray());
+    $out = $challenge->toArray();
+    // Risk-v2 fixture: ?decoy=1 makes the fixture emit the server-issued
+    // decoy (honeypot) field name, mirroring the bundle's risk-enabled
+    // issuance response.
+    if (($_GET['decoy'] ?? '') === '1') {
+        $out['decoy_field'] = 'decoy_'.substr(hash('sha256', $challenge->nonce), 0, 8);
+    }
+    echo json_encode($out);
 
     return true;
 }
@@ -290,9 +339,20 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['worker-stale'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker-stale.js"';
     $binding = ($_GET['binding'] ?? '') !== '' ? ' data-kiwi-request-binding="'.htmlspecialchars((string) $_GET['binding'], ENT_QUOTES).'"' : '';
     $lang = ($_GET['lang'] ?? '') !== '' ? ' data-kiwi-lang="'.htmlspecialchars((string) $_GET['lang'], ENT_QUOTES).'"' : '';
+    // Risk-v2 fixture knobs: ?decoy=1 emits the decoy field in the
+    // challenge response, ?ttl=<s> shortens the challenge lifetime (the
+    // expiry-driven re-solve test), ?capture=<name> records the challenge
+    // request bodies, and ?chain=<ticket> seeds the container with
+    // data-kiwi-chain-ticket.
+    $endpointQuery = [];
+    if (($_GET['decoy'] ?? '') === '1') $endpointQuery[] = 'decoy=1';
+    if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
+    if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
+    $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
+    $chainAttr = ($_GET['chain'] ?? '') !== '' ? ' data-kiwi-chain-ticket="'.htmlspecialchars((string) $_GET['chain'], ENT_QUOTES).'"' : '';
     header('Content-Type: text/html');
     echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"/challenge\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}>
+<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
