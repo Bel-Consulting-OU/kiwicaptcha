@@ -502,6 +502,16 @@ jobs:
             test ! -d "$d" || { echo "duplicate source root $d/ exists — packages/ is canonical" >&2; exit 1; }
           done
           echo "product identity OK"
+      - name: accessibility documents must be byte-identical
+        # The canonical accessibility document lives in the WASM package;
+        # the Symfony bundle ships a packaged copy that must never drift
+        # from it (the conformance claim is a single canonical text).
+        run: |
+          set -euo pipefail
+          cmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \
+            packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md \
+            || { echo "ACCESSIBILITY.md drift: packages/kiwicaptcha-wasm/ACCESSIBILITY.md and packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md differ — the packaged Symfony copy must stay byte-identical to the canonical WASM document" >&2; exit 1; }
+          echo "accessibility documents byte-identical"
 
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
