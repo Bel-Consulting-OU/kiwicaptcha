@@ -82,7 +82,7 @@ function chainStateFile(): string
  */
 final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore
 {
-    private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed'];
+    private const STATES = ['available', 'reserved', 'issued', 'verified', 'step_up_required', 'denied', 'completed'];
     private const CHAINABLE = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
 
     /** @var array<string, array<string, mixed>> */
@@ -314,6 +314,46 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         }
 
         return 'verified_new';
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'step_up_required_same' : 'conflict';
+        }
+        if ($record['state'] === 'denied') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'conflict' : 'conflict';
+        }
+        if ($record['state'] !== 'issued' || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->chains[$chainId]['state'] = 'step_up_required';
+
+        return 'step_up_required_new';
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'denied') {
+            return $record['stage2Nonce'] === $stage2Nonce ? 'denied_same' : 'conflict';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return 'conflict';
+        }
+        if ($record['state'] !== 'issued' || $record['stage2Nonce'] !== $stage2Nonce) {
+            return 'conflict';
+        }
+        $this->chains[$chainId]['state'] = 'denied';
+
+        return 'denied_new';
     }
 
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
