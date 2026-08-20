@@ -316,6 +316,56 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         return 'verified_new';
     }
 
+    public function markTransactionDenied(string $chainId): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'denied') {
+            return 'denied_same';
+        }
+        if ($record['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return 'conflict';
+        }
+        if (!in_array($record['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $this->chains[$chainId]['state'] = 'denied';
+        $this->chains[$chainId]['owner'] = null;
+        $this->chains[$chainId]['leaseUntil'] = null;
+
+        return 'denied_new';
+    }
+
+    public function markTransactionStepUpRequired(string $chainId): string
+    {
+        $record = $this->live($chainId);
+        if ($record === null) {
+            return 'missing';
+        }
+        if ($record['state'] === 'step_up_required') {
+            return 'step_up_required_same';
+        }
+        if ($record['state'] === 'verified') {
+            return 'already_verified';
+        }
+        if ($record['state'] === 'denied') {
+            return 'conflict';
+        }
+        if (!in_array($record['state'], ['available', 'reserved', 'issued', 'completed'], true)) {
+            return 'conflict';
+        }
+        $this->chains[$chainId]['state'] = 'step_up_required';
+        $this->chains[$chainId]['owner'] = null;
+        $this->chains[$chainId]['leaseUntil'] = null;
+
+        return 'step_up_required_new';
+    }
+
     public function markStepUpRequired(string $chainId, string $stage2Nonce): string
     {
         $record = $this->live($chainId);
