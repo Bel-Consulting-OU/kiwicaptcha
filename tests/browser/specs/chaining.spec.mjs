@@ -13,6 +13,11 @@ import { test, expect } from '@playwright/test';
 //  - the stage-2 verification ENDS the chain (the obligation is cleared);
 //    a subsequent unrelated transaction gets an independent normal
 //    challenge;
+//  - a TERMINAL disposition (the transaction's final Deny / StepUp
+//    finalize) binds the transaction to its terminal response: a later
+//    challenge request — WITH or WITHOUT the ticket — re-encounters the
+//    terminal state (429 RISK_DENIED / 403 STEP_UP_REQUIRED, never a new
+//    challenge, never a stage-1 issuance, never a re-reservation);
 //  - no new persistent device identity: the challenge requests carry no
 //    fingerprint-like data.
 
@@ -48,6 +53,19 @@ function nonceOf(body) {
 /** POST a challenge request against the chaining-enabled fixture. */
 async function challengePost(page, body) {
   const resp = await page.request.post('http://127.0.0.1:8085/challenge?chaining=1', { data: body });
+  return resp.json();
+}
+
+/** POST a challenge request and return the RAW response (status checks). */
+async function challengeStatus(page, body) {
+  return page.request.post('http://127.0.0.1:8085/challenge?chaining=1', { data: body });
+}
+
+/** Terminalize the open obligation of the transaction (deny / step_up). */
+async function chainDisposition(page, token, { disposition, binding, scope = 'login' } = {}) {
+  const body = { token, scope, disposition };
+  if (binding) body.request_binding = binding;
+  const resp = await page.request.post('http://127.0.0.1:8085/chain-verify', { data: body });
   return resp.json();
 }
 
@@ -260,5 +278,92 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
       expect(body.honeypot).toBeUndefined();
       expect(body.decoy_field).toBeUndefined();
     }
+  });
+
+  test('a DENIED terminal chain answers 429 RISK_DENIED to a challenge request without a ticket', async ({ page }) => {
+    // A per-run transaction id: a terminalized chain stays terminal for
+    // its whole TTL, so a re-run of the suite must never collide with a
+    // terminalized obligation left by an earlier run.
+    const binding = `txn-d1-${Date.now()}`;
+    // Open the chain with a stage-1 solve.
+    await page.goto(`/?chaining=1&binding=${binding}`);
+    await solve(page);
+    const token = await tokenOf(page);
+    const disposition = await chainVerify(page, token, { binding });
+    expect(disposition.chain_ticket).toBeTruthy();
+
+    // The transaction's final disposition is DENY: the open obligation is
+    // terminalized durably (NONCE-AGNOSTIC — the obligation mapping is
+    // KEPT, so the transaction stays bound to its final denial).
+    const terminal = await chainDisposition(page, token, { disposition: 'deny', binding });
+    expect(terminal.code).toBe('RISK_DENIED');
+
+    // A challenge request WITHOUT a ticket for the same transaction
+    // re-encounters the TERMINAL denial: HTTP 429 RISK_DENIED — never a
+    // new challenge, never a stage-1 issuance.
+    const denied = await challengeStatus(page, { scope: 'login', request_binding: binding });
+    expect(denied.status()).toBe(429);
+    const deniedBody = await denied.json();
+    expect(deniedBody.error.code).toBe('RISK_DENIED');
+    expect(deniedBody.error.message).toBe('Challenge issuance denied by the adaptive risk engine. Try again later.');
+    expect(deniedBody.nonce).toBeUndefined();
+
+    // Even WITH the ticket the chain stays terminal: the reservation can
+    // never be claimed again and no challenge is ever minted.
+    const withTicket = await challengeStatus(page, {
+      scope: 'login',
+      request_binding: binding,
+      chain_ticket: disposition.chain_ticket,
+    });
+    expect(withTicket.status()).toBe(429);
+    const withTicketBody = await withTicket.json();
+    expect(withTicketBody.error.code).toBe('RISK_DENIED');
+    expect(withTicketBody.nonce).toBeUndefined();
+  });
+
+  test('a STEP_UP_REQUIRED terminal chain answers 403 STEP_UP_REQUIRED to a challenge request without a ticket', async ({ page }) => {
+    const binding = `txn-s1-${Date.now()}`;
+    await page.goto(`/?chaining=1&binding=${binding}`);
+    await solve(page);
+    const token = await tokenOf(page);
+    const disposition = await chainVerify(page, token, { binding });
+    expect(disposition.chain_ticket).toBeTruthy();
+
+    // The transaction's final disposition is STEP-UP: the open obligation
+    // is terminalized durably (the obligation mapping is KEPT).
+    const terminal = await chainDisposition(page, token, { disposition: 'step_up', binding });
+    expect(terminal.code).toBe('STEP_UP_REQUIRED');
+
+    // The no-ticket challenge request re-encounters the TERMINAL step-up:
+    // HTTP 403 STEP_UP_REQUIRED — no challenge, no stage-1 issuance.
+    const stepUp = await challengeStatus(page, { scope: 'login', request_binding: binding });
+    expect(stepUp.status()).toBe(403);
+    const stepUpBody = await stepUp.json();
+    expect(stepUpBody.error.code).toBe('STEP_UP_REQUIRED');
+    expect(stepUpBody.error.message).toBe('Additional verification is required for this request.');
+    expect(stepUpBody.nonce).toBeUndefined();
+
+    // With the ticket the terminal response is identical (the chain can
+    // never be re-reserved or re-issued).
+    const withTicket = await challengeStatus(page, {
+      scope: 'login',
+      request_binding: binding,
+      chain_ticket: disposition.chain_ticket,
+    });
+    expect(withTicket.status()).toBe(403);
+    const withTicketBody = await withTicket.json();
+    expect(withTicketBody.error.code).toBe('STEP_UP_REQUIRED');
+    expect(withTicketBody.nonce).toBeUndefined();
+  });
+
+  test('the fixture chain store mirrors the production terminal-state machine', async ({ page }) => {
+    // The fixture-level self-test pins the store semantics that the HTTP
+    // flow cannot reach directly: reserve() answers the TERMINAL statuses
+    // (a terminal chain can never be set back to reserved) and markIssued()
+    // answers 'conflict' on a terminal chain — the exact Lua branches.
+    const resp = await page.request.get('http://127.0.0.1:8085/chain-store-selftest');
+    const result = await resp.json();
+    expect(result.ok).toBe(true);
+    expect(result.failures).toEqual([]);
   });
 });

@@ -7,6 +7,8 @@ import AxeBuilder from '@axe-core/playwright';
 // acceptance set:
 //  - computed-color badge contrast, light AND dark, every state (1.4.3)
 //  - computed non-text contrast: Retry boundary + focus indicator >= 3:1 (1.4.11)
+//  - focus appearance (2.4.13, AAA): indicator AREA >= the 2px-perimeter
+//    minimum + >= 3:1 contrast CHANGE at the same pixels, light AND dark
 //  - axe scans per state, light and dark
 //  - keyboard-only operation (real sequential Tab/Shift+Tab, Enter+Space)
 //  - live-region contract (exactly one widget-local status in every renderer)
@@ -73,6 +75,125 @@ const AXE_RULES = [
   'aria-progressbar-name', 'button-name', 'focus-order-semantics', 'html-has-lang',
   'label', 'link-in-text-block', 'select-name', 'valid-lang', 'document-title',
 ];
+
+// WCAG 2.4.13 measurement, focused state: derives the focus indicator's
+// geometry (solid outline width/offset, or a hard-edged spread shadow) over
+// the control's bounding box, and samples the pixel at the indicator
+// location — the surface the browser actually paints there (elementFromPoint,
+// composited up through any translucent ancestors) and the indicator
+// composited over that same surface. All colors are computed in the
+// browser; none are hard-coded.
+async function measuredFocusGeometry(page) {
+  return page.evaluate(() => {
+    const w = document.querySelector('[data-kiwi-widget]');
+    const retry = w.querySelector('[data-kiwi-retry]');
+    const parse = (c) => {
+      const m = c.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/);
+      if (!m) return null;
+      return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] !== undefined ? Number(m[4]) : 1 };
+    };
+    const composite = (fgc, bgc) => ({ r: fgc.r * fgc.a + bgc.r * (1 - fgc.a), g: fgc.g * fgc.a + bgc.g * (1 - fgc.a), b: fgc.b * fgc.a + bgc.b * (1 - fgc.a) });
+    const toHex = ({ r, g, b }) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+    const cs = (el) => getComputedStyle(el);
+    const rect = retry.getBoundingClientRect();
+    const style = cs(retry);
+    const outlineWidth = parseFloat(style.outlineWidth) || 0;
+    const outlineOffset = parseFloat(style.outlineOffset) || 0;
+    const outline = parse(style.outlineColor);
+    let indicator = null;
+    let kind = null;
+    let thickness = 0;
+    let gap = 0;
+    let areaInfeasible = null;
+    if (style.outlineStyle !== 'none' && outlineWidth > 0 && outline && outline.a > 0) {
+      indicator = outline;
+      kind = 'outline';
+      thickness = outlineWidth;
+      gap = outlineOffset;
+    } else {
+      const shadows = (style.boxShadow.match(/rgba?\([^)]*\)/g) || []).map(parse).filter((c) => c && c.a > 0);
+      if (shadows.length) {
+        indicator = shadows[0];
+        kind = 'box-shadow';
+        const m = style.boxShadow.match(/rgba?\([^)]*\)\s+(-?[\d.]+)px\s+(-?[\d.]+)px\s+(-?[\d.]+)px(?:\s+(-?[\d.]+)px)?/);
+        const blur = m ? Math.abs(parseFloat(m[3]) || 0) : -1;
+        const spread = m ? Math.abs(parseFloat(m[4]) || 0) : -1;
+        if (blur < 0) areaInfeasible = 'unparseable box-shadow';
+        else if (blur > 0) areaInfeasible = `blurred box-shadow (blur ${blur}px)`;
+        else if (spread <= 0) areaInfeasible = `box-shadow with no measurable spread band (spread ${spread}px)`;
+        else { thickness = spread; gap = 0; }
+      }
+    }
+    if (!indicator) {
+      return { error: JSON.stringify({ outlineStyle: style.outlineStyle, outlineColor: style.outlineColor, outlineWidth: style.outlineWidth, boxShadow: style.boxShadow }) };
+    }
+    // Sample the midpoint of the ring's top band: x centered on the
+    // control, y midway through the indicator thickness.
+    const sample = { x: rect.left + rect.width / 2, y: rect.top - gap - thickness / 2 };
+    const surfaceAt = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      let acc = null;
+      let node = el;
+      while (node && node !== document.documentElement) {
+        const bg = parse(cs(node).backgroundColor);
+        if (bg && bg.a > 0) acc = acc ? composite(bg, acc) : bg;
+        if (acc && acc.a >= 1) break;
+        node = node.parentElement;
+      }
+      if (!acc) acc = { r: 255, g: 255, b: 255, a: 1 };
+      return { r: acc.r, g: acc.g, b: acc.b, a: 1 };
+    };
+    const surface = surfaceAt(sample.x, sample.y);
+    if (!surface) return { error: 'no element at the indicator sample point' };
+    return {
+      kind,
+      thickness,
+      gap,
+      areaInfeasible,
+      rect: { w: rect.width, h: rect.height },
+      sample,
+      surface: toHex(surface),
+      indicator: toHex(indicator),
+      focusedPixel: toHex(composite(indicator, surface)),
+      // Ring band area = outer rect (control expanded by gap + thickness)
+      // minus inner rect (control expanded by gap); the 2.4.13 minimum is
+      // the area of a 2 CSS px thick perimeter of the control:
+      // 2 * 2 * (w + h).
+      ringArea: (rect.width + 2 * (gap + thickness)) * (rect.height + 2 * (gap + thickness)) - (rect.width + 2 * gap) * (rect.height + 2 * gap),
+      twoPxPerimeterArea: 4 * (rect.width + rect.height),
+    };
+  });
+}
+
+// The unfocused half of the same-pixel measurement: the pixel at the
+// indicator location once focus has left the control. Layout is unchanged
+// (outlines never affect layout), so the coordinates are re-derived from the
+// same geometry and must match the focused run's sample.
+async function surfacePixelAt(page, sample) {
+  return page.evaluate((pt) => {
+    const parse = (c) => {
+      const m = c.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/);
+      if (!m) return null;
+      return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] !== undefined ? Number(m[4]) : 1 };
+    };
+    const composite = (fgc, bgc) => ({ r: fgc.r * fgc.a + bgc.r * (1 - fgc.a), g: fgc.g * fgc.a + bgc.g * (1 - fgc.a), b: fgc.b * fgc.a + bgc.b * (1 - fgc.a) });
+    const toHex = ({ r, g, b }) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+    const cs = (el) => getComputedStyle(el);
+    const el = document.elementFromPoint(pt.x, pt.y);
+    if (!el) return { error: 'no element at the sample point' };
+    let acc = null;
+    let node = el;
+    while (node && node !== document.documentElement) {
+      const bg = parse(cs(node).backgroundColor);
+      if (bg && bg.a > 0) acc = acc ? composite(bg, acc) : bg;
+      if (acc && acc.a >= 1) break;
+      node = node.parentElement;
+    }
+    if (!acc) acc = { r: 255, g: 255, b: 255, a: 1 };
+    return { x: pt.x, y: pt.y, pixel: toHex({ r: acc.r, g: acc.g, b: acc.b, a: 1 }) };
+  }, sample);
+}
 
 test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
   test('badge contrast (WCAG 1.4.3): COMPUTED colors, light AND dark, every state >= 4.5:1 (target >= 5:1)', async ({ page }) => {
@@ -313,6 +434,72 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
       const indicatorRatio = contrastRatio(colors.indicator.color, colors.indicator.adjacent);
       expect(boundaryRatio, `theme=${theme}: Retry control boundary must be >= 3:1 (WCAG 1.4.11; measured ${boundaryRatio.toFixed(2)}:1 ${colors.boundary.border} vs ${colors.boundary.adjacent})`).toBeGreaterThanOrEqual(3);
       expect(indicatorRatio, `theme=${theme}: focus indicator (${colors.indicator.kind}) must be >= 3:1 (WCAG 1.4.11; measured ${indicatorRatio.toFixed(2)}:1 ${colors.indicator.color} vs ${colors.indicator.adjacent})`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test('focus appearance (WCAG 2.4.13): indicator AREA >= the 2px-perimeter minimum AND >= 3:1 contrast CHANGE at the SAME pixels, light AND dark', async ({ page }) => {
+    // 2.4.13 is not met by 1.4.11-style adjacent-surface contrast alone:
+    // it requires (a) a minimum indicator AREA — at least the area of a
+    // 2 CSS px thick perimeter of the unfocused control — and (b) a
+    // >= 3:1 contrast CHANGE between the focused and unfocused states at
+    // the SAME pixels. Both are genuinely measured here: (a) from the
+    // indicator's computed geometry over the control's bounding box;
+    // (b) by sampling the pixel at the indicator location in BOTH states —
+    // the surface the browser actually paints there unfocused, and the
+    // indicator composited over that same surface focused. All colors are
+    // computed in the browser; none are hard-coded, so a palette regression
+    // in EITHER theme fails here.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+    });
+    for (const theme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto('/');
+      await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+      await page.evaluate(() => {
+        const w = document.querySelector('[data-kiwi-widget]');
+        const container = w.closest('.kiwi-container');
+        const before = document.createElement('input');
+        before.id = 'kiwi-before';
+        before.setAttribute('aria-label', 'before');
+        container.parentNode.insertBefore(before, container);
+      });
+      const engine = test.info().project.name;
+      if (engine !== 'webkit') {
+        await page.locator('#kiwi-before').focus();
+        await page.keyboard.press('Tab');
+      } else {
+        await page.locator('[data-kiwi-retry]').focus();
+      }
+      const focused = await page.evaluate(() => {
+        const ae = document.activeElement;
+        return !!ae && ae.getAttribute('data-kiwi-retry') !== null && ae.matches(':focus-visible');
+      });
+      expect(focused, `theme=${theme}: the Retry button must be focused with :focus-visible`).toBe(true);
+
+      const focusedM = await measuredFocusGeometry(page);
+      expect(focusedM.error, `theme=${theme}: ${focusedM.error}`).toBeUndefined();
+
+      // Unfocus and re-measure at the SAME coordinates: the pixel at the
+      // ring location must go back to the surface the indicator covers.
+      await page.locator('#kiwi-before').focus();
+      const unfocusedM = await surfacePixelAt(page, focusedM.sample);
+      expect(unfocusedM.error, `theme=${theme}: ${unfocusedM.error}`).toBeUndefined();
+      expect(Math.abs(focusedM.sample.x - unfocusedM.x), `theme=${theme}: the unfocused sample must be the SAME pixel (x)`).toBeLessThan(0.5);
+      expect(Math.abs(focusedM.sample.y - unfocusedM.y), `theme=${theme}: the unfocused sample must be the SAME pixel (y)`).toBeLessThan(0.5);
+      expect(unfocusedM.pixel, `theme=${theme}: the pixel at the ring location must return to the surface (${focusedM.surface}) when unfocused`).toBe(focusedM.surface);
+
+      const change = contrastRatio(focusedM.focusedPixel, unfocusedM.pixel);
+      expect(change, `theme=${theme}: the SAME pixel must change >= 3:1 between unfocused (${unfocusedM.pixel}) and focused (${focusedM.focusedPixel}); measured ${change.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+
+      if (focusedM.kind === 'outline') {
+        expect(focusedM.thickness, `theme=${theme}: the ring must be >= 2 CSS px thick (measured ${focusedM.thickness}px)`).toBeGreaterThanOrEqual(2);
+        expect(focusedM.ringArea, `theme=${theme}: indicator area ${focusedM.ringArea.toFixed(1)}px^2 must be >= the 2px-perimeter minimum ${focusedM.twoPxPerimeterArea.toFixed(1)}px^2`).toBeGreaterThanOrEqual(focusedM.twoPxPerimeterArea - 0.5);
+      } else if (focusedM.areaInfeasible) {
+        throw new Error(`theme=${theme}: the 2.4.13 area measurement is genuinely infeasible for the computed indicator (${focusedM.areaInfeasible}) with the suite's primitives — the document must fall back to manual-qualification wording for 2.4.13`);
+      } else {
+        expect(focusedM.ringArea, `theme=${theme}: indicator area ${focusedM.ringArea.toFixed(1)}px^2 must be >= the 2px-perimeter minimum ${focusedM.twoPxPerimeterArea.toFixed(1)}px^2`).toBeGreaterThanOrEqual(focusedM.twoPxPerimeterArea - 0.5);
+      }
     }
   });
 

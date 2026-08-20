@@ -65,10 +65,13 @@ function writeCapture(string $name, string $rawBody): void
 // router per request, so the transactional chain state (chain records +
 // obligation mappings) persists in ONE temp file, mirroring the bundle's
 // Redis machine (available -> reserved(short lease) -> issued(stage2Nonce)
-// -> verified(stage2Nonce) — verified TERMINAL, obligation cleared
-// atomically). The chaining fixture is a FILE-BACKED stand-in for the
-// bundle's RedisChainedChallengeStateStore — same outcome strings, same
-// strict v2 record shape.
+// -> a DISPOSITION-AWARE TERMINAL transition: verified (the obligation is
+// cleared atomically) or step_up_required / denied (the obligation mapping
+// is KEPT — a later challenge request for the same transaction re-encounters
+// the terminal state, never a new stage-1, never a re-reservation). The
+// chaining fixture is a FILE-BACKED stand-in for the bundle's
+// RedisChainedChallengeStateStore — same outcome strings, same strict v2
+// record shape.
 function chainStateFile(): string
 {
     return sys_get_temp_dir().'/kiwicaptacha-chain-state.json';
@@ -239,6 +242,12 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         if ($record['state'] === 'completed') {
             return 'completed';
         }
+        if ($record['state'] === 'step_up_required') {
+            return 'step_up_required';
+        }
+        if ($record['state'] === 'denied') {
+            return 'denied';
+        }
         if ($record['state'] === 'reserved') {
             if ($record['owner'] === $ownerToken) {
                 return 'retry';
@@ -292,6 +301,9 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         if ($record['state'] === 'verified') {
             return $record['stage2Nonce'] === $stage2Nonce ? 'verified_same' : 'conflict';
         }
+        if ($record['state'] === 'step_up_required' || $record['state'] === 'denied') {
+            return 'conflict';
+        }
 
         return 'not_owner';
     }
@@ -316,11 +328,18 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         return 'verified_new';
     }
 
-    public function markTransactionDenied(string $chainId): string
+    public function markTransactionDenied(string $chainId, string $obligationId): string
     {
         $record = $this->live($chainId);
         if ($record === null) {
             return 'missing';
+        }
+        if (($this->obligations[$obligationId] ?? null) !== $chainId || ($record['obligationId'] ?? null) !== $obligationId) {
+            if (!isset($this->obligations[$obligationId])) {
+                return 'already_completed';
+            }
+
+            return 'obligation_moved';
         }
         if ($record['state'] === 'denied') {
             return 'denied_same';
@@ -341,11 +360,18 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         return 'denied_new';
     }
 
-    public function markTransactionStepUpRequired(string $chainId): string
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
     {
         $record = $this->live($chainId);
         if ($record === null) {
             return 'missing';
+        }
+        if (($this->obligations[$obligationId] ?? null) !== $chainId || ($record['obligationId'] ?? null) !== $obligationId) {
+            if (!isset($this->obligations[$obligationId])) {
+                return 'already_completed';
+            }
+
+            return 'obligation_moved';
         }
         if ($record['state'] === 'step_up_required') {
             return 'step_up_required_same';
@@ -495,8 +521,12 @@ function rebuildChallengeResponse(array $recordData): array
  * transaction's obligation (a foreign ticket -> 422), AUTO-RESUMES an
  * open chain when no ticket is presented, recovers/rearms the issued
  * stage-2 challenge, claims the SHORT owner-scoped reservation and mints
- * the stronger argon stage (markIssued idempotent). Returns
- * [status, body] or null when the request is an ORDINARY stage-1 flow.
+ * the stronger argon stage (markIssued idempotent). A chain in the
+ * TERMINAL step_up_required/denied state answers its terminal response
+ * DIRECTLY — 403 STEP_UP_REQUIRED / 429 RISK_DENIED — BEFORE any
+ * reservation attempt (never a new challenge, never a stage-1, never a
+ * re-reservation). Returns [status, body] or null when the request is an
+ * ORDINARY stage-1 flow.
  */
 function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
 {
@@ -564,6 +594,20 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
                 return $inspection;
             }
         }
+        if ($requirement->state === 'step_up_required') {
+            // TERMINAL STEP-UP: the transaction is bound to its final
+            // step-up disposition (the obligation mapping was KEPT) — no
+            // challenge issuance, ever. A later request for the same
+            // transaction re-encounters this terminal state.
+            return [403, ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']]];
+        }
+        if ($requirement->state === 'denied') {
+            // TERMINAL DENIAL: the transaction is bound to its final
+            // denial disposition (the obligation mapping was KEPT) — no
+            // challenge issuance, ever. A later request for the same
+            // transaction re-encounters this terminal state.
+            return [429, ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']]];
+        }
         $reservation = $chainService->reserveStage2($chainId, $owner);
         if ($reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Available
             || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::TakenOver
@@ -576,6 +620,8 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
         }
         if ($reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Issued
             || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Verified
+            || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::StepUpRequired
+            || $reservation === \BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult::Denied
         ) {
             try {
                 $requirement = $chainService->requirementFor($chainId);
@@ -713,6 +759,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
     }
     $chainStore = new ChainFileStore();
     $chainService = new \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService($chainStore, $GLOBALS['kiwi_secret'], 300, 15, new FixtureBindingAuthority());
+    $disposition = is_array($body) && isset($body['disposition']) && is_string($body['disposition']) ? $body['disposition'] : null;
+    if ($disposition === 'deny' || $disposition === 'step_up') {
+        // THE TERMINALIZATION KNOB of the fixture (the mirror of the
+        // validator's post-solve dispositions): a fresh Deny/StepUp of a
+        // verified nonce of the obligated transaction TERMINALIZES the
+        // open obligation durably (NONCE-AGNOSTIC — the obligation
+        // mapping is KEPT, so a later challenge request re-encounters the
+        // terminal state, never a new stage-1).
+        $requirement = $chainService->findOpenRequirement($scope, $binding ?? '', 1);
+        if ($requirement === null) {
+            echo json_encode(['ok' => false, 'code' => 'no_open_chain']);
+
+            return true;
+        }
+        $terminal = $disposition === 'deny'
+            ? $chainService->markTransactionDenied($requirement->chainId)
+            : $chainService->markTransactionStepUpRequired($requirement->chainId);
+        if (!in_array($terminal, [
+            \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::DeniedNew,
+            \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::DeniedSame,
+            \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::StepUpRequiredNew,
+            \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::StepUpRequiredSame,
+        ], true)) {
+            echo json_encode(['ok' => false, 'code' => 'chain_terminalization_refused']);
+
+            return true;
+        }
+        echo json_encode(['ok' => false, 'code' => $disposition === 'deny' ? 'RISK_DENIED' : 'STEP_UP_REQUIRED']);
+
+        return true;
+    }
     if (is_string($chainTicket) && $chainTicket !== '') {
         // STAGE-2 SOLVE: the chain is marked verified (the obligation is
         // cleared atomically) and the consumed record is retired.
@@ -740,10 +817,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
         return true;
     }
     // STAGE-1 SOLVE: the reassessment demands the stronger argon stage —
-    // the chain opens (one obligation per transaction).
+    // the chain opens (one obligation per transaction). The ticket is
+    // signed from the server-held requirement's ACTUAL expiry — never a
+    // second clock read that could straddle the chain's expiry boundary.
     $requirement = $chainService->requireStage2($nonce, $scope, $binding ?? '', 1, \KiwiCaptcha\Risk\RiskAction::Argon32, time() + 300);
-    $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+    $ticket = $chainService->ticketFor($requirement->chainId, $requirement->expiresAt);
     echo json_encode(['ok' => false, 'chain_required' => true, 'chain_ticket' => $ticket]);
+
+    return true;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && $path === '/chain-store-selftest') {
+    // The fixture store's state-machine self-test (asserted by the
+    // chaining spec): pins the PRODUCTION terminal semantics at the store
+    // level — reserve() answers the TERMINAL statuses (a terminal chain
+    // can never be set back to reserved) and markIssued() answers
+    // 'conflict' on a terminal chain — mirroring the bundle's Lua.
+    header('Content-Type: application/json');
+    $failures = [];
+    $check = static function (string $name, bool $ok) use (&$failures): void {
+        if (!$ok) {
+            $failures[] = $name;
+        }
+    };
+    try {
+        $store = new ChainFileStore();
+        $base = 'selftest-'.bin2hex(random_bytes(6));
+        $nonceA = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+        $nonceB = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
+        $deniedChain = $base.'-denied';
+        $store->create($deniedChain, $nonceA, 'login', 120, 'txn-selftest-denied', 'argon32', 1);
+        $check('denied: fresh reserve', $store->reserve($deniedChain, 'owner-a', 15) === 'available');
+        $check('denied: markIssued', $store->markIssued($deniedChain, 'owner-a', $nonceB) === 'issued_new');
+        $check('denied: terminalize', $store->markTransactionDenied($deniedChain) === 'denied_new');
+        $check('denied: reserve answers denied', $store->reserve($deniedChain, 'owner-b', 15) === 'denied');
+        $check('denied: never re-reserved', $store->read($deniedChain)['state'] === 'denied');
+        $check('denied: markIssued conflict', $store->markIssued($deniedChain, 'owner-b', $nonceB) === 'conflict');
+        $check('denied: cannot flip to step-up', $store->markTransactionStepUpRequired($deniedChain) === 'conflict');
+        $stepUpChain = $base.'-stepup';
+        $store->create($stepUpChain, $nonceA, 'login', 120, 'txn-selftest-stepup', 'argon32', 1);
+        $check('step_up: terminalize', $store->markTransactionStepUpRequired($stepUpChain) === 'step_up_required_new');
+        $check('step_up: reserve answers step_up_required', $store->reserve($stepUpChain, 'owner-b', 15) === 'step_up_required');
+        $check('step_up: never re-reserved', $store->read($stepUpChain)['state'] === 'step_up_required');
+        $check('step_up: markIssued conflict', $store->markIssued($stepUpChain, 'owner-b', $nonceB) === 'conflict');
+    } catch (\Throwable $e) {
+        $failures[] = 'exception: '.$e->getMessage();
+    }
+    echo json_encode(['ok' => $failures === [], 'failures' => $failures]);
 
     return true;
 }

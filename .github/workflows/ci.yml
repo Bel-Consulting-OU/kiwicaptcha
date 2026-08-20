@@ -512,13 +512,16 @@ jobs:
             packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md \
             || { echo "ACCESSIBILITY.md drift: packages/kiwicaptcha-wasm/ACCESSIBILITY.md and packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md differ — the packaged Symfony copy must stay byte-identical to the canonical WASM document" >&2; exit 1; }
           echo "accessibility documents byte-identical"
-      - name: docs-lint (advisory prose lint)
-        # ADVISORY: prints per-file prose-lint violation counts and a
-        # total; never fails the job (explicit || true). It becomes a
-        # hard gate only after the baseline is driven to zero.
+      - name: docs-lint (prose lint, baseline ratchet)
+        # BASELINE RATCHET: the committed baseline
+        # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
+        # and intentionally reduced over time; this step fails when the
+        # current violation total exceeds it. After deliberate rewrites,
+        # --update-baseline regenerates the baseline; once it reaches
+        # zero, advisory mode is removed.
         run: |
           set -euo pipefail
-          bash packages/kiwicaptcha/tools/docs-lint.sh --source || true
+          bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
 
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,

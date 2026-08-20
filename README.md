@@ -6,19 +6,18 @@ optimized JS solving, no external services. **No third-party tracking. No
 third-party requests. First-party behavioral signals never leave your
 application.** Developed by Bel Consulting OÜ (MIT).
 
-## What KiwiCaptcha is — and is not
+## What KiwiCaptcha is
 
-KiwiCaptcha is **anti-abuse protection, not a reliable human-vs-bot
-discriminator**. A human does not solve the challenge — their CPU does, and
-a bot's CPU can do exactly the same work. The core value is economic: every
-signup, login, password-reset, or scraping attempt carries a real, tunable
-computational cost, which makes mass abuse uneconomical at scale.
+KiwiCaptcha is anti-abuse protection. A human does not solve the challenge:
+their CPU does, and a bot's CPU can do the same work. The core value is
+economic: every signup, login, password-reset, or scraping attempt carries
+a real, tunable computational cost, which makes mass abuse uneconomical at
+scale.
 
-Browser behavioral telemetry is a **supplement, not the security
-boundary** — it is client-controlled and forgeable. The security property
-you can rely on is the proof-of-work cost; everything else is
-defense-in-depth. The precise guarantees — and the explicit non-guarantees —
-are stated in [SECURITY.md](SECURITY.md).
+Browser behavioral telemetry is a supplementary signal, not the security
+boundary: it is client-controlled and forgeable. The security property is
+the proof-of-work cost; everything else is defense-in-depth. The precise
+guarantees and non-guarantees are stated in [SECURITY.md](SECURITY.md).
 
 ## Features
 
@@ -46,9 +45,9 @@ are stated in [SECURITY.md](SECURITY.md).
   candidates. Deployments must additionally rate-limit challenge issuance
   and cap aggregate Argon2id verification concurrency — the Symfony bundle
   ships both.
-- **Premium UI** — modern, responsive widget with native dark mode and zero
-  external dependencies (no external JS, no iframes, no third-party hosts),
-  with optional CSP nonce support.
+- **Widget** — a modern, responsive browser widget with native dark mode
+  and no external dependencies (no external JS, no iframes, no third-party
+  hosts), with optional CSP nonce support.
 - **First-party behavioral telemetry, off by default** — the widget
   collects no hardware-capability, device-memory, or screen signals unless
   the operator explicitly enables the coarse client-context opt-in;
