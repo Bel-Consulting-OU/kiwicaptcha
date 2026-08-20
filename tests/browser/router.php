@@ -856,7 +856,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && $path === '/chain-store-selftest') {
         $check('denied: never re-reserved', $store->read($deniedChain)['state'] === 'denied');
         $check('denied: markIssued conflict', $store->markIssued($deniedChain, 'owner-b', $nonceB) === 'conflict');
         $check('denied: cannot flip to step-up', $store->markTransactionStepUpRequired($deniedChain, $deniedObligation) === 'conflict');
-        $check('denied: stale obligation id refused', $store->markTransactionDenied($deniedChain, hash('sha256', 'other')) === 'obligation_moved');
+        $otherChain = $base.'-other';
+        $otherObligation = hash('sha256', $otherChain);
+        $store->createWithObligation($otherChain, $otherObligation, $nonceA, 'login', 'txn-selftest-other', 'argon32', 1, 120);
+        $check('denied: moved obligation refused', $store->markTransactionDenied($deniedChain, $otherObligation) === 'obligation_moved');
+        $check('denied: unknown obligation id is already-completed', $store->markTransactionDenied($deniedChain, hash('sha256', 'never-registered')) === 'already_completed');
         $stepUpChain = $base.'-stepup';
         $stepUpObligation = hash('sha256', $stepUpChain);
         $store->createWithObligation($stepUpChain, $stepUpObligation, $nonceA, 'login', 'txn-selftest-stepup', 'argon32', 1, 120);
