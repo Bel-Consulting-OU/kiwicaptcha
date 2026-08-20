@@ -773,9 +773,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
 
             return true;
         }
+        $obligationId = $chainService->obligationIdFor($scope, $binding ?? '', 1);
         $terminal = $disposition === 'deny'
-            ? $chainService->markTransactionDenied($requirement->chainId)
-            : $chainService->markTransactionStepUpRequired($requirement->chainId);
+            ? $chainService->markTransactionDenied($requirement->chainId, $obligationId)
+            : $chainService->markTransactionStepUpRequired($requirement->chainId, $obligationId);
         if (!in_array($terminal, [
             \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::DeniedNew,
             \BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult::DeniedSame,
