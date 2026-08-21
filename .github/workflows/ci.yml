@@ -530,6 +530,15 @@ jobs:
         # baselines/manifests before the lint steps enforce them.
         run: sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
 
+      - name: error-code parity (PHP enum vs Rust code() mapping)
+        # The cross-language wire-vocabulary drift gate: parses the PHP
+        # VerifyError enum's case values and greps the Rust core's
+        # code() mapping, failing on any PHP code without a Rust twin
+        # (outside the script's documented-divergence table). A
+        # handwritten Rust-side list cannot detect PHP-side drift; this
+        # reads both sources directly.
+        run: sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
+
       - name: docs-lint (prose lint, baseline ratchet)
         # Baseline ratchet: the committed baseline
         # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
@@ -691,7 +700,7 @@ jobs:
           cd /tmp/crate-check/kiwicaptcha-risk
           rm -rf target
           # Point the versioned dependency at the local core (as crates.io
-          # resolution would once kiwicaptcha 1.1.0 is published). The
+          # resolution would once kiwicaptcha 1.7.0 is published). The
           # include_str!("../resources/risk-v1.lua") must resolve here.
           sed -i 's|path = "../kiwicaptcha"|path = "'"$GITHUB_WORKSPACE"'/packages/kiwicaptcha"|' Cargo.toml
           cargo check
@@ -706,7 +715,7 @@ jobs:
         # the packaged representation (tarball -> unpack -> compile), not
         # just `--no-verify` list checks. The core crate's dependencies
         # are all registry crates, so verification is genuine. (The risk
-        # crate keeps --no-verify until kiwicaptcha 1.1.0 is on the
+        # crate keeps --no-verify until kiwicaptcha 1.7.0 is on the
         # registry — its path+version dependency cannot be verified from
         # the tarball alone.)
         working-directory: packages/kiwicaptcha
