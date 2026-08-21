@@ -522,6 +522,14 @@ jobs:
       - name: Install gawk (deterministic prose lint)
         run: sudo apt-get update && sudo apt-get install -y gawk
 
+      - name: docs-lint adoption-manifest one-shot tests
+        # The adoption manifest's one-shot semantics (an entry applies
+        # once, is consumed when its path lands, and never re-adopts a
+        # reintroduced path) are behavior, not convention — this step
+        # runs the shell-level test suite against throwaway
+        # baselines/manifests before the lint steps enforce them.
+        run: sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
+
       - name: docs-lint (prose lint, baseline ratchet)
         # Baseline ratchet: the committed baseline
         # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
@@ -559,16 +567,46 @@ jobs:
         # compared cannot be trusted.
         run: |
           set -euo pipefail
-          BASE_SHA="${GITHUB_BASE_SHA:-}"
-          if [ -z "$BASE_SHA" ]; then
-            BASE_SHA="$(git rev-parse --verify "${{ github.event.before }}" 2>/dev/null || true)"
-          fi
-          if [ -z "$BASE_SHA" ]; then
+          # The comparison base is resolved from the explicit event
+          # context only: a pull_request compares against its base branch
+          # head, a push against the previous head. Any other trigger
+          # (workflow_dispatch, schedule, merge_group) has no defined
+          # base — the step fails closed with a clear message instead of
+          # silently comparing against an arbitrary commit (an
+          # environment-variable probe with unconditional parent
+          # fallbacks could compare a single-commit window and understate
+          # a whole change).
+          case "${{ github.event_name }}" in
+            pull_request)
+              BASE_SHA="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              BASE_SHA="${{ github.event.before }}"
+              ;;
+            *)
+              echo "::error::baseline-integrity requires a pull_request or push event context (got ${{ github.event_name }}); no comparison base is defined"
+              exit 1
+              ;;
+          esac
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            # A push with no readable 'before' (a tag push or a new
+            # branch push — GitHub reports the zero SHA) still has a
+            # defined comparison base: the pushed commit's parent. The
+            # tag-triggered CI run is the release pipeline's gate, so
+            # this path must stay comparable, never skipped.
             BASE_SHA="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+            if [ -z "$BASE_SHA" ]; then
+              echo "::error::baseline-integrity cannot run: the push carries no 'before' and HEAD has no parent (a root commit has no comparison base)"
+              exit 1
+            fi
+            echo "note: no 'before' in the event context — comparing against the parent $BASE_SHA"
           fi
-          if [ -z "$BASE_SHA" ] \
-              || ! git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
-            echo "::error::baseline-integrity cannot run: no comparison base available"
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::error::baseline-integrity cannot run: base $BASE_SHA is not readable in this checkout"
+            exit 1
+          fi
+          if ! git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
+            echo "::error::baseline-integrity cannot run: no baseline file at the base $BASE_SHA"
             exit 1
           fi
           git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
