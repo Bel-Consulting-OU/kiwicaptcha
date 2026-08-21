@@ -529,6 +529,24 @@ jobs:
         run: |
           set -euo pipefail
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
+      - name: docs-lint (prose lint, baseline integrity)
+        # The committed baseline must be monotonic against the baseline
+        # of the parent commit: every tracked path's row may only stay
+        # equal or decrease (a path dropped from the baseline is a
+        # deletion and is fine), a path newly tracked by the current
+        # baseline is allowed only when adopted in
+        # packages/kiwicaptcha/tools/docs-lint-adopted.txt, and the
+        # total may only stay equal or decrease. Regeneration with
+        # --update-baseline may only reduce the rows, so a scan that
+        # needs headroom must be fixed by a rewrite, never by
+        # regenerating the baseline.
+        run: |
+          set -euo pipefail
+          BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          if [ -n "$BASE_SHA" ]; then
+            git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+            bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
+          fi
 
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
