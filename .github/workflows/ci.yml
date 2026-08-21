@@ -512,6 +512,9 @@ jobs:
             packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md \
             || { echo "ACCESSIBILITY.md drift: packages/kiwicaptcha-wasm/ACCESSIBILITY.md and packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md differ — the packaged Symfony copy must stay byte-identical to the canonical WASM document" >&2; exit 1; }
           echo "accessibility documents byte-identical"
+      - name: Install gawk (deterministic prose lint)
+        run: sudo apt-get update && sudo apt-get install -y gawk
+
       - name: docs-lint (prose lint, baseline ratchet)
         # BASELINE RATCHET: the committed baseline
         # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
