@@ -207,7 +207,7 @@ test.describe('KiwiCaptcha origin validation', () => {
   test('a cross-origin redirect target is never contacted', async ({ page }) => {
     const foreign = [];
     page.on('request', (req) => {
-      if (req.url().startsWith('http://127.0.0.1:9999')) foreign.push(req.url());
+      if (req.url().startsWith('http:\/\/127.0.0.1:9999')) foreign.push(req.url());
     });
     await page.route('**/challenge', async (route) => {
       await route.fulfill({
@@ -226,7 +226,7 @@ test.describe('KiwiCaptcha origin validation', () => {
   test('a cross-origin challenge endpoint is refused before any fetch', async ({ page }) => {
     const foreign = [];
     page.on('request', (req) => {
-      if (req.url().startsWith('http://127.0.0.1:9999')) foreign.push(req.url());
+      if (req.url().startsWith('http:\/\/127.0.0.1:9999')) foreign.push(req.url());
     });
     await serveWidgetPage(page, {
       'data-kiwi-endpoint': 'http://127.0.0.1:9999/challenge',

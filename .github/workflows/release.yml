@@ -1,8 +1,8 @@
 name: Release
 
-# The release pipeline is CI-GATED on the EXACT tag-triggered ci.yml
+# The release pipeline is gated on the exact tag-triggered ci.yml
 # run, split into a blast-radius-limited build job and an attest/publish
-# job, and publishes ATOMICALLY:
+# job, and publishes atomically:
 #
 #   job 1 (contents: read, actions: write — cannot publish/attest):
 #     gate (exact tag CI run succeeded; commit on protected main; release
@@ -15,7 +15,7 @@ name: Release
 #     `gh release create` (draft -> upload -> publish, no clobber).
 #
 # v* tags are protected by a repository ruleset; GitHub Immutable
-# Releases is ENABLED (PUT /repos/{owner}/{repo}/immutable-releases), so
+# Releases is enabled (PUT /repos/{owner}/{repo}/immutable-releases), so
 # every published release object locks its tag and assets and carries a
 # release-level attestation; the publish step verifies both
 # (immutable:true API assertion + gh release verify).
@@ -31,7 +31,7 @@ jobs:
   gate-and-build:
     name: Gate and build release assets
     runs-on: ubuntu-latest
-    # This job can NEVER publish or attest — it only has read access to
+    # This job can never publish or attest — it only has read access to
     # contents plus the actions permission required to upload the workflow
     # artifact. The blast radius of repo-controlled bash build.sh is
     # bounded to artifact production.
@@ -46,15 +46,15 @@ jobs:
         with:
           fetch-depth: 0
       - name: gate — exact tag CI, protected-main reachability, no existing release
-        # The gate selects the SPECIFIC ci.yml workflow run triggered by
-        # THIS tag push (head_sha == GITHUB_SHA AND head_branch ==
+        # The gate selects the specific ci.yml workflow run triggered by
+        # this tag push (head_sha == GITHUB_SHA AND head_branch ==
         # GITHUB_REF_NAME AND event == push) and requires it to be
         # completed with success. Querying all check runs for the SHA is
         # wrong twice over: the release job's own run can never complete
         # while it waits, and the same SHA carries both a main-push and a
         # tag-push CI copy — only the tag-triggered run proves "the CI
         # workflow triggered by this tag passed". An existing release is
-        # also refused HERE, before any build, manifest or attestation
+        # also refused here, before any build, manifest or attestation
         # work (never create attestations for a release that cannot be
         # published).
         run: |
@@ -68,25 +68,25 @@ jobs:
           fi
           echo "release $tag does not exist yet"
 
-          # PREFLIGHT repository immutability before any build/attestation:
+          # Preflight repository immutability before any build/attestation:
           # publishing must never leave behind a public mutable release
           # because the setting was disabled; this check fails the
           # pipeline closed on it. The organization policy is additionally
           # enforced org-wide (PUT /orgs/{org}/settings/immutable-releases
           # enforced_repositories=all), so repository drift is impossible.
           #
-          # LIVE read-only immutable-policy preflight: the repository/org
-          # SETTING endpoints are admin-gated (403 for this job's plain
-          # GITHUB_TOKEN), but the release OBJECT exposes the platform's
+          # Live read-only immutable-policy preflight: the repository/org
+          # Setting endpoints are admin-gated (403 for this job's plain
+          # GITHUB_TOKEN), but the release object exposes the platform's
           # enforcement: every release created while immutable releases
-          # are ENABLED carries `immutable: true` (GET
+          # are enabled carries `immutable: true` (GET
           # /repos/{o}/{r}/releases/latest — plain token, read-only).
           # Disabling the setting flips existing releases mutable, so the
-          # last release's flag is a LIVE behavioral probe of the current
+          # last release's flag is a live behavioral probe of the current
           # policy: if it reads anything but true, the pipeline fails
-          # closed BEFORE any build work. The admin-declared variable
+          # closed before any build work. The admin-declared variable
           # gate below remains as the complementary governance contract —
-          # BOTH sources must agree (the variable names the org admin's
+          # Both sources must agree (the variable names the org admin's
           # declaration; the live field proves the platform actually
           # enforces it).
           live_immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.immutable // empty' 2>/dev/null || true)"
@@ -103,9 +103,9 @@ jobs:
             echo "immutability preflight: live read-only probe OK (most recent release is immutable=true)"
           fi
 
-          # HARD admin-declared gate: the repository variable must be
+          # Hard admin-declared gate: the repository variable must be
           # declared "true" by an org admin. Without it — or when it reads
-          # as anything else — the release is REFUSED before any
+          # as anything else — the release is refused before any
           # build/attestation work. This is a strict contract: a release
           # can never proceed unless an org admin has declared the
           # immutability governance in place.
@@ -130,7 +130,7 @@ jobs:
             exit 1
           fi
           if [[ "$org_policy" == "selected" ]]; then
-            # 'selected' only proves enforcement when THIS repository is in
+            # 'selected' only proves enforcement when this repository is in
             # the selected set. The membership check walks the documented
             # response shape ({total_count, repositories:[{id,...}]}) with
             # pagination — a jq index() against the raw response silently
@@ -157,7 +157,7 @@ jobs:
             fi
           fi
 
-          # The reachability proof uses LOCAL git: the tag's commit must
+          # The reachability proof uses local git: the tag's commit must
           # be an ancestor of protected origin/main (the GitHub compare
           # endpoint is not usable for every ref pair on this repository).
           git fetch --quiet --depth=100 origin main
@@ -168,8 +168,8 @@ jobs:
           echo "reachability: $sha is an ancestor of origin/main (local git)"
 
           # Release provenance must survive an administrator bypass of
-          # branch protection: the EXACT tagged commit must be
-          # GitHub-VERIFIED (signed with a key GitHub recognizes as the
+          # branch protection: the exact tagged commit must be
+          # GitHub-verified (signed with a key GitHub recognizes as the
           # committer's) before anything is built or published. An
           # unsigned or unknown-key tag is refused.
           ver="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '{verified: .commit.verification.verified, reason: .commit.verification.reason, signature: .commit.verification.signature}')"
@@ -215,10 +215,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Admin-declared immutability gate: the vars context is
           # natively readable by the workflow — set the repository
-          # variable IMMUTABLE_RELEASES_ENFORCED=true as part of the
+          # variable `IMMUTABLE_RELEASES_ENFORCED=true` as part of the
           # governance contract.
           IMMUTABLE_RELEASES_ENFORCED: ${{ vars.IMMUTABLE_RELEASES_ENFORCED }}
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
@@ -233,7 +233,7 @@ jobs:
       - name: released bytes must equal the committed (browser-tested) bytes
         # The committed assets are what the browser suite and the
         # Symfony/core parity jobs test. The strict rebuild must reproduce
-        # them EXACTLY — any drift fails the release, so tested bytes ==
+        # them exactly — any drift fails the release, so tested bytes ==
         # released bytes by construction.
         run: |
           set -euo pipefail
@@ -244,10 +244,10 @@ jobs:
             assets/widget.css
           echo "strict rebuild == committed/tested assets"
       - name: release manifest (SHA-256 + SRI)
-        # SHA256SUMS uses BASENAMES so `shasum -c SHA256SUMS` works in a
+        # SHA256SUMS uses basenames so `shasum -c SHA256SUMS` works in a
         # flat download folder; SRI covers all four release assets
         # (widget.css is SRI-capable via <link>). Both manifests are
-        # written INSIDE assets/ so the single upload directory carries
+        # written inside assets/ so the single upload directory carries
         # everything with a predictable layout (no common-prefix
         # flattening ambiguity across multiple upload paths).
         run: |
@@ -265,7 +265,7 @@ jobs:
     name: Attest and publish the release
     runs-on: ubuntu-latest
     needs: gate-and-build
-    # ONLY this job holds publish/attestation capability, and it runs only
+    # Only this job holds publish/attestation capability, and it runs only
     # after the gated build produced the artifact.
     permissions:
       contents: write
@@ -299,10 +299,10 @@ jobs:
             ${{ github.workspace }}/SHA256SUMS
             ${{ github.workspace }}/SRI.txt
       - name: publish the release atomically (draft -> upload -> publish)
-        # Assets are passed DIRECTLY to `gh release create` — GitHub CLI
-        # creates the release as a DRAFT, uploads the assets, and only
+        # Assets are passed directly to `gh release create` — GitHub CLI
+        # creates the release as a draft, uploads the assets, and only
         # then publishes it; a failure never leaves a public partial
-        # release. An EXISTING release is already refused in the gate
+        # release. An existing release is already refused in the gate
         # (and is refused again here) — no --clobber, ever.
         run: |
           set -euo pipefail
@@ -310,7 +310,7 @@ jobs:
             echo "refusing to publish: release $GITHUB_REF_NAME already exists (releases are immutable)" >&2
             exit 1
           fi
-          # The release evidence is GENERATED from the API (never
+          # The release evidence is generated from the API (never
           # hand-written): the exact tag CI job counts and the
           # verified-commit state are computed here and embedded in the
           # notes, so the evidence cannot go stale.
@@ -344,11 +344,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: verify the published release (immutability + attestation)
-        # With GitHub Immutable Releases ENABLED, the publish step must
-        # PROVE the release object is immutable and its release-level
+        # With GitHub Immutable Releases enabled, the publish step must
+        # prove the release object is immutable and its release-level
         # attestation verifies — a release that fails either assertion is
         # a broken pipeline, not a release. The release-level attestation
-        # is created ASYNCHRONOUSLY after publication, so the check is
+        # is created asynchronously after publication, so the check is
         # polled for up to three minutes.
         run: |
           set -euo pipefail

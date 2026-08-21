@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           # The toolchain is pinned explicitly: the repo
           # rust-toolchain.toml also pins 1.96.0, which makes the action
@@ -30,12 +30,11 @@ jobs:
       - name: quick-start end-to-end
         # The public quick-start is an executable behavioral test
         # (issue -> solve -> verify -> VerifyOutcome::Valid): cargo test
-        # --workspace only COMPILES examples; this step EXECUTES the
-        # example's #[test], so a compilable-but-broken quick-start can
-        # never ship.
+        # --workspace only compiles examples; this step runs the
+        # example's #[test], so a broken quick-start can never ship.
         run: cargo test -p kiwicaptcha --example quickstart
       - name: wasm32 build
-        # kiwicaptcha-wasm is a STANDALONE crate (not a workspace member), so
+        # kiwicaptcha-wasm is a standalone crate (not a workspace member), so
         # the build runs from its own directory.
         working-directory: packages/kiwicaptcha-wasm
         run: cargo build --target wasm32-unknown-unknown
@@ -50,7 +49,7 @@ jobs:
   quick-start:
     # The public quick-start is an executable behavioral test
     # (issue -> solve -> verify -> VerifyOutcome::Valid) and is a
-    # STANDALONE job: the protected-main ruleset requires it as an
+    # standalone job: the protected-main ruleset requires it as an
     # independent status context — a step inside the Rust job never emits
     # a check run, so PRs could wait forever on a phantom
     # "quick-start end-to-end" context.
@@ -60,7 +59,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - name: quick-start end-to-end
@@ -159,7 +158,7 @@ jobs:
           echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
           exit 1
       - name: pin Symfony 8.x (PHP 8.4 for the 8.x line)
-        # Only the five DECLARED packages are pinned: --with requires the
+        # Only the five declared packages are pinned: --with requires the
         # temporary constraint to be a subset of composer.json, and the
         # transitive packages (config, dependency-injection, twig-bridge,
         # routing, cache, property-info, error-handler) resolve to the
@@ -207,9 +206,9 @@ jobs:
 
   phpredis-siteverify:
     # The Siteverify idempotency store and the invalid-secret log gate
-    # accept BOTH Predis and native PhpRedis, so the \Redis branch
+    # accept both Predis and native PhpRedis, so the \Redis branch
     # (Redis::eval with the array-argument form) is validated here. This
-    # REQUIRED lane runs the Siteverify + idempotency suites with the
+    # required lane runs the Siteverify + idempotency suites with the
     # phpredis extension loaded and smokes the \Redis branch of the
     # idempotency store directly against the real Redis container.
     name: PhpRedis Siteverify (idempotency + log gate, real Redis)
@@ -246,7 +245,7 @@ jobs:
         # The Siteverify suites construct Predis clients explicitly and the
         # store branches on the client type — this smoke proves the \Redis
         # branch (Redis::eval with the array-argument form) against the
-        # real Redis at 127.0.0.1:6399 BEFORE the suites run.
+        # real Redis at 127.0.0.1:6399 before the suites run.
         working-directory: packages/kiwicaptcha/integrations/symfony
         run: |
           # shellcheck disable=SC2016 # PHP variables inside single-quoted code
@@ -285,8 +284,8 @@ jobs:
         run: vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
 
   redis-compat:
-    # NON-GATING forward-compatibility probe: runs the risk real-Redis
-    # suites against NEWER Redis (8.x, digest-pinned) so future Redis
+    # Non-gating forward-compatibility probe: runs the risk real-Redis
+    # suites against newer Redis (8.x, digest-pinned) so future Redis
     # behavior changes surface as visible warnings, while the release gate
     # keeps testing the deterministic pinned Redis 7 digest. Deliberately
     # NOT in the protected-main required-check set.
@@ -303,7 +302,7 @@ jobs:
         working-directory: packages/kiwicaptcha-risk
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
@@ -336,7 +335,7 @@ jobs:
         working-directory: packages/kiwicaptcha-risk
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
@@ -380,7 +379,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
@@ -424,7 +423,7 @@ jobs:
         run: composer install --no-interaction --prefer-dist
       - name: install Symfony bundle (real ApiJsController for the compat endpoints)
         # The fixture router serves /kiwi-captcha/api.js and
-        # /kiwi-captcha/widget.css through the REAL bundle controller: the
+        # /kiwi-captcha/widget.css through the real bundle controller: the
         # bundle vendor must exist so the production code path (not a
         # hard-coded concat) is what the browser tests exercise.
         working-directory: packages/kiwicaptcha/integrations/symfony
@@ -432,7 +431,7 @@ jobs:
       - name: install Playwright
         working-directory: tests/browser
         run: |
-          # npm ci installs EXACTLY the committed package-lock.json
+          # npm ci installs exactly the committed package-lock.json
           # (reproducible browser-suite deps).
           npm ci --no-audit --no-fund
           npx playwright install chromium
@@ -443,7 +442,7 @@ jobs:
 
   # The accessibility acceptance suite and the curated cross-browser
   # critical-path suite run across Chromium + Firefox + WebKit
-  # (playwright.a11y.config.mjs). This is a REQUIRED status check —
+  # (playwright.a11y.config.mjs). This is a required status check —
   # three-engine evidence is part of the AA conformance claim.
   browser-a11y:
     name: Browser accessibility + cross-browser (Chromium + Firefox + WebKit)
@@ -477,17 +476,25 @@ jobs:
   repo-sanity:
     # Semantic repository/release sanity gate: a mechanically valid
     # release pipeline must never sign and attest the wrong product
-    # content. Checks the product identity of the README, the Cargo
+    # content. Checks the product identity of the `README`, the Cargo
     # package, the Composer packages and the release asset names.
     name: Repo semantic sanity (product identity)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # Full history: the baseline-integrity step resolves its
+          # comparison base (the PR base / the push's previous head) from
+          # the repository, and the docs-lint scan covers workflow prose,
+          # so a shallow checkout would make the base unresolvable.
+          fetch-depth: 0
       - name: product identity checks
         run: |
           set -euo pipefail
-          grep -q '^# KiwiCaptcha' README.md || { echo "README is not the KiwiCaptcha README" >&2; exit 1; }
-          if grep -q '^# ApexM''ail' README.md; then echo "README contains the wrong product header" >&2; exit 1; fi
+          KIWI_HDR='# KiwiCaptcha'
+          APEX_HDR='# ApexM''ail'
+          grep -q "^$KIWI_HDR" README.md || { echo "README is not the KiwiCaptcha README" >&2; exit 1; }
+          if grep -q "^$APEX_HDR" README.md; then echo "README contains the wrong product header" >&2; exit 1; fi
           grep -q 'packages/kiwicaptcha' README.md || { echo "README lost the package references" >&2; exit 1; }
           grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
           grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml || { echo "Cargo package name wrong" >&2; exit 1; }
@@ -495,7 +502,7 @@ jobs:
             test -f "packages/kiwicaptcha-wasm/assets/$asset" || { echo "missing release asset $asset" >&2; exit 1; }
           done
           test -f tests/browser/compat-capabilities.json || { echo "missing capability matrix" >&2; exit 1; }
-          # The packages/ hierarchy is the ONLY source root — top-level
+          # The packages/ hierarchy is the only source root — top-level
           # mirrors must never reappear (they diverged in
           # security-adjacent source before removal).
           for d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do
@@ -516,7 +523,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gawk
 
       - name: docs-lint (prose lint, baseline ratchet)
-        # BASELINE RATCHET: the committed baseline
+        # Baseline ratchet: the committed baseline
         # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
         # and intentionally reduced over time; this step fails when any
         # scanned file exceeds its per-file row (a scanned file without
@@ -524,8 +531,8 @@ jobs:
         # exceeds the baseline total. Scan roots: the five kiwicaptcha
         # package families, the browser test suite under tests/browser,
         # the design docs under protocol/, the workflow prose under
-        # .github/workflows/, and the product root files README.md and
-        # SECURITY.md (root-level roots are scanned only when present).
+        # .github/workflows/, and the product root files `README.md` and
+        # `SECURITY.md` (root-level roots are scanned only when present).
         # After deliberate rewrites, --update-baseline regenerates the
         # per-file baseline; once it reaches zero, advisory mode is
         # removed.
@@ -533,24 +540,52 @@ jobs:
           set -euo pipefail
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
       - name: docs-lint (prose lint, baseline integrity)
-        # The committed baseline must be monotonic against the baseline
-        # of the parent commit: every tracked path's row may only stay
-        # equal or decrease (a path dropped from the baseline is a
-        # deletion and is fine), a path newly tracked by the current
-        # baseline is allowed only when adopted in
-        # packages/kiwicaptcha/tools/docs-lint-adopted.txt, and the
-        # total may only stay equal or decrease. Regeneration with
-        # --update-baseline may only reduce the rows, so a scan that
+        # The comparison base is the PR base branch or the push's
+        # previous head, so a whole proposed change may only decrease the
+        # baseline; a single-commit comparison is insufficient. The
+        # committed baseline must be monotonic against the base baseline:
+        # every tracked path's row may only stay equal or decrease (a
+        # path dropped from the baseline is a deletion and is fine), a
+        # path newly tracked by the current baseline is allowed only when
+        # adopted in packages/kiwicaptcha/tools/docs-lint-adopted.txt,
+        # and the total may only stay equal or decrease. Regeneration
+        # with --update-baseline may only reduce the rows, so a scan that
         # needs headroom must be fixed by a rewrite, never by
-        # regenerating the baseline.
+        # regenerating the baseline. The adoption manifest is one-shot:
+        # every entry must be absent from the base baseline, and an entry
+        # that already has a row there is stale (its adoption landed) and
+        # fails the step, forcing its removal. If no comparison base is
+        # resolvable the step fails closed: a baseline that cannot be
+        # compared cannot be trusted.
         run: |
           set -euo pipefail
-          BASE_SHA="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
-          if [ -n "$BASE_SHA" ] \
-              && git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
-            git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
-            bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
+          BASE_SHA="${GITHUB_BASE_SHA:-}"
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(git rev-parse --verify "${{ github.event.before }}" 2>/dev/null || true)"
           fi
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+          if [ -z "$BASE_SHA" ] \
+              || ! git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
+            echo "::error::baseline-integrity cannot run: no comparison base available"
+            exit 1
+          fi
+          git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+          # Adoption one-shot enforcement: every entry must be absent
+          # from the base baseline; an entry with a row there is stale
+          # and fails the step, forcing its removal from the manifest.
+          while IFS= read -r entry; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"
+            entry="${entry%%#*}"
+            entry="${entry%"${entry##*[![:space:]]}"}"
+            [ -n "$entry" ] || continue
+            if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
+              echo "::error::stale adoption manifest entry: $entry already has a row in the base baseline; remove it from packages/kiwicaptcha/tools/docs-lint-adopted.txt"
+              exit 1
+            fi
+          done < packages/kiwicaptcha/tools/docs-lint-adopted.txt
+          bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
 
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
@@ -602,7 +637,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - name: cargo package (risk crate)
@@ -630,7 +665,7 @@ jobs:
         run: cargo test -p kiwicaptcha --example quickstart
       - name: cargo package (core crate, REAL verification)
         # `cargo package --locked` runs Cargo's full verification build of
-        # the PACKAGED representation (tarball -> unpack -> compile), not
+        # the packaged representation (tarball -> unpack -> compile), not
         # just `--no-verify` list checks. The core crate's dependencies
         # are all registry crates, so verification is genuine. (The risk
         # crate keeps --no-verify until kiwicaptcha 1.1.0 is on the
@@ -711,7 +746,7 @@ jobs:
         working-directory: packages/kiwicaptcha
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - name: redis_verify integration tests (real Redis)
@@ -738,7 +773,7 @@ jobs:
         working-directory: packages/kiwicaptcha-wasm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
@@ -766,7 +801,7 @@ jobs:
         working-directory: packages/kiwicaptcha-wasm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
@@ -821,13 +856,13 @@ jobs:
         working-directory: packages/kiwicaptcha-wasm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - name: first clean strict build
-        # Reproducibility is DEMONSTRATED, not inferred from version pins:
+        # Reproducibility is demonstrated, not inferred from version pins:
         # two fully clean strict builds (fresh target dir, fresh pkg dir,
         # fresh wasm-opt download) must produce identical asset hashes.
         env:
@@ -858,7 +893,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - name: core crate resources must be byte-identical to the canonical assets
@@ -901,7 +936,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch HEAD (rolling, 2026-08-05)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)

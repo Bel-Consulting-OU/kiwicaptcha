@@ -52,7 +52,7 @@ test.describe('KiwiCaptcha browser solver', () => {
     const external = [];
     page.on('request', (req) => {
       const url = new URL(req.url());
-      if (url.origin !== 'http://127.0.0.1:8085') external.push(req.url());
+      if (url.origin !== 'http:\/\/127.0.0.1:8085') external.push(req.url());
     });
     await page.goto('/');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });

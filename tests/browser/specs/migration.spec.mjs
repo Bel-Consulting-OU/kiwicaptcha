@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // Incumbent migration is a CI contract. These fixtures are
-// structurally copied from standard reCAPTCHA v2 / invisible / hCaptcha /
+// structurally copied from standard `reCAPTCHA` v2 / invisible / hCaptcha /
 // Turnstile integrations — the only difference is the provider script URL
 // (kiwi /kiwi-captcha/api.js?compat=...). The migration-diff budget: a
 // standard incumbent page migrates with no more than a handful of changed

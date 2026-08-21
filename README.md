@@ -138,7 +138,9 @@ The record's fields (scope, IP binding tag, region, policy epoch, ...) are descr
 ## Storage and single-use semantics
 
 Single-use semantics are enforced by consuming the record on verification.
-Atomicity under concurrency is opt-in: implementations that guarantee strict single-use (a second call MUST return null even when two requests race) implement `AtomicStorageInterface`.
+The consumed record is retained until its TTL with the committed deterministic result.
+A replay returns the retained outcome rather than null: `AlreadyConsumed` unless the caller supplies the exact operation identity recorded by the original consume, in which case that outcome is reproduced.
+Atomicity under concurrency is opt-in: implementations that guarantee strict single-use (exactly one caller wins the pending-to-consumed transition even when two requests race) implement `AtomicStorageInterface`.
 
 | Adapter | Use case |
 |---------|----------|
