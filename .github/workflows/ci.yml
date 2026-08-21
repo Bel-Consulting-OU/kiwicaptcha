@@ -515,10 +515,12 @@ jobs:
       - name: docs-lint (prose lint, baseline ratchet)
         # BASELINE RATCHET: the committed baseline
         # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
-        # and intentionally reduced over time; this step fails when the
-        # current violation total exceeds it. After deliberate rewrites,
-        # --update-baseline regenerates the baseline; once it reaches
-        # zero, advisory mode is removed.
+        # and intentionally reduced over time; this step fails when any
+        # scanned file exceeds its per-file row (a scanned file without
+        # a row counts as a new file with baseline 0) or the total
+        # exceeds the baseline total. After deliberate rewrites,
+        # --update-baseline regenerates the per-file baseline; once it
+        # reaches zero, advisory mode is removed.
         run: |
           set -euo pipefail
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt

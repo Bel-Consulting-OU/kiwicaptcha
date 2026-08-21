@@ -334,11 +334,14 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         if ($record === null) {
             return 'missing';
         }
-        if (($this->obligations[$obligationId] ?? null) !== $chainId || ($record['obligationId'] ?? null) !== $obligationId) {
-            if (!isset($this->obligations[$obligationId])) {
-                return 'already_completed';
-            }
-
+        if (($record['obligationId'] ?? null) !== $obligationId) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->obligations[$obligationId] ?? null;
+        if ($mapped === null) {
+            return 'already_completed';
+        }
+        if ($mapped !== $chainId) {
             return 'obligation_moved';
         }
         if ($record['state'] === 'denied') {
@@ -366,11 +369,14 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
         if ($record === null) {
             return 'missing';
         }
-        if (($this->obligations[$obligationId] ?? null) !== $chainId || ($record['obligationId'] ?? null) !== $obligationId) {
-            if (!isset($this->obligations[$obligationId])) {
-                return 'already_completed';
-            }
-
+        if (($record['obligationId'] ?? null) !== $obligationId) {
+            return 'obligation_moved';
+        }
+        $mapped = $this->obligations[$obligationId] ?? null;
+        if ($mapped === null) {
+            return 'already_completed';
+        }
+        if ($mapped !== $chainId) {
             return 'obligation_moved';
         }
         if ($record['state'] === 'step_up_required') {
@@ -860,7 +866,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && $path === '/chain-store-selftest') {
         $otherObligation = hash('sha256', $otherChain);
         $store->createWithObligation($otherChain, $otherObligation, $nonceA, 'login', 'txn-selftest-other', 'argon32', 1, 120);
         $check('denied: moved obligation refused', $store->markTransactionDenied($deniedChain, $otherObligation) === 'obligation_moved');
-        $check('denied: unknown obligation id is already-completed', $store->markTransactionDenied($deniedChain, hash('sha256', 'never-registered')) === 'already_completed');
+        $check('denied: unknown obligation id is obligation-moved', $store->markTransactionDenied($deniedChain, hash('sha256', 'never-registered')) === 'obligation_moved');
+        $completedChain = $base.'-completed';
+        $completedObligation = hash('sha256', $completedChain);
+        $store->createWithObligation($completedChain, $completedObligation, $nonceA, 'login', 'txn-selftest-completed', 'argon32', 1, 120);
+        $store->deleteObligation($completedChain, $completedObligation);
+        $check('denied: correct id with deleted mapping is already-completed', $store->markTransactionDenied($completedChain, $completedObligation) === 'already_completed');
         $stepUpChain = $base.'-stepup';
         $stepUpObligation = hash('sha256', $stepUpChain);
         $store->createWithObligation($stepUpChain, $stepUpObligation, $nonceA, 'login', 'txn-selftest-stepup', 'argon32', 1, 120);
