@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// Incumbent migration is a CI CONTRACT. These fixtures are
+// Incumbent migration is a CI contract. These fixtures are
 // structurally copied from standard reCAPTCHA v2 / invisible / hCaptcha /
-// Turnstile integrations — the ONLY difference is the provider script URL
+// Turnstile integrations — the only difference is the provider script URL
 // (kiwi /kiwi-captcha/api.js?compat=...). The migration-diff budget: a
 // standard incumbent page migrates with no more than a handful of changed
 // lines; if a fixture requires more edits to keep working, that is a
@@ -39,7 +39,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2: omitted widget id defaults to the first created widget', async ({ page }) => {
-    // The omitted id targets the FIRST created widget (the incumbent
+    // The omitted id targets the first created widget (the incumbent
     // providers' documented default): reset()/getResponse()/execute()
     // with no argument operate on that widget, and reset() reacquires a
     // fresh response.
@@ -60,7 +60,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders', async ({ page }) => {
-    // The fixture is the DOCUMENTED integration pattern (onload +
+    // The fixture is the documented integration pattern (onload +
     // render=explicit) with only the provider URL changed. The invariant:
     // render=explicit suppresses auto-render (exactly ONE widget) and the
     // onload callback runs.
@@ -79,10 +79,10 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('Turnstile: action/cData bound at issuance, returned from verified server state, request forging ignored', async ({ page, request }) => {
-    // The FULL trust chain: data-action/data-cdata on the container ->
+    // The full trust chain: data-action/data-cdata on the container ->
     // the driver sends them in the challenge request -> the server binds
-    // them to the nonce -> Siteverify returns the SERVER-STORED values.
-    // A backend request that tries action=admin gets the REAL action.
+    // them to the nonce -> Siteverify returns the server-stored values.
+    // A backend request that tries action=admin gets the real action.
     await page.goto('/migration/turnstile-meta.html');
     await expect(page.locator('#out')).toHaveText(/^cb:/, { timeout: 60_000 });
     const token = await page.evaluate(() => {
@@ -121,7 +121,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
       await route.fulfill({ response });
     });
     await page.goto('/migration/recaptcha-v3.html');
-    // Capture the token from the execute PROMISE (the hidden holder is
+    // Capture the token from the execute promise (the hidden holder is
     // torn down on completion by design, so getResponse() afterwards is
     // empty).
     const token = await page.evaluate(async () => {
@@ -133,14 +133,14 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     const v3 = bodies.find((b) => b.sitekey === '6Lc_v3_sitekey_a');
     expect(v3, 'the challenge body must carry the real sitekey').toBeTruthy();
     expect(v3.action, 'the challenge body must carry the requested action independently').toBe('checkout');
-    // The client scope is the public sitekey (the design): the SERVER maps
+    // The client scope is the public sitekey (the design): the server maps
     // (sitekey, action) to the protected scope.
     expect(v3.scope).toBe('6Lc_v3_sitekey_a');
     const verified = await request.post('/verify', { data: { token, scope: 'commerce_high_value' } });
     const body = await verified.json();
     expect(body.ok, 'the server-resolved scope must be what verifies').toBe(true);
 
-    // Unknown action -> REFUSED by the server policy (the 422 must reach
+    // Unknown action -> refused by the server policy (the 422 must reach
     // the client; the raw body is intentionally not leaked into the
     // widget's error message).
     const refused = await page.evaluate(async () => {
@@ -159,7 +159,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
 
   test('reCAPTCHA v2: Retry after terminal failure preserves the FULL security configuration', async ({ page }) => {
     // A mapped sitekey -> sensitive scope must survive the Retry path:
-    // reacquisition reinitializes from the PRESERVED options, never a
+    // reacquisition reinitializes from the preserved options, never a
     // blank initWidget(W) that falls back to the default scope.
     let failing = true;
     const scopes = [];
@@ -176,7 +176,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 60_000 });
     // The initial render's scope identity (the container's data-kiwi-scope,
     // which is the mapped sitekey — the fixture allowlist maps it to
-    // 'login' server-side; a downgrade would show a DIFFERENT scope here).
+    // 'login' server-side; a downgrade would show a different scope here).
     const containerScope = await page.evaluate(() => document.querySelector('.g-recaptcha').dataset.sitekey || document.querySelector('.g-recaptcha').dataset.kiwiScope);
     failing = false;
     await page.locator('.g-recaptcha [data-kiwi-retry]').click();
@@ -192,7 +192,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   test('reCAPTCHA v2: expiry -> Retry keyboard reacquisition preserves host form fields', async ({ page }) => {
     await page.goto('/migration/recaptcha-v2-ttl.html');
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
-    // Fill unrelated host-form data BEFORE expiry.
+    // Fill unrelated host-form data before expiry.
     await page.fill('input[name="email"]', 'user@example.com');
     await expect(page.locator('input[name="g-recaptcha-response"]')).toHaveValue('', { timeout: 30_000 });
     // The expired state exposes the Retry button.
@@ -241,7 +241,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
       const deadline = Date.now() + 30_000;
       let response = '';
       while (Date.now() < deadline) {
-        // The instance id lives on the RENDERED CONTAINER (compat mode),
+        // The instance id lives on the rendered container (compat mode),
         // not on the inner widget element.
         const id = el.dataset.kiwiInstance;
         response = id ? window.grecaptcha.getResponse(id) : '';
@@ -293,8 +293,8 @@ test.describe('KiwiCaptcha migration compatibility', () => {
 
   test('reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure', async ({ page }) => {
     // The invariant: the provider error callback fires exactly once on
-    // terminal failure (fail()/workerUnavailable()/solverMismatch() all
-    // invoke it).
+    // terminal failure. fail(), workerUnavailable() and solverMismatch()
+    // all invoke it.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
     });
@@ -378,7 +378,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     // ready() must not race the loader-glue self-fetch — an
     // explicit render() inside ready() immediately starts an Argon worker
     // that needs the glue (no inline script exists on the external-loader
-    // page). The api.js response is DELIBERATELY delayed so the race is
+    // page). The api.js response is deliberately delayed so the race is
     // observable.
     await page.route('**/api.js?*', async (route) => {
       await new Promise((r) => setTimeout(r, 1500));
@@ -474,7 +474,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
       const el = document.querySelector('.g-recaptcha');
       const wid = el.dataset.kiwiInstance;
       window.grecaptcha.remove(wid);
-      // Provider parity (Turnstile remove()): the widget markup leaves the
+      // Provider parity with Turnstile's remove(): the widget markup leaves the
       // page entirely.
       return document.querySelector('.g-recaptcha') === null
         && document.querySelectorAll('[data-kiwi-widget]').length === 0;
@@ -518,7 +518,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('the visible .kiwi-widget carries the done state', async ({ page }) => {
-    // The state attribute must live on the INNER
+    // The state attribute must live on the inner
     // .kiwi-widget — the stylesheet keys the pulse/success/failure styling
     // and Retry visibility on .kiwi-widget[data-state=...].
     await page.goto('/migration/recaptcha-v2.html');
@@ -685,7 +685,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('hCaptcha async execute(undefined) resolves {response, key} against the FIRST created widget', async ({ page }) => {
-    // widgetID is OPTIONAL in the incumbent API: with no argument the
+    // widgetID is optional in the incumbent API: with no argument the
     // async form targets the first created widget and resolves the
     // {response, key} pair — key === getRespKey() on the same default.
     await page.goto('/migration/hcaptcha.html');
@@ -793,7 +793,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('hCaptcha BARE execute still rejects with an Error object on failure', async ({ page }) => {
-    // The error-code normalization applies ONLY to the async form — the
+    // The error-code normalization applies only to the async form — the
     // bare (non-async) execute keeps the native Error-object rejection.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });

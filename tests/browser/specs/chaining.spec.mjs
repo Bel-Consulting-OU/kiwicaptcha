@@ -2,21 +2,21 @@ import { test, expect } from '@playwright/test';
 
 // Chained challenges (the transaction-obligation redesign), end-to-end in
 // the real browser against the fixture router (?chaining=1):
-//  - a CHAIN_REQUIRED stage-1 solve opens a SERVER-SIDE obligation; the
-//    re-rendered widget receives the STRONGER stage-2 challenge;
+//  - a chain_required stage-1 solve opens a server-side obligation; the
+//    re-rendered widget receives the stronger stage-2 challenge;
 //  - a reset (or a full page reload) of the same transaction still gets
 //    stage 2 — and when the widget clears the chain_ticket (as it does
-//    after a solve), the server AUTO-RESUMES the open chain without the
+//    after a solve), the server auto-resumes the open chain without the
 //    ticket (never an unchained stage-1);
 //  - a lost stage-2 response is recovered: the next request returns the
-//    EXACT same challenge (no re-mint);
-//  - the stage-2 verification ENDS the chain (the obligation is cleared);
+//    exact same challenge (no re-mint);
+//  - the stage-2 verification ends the chain (the obligation is cleared);
 //    a subsequent unrelated transaction gets an independent normal
 //    challenge;
-//  - a TERMINAL disposition (the transaction's final Deny / StepUp
+//  - a terminal disposition (the transaction's final Deny / StepUp
 //    finalize) binds the transaction to its terminal response: a later
-//    challenge request — WITH or WITHOUT the ticket — re-encounters the
-//    terminal state (429 RISK_DENIED / 403 STEP_UP_REQUIRED, never a new
+//    challenge request — with or without the ticket — re-encounters the
+//    terminal state (429 risk_denied / 403 step_up_required, never a new
 //    challenge, never a stage-1 issuance, never a re-reservation);
 //  - no new persistent device identity: the challenge requests carry no
 //    fingerprint-like data.
@@ -45,7 +45,7 @@ async function chainVerify(page, token, { ticket, binding, scope = 'login' } = {
   return resp.json();
 }
 
-/** The nonce of a challenge RESPONSE (the exact-same-challenge checks). */
+/** The nonce of a challenge response (the exact-same-challenge checks). */
 function nonceOf(body) {
   return body && typeof body.nonce === 'string' ? body.nonce : null;
 }
@@ -72,7 +72,7 @@ async function chainDisposition(page, token, { disposition, binding, scope = 'lo
 test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
   test('a CHAIN_REQUIRED stage-1 opens the chain and the re-rendered widget receives stage 2', async ({ page }) => {
     // Stage 1: the page issues the ordinary challenge; the browser solves
-    // it; the form submission demands the STRONGER stage (CHAIN_REQUIRED
+    // it; the form submission demands the stronger stage (chain_required
     // + the one-shot ticket).
     await page.goto('/?chaining=1&capture=s4&binding=txn-b4');
     await solve(page);
@@ -87,8 +87,8 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(disposition.chain_required).toBe(true);
     expect(disposition.chain_ticket).toMatch(/^[A-Za-z0-9._:-]{1,256}$/);
 
-    // Stage 2: the application re-renders the widget WITH the ticket —
-    // the widget receives the STRONGER argon stage.
+    // Stage 2: the application re-renders the widget with the ticket —
+    // the widget receives the stronger argon stage.
     await page.goto(`/?chaining=1&capture=s5&chain=${encodeURIComponent(disposition.chain_ticket)}&binding=txn-b4`);
     await solve(page, 180_000);
     const stage2 = JSON.parse(await readCapture(page, 's5'));
@@ -96,7 +96,7 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(stage2.request_binding).toBe('txn-b4');
     expect(stage2.client_context).toBeUndefined();
 
-    // The stage-2 issuance (HTTP level, the same ticket) is the ARGON
+    // The stage-2 issuance (HTTP level, the same ticket) is the argon
     // challenge (the stronger stage) — never a stage-1 sha.
     const stage2Issuance = await challengePost(page, {
       scope: 'login',
@@ -116,21 +116,21 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(disposition.chain_ticket).toBeTruthy();
 
     // The re-rendered widget solves the stage-2 challenge; the driver
-    // CLEARS the one-shot ticket attribute after the solve.
+    // clears the one-shot ticket attribute after the solve.
     await page.goto(`/?chaining=1&capture=r5&chain=${encodeURIComponent(disposition.chain_ticket)}&binding=txn-b5`);
     await solve(page, 180_000);
     await expect(page.locator('#kiwicaptcha-root')).not.toHaveAttribute('data-kiwi-chain-ticket');
 
-    // A RESET of the same transaction: the challenge request carries NO
-    // chain_ticket — the server's open obligation AUTO-RESUMES the chain
-    // and recovers the SAME issued stage-2 challenge (never a stage-1).
+    // A reset of the same transaction: the challenge request carries NO
+    // chain_ticket — the server's open obligation auto-resumes the chain
+    // and recovers the same issued stage-2 challenge (never a stage-1).
     const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
     const recovered = await challengePost(page, { scope: 'login', request_binding: 'txn-b5' });
     await page.evaluate((wid) => window.KiwiCaptcha.reset(wid), widgetId);
     await solve(page, 180_000);
     const after = JSON.parse(await readCapture(page, 'r5'));
     // The reset's request carries NO ticket (the driver cleared it) and
-    // the recovered challenge is the SAME stage-2 challenge.
+    // the recovered challenge is the same stage-2 challenge.
     expect(after.chain_ticket).toBeUndefined();
     expect(nonceOf(recovered)).not.toBeNull();
     expect(after.request_binding).toBe('txn-b5');
@@ -159,8 +159,8 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     await solve(page, 180_000);
     expect(firstNonce).not.toBeNull();
 
-    // Full page RELOAD: the same ticket + transaction — the server
-    // RECOVERS the exact same issued challenge (no re-mint).
+    // Full page reload: the same ticket + transaction — the server
+    // recovers the exact same issued challenge (no re-mint).
     let secondNonce = null;
     page.on('response', async (resp) => {
       if (resp.url().includes('/challenge')) {
@@ -184,7 +184,7 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     const disposition = await chainVerify(page, token, { binding: 'txn-b7' });
     expect(disposition.chain_ticket).toBeTruthy();
 
-    // Seed the ticket, then REMOVE it from the container before the
+    // Seed the ticket, then remove it from the container before the
     // widget's re-execution — the server still resumes the open chain.
     await page.goto(`/?chaining=1&capture=m5&chain=${encodeURIComponent(disposition.chain_ticket)}&binding=txn-b7`);
     await page.evaluate(() => document.querySelector('#kiwicaptcha-root').removeAttribute('data-kiwi-chain-ticket'));
@@ -200,9 +200,9 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
   });
 
   test('a lost stage-2 response is recovered: the next request returns the exact same challenge', async ({ page }) => {
-    // Drive the stage-2 issuance at the HTTP level: the FIRST response is
-    // "lost" (the widget never sees it), the SECOND request must return
-    // the EXACT same challenge — no re-mint.
+    // Drive the stage-2 issuance at the HTTP level: the first response is
+    // "lost" (the widget never sees it), the second request must return
+    // the exact same challenge — no re-mint.
     await page.goto('/?chaining=1&binding=txn-b8');
     await solve(page);
     const token = await tokenOf(page);
@@ -239,13 +239,13 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(ended.ok).toBe(true);
     expect(ended.chain_ended).toBe(true);
 
-    // The SAME transaction again (no ticket): the chain ended — the
-    // request is a NORMAL unchained issuance (no stage-2 recovery, no
+    // The same transaction again (no ticket): the chain ended — the
+    // request is a normal unchained issuance (no stage-2 recovery, no
     // ticket involvement).
     const again = await challengePost(page, { scope: 'login', request_binding: 'txn-b9' });
     expect(again.algorithm).toBe('sha256');
 
-    // An UNRELATED transaction gets its own independent normal challenge.
+    // An unrelated transaction gets its own independent normal challenge.
     await page.goto('/?chaining=1&capture=e6&binding=txn-b10');
     await solve(page);
     const unrelated = JSON.parse(await readCapture(page, 'e6'));
@@ -264,7 +264,7 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     await page.goto(`/?chaining=1&capture=i5&chain=${encodeURIComponent(disposition.chain_ticket)}&binding=txn-b11`);
     await solve(page, 180_000);
 
-    // The stage-1 AND stage-2 challenge requests carry ONLY the
+    // The stage-1 AND stage-2 challenge requests carry only the
     // documented fields (scope / algorithm / request_binding /
     // chain_ticket) — no canvas/font/GPU/UA-derived or device-capability
     // data, no client_context (the opt-in is off).
@@ -292,14 +292,14 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     const disposition = await chainVerify(page, token, { binding });
     expect(disposition.chain_ticket).toBeTruthy();
 
-    // The transaction's final disposition is DENY: the open obligation is
-    // terminalized durably (NONCE-AGNOSTIC — the obligation mapping is
-    // KEPT, so the transaction stays bound to its final denial).
+    // The transaction's final disposition is deny: the open obligation is
+    // terminalized durably (nonce-agnostic — the obligation mapping is
+    // kept, so the transaction stays bound to its final denial).
     const terminal = await chainDisposition(page, token, { disposition: 'deny', binding });
     expect(terminal.code).toBe('RISK_DENIED');
 
-    // A challenge request WITHOUT a ticket for the same transaction
-    // re-encounters the TERMINAL denial: HTTP 429 RISK_DENIED — never a
+    // A challenge request without a ticket for the same transaction
+    // re-encounters the terminal denial: HTTP 429 risk_denied — never a
     // new challenge, never a stage-1 issuance.
     const denied = await challengeStatus(page, { scope: 'login', request_binding: binding });
     expect(denied.status()).toBe(429);
@@ -308,7 +308,7 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     expect(deniedBody.error.message).toBe('Challenge issuance denied by the adaptive risk engine. Try again later.');
     expect(deniedBody.nonce).toBeUndefined();
 
-    // Even WITH the ticket the chain stays terminal: the reservation can
+    // Even with the ticket the chain stays terminal: the reservation can
     // never be claimed again and no challenge is ever minted.
     const withTicket = await challengeStatus(page, {
       scope: 'login',
@@ -329,13 +329,13 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
     const disposition = await chainVerify(page, token, { binding });
     expect(disposition.chain_ticket).toBeTruthy();
 
-    // The transaction's final disposition is STEP-UP: the open obligation
-    // is terminalized durably (the obligation mapping is KEPT).
+    // The transaction's final disposition is step-up: the open obligation
+    // is terminalized durably (the obligation mapping is kept).
     const terminal = await chainDisposition(page, token, { disposition: 'step_up', binding });
     expect(terminal.code).toBe('STEP_UP_REQUIRED');
 
-    // The no-ticket challenge request re-encounters the TERMINAL step-up:
-    // HTTP 403 STEP_UP_REQUIRED — no challenge, no stage-1 issuance.
+    // The no-ticket challenge request re-encounters the terminal step-up:
+    // HTTP 403 step_up_required — no challenge, no stage-1 issuance.
     const stepUp = await challengeStatus(page, { scope: 'login', request_binding: binding });
     expect(stepUp.status()).toBe(403);
     const stepUpBody = await stepUp.json();
@@ -358,7 +358,7 @@ test.describe('KiwiCaptcha chained challenges (transaction obligation)', () => {
 
   test('the fixture chain store mirrors the production terminal-state machine', async ({ page }) => {
     // The fixture-level self-test pins the store semantics that the HTTP
-    // flow cannot reach directly: reserve() answers the TERMINAL statuses
+    // flow cannot reach directly: reserve() answers the terminal statuses
     // (a terminal chain can never be set back to reserved) and markIssued()
     // answers 'conflict' on a terminal chain — the exact Lua branches.
     const resp = await page.request.get('http://127.0.0.1:8085/chain-store-selftest');

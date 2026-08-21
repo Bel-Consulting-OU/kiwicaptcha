@@ -17,7 +17,7 @@ test.describe('KiwiCaptcha cross-browser critical paths', () => {
   test('capability matrix (item 31): every declared flag is real on the live API surface', async ({ page }) => {
     // The source-controlled declaration is the single machine-readable
     // answer to "what does compatible mean in this release" — this test
-    // proves the DECLARED flags exist on the live surface (marketing/docs
+    // proves the declared flags exist on the live surface (marketing/docs
     // can never silently outrun the implementation). Each provider's
     // global is installed only on ITS fixture page.
     await page.goto('/migration/recaptcha-v2.html');
@@ -225,7 +225,7 @@ test.describe('KiwiCaptcha cross-browser critical paths', () => {
       expect(state.wrapper.role, `${p.path}: the wrapper must not be a second group`).toBeNull();
       expect(state.wrapper.lang, `${p.path}: the wrapper must not carry a language`).toBeNull();
       expect(state.wrapper.aria, `${p.path}: the wrapper must not carry an accessible label`).toBeNull();
-      // The inner widget's accessible name must be the LOCALIZED string,
+      // The inner widget's accessible name must be the localized string,
       // not the static English template. (The visible label element
       // carries transient status text during a solve, so the accessible
       // name — set from the same translated pack — is the stable check.)

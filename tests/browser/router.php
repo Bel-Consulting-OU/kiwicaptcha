@@ -6,14 +6,14 @@ declare(strict_types=1);
  * Browser-test fixture server (php -S 127.0.0.1:8085 router.php).
  *
  * Serves the widget page and real challenge/verify endpoints backed by the
- * PURE PHP core (no Symfony needed): SHA-256 and Argon2id issuance + local
+ * pure PHP core (no Symfony needed): SHA-256 and Argon2id issuance + local
  * verification, so Playwright can exercise the actual browser solver.
  */
 
 $repo = dirname(__DIR__, 2); // tests/browser -> repo root
 
 require $repo.'/packages/kiwicaptcha-php/vendor/autoload.php';
-// The Siteverify e2e route uses the REAL Symfony bundle
+// The Siteverify e2e route uses the real Symfony bundle
 // controller + SiteVerify stores — load the bundle's autoloader when its
 // vendor is installed (CI installs it for exactly this fixture fidelity).
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -33,7 +33,7 @@ $GLOBALS['kiwi_secret'] = $secret;
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
 // php -S re-includes this router per request, so in-process state is lost —
-// the record is persisted to a temp file PER NONCE (single-use: consumed
+// the record is persisted to a temp file PER nonce (single-use: consumed
 // on verify; a shared file would race when tests issue challenges).
 function recordFile(string $nonce): string
 {
@@ -46,7 +46,7 @@ function metadataFile(string $nonce): string
 // Risk-v2 fixture capture: challenge requests (and form submissions) are
 // recorded to a temp file per capture name so Playwright can assert the
 // driver's evidence fields (client_context / decoy_field / honeypot /
-// chain_ticket) against the REAL requests the browser sends.
+// chain_ticket) against the real requests the browser sends.
 function captureFile(string $name): string
 {
     return sys_get_temp_dir().'/kiwicaptacha-capture-'.preg_replace('/[^A-Za-z0-9_-]/', '', $name).'.json';
@@ -64,12 +64,13 @@ function writeCapture(string $name, string $rawBody): void
 // The chain state of the chained-challenge fixture: php -S re-includes the
 // router per request, so the transactional chain state (chain records +
 // obligation mappings) persists in ONE temp file, mirroring the bundle's
-// Redis machine (available -> reserved(short lease) -> issued(stage2Nonce)
-// -> a DISPOSITION-AWARE TERMINAL transition: verified (the obligation is
-// cleared atomically) or step_up_required / denied (the obligation mapping
-// is KEPT — a later challenge request for the same transaction re-encounters
-// the terminal state, never a new stage-1, never a re-reservation). The
-// chaining fixture is a FILE-BACKED stand-in for the bundle's
+// Redis machine (available -> reserved with a short lease -> issued
+// (stage2Nonce), then a disposition-aware terminal transition: verified,
+// with the obligation cleared atomically, or step_up_required / denied,
+// with the obligation mapping kept — a later challenge request for the
+// same transaction re-encounters the terminal state, never a new stage-1,
+// never a re-reservation). The
+// chaining fixture is a file-backed stand-in for the bundle's
 // RedisChainedChallengeStateStore — same outcome strings, same strict v2
 // record shape.
 function chainStateFile(): string
@@ -80,7 +81,7 @@ function chainStateFile(): string
 /**
  * The chained-challenge state store of the fixture: the transactional
  * machine persisted to one temp file (the strict v2 schema, the
- * obligation index {obligationId => chainId}, the SHORT owner-scoped
+ * obligation index {obligationId => chainId}, the short owner-scoped
  * lease bounded by the record's own remaining TTL).
  */
 final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore
@@ -500,7 +501,7 @@ final class FixtureBindingAuthority implements \BelConsulting\KiwiCaptchaBundle\
 }
 
 /**
- * Rebuild the EXACT issuance response of an already-issued challenge from
+ * Rebuild the exact issuance response of an already-issued challenge from
  * its stored record (the bundle controller's rebuildIssuanceResponse
  * mapping — the response shape is camelCase, the record shape snake_case).
  */
@@ -523,16 +524,16 @@ function rebuildChallengeResponse(array $recordData): array
 
 /**
  * The chained /challenge handler (mirror of the bundle controller's
- * stage-2 gate): validates the presented ticket against the CURRENT
- * transaction's obligation (a foreign ticket -> 422), AUTO-RESUMES an
+ * stage-2 gate) validates the presented ticket against the current
+ * transaction's obligation; a foreign ticket gets 422. It auto-resumes an
  * open chain when no ticket is presented, recovers/rearms the issued
- * stage-2 challenge, claims the SHORT owner-scoped reservation and mints
+ * stage-2 challenge, claims the short owner-scoped reservation and mints
  * the stronger argon stage (markIssued idempotent). A chain in the
- * TERMINAL step_up_required/denied state answers its terminal response
- * DIRECTLY — 403 STEP_UP_REQUIRED / 429 RISK_DENIED — BEFORE any
+ * terminal step_up_required/denied state answers its terminal response
+ * directly — 403 step_up_required / 429 risk_denied — before any
  * reservation attempt (never a new challenge, never a stage-1, never a
  * re-reservation). Returns [status, body] or null when the request is an
- * ORDINARY stage-1 flow.
+ * ordinary stage-1 flow.
  */
 function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
 {
@@ -575,7 +576,7 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
         }
         $chainId = (string) $payload['chainId'];
     } elseif ($requirement !== null) {
-        // AUTO-RESUME: no ticket, open obligation -> stage 2.
+        // auto-resume: no ticket, open obligation -> stage 2.
         $chainId = $requirement->chainId;
     }
 
@@ -583,7 +584,7 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
         return null; // ordinary stage-1 flow
     }
 
-    // STAGE-2 STATE ENTRY: recover / rearm / reserve.
+    // stage-2 state entry: recover / rearm / reserve.
     $owner = bin2hex(random_bytes(16));
     for ($i = 0; $i < 3; $i++) {
         if ($requirement->state === 'verified') {
@@ -601,15 +602,15 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
             }
         }
         if ($requirement->state === 'step_up_required') {
-            // TERMINAL STEP-UP: the transaction is bound to its final
-            // step-up disposition (the obligation mapping was KEPT) — no
+            // terminal step-up: the transaction is bound to its final
+            // step-up disposition (the obligation mapping was kept) — no
             // challenge issuance, ever. A later request for the same
             // transaction re-encounters this terminal state.
             return [403, ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']]];
         }
         if ($requirement->state === 'denied') {
-            // TERMINAL DENIAL: the transaction is bound to its final
-            // denial disposition (the obligation mapping was KEPT) — no
+            // terminal denial: the transaction is bound to its final
+            // denial disposition (the obligation mapping was kept) — no
             // challenge issuance, ever. A later request for the same
             // transaction re-encounters this terminal state.
             return [429, ['error' => ['code' => 'RISK_DENIED', 'message' => 'Challenge issuance denied by the adaptive risk engine. Try again later.']]];
@@ -643,7 +644,7 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
         return [422, ['error' => ['code' => 'INVALID_METADATA', 'message' => 'The chain ticket is invalid, expired or already consumed.']]];
     }
 
-    // MINT THE STRONGER STAGE-2 (argon) + idempotent markIssued.
+    // mint THE stronger stage-2 (argon) + idempotent markIssued.
     $stage2 = mintChallenge($scope, $binding, PoWAlgorithm::Argon2id);
     if ($stage2 === null) {
         return [500, ['error' => 'mint failed']];
@@ -657,10 +658,10 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
 }
 
 /**
- * The issued-stage-2 inspection of the fixture: pending record -> recover
- * the EXACT same challenge; missing record -> rearm for a fresh stage-2
- * mint (never a stage-1); returns [status, body] or null when the chain
- * was rearmed (the caller proceeds to the reservation + mint).
+ * The issued-stage-2 inspection of the fixture: a pending record recovers
+ * the exact same challenge; a missing record rearms for a fresh stage-2
+ * mint (never a stage-1). It returns [status, body] or null when the
+ * chain was rearmed; the caller then proceeds to the reservation + mint.
  */
 function inspectIssuedStage2(string $chainId, string $stage2Nonce, \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainService): ?array
 {
@@ -741,8 +742,8 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
     // The chaining form-submission fixture: verifies a solved token and
     // resolves the transaction disposition — a stage-1 solve opens the
-    // chain (CHAIN_REQUIRED + the one-shot ticket), a stage-2 solve (with
-    // the ticket) VERIFIES the chain (the obligation is cleared).
+    // chain (chain_required + the one-shot ticket), a stage-2 solve (with
+    // the ticket) verifies the chain (the obligation is cleared).
     $body = json_decode((string) file_get_contents('php://input'), true);
     header('Content-Type: application/json');
     $token = is_array($body) && isset($body['token']) && is_string($body['token']) ? $body['token'] : '';
@@ -767,11 +768,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
     $chainService = new \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService($chainStore, $GLOBALS['kiwi_secret'], 300, 15, new FixtureBindingAuthority());
     $disposition = is_array($body) && isset($body['disposition']) && is_string($body['disposition']) ? $body['disposition'] : null;
     if ($disposition === 'deny' || $disposition === 'step_up') {
-        // THE TERMINALIZATION KNOB of the fixture (the mirror of the
+        // THE terminalization knob of the fixture (the mirror of the
         // validator's post-solve dispositions): a fresh Deny/StepUp of a
-        // verified nonce of the obligated transaction TERMINALIZES the
-        // open obligation durably (NONCE-AGNOSTIC — the obligation
-        // mapping is KEPT, so a later challenge request re-encounters the
+        // verified nonce of the obligated transaction terminalizes the
+        // open obligation durably (nonce-agnostic — the obligation
+        // mapping is kept, so a later challenge request re-encounters the
         // terminal state, never a new stage-1).
         $requirement = $chainService->findOpenRequirement($scope, $binding ?? '', 1);
         if ($requirement === null) {
@@ -798,7 +799,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
         return true;
     }
     if (is_string($chainTicket) && $chainTicket !== '') {
-        // STAGE-2 SOLVE: the chain is marked verified (the obligation is
+        // stage-2 solve: the chain is marked verified (the obligation is
         // cleared atomically) and the consumed record is retired.
         $payload = $chainService->verify($chainTicket);
         if ($payload === null) {
@@ -823,9 +824,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
 
         return true;
     }
-    // STAGE-1 SOLVE: the reassessment demands the stronger argon stage —
+    // stage-1 solve: the reassessment demands the stronger argon stage —
     // the chain opens (one obligation per transaction). The ticket is
-    // signed from the server-held requirement's ACTUAL expiry — never a
+    // signed from the server-held requirement's actual expiry — never a
     // second clock read that could straddle the chain's expiry boundary.
     $requirement = $chainService->requireStage2($nonce, $scope, $binding ?? '', 1, \KiwiCaptcha\Risk\RiskAction::Argon32, time() + 300);
     $ticket = $chainService->ticketFor($requirement->chainId, $requirement->expiresAt);
@@ -836,8 +837,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/chain-verify') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && $path === '/chain-store-selftest') {
     // The fixture store's state-machine self-test (asserted by the
-    // chaining spec): pins the PRODUCTION terminal semantics at the store
-    // level — reserve() answers the TERMINAL statuses (a terminal chain
+    // chaining spec): pins the production terminal semantics at the store
+    // level — reserve() answers the terminal statuses (a terminal chain
     // can never be set back to reserved) and markIssued() answers
     // 'conflict' on a terminal chain — mirroring the bundle's Lua.
     header('Content-Type: application/json');
@@ -943,7 +944,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         '6Lc_ready_explicit' => 'login',
     ];
     $scope = $sitekeyAllowlist[(string) ($body['scope'] ?? '')] ?? (string) ($body['scope'] ?? 'login');
-    // The fixture mirrors the bundle's SERVER-OWNED
+    // The fixture mirrors the bundle's server-owned
     // (sitekey, action) -> scope policy — the v3 browser e2e proves the
     // pair travels separately and resolves server-side.
     $sitekeyPolicy = [
@@ -963,10 +964,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
             return true;
         }
     }
-    // CHAINING FIXTURE (?chaining=1): the transaction-obligation stage-2
-    // gate — a presented chain_ticket must match the CURRENT
+    // chaining fixture (?chaining=1): the transaction-obligation stage-2
+    // gate — a presented chain_ticket must match the current
     // transaction's obligation (a foreign ticket -> 422), an open
-    // obligation AUTO-RESUMES the chain WITHOUT a ticket (never issue
+    // obligation auto-resumes the chain without a ticket (never issue
     // stage 1), the issued stage-2 challenge is recovered/rearmed, and
     // the stronger argon stage is minted + durably issued (markIssued).
     // Without ?chaining=1 the ticket is ignored (a deployment without
@@ -1030,7 +1031,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path === '/kiwi-captcha/siteverify')) {
-    // e2e: the REAL SiteVerifyController against the record
+    // e2e: the real SiteVerifyController against the record
     // + metadata persisted at issuance (the fixture's file-based storage
     // stands in for the shared store).
     $body = json_decode((string) file_get_contents('php://input'), true);
@@ -1122,7 +1123,7 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
 // Incumbent-compatibility loader + migration fixtures.
 $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
 
-// The compat endpoints go through the REAL bundle
+// The compat endpoints go through the real bundle
 // controller — the hard-coded concat hid a production route
 // failure (a missing Request import broke the actual routes).
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -1152,7 +1153,7 @@ if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|r
     $html = file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
     // Page-level loader parameters (hl, render, onload) are
     // propagated into the fixture's api.js URL — the incumbent pattern
-    // puts them on the SCRIPT URL, and the fixture HTML cannot know the
+    // puts them on the script URL, and the fixture HTML cannot know the
     // test's query string.
     $pageParams = $_GET;
     if (isset($pageParams['hl']) || isset($pageParams['render']) || isset($pageParams['onload'])) {

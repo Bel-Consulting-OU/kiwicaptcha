@@ -4,11 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Risk-v2 driver evidence: the challenge request carries the coarse
-// client_context capability descriptor ONLY when the widget container or
+// client_context capability descriptor only when the widget container or
 // widget element carries the explicit data-kiwi-risk-context="coarse"
 // opt-in attribute (the default is off); a decoy_field issuance response
 // renders a hidden honeypot input next to the token input whose fill rides
-// BOTH the protected form submission and a later challenge request; and
+// both the protected form submission and a later challenge request; and
 // data-kiwi-chain-ticket presents the one-shot chain ticket exactly once,
 // then clears it so a re-solve never re-sends a consumed ticket.
 
@@ -86,7 +86,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     await expect(decoy).toHaveAttribute('aria-hidden', 'true');
     const display = await decoy.evaluate((el) => getComputedStyle(el).display);
     expect(display).toBe('none');
-    // INSIDE the same form/host as the token input (the app's form).
+    // inside the same form/host as the token input (the app's form).
     const sameHost = await page.evaluate(() => {
       const token = document.querySelector('[data-kiwi-token]');
       const d = document.querySelector('input[name^="decoy_"]');

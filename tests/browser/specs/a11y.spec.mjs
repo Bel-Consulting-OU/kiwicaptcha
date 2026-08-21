@@ -7,8 +7,8 @@ import AxeBuilder from '@axe-core/playwright';
 // acceptance set:
 //  - computed-color badge contrast, light AND dark, every state (1.4.3)
 //  - computed non-text contrast: Retry boundary + focus indicator >= 3:1 (1.4.11)
-//  - focus appearance (2.4.13, AAA): indicator AREA >= the 2px-perimeter
-//    minimum + >= 3:1 contrast CHANGE at the same pixels, light AND dark
+//  - focus appearance (2.4.13, AAA): indicator area >= the 2px-perimeter
+//    minimum + >= 3:1 contrast change at the same pixels, light AND dark
 //  - axe scans per state, light and dark
 //  - keyboard-only operation (real sequential Tab/Shift+Tab, Enter+Space)
 //  - live-region contract (exactly one widget-local status in every renderer)
@@ -37,11 +37,11 @@ function contrastRatio(a, b) {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
-// Composite the badge's COMPUTED background (which may be an
-// rgba tint) over the ACTUAL surface behind it (the widget's computed
-// background), then contrast the COMPUTED foreground against the result.
+// Composite the badge's computed background (which may be an
+// rgba tint) over the actual surface behind it (the widget's computed
+// background), then contrast the computed foreground against the result.
 // The test interrogates the browser — it never hard-codes surfaces or
-// expected colors, so CSS regression in EITHER theme is detected, not
+// expected colors, so CSS regression in either theme is detected, not
 // duplicated.
 function computedContrast(page, state) {
   return page.evaluate((st) => {
@@ -291,7 +291,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     });
     expect(focusVisible).toBe(true);
 
-    // No keyboard trap — performed while the widget is STILL failed so the
+    // No keyboard trap — performed while the widget is still failed so the
     // Retry is visible (it is hidden by design in solved state, which
     // would legitimately remove it from the tab order): Tab from the
     // button reaches #kiwi-after and Shift+Tab returns to the Retry
@@ -328,7 +328,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
     await expect(page.locator('[data-kiwi-token]')).not.toHaveValue('');
 
-    // Space activates too: drive a REAL second failure cycle (reset ->
+    // Space activates too: drive a real second failure cycle (reset ->
     // failing endpoint -> terminal failed -> Retry visible), then Space.
     failing = true;
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
@@ -361,9 +361,9 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
   test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark', async ({ page }) => {
     // WCAG 1.4.11 requires UI-component boundaries and the
     // focus indicator to be >= 3:1 against the adjacent surface. The test
-    // COMPUTES the colors in the browser (getComputedStyle border/outline,
+    // computes the colors in the browser (getComputedStyle border/outline,
     // button background composited over the widget surface) — it never
-    // hard-codes expected colors, so a palette regression in EITHER theme
+    // hard-codes expected colors, so a palette regression in either theme
     // fails here. The suite computes it; a CSS comment does not.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
@@ -439,16 +439,16 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
 
   test('focus appearance (WCAG 2.4.13): indicator AREA >= the 2px-perimeter minimum AND >= 3:1 contrast CHANGE at the SAME pixels, light AND dark', async ({ page }) => {
     // 2.4.13 is not met by 1.4.11-style adjacent-surface contrast alone:
-    // it requires (a) a minimum indicator AREA — at least the area of a
+    // it requires (a) a minimum indicator area — at least the area of a
     // 2 CSS px thick perimeter of the unfocused control — and (b) a
-    // >= 3:1 contrast CHANGE between the focused and unfocused states at
-    // the SAME pixels. Both are genuinely measured here: (a) from the
+    // >= 3:1 contrast change between the focused and unfocused states at
+    // the same pixels. Both are genuinely measured here: (a) from the
     // indicator's computed geometry over the control's bounding box;
-    // (b) by sampling the pixel at the indicator location in BOTH states —
+    // (b) by sampling the pixel at the indicator location in both states —
     // the surface the browser actually paints there unfocused, and the
     // indicator composited over that same surface focused. All colors are
     // computed in the browser; none are hard-coded, so a palette regression
-    // in EITHER theme fails here.
+    // in either theme fails here.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
     });
@@ -480,7 +480,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
       const focusedM = await measuredFocusGeometry(page);
       expect(focusedM.error, `theme=${theme}: ${focusedM.error}`).toBeUndefined();
 
-      // Unfocus and re-measure at the SAME coordinates: the pixel at the
+      // Unfocus and re-measure at the same coordinates: the pixel at the
       // ring location must go back to the surface the indicator covers.
       await page.locator('#kiwi-before').focus();
       const unfocusedM = await surfacePixelAt(page, focusedM.sample);
@@ -653,7 +653,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
   test('responsive: WCAG 1.4.12 text-spacing overrides (all FOUR conditions) lose no content or function', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
-    // 1.4.12 requires all four conditions SIMULTANEOUSLY: line-height >=
+    // 1.4.12 requires all four conditions simultaneously: line-height >=
     // 1.5x, paragraph spacing >= 2x, letter-spacing >= 0.12x, word-spacing
     // >= 0.16x.
     await page.evaluate(() => {

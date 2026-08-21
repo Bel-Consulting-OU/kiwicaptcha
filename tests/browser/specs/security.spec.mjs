@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 //
 // This file is canonical at packages/kiwicaptcha-wasm/tests/browser/specs/
 // and MUST be copied into the public repo's tests/browser/specs/ during
-// sync. The asset paths below resolve in BOTH layouts (public repo:
+// sync. The asset paths below resolve in both layouts (public repo:
 // tests/browser/specs -> ../../../packages/kiwicaptcha-wasm/assets;
 // wasm package: tests/browser/specs -> ../../../assets).
 
@@ -37,7 +37,7 @@ function workerSource() {
 
 /// A widget page served from the test origin (127.0.0.1:8085) so
 /// window.location.origin resolves — the driver refuses cross-origin
-/// challenge endpoints BEFORE any fetch, so a page on another origin could
+/// challenge endpoints before any fetch, so a page on another origin could
 /// never exercise that check.
 async function serveWidgetPage(page, attrs) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
@@ -108,7 +108,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(src).toMatch(/msg\.v !== 1/);
     expect(src).toMatch(/typeof msg\.counter !== "number"/);
     expect(src).toMatch(/typeof msg\.reason !== "string"/);
-    // Worker side (embedded KIWI_WORKER_SRC + standalone asset): the solve
+    // Worker side (embedded kiwi_worker_src + standalone asset): the solve
     // request must be a v1 object with the full numeric/string field set.
     expect(src).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
     expect(worker).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
@@ -119,7 +119,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {
     await page.goto('/');
     // The worker is created by the driver from the standalone asset; run the
-    // SAME worker source in isolation and verify the onmessage schema guard:
+    // same worker source in isolation and verify the onmessage schema guard:
     // messages without the version field or with an unknown type must never
     // produce a reply (the pre-guard code would have replied "failed").
     // The worker's own startup "ready" handshake is expected and filtered
@@ -267,7 +267,7 @@ test.describe('KiwiCaptcha calibration floor', () => {
     expect(bodies).toHaveLength(1);
     const body = bodies[0];
     // Without the data-kiwi-risk-context="coarse" opt-in the coarse
-    // risk-v2 client_context descriptor is NEVER sent (telemetry and
+    // risk-v2 client_context descriptor is never sent (telemetry and
     // client context are off by default); the request never carries
     // difficulty-suggesting parameters.
     expect(Object.keys(body).sort()).toEqual(['scope']);
@@ -398,7 +398,7 @@ test.describe('KiwiCaptcha failure recovery', () => {
       timeout: 30_000,
     });
     failing = false;
-    // (WCAG 2.5.2): the Retry BUTTON is the reacquire control
+    // (WCAG 2.5.2): the Retry button is the reacquire control
     // (click activation); the passive widget is not a pointer target.
     await page.locator('[data-kiwi-retry]').click();
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
@@ -449,7 +449,7 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     const src = driverSource();
     const worker = workerSource();
 
-    // The PROTOCOL id constant must exist in the driver and the worker,
+    // The protocol id constant must exist in the driver and the worker,
     // and both must agree (renamed from 'build id' — it
     // proves protocol compatibility; exact identity is the release
     // SHA256SUMS/SRI/attestation chain).
@@ -459,7 +459,7 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     expect(workerProtocolId).toBe(driverProtocolId);
 
     // The worker verifies the wasm glue's exported solver_protocol_version()
-    // (an integer — clean at the raw ABI) BEFORE ready (driver+worker+wasm
+    // (an integer — clean at the raw ABI) before ready (driver+worker+wasm
     // must agree), then reports the protocol id on startup (ready) and on
     // success (done); the embedded copy in the driver matches the
     // standalone asset.
@@ -506,7 +506,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // the driver (from the container/widget attributes only) and once in the
     // embedded worker source (from the solve request). No other declaration.
     expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(2);
-    // The ONLY hard-coded algorithm assignment in the entire file is the
+    // The only hard-coded algorithm assignment in the entire file is the
     // audit-#62 profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
@@ -517,12 +517,12 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // Only the two server-offered profiles are selectable — anything else is
     // normalized to the default; the client can never invent parameters.
     expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id"/);
-    // Solver selection is driven ONLY by the server's response algorithm —
+    // Solver selection is driven only by the server's response algorithm —
     // never by a client capability probe (no navigator capability gating).
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "argon2id"/);
     expect(src, 'no capability probe may gate the algorithm choice').not.toMatch(/navigator\.[\w.]*[Cc]apab/);
     // A server-side downgrade (argon2id requested, weaker returned) is a
-    // FAILED challenge, never accepted and never solved.
+    // failed challenge, never accepted and never solved.
     expect(src).toMatch(/Challenge downgraded/);
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) !== "argon2id"/);
   });
@@ -624,7 +624,7 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
 test.describe('KiwiCaptcha host-header independence', () => {
   test('same-origin enforcement uses window.location.origin only — never location.host/hostname or a Host header (static source assertion)', () => {
     const src = driverSource();
-    // The endpoint check compares ORIGINS (the page's own scheme+host+port),
+    // The endpoint check compares origins (the page's own scheme+host+port),
     // never a request Host header — a Host header is attacker-influenced,
     // window.location is not.
     expect(src).toMatch(/url\.origin !== window\.location\.origin/);
@@ -643,7 +643,7 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     const src = driverSource();
     // scope enters via the object literal; algorithm/request_binding via
     // assignments; the risk-v2 evidence fields (chain_ticket /
-    // client_context / decoy_field / honeypot) and the OPTIONAL
+    // client_context / decoy_field / honeypot) and the optional
     // provider-metadata fields (action/cdata/sitekey) — a field outside
     // this closed set would have to appear here. client_context is sent
     // only under the explicit data-kiwi-risk-context="coarse" opt-in.
