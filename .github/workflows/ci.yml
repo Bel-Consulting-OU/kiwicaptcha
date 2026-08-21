@@ -545,8 +545,9 @@ jobs:
         # regenerating the baseline.
         run: |
           set -euo pipefail
-          BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || true)"
-          if [ -n "$BASE_SHA" ]; then
+          BASE_SHA="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          if [ -n "$BASE_SHA" ] \
+              && git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
             git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
             bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
           fi
