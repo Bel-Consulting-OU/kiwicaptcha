@@ -518,9 +518,14 @@ jobs:
         # and intentionally reduced over time; this step fails when any
         # scanned file exceeds its per-file row (a scanned file without
         # a row counts as a new file with baseline 0) or the total
-        # exceeds the baseline total. After deliberate rewrites,
-        # --update-baseline regenerates the per-file baseline; once it
-        # reaches zero, advisory mode is removed.
+        # exceeds the baseline total. Scan roots: the five kiwicaptcha
+        # package families, the browser test suite under tests/browser,
+        # the design docs under protocol/, the workflow prose under
+        # .github/workflows/, and the product root files README.md and
+        # SECURITY.md (root-level roots are scanned only when present).
+        # After deliberate rewrites, --update-baseline regenerates the
+        # per-file baseline; once it reaches zero, advisory mode is
+        # removed.
         run: |
           set -euo pipefail
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
