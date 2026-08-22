@@ -14,7 +14,7 @@ Security fixes are released for the **latest minor of every supported major line
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its own independent version.
-For example, the `v1.2.0` repository release contains Rust core `1.7.0`, `kiwicaptcha-php` `1.x`, the risk engines `0.1.x`, the `2026-08-r1` solver build, and the current Symfony bundle release.
+Repository release tags and artifact versions are independent. For example, a repository `vX.Y.Z` release may contain `kiwicaptcha` `1.7.0`, `kiwicaptcha-php` `1.x`, the risk engines `0.1.x`, the current solver build, and the current Symfony bundle release.
 Advisories always name the **artifact and its version** (e.g. `kiwicaptcha (Rust core) 1.7.0`), never a bare repository tag.
 
 Users are expected to run the newest supported release.
@@ -126,13 +126,13 @@ The security Redis (challenge storage, replay guards, rate/outstanding counters,
 - `maxmemory-policy noeviction` is mandatory. KiwiCaptcha state must never be evicted mid-window: an evicted challenge record or consumed-state guard silently re-enables replay and stockpiling windows.
   Size `maxmemory` for the worst case (`max_outstanding_challenges_global` outstanding records × record size, plus risk state and lease sets, with headroom).
   Alert on `evicted_keys > 0` and `used_memory` > 70% of `maxmemory`; **observed eviction is a security incident**, not a capacity event.
-- Verified `WAIT` barriers + TTL margin for replay safety: with async replication, configure `wait_replicas` (a Redis `WAIT` follows every durability-critical write: challenge issuance, the pending→consumed transition, and the deterministic-result commit) and `wait_timeout_ms`.
+- Verified `WAIT` barriers + TTL margin for replay safety: with async replication, configure `wait_replicas` (a Redis `WAIT` follows every durability-critical write: challenge issuance, the pending→consumed transition, the deterministic-result commit, and the terminal delete-if-pending deletion) and `wait_timeout_ms`.
   The acknowledgement count is verified: fewer than `wait_replicas` acked replicas fails the operation closed (`ReplicaWaitException` / `replica wait not satisfied`).
   Configure `ttl_margin_secs` beyond token validity so consumed-state guards outlive validity + clock skew + failover margin.
   On a replica-less server a configured barrier fails closed by design; `wait_replicas` is a hard durability contract.
   Promotion invariant: `WAIT N` proves that at least N replicas acknowledged the write; it does not constrain which replicas your failover manager may promote.
   For replay-safe promotion, operators must either set the acknowledgement threshold to cover every eligible failover target during the challenge lifetime, or configure the failover policy/topology so a lagging/non-current replica can never be promoted. This includes promotion-eligibility gates, `min-replicas-to-write` style replication gating, or a quorum/consensus design whose semantics you can actually guarantee.
-  Without that deployment invariant, a promotion can resurrect a consumed record from a stale replica.
+  Without that deployment invariant, a promotion can resurrect a consumed record from a stale replica, or restore a burned pending challenge on a replica that missed its terminal delete-if-pending deletion, letting it be redeemed.
 - Script versioning: the risk engine runs the canonical `risk-v1.lua` (protocol/risk-v1) verbatim via `EVALSHA` with an automatic `NOSCRIPT` fallback.
   The script's SHA is a protocol artifact, pinned by the `risk-v1` protocol directory and mirrored byte-identically into the Rust and PHP packages (CI enforces explicit `cmp` byte parity across all nine protocol scripts on every push).
   The Lua is versioned (`v4` semantics at the time of writing); never hand-edit any of the three copies, and never load a modified script into a deployment whose stores were written by the canonical one.

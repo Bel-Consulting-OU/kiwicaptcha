@@ -49,14 +49,15 @@ The full per-feature documentation (protocol v2 signing, clock policy, attempt a
 │ WASM/JS  │  POST /auth/login {kiwi__token}    │   nonce} →   │
 │ solver   │ ──────────────────────────────────▶│ record       │
 │          │                                    │              │
-│          │                                    │ verify:      │
-│          │                                    │ validate →   │
-│          │                                    │ HMAC → TTL → │
-│          │                                    │ scope →      │
-│          │                                    │ binding →    │
-│          │                                    │ re-derive →  │
-│          │                                    │ consume      │
-└──────────┘                                    └──────────────┘
+│          │                                    │ verify:                    │
+│          │                                    │ cheap checks: structure,   │
+│          │                                    │ signature, TTL, scope,     │
+│          │                                    │ binding, timing            │
+│          │                                    │ atomic pending→consumed →  │
+│          │                                    │ consumed-record recheck →  │
+│          │                                    │ derive exactly once →      │
+│          │                                    │ commit deterministic result│
+└──────────┘                                    └────────────────────────────┘
 ```
 
 The widget resolves the challenge endpoint against the page origin and refuses cross-origin endpoints outright.
