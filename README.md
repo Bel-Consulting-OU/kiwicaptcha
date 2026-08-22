@@ -41,12 +41,12 @@ The full per-feature documentation (protocol v2 signing, clock policy, attempt a
 ## Architecture
 
 ```
-┌──────────┐  POST {prefix}/challenge {scope}   ┌─────────────┐
+┌──────────┐  POST {prefix}/challenge {scope}   ┌──────────────┐
 │ Browser  │ ──────────────────────────────────▶│  Your App    │
-│ (widget) │◀─── {nonce, challenge, salt,      │              │
-│          │      algorithm, targetBits, ...}  │ Redis:       │
+│ (widget) │◀─── {nonce, challenge, salt,       │              │
+│          │      algorithm, targetBits, ...}   │ Redis:       │
 │          │                                    │ kcaptcha:{   │
-│ WASM/JS  │  POST /auth/login {kiwi__token}   │   nonce} →   │
+│ WASM/JS  │  POST /auth/login {kiwi__token}    │   nonce} →   │
 │ solver   │ ──────────────────────────────────▶│ record       │
 │          │                                    │              │
 │          │                                    │ verify:      │
