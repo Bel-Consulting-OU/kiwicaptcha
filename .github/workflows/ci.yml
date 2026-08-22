@@ -103,6 +103,9 @@ jobs:
         run: composer validate --strict
       - name: composer install
         run: composer install --no-interaction --prefer-dist
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+
       - name: composer audit (dependency/security)
         # Packagist's security-advisories API is occasionally flaky
         # (502s/timeouts). The audit retries with backoff and only then

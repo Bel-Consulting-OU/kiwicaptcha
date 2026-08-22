@@ -6,7 +6,7 @@ Security fixes are released for the **latest minor of every supported major line
 
 | Artifact | Supported lines |
 |---|---|
-| `kiwicaptcha` (Rust core) | latest `1.x` (currently `1.1.0`). |
+| `kiwicaptcha` (Rust core) | latest `1.x` (currently `1.7.0`). |
 | `kiwicaptcha-php` | latest `1.x`. |
 | `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
 | `kiwicaptcha-risk-php` | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
@@ -14,8 +14,8 @@ Security fixes are released for the **latest minor of every supported major line
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its own independent version.
-For example, the `v1.2.0` repository release contains Rust core `1.1.0`, `kiwicaptcha-php` `1.x`, the risk engines `0.1.x`, the `2026-08-r1` solver build, and the current Symfony bundle release.
-Advisories always name the **artifact and its version** (e.g. `kiwicaptcha (Rust core) 1.1.0`), never a bare repository tag.
+For example, the `v1.2.0` repository release contains Rust core `1.7.0`, `kiwicaptcha-php` `1.x`, the risk engines `0.1.x`, the `2026-08-r1` solver build, and the current Symfony bundle release.
+Advisories always name the **artifact and its version** (e.g. `kiwicaptcha (Rust core) 1.7.0`), never a bare repository tag.
 
 Users are expected to run the newest supported release.
 When a vulnerability is fixed, the fix is backported to all supported lines; unsupported lines receive no fixes and should be upgraded or removed.
