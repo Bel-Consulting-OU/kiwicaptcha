@@ -1113,7 +1113,7 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     // rewritten: the driver must refuse it with the controlled
     // kiwi:solver-mismatch state instead of accepting a stale worker.
     if ($path === '/kiwi-worker-stale.js') {
-        $body = str_replace('2026-08-r1', '2026-08-r0', (string) $body);
+        $body = str_replace('2026-08-r2', '2026-08-r0', (string) $body);
     }
     echo $body;
 
