@@ -5,7 +5,7 @@ Hybrid Rust (WASM) + optimized JS solving, no external services.
 No third-party tracking.
 No third-party requests.
 First-party behavioral signals never leave your application.
-Developed by Bel Consulting OÜ (MIT).
+Developed by Bel Consulting OÜ (MIT license).
 
 ## What KiwiCaptcha is
 
