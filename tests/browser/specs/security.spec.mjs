@@ -496,12 +496,18 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly TWO fetch calls exist in the whole driver: the loader-glue
-    // fetch (the external /api.js path fetches its own source
-    // to hand the wasm glue to the Blob worker) and the challenge fetch.
-    // There can be no "retry with a weaker challenge" code path to fetch
-    // a second challenge.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(2);
+    // Exactly three fetch calls exist in the whole driver: the loader-glue
+    // fetch (the external /api.js path fetches its own source to hand the
+    // wasm glue to the Blob worker), the challenge fetch, and the
+    // fire-and-forget abandonment notification POST to the cancellation
+    // endpoint. There can be no "retry with a weaker challenge" code path
+    // to fetch a second challenge.
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(3);
+    // The abandonment notification is the single cancel POST: it targets
+    // the cancellation endpoint with the abandoned nonce and nothing else
+    // (the exhaustive widget spec asserts the runtime behavior).
+    expect(src.match(/endpoint \+ "\/cancel"/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/body: JSON\.stringify\(\{ nonce: nonce \}\)/);
     // The algorithm variable is declared exactly twice in the file: once in
     // the driver (from the container/widget attributes only) and once in the
     // embedded worker source (from the solve request). No other declaration.

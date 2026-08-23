@@ -10,7 +10,7 @@ Security fixes are released for the **latest minor of every supported major line
 | `kiwicaptcha-php` | latest `1.x`. |
 | `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
 | `kiwicaptcha-risk-php` | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
-| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r1` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
+| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r2` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its own independent version.
@@ -70,7 +70,7 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 
 The four browser assets in `packages/kiwicaptcha-wasm/assets/` are **version-locked as a set** — the widget driver, the worker, and the WASM glue/solver must come from the **same build**:
 
-- `widget-driver.js` embeds `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-08-r1`) and embeds a copy of the worker source; the worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
+- `widget-driver.js` embeds `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-08-r2`) and embeds a copy of the worker source; the worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
 - The worker declares the same constant and reports it in its handshake (`ready` / `done` messages).
   The driver validates it; a mismatch enters the controlled `kiwi:solver-mismatch` state and the driver **never** accepts a solution from a mismatched worker.
 - The wasm glue (`kiwicaptcha-wasm.js`) is built by the release pipeline (`.github/workflows/release.yml` on every `v*` tag): strict deterministic build, SHA-256 + SRI manifests, SLSA provenance attestation, and asset upload to the GitHub release.
@@ -126,7 +126,8 @@ The security Redis (challenge storage, replay guards, rate/outstanding counters,
 - `maxmemory-policy noeviction` is mandatory. KiwiCaptcha state must never be evicted mid-window: an evicted challenge record or consumed-state guard silently re-enables replay and stockpiling windows.
   Size `maxmemory` for the worst case (`max_outstanding_challenges_global` outstanding records × record size, plus risk state and lease sets, with headroom).
   Alert on `evicted_keys > 0` and `used_memory` > 70% of `maxmemory`; **observed eviction is a security incident**, not a capacity event.
-- Verified `WAIT` barriers + TTL margin for replay safety: with async replication, configure `wait_replicas` (a Redis `WAIT` follows every durability-critical write: challenge issuance, the pending→consumed transition, the deterministic-result commit, and the terminal delete-if-pending deletion) and `wait_timeout_ms`.
+- Verified `WAIT` barriers + TTL margin for replay safety: with async replication, configure `wait_replicas` (a Redis `WAIT` follows every durability-critical write: challenge issuance, the pending→consumed transition, the pending→cancelled transition, the deterministic-result commit, and the terminal delete-if-pending deletion) and `wait_timeout_ms`.
+  The pending→cancelled transition is durability-critical like the other security-state transitions: a cancelled record must never resurrect as pending on a promoted stale replica.
   The acknowledgement count is verified: fewer than `wait_replicas` acked replicas fails the operation closed (`ReplicaWaitException` / `replica wait not satisfied`).
   Configure `ttl_margin_secs` beyond token validity so consumed-state guards outlive validity + clock skew + failover margin.
   On a replica-less server a configured barrier fails closed by design; `wait_replicas` is a hard durability contract.
