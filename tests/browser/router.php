@@ -1060,18 +1060,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $metadataStore,
     );
     // A successful verification consumes the record (single-use); the
-    // retained consumed-state machinery is per-request here (the fixture's
-    // file stands in for the shared store), so the file is removed after
-    // the first redemption.
-    @unlink(recordFile($nonce));
-    $response = $controller->siteverify(\Symfony\Component\HttpFoundation\Request::create('/kiwi-captcha/siteverify', 'POST', [
+    // fixture's file stands in for the shared retained-state store, so the
+    // record is removed only after a successful redemption (the controller
+    // must see the pending record to verify it). The request carries the
+    // RAW application/x-www-form-urlencoded body exactly like the
+    // production wire: SiteVerify deliberately fails closed when it is
+    // asked to trust a populated framework form bag without the original
+    // raw body (duplicate/bracket ambiguity can then no longer be proven
+    // absent), so the fixture must never use the 3rd-arg parameter bag.
+    $params = [
         'secret' => (string) ($body['secret'] ?? ''),
         'response' => (string) ($body['response'] ?? ''),
         'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
         'action' => $body['action'] ?? null,
-    ]));
+    ];
+    $rawBody = http_build_query($params);
+    $request = \Symfony\Component\HttpFoundation\Request::create(
+        '/kiwi-captcha/siteverify',
+        'POST',
+        [],
+        [],
+        [],
+        ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+        $rawBody,
+    );
+    $response = $controller->siteverify($request);
     $decoded = SolutionToken::decode((string) ($body['response'] ?? ''));
-    error_log('SV-DEBUG nonce='.$nonce.' decode='.(($decoded instanceof SolutionToken) ? 'ok' : 'FAIL').' recordFile='.(is_file(recordFile($nonce)) ? 'yes' : 'no').' remoteip='.(string) ($body['remoteip'] ?? 'none'));
+    $success = $decoded instanceof SolutionToken && (bool) $response->getStatusCode() === false ? false : ($response->getStatusCode() >= 200 && $response->getStatusCode() < 300);
+    if ($success) {
+        @unlink(recordFile($nonce));
+    }
     echo $response->getContent();
 
     return true;
