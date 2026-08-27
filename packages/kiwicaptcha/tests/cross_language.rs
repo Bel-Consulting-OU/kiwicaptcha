@@ -34,6 +34,10 @@ fn rust_verifies_php_issued_record() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
+        now_after_derive: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         now_ns,
         min_duration_ms: 0,
         expected_scope: Some("login"),
@@ -62,6 +66,10 @@ fn rust_verifies_php_issued_record() {
         counter,
         duration_ms: 5000,
         now_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        now_after_derive: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),

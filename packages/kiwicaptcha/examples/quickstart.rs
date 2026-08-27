@@ -81,6 +81,7 @@ fn quickstart() -> Result<(), String> {
         counter: decoded.counter,
         duration_ms: decoded.duration_ms,
         now_unix,
+        now_after_derive: now_unix,
         now_ns,
         min_duration_ms: 0, // floor is max(ctx, record.min_duration_ms); 0 = record only
         expected_scope: Some("login"),

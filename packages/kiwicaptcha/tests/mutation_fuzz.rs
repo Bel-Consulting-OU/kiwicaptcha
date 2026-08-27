@@ -97,6 +97,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 counter: 1,
                 duration_ms: 5000,
                 now_unix: NOW_UNIX + 1,
+                now_after_derive: NOW_UNIX + 1,
                 now_ns: NOW_NS + 1_000_000,
                 min_duration_ms: 0,
                 expected_scope: None,
