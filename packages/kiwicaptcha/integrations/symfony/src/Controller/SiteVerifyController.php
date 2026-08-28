@@ -349,6 +349,12 @@ final class SiteVerifyController
             'arg_sep_in' => ini_get('arg_separator.input'),
             'arg_sep_out' => ini_get('arg_separator.output'),
             'ctype' => function_exists('ctype_xdigit') ? ((new \ReflectionFunction('ctype_xdigit'))->getFileName() !== false ? 'polyfill-file' : 'builtin') : 'missing',
+            'opcache' => extension_loaded('Zend OPcache') ? [
+                'jit' => ini_get('opcache.jit'),
+                'jit_buffer_size' => ini_get('opcache.jit_buffer_size'),
+                'enable_cli' => ini_get('opcache.enable_cli'),
+                'jit_enabled' => function_exists('opcache_get_status') ? (opcache_get_status(false)['jit']['enabled'] ?? null) : null,
+            ] : 'missing',
             'http_foundation_version' => class_exists('Composer\\InstalledVersions') ? (\Composer\InstalledVersions::getVersion('symfony/http-foundation') ?? '?') : 'no-installedversions',
             'request_uri' => $request->getRequestUri(),
             'request_method' => $request->getMethod(),
@@ -1553,7 +1559,6 @@ LUA;
                 'value_b64' => base64_encode($parts[1] ?? ''),
                 'value_len' => \strlen($parts[1] ?? ''),
                 'decoded_name' => $name,
-                'decoded_value_len' => $name !== null ? \strlen($this->canonicalFormDecode($parts[1] ?? '') ?? '') : null,
             ]);
             if ($name === null || $name === '' || str_contains($name, '[') || str_contains($name, ']')) {
                 return null;
@@ -1582,8 +1587,19 @@ LUA;
     {
         $length = \strlen($component);
         $out = '';
+        $trace = static function (string $label, mixed $detail = null): void {
+            if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+                error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
+            }
+        };
+        $anomaly = [];
         for ($i = 0; $i < $length; ++$i) {
             $ch = $component[$i];
+            if (\strlen($out) > \strlen($component)) {
+                if (\count($anomaly) < 40) {
+                    $anomaly[] = [$i, $ch, \strlen($out)];
+                }
+            }
             if ($ch === '+') {
                 $out .= ' ';
 
@@ -1599,6 +1615,15 @@ LUA;
             }
             $out .= chr(hexdec(substr($component, $i + 1, 2)));
             $i += 2;
+        }
+        if ($anomaly !== []) {
+            $trace('decode-anomaly', [
+                'input_b64' => base64_encode($component),
+                'input_len' => \strlen($component),
+                'output_b64' => base64_encode($out),
+                'output_len' => \strlen($out),
+                'overrun' => $anomaly,
+            ]);
         }
 
         return $out;
