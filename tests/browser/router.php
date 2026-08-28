@@ -1071,7 +1071,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         'response_len' => \strlen((string) ($body['response'] ?? '')),
         'response_sha256' => hash('sha256', (string) ($body['response'] ?? '')),
         'decode' => $preDecode,
+        'content_type' => (string) ($_SERVER['CONTENT_TYPE'] ?? ''),
+        'raw_len' => \strlen($rawBody),
     ];
+    // Fixture-only probe: re-verify the token against a COPY of the
+    // persisted record with the SAME configuration the controller uses
+    // (secret, scope 'login' from the siteverify map, remoteip), so a
+    // pre-verification controller rejection is distinguishable from a
+    // genuine verification failure. The probe consumes its own copy,
+    // never the persisted record file.
+    $GLOBALS['kiwi_last_siteverify_probe'] = null;
+    $probeNonce = (string) (explode('.', (string) base64_decode((string) ($body['response'] ?? ''), true))[0] ?? '');
+    if ($probeNonce !== '' && is_file(recordFile($probeNonce))) {
+        try {
+            $probeRecord = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($probeNonce)), true));
+            $probeStorage = new ArrayStorage();
+            $probeStorage->store($probeRecord);
+            $probeOutcome = (new Verifier($probeStorage))->verify(
+                (string) ($body['response'] ?? ''),
+                $GLOBALS['kiwi_secret'],
+                'login',
+                (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'),
+            );
+            $GLOBALS['kiwi_last_siteverify_probe'] = $probeOutcome->code();
+        } catch (\Throwable $e) {
+            $GLOBALS['kiwi_last_siteverify_probe'] = 'probe-exception:'.get_class($e);
+        }
+    }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
     $nonce = (string) (explode('.', (string) base64_decode((string) ($body['response'] ?? ''), true))[0] ?? '');
@@ -1159,10 +1185,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         // payload stays collapsed.
         $recorded = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
         $preDecode = $GLOBALS['kiwi_last_siteverify_predecode'] ?? null;
+        $probe = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
         $diagnostic = $recorded !== null
-            ? sprintf('code=%s context=%s', $recorded['code'], json_encode($recorded['context']))
+            ? sprintf('code=%s context=%s probe=%s', $recorded['code'], json_encode($recorded['context']), $probe ?? 'n/a')
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s decode=%s', $preDecode['response_len'], $preDecode['response_sha256'], $preDecode['decode'])
+                ? sprintf('pre-decode: len=%d sha256=%s decode=%s ct=%s raw_len=%d probe=%s', $preDecode['response_len'], $preDecode['response_sha256'], $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a')
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
