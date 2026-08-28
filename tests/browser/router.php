@@ -1073,6 +1073,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         'decode' => $preDecode,
         'content_type' => (string) ($_SERVER['CONTENT_TYPE'] ?? ''),
         'raw_len' => \strlen($rawBody),
+        // The controller sees the REBUILT form body, not the original
+        // JSON: the rebuilt token must be byte-identical to the original
+        // or the decode/verify below operate on a mangled value.
+        'rebuilt_token_sha256' => null,
     ];
     // Fixture-only probe: re-verify the token against a COPY of the
     // persisted record with the SAME configuration the controller uses
@@ -1159,6 +1163,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         'action' => $body['action'] ?? null,
     ];
     $rawBody = http_build_query($params);
+    $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] = hash('sha256', (string) ($params['response'] ?? ''));
     $request = \Symfony\Component\HttpFoundation\Request::create(
         '/kiwi-captcha/siteverify',
         'POST',
@@ -1186,10 +1191,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $recorded = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
         $preDecode = $GLOBALS['kiwi_last_siteverify_predecode'] ?? null;
         $probe = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
+        $rebuiltSha = $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] ?? 'n/a';
         $diagnostic = $recorded !== null
             ? sprintf('code=%s context=%s probe=%s', $recorded['code'], json_encode($recorded['context']), $probe ?? 'n/a')
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s decode=%s ct=%s raw_len=%d probe=%s', $preDecode['response_len'], $preDecode['response_sha256'], $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a')
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s decode=%s ct=%s raw_len=%d probe=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a')
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
