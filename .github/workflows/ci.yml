@@ -1051,4 +1051,4 @@ jobs:
         working-directory: packages/kiwicaptcha
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
-        run: cargo test --test cross_language redis_runtime_state_interop_with_php -- --nocapture
+        run: cargo test --features redis --test cross_language redis_runtime_state_interop_with_php -- --nocapture
