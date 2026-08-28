@@ -1174,6 +1174,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $rawBody,
     );
     $response = $controller->siteverify($request);
+    // The form path's own outcome, snapshotted before any bisect: the
+    // diagnostic must report the form call's observer state, not the
+    // last (possibly bisect-overwritten) write.
+    $GLOBALS['kiwi_last_siteverify_form_outcome'] = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
+    $GLOBALS['kiwi_last_siteverify_form_probe'] = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
     // Fixture-only bisect: the SAME logical request as JSON (the original
     // wire) — if the form path rejects but the JSON path succeeds, the
     // strict form decoder is the differentiator on this runner.
@@ -1214,8 +1219,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $probe = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
         $rebuiltSha = $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] ?? 'n/a';
         $bisect = $GLOBALS['kiwi_last_siteverify_json_bisect'] ?? 'n/a';
-        $diagnostic = $recorded !== null
-            ? sprintf('code=%s context=%s probe=%s json_bisect=%s', $recorded['code'], json_encode($recorded['context']), $probe ?? 'n/a', var_export($bisect, true))
+        $formOutcome = $GLOBALS['kiwi_last_siteverify_form_outcome'] ?? null;
+        $formOutcomeCode = $formOutcome['code'] ?? 'no-observer';
+        $diagnostic = $formOutcome !== null
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true))
             : ($preDecode !== null
                 ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true))
                 : 'no outcome recorded');
