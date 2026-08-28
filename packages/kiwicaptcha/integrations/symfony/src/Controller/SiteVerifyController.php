@@ -338,6 +338,21 @@ final class SiteVerifyController
                 error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
             }
         };
+        $trace('context', [
+            'php' => PHP_VERSION,
+            'sapi' => php_sapi_name(),
+            'os' => PHP_OS,
+            'uname' => function_exists('php_uname') ? php_uname('r') : '?',
+            'controller_file' => (new \ReflectionClass($this))->getFileName(),
+            'request_file' => (new \ReflectionClass($request))->getFileName(),
+            'extensions' => implode(',', get_loaded_extensions()),
+            'arg_sep_in' => ini_get('arg_separator.input'),
+            'arg_sep_out' => ini_get('arg_separator.output'),
+            'ctype' => function_exists('ctype_xdigit') ? ((new \ReflectionFunction('ctype_xdigit'))->getFileName() !== false ? 'polyfill-file' : 'builtin') : 'missing',
+            'http_foundation_version' => class_exists('Composer\\InstalledVersions') ? (\Composer\InstalledVersions::getVersion('symfony/http-foundation') ?? '?') : 'no-installedversions',
+            'request_uri' => $request->getRequestUri(),
+            'request_method' => $request->getMethod(),
+        ]);
         if ($this->siteverifySecrets === []) {
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
@@ -1467,12 +1482,37 @@ LUA;
      */
     private function readBoundedBody(Request $request): string
     {
+        $trace = static function (string $label, mixed $detail = null): void {
+            if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+                error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
+            }
+        };
+        $contentProp = null;
+        try {
+            $contentProp = (new \ReflectionObject($request))->getProperty('content')->getValue($request);
+        } catch (\Throwable) {
+        }
+        $trace('read-entry', [
+            'content_type' => get_debug_type($contentProp),
+            'content_is_resource' => \is_resource($contentProp),
+            'request_class' => $request::class,
+        ]);
         $stream = $request->getContent(true);
         if (\is_resource($stream)) {
-            return (string) stream_get_contents($stream, self::MAX_BODY_BYTES + 1);
+            $out = (string) stream_get_contents($stream, self::MAX_BODY_BYTES + 1);
+            $trace('read-resource', [
+                'stream_meta' => stream_get_meta_data($stream),
+                'out_b64' => base64_encode($out),
+                'out_len' => \strlen($out),
+            ]);
+
+            return $out;
         }
 
-        return (string) $request->getContent();
+        $out = (string) $request->getContent();
+        $trace('read-string', ['out_b64' => base64_encode($out), 'out_len' => \strlen($out)]);
+
+        return $out;
     }
 
     /**
@@ -1486,9 +1526,15 @@ LUA;
      */
     private function decodeStrictFormBody(string $body): ?array
     {
+        $trace = static function (string $label, mixed $detail = null): void {
+            if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+                error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
+            }
+        };
         if ($body === '') {
             return null;
         }
+        $trace('strict-entry', ['body_b64' => base64_encode($body), 'body_len' => \strlen($body)]);
         $decoded = [];
         foreach (explode('&', $body) as $pair) {
             if ($pair === '') {
@@ -1502,6 +1548,13 @@ LUA;
             // and the decoded names must be non-empty, bracket-free and
             // duplicate-free.
             $name = $this->canonicalFormDecode($parts[0]);
+            $trace('strict-pair', [
+                'name_b64' => base64_encode($parts[0]),
+                'value_b64' => base64_encode($parts[1] ?? ''),
+                'value_len' => \strlen($parts[1] ?? ''),
+                'decoded_name' => $name,
+                'decoded_value_len' => $name !== null ? \strlen($this->canonicalFormDecode($parts[1] ?? '') ?? '') : null,
+            ]);
             if ($name === null || $name === '' || str_contains($name, '[') || str_contains($name, ']')) {
                 return null;
             }
@@ -1514,6 +1567,7 @@ LUA;
             }
             $decoded[$name] = $value;
         }
+        $trace('strict-done', ['response_b64' => base64_encode((string) ($decoded['response'] ?? '')), 'response_len' => \strlen((string) ($decoded['response'] ?? '')), 'keys' => array_keys($decoded)]);
 
         return $decoded;
     }
@@ -1552,6 +1606,20 @@ LUA;
 
     private function parseBody(Request $request, string $requestBody): ?array
     {
+        $trace = static function (string $label, mixed $detail = null): void {
+            if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+                error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
+            }
+        };
+        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $trace('parseBody-entry', [
+            'content_type' => $contentType,
+            'method' => $request->getMethod(),
+            'query_count' => $request->query->count(),
+            'bag_count' => $request->request->count(),
+            'body_b64' => base64_encode($requestBody),
+            'body_len' => \strlen($requestBody),
+        ]);
         // Framing rigor: only POST with an explicit identity content type
         // is accepted — the provider contract is application/json and
         // application/x-www-form-urlencoded, and the parameter source is
@@ -1564,7 +1632,6 @@ LUA;
         if ($request->query->count() > 0) {
             return null;
         }
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
         if ($contentType === 'application/json') {
             // The shared raw-document duplicate-key scanner:
             // {"secret":"A","secret":"B"} is refused, never silently

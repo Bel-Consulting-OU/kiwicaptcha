@@ -1185,12 +1185,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
         $rawBody,
     );
+    if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+        try {
+            $contentProp = (new \ReflectionObject($request))->getProperty('content')->getValue($request);
+        } catch (\Throwable $e) {
+            $contentProp = 'unreadable:'.get_class($e);
+        }
+        error_log(sprintf('kiwicaptcha-fixture-trace: request-prep request_class=%s request_file=%s content_type=%s raw_body_b64=%s body_b64=%s', $request::class, (new \ReflectionClass($request))->getFileName(), get_debug_type($contentProp), base64_encode((string) file_get_contents('php://input')), base64_encode($rawBody)));
+    }
     $response = $controller->siteverify($request);
     // The form path's own outcome, snapshotted before any bisect: the
     // diagnostic must report the form call's observer state, not the
     // last (possibly bisect-overwritten) write.
     $GLOBALS['kiwi_last_siteverify_form_outcome'] = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
     $GLOBALS['kiwi_last_siteverify_form_probe'] = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
+    // Fixture-only replay: the SAME logical request (same URI, same
+    // rebuilt body) through a fresh Request object, isolating whether the
+    // failure is a first-call artifact or tied to the request identity.
+    $replayRequest = \Symfony\Component\HttpFoundation\Request::create(
+        '/kiwi-captcha/siteverify',
+        'POST',
+        [],
+        [],
+        [],
+        ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+        $rawBody,
+    );
+    $replayResponse = $controller->siteverify($replayRequest);
+    $replayPayload = json_decode((string) $replayResponse->getContent(), true);
+    $GLOBALS['kiwi_last_siteverify_replay_code'] = ($replayPayload['success'] ?? null) === true ? 'ok' : ($replayPayload['error-codes'][0] ?? '?');
     // Fixture-only: replicate the controller's strict form decoder on the
     // REBUILT form body and log the decoded response token's sha — if it
     // differs from the original, the form wire mangles the token on this
@@ -1291,13 +1314,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $bMatch = $GLOBALS['kiwi_last_siteverify_bisect_form_match'] ?? 'n/a';
         $bMismatch = $GLOBALS['kiwi_last_siteverify_bisect_form_mismatch'] ?? 'n/a';
         $bJsonAction = $GLOBALS['kiwi_last_siteverify_bisect_json_action'] ?? 'n/a';
+        $replayCode = $GLOBALS['kiwi_last_siteverify_replay_code'] ?? 'n/a';
         $tokenProfile = sprintf('+%d/%%%d/=%d/_%d/-%d', $preDecode['token_plus'] ?? -1, $preDecode['token_slash'] ?? -1, $preDecode['token_eq'] ?? -1, $preDecode['token_underscore'] ?? -1, $preDecode['token_dash'] ?? -1);
         $jsonCode = $GLOBALS['kiwi_last_siteverify_json_bisect_code'] ?? 'n/a';
         $jsonObs = $GLOBALS['kiwi_last_siteverify_json_bisect_observer'] ?? 'n/a';
         $diagnostic = $formOutcome !== null
-            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s json_code=%s json_obs=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s json_code=%s json_obs=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s replay=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $replayCode, $tokenProfile)
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s json_code=%s json_obs=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s json_code=%s json_obs=%s noaction=%s match=%s mismatch=%s json_action=%s replay=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $replayCode, $tokenProfile)
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
