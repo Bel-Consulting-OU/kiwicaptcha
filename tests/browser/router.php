@@ -1254,7 +1254,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         );
         $jsonResponse = $controller->siteverify($jsonRequest);
         $jsonPayload = json_decode((string) $jsonResponse->getContent(), true);
+        $jsonOutcome = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
         $GLOBALS['kiwi_last_siteverify_json_bisect'] = $jsonPayload['success'] ?? null;
+        $GLOBALS['kiwi_last_siteverify_json_bisect_code'] = ($jsonPayload['success'] ?? null) === true ? 'ok' : ($jsonPayload['error-codes'][0] ?? '?');
+        $GLOBALS['kiwi_last_siteverify_json_bisect_observer'] = $jsonOutcome['code'] ?? 'no-observer';
     } catch (\Throwable $e) {
         $GLOBALS['kiwi_last_siteverify_json_bisect'] = 'bisect-exception:'.get_class($e);
     }
@@ -1285,10 +1288,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $bMismatch = $GLOBALS['kiwi_last_siteverify_bisect_form_mismatch'] ?? 'n/a';
         $bJsonAction = $GLOBALS['kiwi_last_siteverify_bisect_json_action'] ?? 'n/a';
         $tokenProfile = sprintf('+%d/%%%d/=%d/_%d/-%d', $preDecode['token_plus'] ?? -1, $preDecode['token_slash'] ?? -1, $preDecode['token_eq'] ?? -1, $preDecode['token_underscore'] ?? -1, $preDecode['token_dash'] ?? -1);
+        $jsonCode = $GLOBALS['kiwi_last_siteverify_json_bisect_code'] ?? 'n/a';
+        $jsonObs = $GLOBALS['kiwi_last_siteverify_json_bisect_observer'] ?? 'n/a';
         $diagnostic = $formOutcome !== null
-            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s json_code=%s json_obs=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s json_code=%s json_obs=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
