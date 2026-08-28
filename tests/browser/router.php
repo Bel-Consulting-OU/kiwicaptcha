@@ -1179,6 +1179,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     // last (possibly bisect-overwritten) write.
     $GLOBALS['kiwi_last_siteverify_form_outcome'] = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
     $GLOBALS['kiwi_last_siteverify_form_probe'] = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
+    // Fixture-only: replicate the controller's strict form decoder on the
+    // REBUILT form body and log the decoded response token's sha — if it
+    // differs from the original, the form wire mangles the token on this
+    // runner (the controller then fails the decode).
+    $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = null;
+    try {
+        $strictToken = null;
+        foreach (explode('&', $rawBody) as $pair) {
+            $parts = explode('=', $pair, 2);
+            $name = rawurldecode($parts[0]);
+            if ($name === 'response') {
+                $component = $parts[1] ?? '';
+                $component = str_replace('+', ' ', $component);
+                $strictToken = preg_replace_callback('/%([0-9A-Fa-f]{2})/', static fn (array $m): string => chr(hexdec($m[1])), $component);
+                break;
+            }
+        }
+        $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = $strictToken !== null ? hash('sha256', $strictToken) : 'response-missing';
+    } catch (\Throwable $e) {
+        $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = 'decode-exception:'.get_class($e);
+    }
     // Fixture-only bisect: the SAME logical request as JSON (the original
     // wire) — if the form path rejects but the JSON path succeeds, the
     // strict form decoder is the differentiator on this runner.
@@ -1219,12 +1240,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $probe = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
         $rebuiltSha = $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] ?? 'n/a';
         $bisect = $GLOBALS['kiwi_last_siteverify_json_bisect'] ?? 'n/a';
+        $strictSha = $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] ?? 'n/a';
         $formOutcome = $GLOBALS['kiwi_last_siteverify_form_outcome'] ?? null;
         $formOutcomeCode = $formOutcome['code'] ?? 'no-observer';
         $diagnostic = $formOutcome !== null
-            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true))
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s strict_sha=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $strictSha)
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true))
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true))
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
