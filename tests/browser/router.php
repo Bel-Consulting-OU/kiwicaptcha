@@ -1173,6 +1173,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     ];
     $rawBody = http_build_query($params);
     $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] = hash('sha256', (string) ($params['response'] ?? ''));
+    if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+        error_log(sprintf('kiwicaptcha-fixture-trace: rebuilt body_len=%d body_sha=%s body_b64=%s response_b64=%s', strlen($rawBody), hash('sha256', $rawBody), base64_encode($rawBody), base64_encode((string) ($params['response'] ?? ''))));
+    }
     $request = \Symfony\Component\HttpFoundation\Request::create(
         '/kiwi-captcha/siteverify',
         'POST',

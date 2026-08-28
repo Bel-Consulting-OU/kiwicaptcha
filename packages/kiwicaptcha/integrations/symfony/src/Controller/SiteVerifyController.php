@@ -377,7 +377,7 @@ final class SiteVerifyController
             $trace('parseBody-null', ['body_len' => strlen($requestBody)]);
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
-        $trace('parsed', ['keys' => array_keys($body), 'response_sha' => hash('sha256', (string) ($body['response'] ?? '')), 'response_len' => strlen((string) ($body['response'] ?? '')), 'action' => $body['action'] ?? null, 'secret' => (string) ($body['secret'] ?? ''), 'remoteip' => $body['remoteip'] ?? null]);
+        $trace('parsed', ['keys' => array_keys($body), 'response_sha' => hash('sha256', (string) ($body['response'] ?? '')), 'response_len' => strlen((string) ($body['response'] ?? '')), 'response_b64' => base64_encode((string) ($body['response'] ?? '')), 'body_b64' => base64_encode($requestBody), 'action' => $body['action'] ?? null, 'secret' => (string) ($body['secret'] ?? ''), 'remoteip' => $body['remoteip'] ?? null]);
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
         $remoteIp = \is_string($body['remoteip'] ?? null) ? $body['remoteip'] : null;
