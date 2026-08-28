@@ -198,14 +198,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // store's crash recovery rests on the strict ordering
         // (SiteVerifyIdempotencyStore::LEASE_SECONDS):
         //
-        //   max verification window  <  lease (60)  <  waiter bound (90)
+        //   max verification window  <  lease (60)  <  waiter bound (2 s)
         //                            <= retained-state recovery retention
         //
-        // The controller enforces only waiter > lease; the Argon admission
-        // lease and the retained consumed-state retention margin complete
-        // the ordering and are validated here, since a configuration that
-        // breaks it makes crash recovery impossible (a `PENDING_SAME` waiter
-        // gives up before the owner lease can be taken over, or a
+        // The controller enforces waiter < lease (the per-request waiter
+        // bound only caps request-slot occupancy; the takeover is a later
+        // retry's job); the Argon admission lease and the retained
+        // consumed-state retention margin complete the ordering and are
+        // validated here, since a configuration that breaks it makes
+        // crash recovery impossible (a `PENDING_SAME` waiter
         // lease-bounded verification outlasts the Siteverify lease and is
         // displaced at takeover). Signed token expiry is irrelevant to the
         // reconstruction: the retained consumed record, kept readable by
@@ -323,6 +324,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $container,
         );
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+
+        // Hard distributed-resource semantics (the architectural
+        // invariant): a deployment claiming a global issuance limit or a
+        // bounded Argon admission ceiling must not silently fall back to
+        // a process-local limiter or gate, since the aggregate of N
+        // workers could otherwise approach N times the configured
+        // ceiling. In production the container refuses the combination
+        // unless the operator explicitly names the local fallback.
+        $environment = $this->environment($container);
+        if (!\in_array($environment, ['test', 'dev'], true)) {
+            if ($config['rate_limit_global'] > 0 && $redisRef === null && !$config['allow_local_global_limit_fallback']) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha: rate_limit_global=%d is a deployment-wide limit, but no Redis client is wired — the limiter would silently fall back to a process-local or best-effort window, so the aggregate of N workers could approach N x %d. Wire redis_service (or a shared PSR-6 pool that is truly deployment-wide) or explicitly set allow_local_global_limit_fallback: true to accept the weaker semantics.',
+                    $config['rate_limit_global'],
+                    $config['rate_limit_global'],
+                ));
+            }
+            if ($config['argon2_max_concurrent_verifications'] > 0 && $redisRef === null && !$config['allow_local_argon_admission_fallback']) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha: argon2_max_concurrent_verifications=%d is a deployment-wide Argon admission ceiling, but no Redis client is wired — the admission would silently fall back to the in-process gate, so the aggregate of N workers could approach N x %d concurrent Argon verifications. Wire redis_service or explicitly set allow_local_argon_admission_fallback: true to accept the weaker semantics.',
+                    $config['argon2_max_concurrent_verifications'],
+                    $config['argon2_max_concurrent_verifications'],
+                ));
+            }
+        }
 
         // The risk.redis knobs (wait_replicas / wait_timeout_ms /
         // ttl_margin_secs) harden the challenge storage when it is a
@@ -871,13 +897,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // cache (risk.security_epoch_cache_secs), keeps a monotonic
         // in-process max (a regressed central value is ignored) and
         // serves the last-observed max when Redis is unavailable. The
-        // effective epoch is applied to the shared verifier (rotating its
-        // expected policy version, always re-applying the configured
-        // region/issuer expectations), so every verification enforces the
-        // current epoch and a central policy bump revokes outstanding
-        // challenges within one cache window. Without a Redis client the
-        // monitor serves the configured risk.policy_version (no central
-        // state to read).
+        // effective epoch is applied to the shared verifier via
+        // setExpectedPolicyVersion(), mutating only the policy epoch: the
+        // region and issuer expectations are construction-time verifier
+        // settings (wired above with the configured values) and are
+        // deliberately never rewritten by the monitor — a central epoch
+        // bump must not disable the issuer security boundary. Every
+        // verification enforces the current epoch and a central policy
+        // bump revokes outstanding challenges within one cache window.
+        // Without a Redis client the monitor serves the configured
+        // risk.policy_version (no central state to read).
         $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
         $container->setDefinition(SecurityEpochMonitor::class, (new Definition(SecurityEpochMonitor::class, [
             new Reference('kiwi_captcha.verifier'),
@@ -886,8 +915,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['risk']['policy_version'],
             $riskConfig['security_epoch_cache_secs'],
         ]))
-            ->setArgument('$region', $config['risk']['region'])
-            ->setArgument('$issuer', null)
             // The max-stale fail-closed window: past last_success +
             // max_stale the validator fails verification closed
             // (temporary_unavailable) and the controller refuses
@@ -1084,6 +1111,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             (float) SiteVerifyController::IDEMPOTENCY_WAIT_SECS, // idempotency wait bound (the ctor default — never null, the param is float)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
+            // The static deployment security-context digest (configured
+            // issuer, region, keyring and revocation state): bound into
+            // the idempotency backend identity so a cached SiteVerify
+            // provider result can never outlive the security context
+            // that produced it — an issuer/region/keyring rotation
+            // invalidates the idempotency namespace (a same-key retry
+            // becomes a different logical operation), exactly as the
+            // core's hard-security verdicts dominate even a
+            // same-operation retry.
+            ->setArgument('$securityContextDigest', hash('sha256', implode("\0", [
+                (string) ($config['issuer'] ?? ''),
+                (string) ($config['risk']['region'] ?? ''),
+                json_encode($config['secrets_by_kid'] ?? []),
+                json_encode($config['revoked_kids'] ?? []),
+            ])))
             ->setArgument('$outstanding', $riskConfig['enabled'] ? new Reference('kiwi_captcha.risk.outstanding') : null)
             // The security-epoch monitor drives the identity and the
             // fail-closed check: the effective epoch (the monitor's
