@@ -1184,6 +1184,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     // differs from the original, the form wire mangles the token on this
     // runner (the controller then fails the decode).
     $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = null;
+    // Fixture-only bisect matrix: (a) form WITHOUT the action field, (b)
+    // JSON WITH the action+cdata — isolating whether the action field or
+    // the form content-type is the differentiator on this runner.
+    $GLOBALS['kiwi_last_siteverify_bisect_form_noaction'] = null;
+    $GLOBALS['kiwi_last_siteverify_bisect_json_action'] = null;
+    try {
+        $formNoAction = http_build_query(['secret' => (string) ($body['secret'] ?? ''), 'response' => (string) ($body['response'] ?? ''), 'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1')]);
+        $naRequest = \Symfony\Component\HttpFoundation\Request::create('/kiwi-captacha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], $formNoAction);
+        $naPayload = json_decode((string) $controller->siteverify($naRequest)->getContent(), true);
+        $GLOBALS['kiwi_last_siteverify_bisect_form_noaction'] = ($naPayload['success'] ?? null) === true ? 'ok' : ($naPayload['error-codes'][0] ?? '?');
+    } catch (\Throwable $e) {
+        $GLOBALS['kiwi_last_siteverify_bisect_form_noaction'] = 'exception:'.get_class($e);
+    }
+    try {
+        $jsonAction = json_encode(['secret' => (string) ($body['secret'] ?? ''), 'response' => (string) ($body['response'] ?? ''), 'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), 'action' => 'admin', 'cdata' => 'forged'], JSON_THROW_ON_ERROR);
+        $jaRequest = \Symfony\Component\HttpFoundation\Request::create('/kiwi-captacha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], $jsonAction);
+        $jaPayload = json_decode((string) $controller->siteverify($jaRequest)->getContent(), true);
+        $GLOBALS['kiwi_last_siteverify_bisect_json_action'] = ($jaPayload['success'] ?? null) === true ? 'ok' : ($jaPayload['error-codes'][0] ?? '?');
+    } catch (\Throwable $e) {
+        $GLOBALS['kiwi_last_siteverify_bisect_json_action'] = 'exception:'.get_class($e);
+    }
     try {
         $strictToken = null;
         foreach (explode('&', $rawBody) as $pair) {
@@ -1243,10 +1264,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $strictSha = $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] ?? 'n/a';
         $formOutcome = $GLOBALS['kiwi_last_siteverify_form_outcome'] ?? null;
         $formOutcomeCode = $formOutcome['code'] ?? 'no-observer';
+        $bNoAction = $GLOBALS['kiwi_last_siteverify_bisect_form_noaction'] ?? 'n/a';
+        $bJsonAction = $GLOBALS['kiwi_last_siteverify_bisect_json_action'] ?? 'n/a';
         $diagnostic = $formOutcome !== null
-            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s strict_sha=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $strictSha)
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s strict_sha=%s noaction_form=%s json_action=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $strictSha, $bNoAction, $bJsonAction)
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true))
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s noaction_form=%s json_action=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $bNoAction, $bJsonAction)
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
