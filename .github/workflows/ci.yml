@@ -984,6 +984,11 @@ jobs:
   cross-language:
     name: Cross-language (both directions)
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
@@ -1042,3 +1047,8 @@ jobs:
         env:
           KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
         run: php tests/CrossLanguageVerify.php
+      - name: Redis runtime-state interoperability (PHP/Rust consume, commit, recovery claims)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --test cross_language redis_runtime_state_interop_with_php -- --nocapture
