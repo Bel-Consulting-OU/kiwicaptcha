@@ -1174,6 +1174,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $rawBody,
     );
     $response = $controller->siteverify($request);
+    // Fixture-only bisect: the SAME logical request as JSON (the original
+    // wire) — if the form path rejects but the JSON path succeeds, the
+    // strict form decoder is the differentiator on this runner.
+    $GLOBALS['kiwi_last_siteverify_json_bisect'] = null;
+    try {
+        $jsonBody = json_encode(['secret' => (string) ($body['secret'] ?? ''), 'response' => (string) ($body['response'] ?? ''), 'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1')], JSON_THROW_ON_ERROR);
+        $jsonRequest = \Symfony\Component\HttpFoundation\Request::create(
+            '/kiwi-captacha/siteverify',
+            'POST',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json'],
+            $jsonBody,
+        );
+        $jsonResponse = $controller->siteverify($jsonRequest);
+        $jsonPayload = json_decode((string) $jsonResponse->getContent(), true);
+        $GLOBALS['kiwi_last_siteverify_json_bisect'] = $jsonPayload['success'] ?? null;
+    } catch (\Throwable $e) {
+        $GLOBALS['kiwi_last_siteverify_json_bisect'] = 'bisect-exception:'.get_class($e);
+    }
     // Provider-compatible SiteVerify semantics return validation failures
     // as HTTP 200 with success:false — the fixture must gate its
     // single-use state on the JSON payload, never the HTTP status.
@@ -1192,10 +1213,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $preDecode = $GLOBALS['kiwi_last_siteverify_predecode'] ?? null;
         $probe = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
         $rebuiltSha = $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] ?? 'n/a';
+        $bisect = $GLOBALS['kiwi_last_siteverify_json_bisect'] ?? 'n/a';
         $diagnostic = $recorded !== null
-            ? sprintf('code=%s context=%s probe=%s', $recorded['code'], json_encode($recorded['context']), $probe ?? 'n/a')
+            ? sprintf('code=%s context=%s probe=%s json_bisect=%s', $recorded['code'], json_encode($recorded['context']), $probe ?? 'n/a', var_export($bisect, true))
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s decode=%s ct=%s raw_len=%d probe=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a')
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true))
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
