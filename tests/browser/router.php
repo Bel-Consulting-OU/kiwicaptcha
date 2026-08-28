@@ -1047,6 +1047,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     // stands in for the shared store). The wire body may arrive as JSON
     // or as the raw application/x-www-form-urlencoded form (the provider
     // contract): both are parsed here.
+    putenv('KIWI_FIXTURE_TRACE=1');
     $rawBody = (string) file_get_contents('php://input');
     $body = json_decode($rawBody, true);
     if (!is_array($body)) {

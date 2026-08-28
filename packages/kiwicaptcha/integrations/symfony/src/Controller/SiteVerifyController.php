@@ -333,6 +333,11 @@ final class SiteVerifyController
 
     public function siteverify(Request $request): Response
     {
+        $trace = static function (string $label, mixed $detail = null): void {
+            if (getenv('KIWI_FIXTURE_TRACE') === '1') {
+                error_log(sprintf('kiwicaptcha-controller-trace: %s %s', $label, $detail === null ? '' : (is_string($detail) ? $detail : json_encode($detail))));
+            }
+        };
         if ($this->siteverifySecrets === []) {
             return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
@@ -369,8 +374,10 @@ final class SiteVerifyController
 
         $body = $this->parseBody($request, $requestBody);
         if ($body === null) {
+            $trace('parseBody-null', ['body_len' => strlen($requestBody)]);
             return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
+        $trace('parsed', ['keys' => array_keys($body), 'response_sha' => hash('sha256', (string) ($body['response'] ?? '')), 'response_len' => strlen((string) ($body['response'] ?? '')), 'action' => $body['action'] ?? null, 'secret' => (string) ($body['secret'] ?? ''), 'remoteip' => $body['remoteip'] ?? null]);
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
         $remoteIp = \is_string($body['remoteip'] ?? null) ? $body['remoteip'] : null;
@@ -388,6 +395,7 @@ final class SiteVerifyController
             return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
         if (\strlen($response) > self::MAX_RESPONSE_BYTES) {
+            $trace('length-reject', ['response_len' => strlen($response)]);
             return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
@@ -584,7 +592,8 @@ final class SiteVerifyController
         // redemptions, never the retained-state reconstruction.
         try {
             $token = SolutionToken::decode($response);
-        } catch (DecodeError) {
+        } catch (DecodeError $e) {
+            $trace('decode-error', ['class' => get_class($e), 'message' => $e->getMessage(), 'response_sha' => hash('sha256', $response), 'response_len' => strlen($response)]);
             // Malformed-token risk feedback (best-effort, never altering
             // the provider response): an authenticated backend sending a
             // malformed Kiwi response token contributes the same
@@ -932,6 +941,7 @@ final class SiteVerifyController
         // path and the TookOver first-verification path alike); a
         // non-idempotent request passes null and records no identity, so
         // a later keyed replay can never reconstruct.
+        $trace('pre-verify', ['nonce' => $token->nonce, 'expectedScope' => $expectedScope, 'remoteIp' => $remoteIp, 'idempotent' => $idempotent]);
         try {
             $outcome = $this->withScopeAttribute($request, $expectedScope, function () use ($response, $expectedScope, $remoteIp, $idempotent, $claim, $operationFingerprint, $canonicalBinding): \KiwiCaptcha\VerifyOutcome {
                 // The scope attribute drives the Argon per-scope admission
@@ -953,6 +963,7 @@ final class SiteVerifyController
                 );
             });
         if ($this->verifyOutcomeObserver !== null) {
+            $trace('observer', ['code' => $outcome->isOk() ? 'ok' : $outcome->code()]);
             ($this->verifyOutcomeObserver)($outcome, [
                 'expectedScope' => $expectedScope,
                 'remoteIp' => $remoteIp,
