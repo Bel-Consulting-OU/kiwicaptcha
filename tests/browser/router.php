@@ -1047,7 +1047,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     // stands in for the shared store). The wire body may arrive as JSON
     // or as the raw application/x-www-form-urlencoded form (the provider
     // contract): both are parsed here.
-    putenv('KIWI_FIXTURE_TRACE=1');
     $rawBody = (string) file_get_contents('php://input');
     $body = json_decode($rawBody, true);
     if (!is_array($body)) {
@@ -1074,7 +1073,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         'decode' => $preDecode,
         'content_type' => (string) ($_SERVER['CONTENT_TYPE'] ?? ''),
         'raw_len' => \strlen($rawBody),
-        // The controller sees the REBUILT form body, not the original
+        // The controller sees the rebuilt form body, not the original
         // JSON: the rebuilt token must be byte-identical to the original
         // or the decode/verify below operate on a mangled value.
         'rebuilt_token_sha256' => null,
@@ -1087,8 +1086,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         'token_underscore' => substr_count((string) ($body['response'] ?? ''), '_'),
         'token_dash' => substr_count((string) ($body['response'] ?? ''), '-'),
     ];
-    // Fixture-only probe: re-verify the token against a COPY of the
-    // persisted record with the SAME configuration the controller uses
+    // Fixture-only probe: re-verify the token against a copy of the
+    // persisted record with the same configuration the controller uses
     // (secret, scope 'login' from the siteverify map, remoteip), so a
     // pre-verification controller rejection is distinguishable from a
     // genuine verification failure. The probe consumes its own copy,
@@ -1173,9 +1172,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     ];
     $rawBody = http_build_query($params);
     $GLOBALS['kiwi_last_siteverify_predecode']['rebuilt_token_sha256'] = hash('sha256', (string) ($params['response'] ?? ''));
-    if (getenv('KIWI_FIXTURE_TRACE') === '1') {
-        error_log(sprintf('kiwicaptcha-fixture-trace: rebuilt body_len=%d body_sha=%s body_b64=%s response_b64=%s', strlen($rawBody), hash('sha256', $rawBody), base64_encode($rawBody), base64_encode((string) ($params['response'] ?? ''))));
-    }
     $request = \Symfony\Component\HttpFoundation\Request::create(
         '/kiwi-captcha/siteverify',
         'POST',
@@ -1185,61 +1181,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
         $rawBody,
     );
-    if (getenv('KIWI_FIXTURE_TRACE') === '1') {
-        try {
-            $contentProp = (new \ReflectionObject($request))->getProperty('content')->getValue($request);
-        } catch (\Throwable $e) {
-            $contentProp = 'unreadable:'.get_class($e);
-        }
-        error_log(sprintf('kiwicaptcha-fixture-trace: request-prep request_class=%s request_file=%s content_type=%s raw_body_b64=%s body_b64=%s', $request::class, (new \ReflectionClass($request))->getFileName(), get_debug_type($contentProp), base64_encode((string) file_get_contents('php://input')), base64_encode($rawBody)));
-    }
     $response = $controller->siteverify($request);
     // The form path's own outcome, snapshotted before any bisect: the
     // diagnostic must report the form call's observer state, not the
     // last (possibly bisect-overwritten) write.
     $GLOBALS['kiwi_last_siteverify_form_outcome'] = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
     $GLOBALS['kiwi_last_siteverify_form_probe'] = $GLOBALS['kiwi_last_siteverify_probe'] ?? null;
-    // Fixture-only replay: the SAME logical request (same URI, same
-    // rebuilt body) through a fresh Request object, isolating whether the
-    // failure is a first-call artifact or tied to the request identity.
-    $replayRequest = \Symfony\Component\HttpFoundation\Request::create(
-        '/kiwi-captcha/siteverify',
-        'POST',
-        [],
-        [],
-        [],
-        ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
-        $rawBody,
-    );
-    $replayResponse = $controller->siteverify($replayRequest);
-    $replayPayload = json_decode((string) $replayResponse->getContent(), true);
-    $GLOBALS['kiwi_last_siteverify_replay_code'] = ($replayPayload['success'] ?? null) === true ? 'ok' : ($replayPayload['error-codes'][0] ?? '?');
     // Fixture-only: replicate the controller's strict form decoder on the
-    // REBUILT form body and log the decoded response token's sha — if it
+    // rebuilt form body and log the decoded response token's sha — if it
     // differs from the original, the form wire mangles the token on this
     // runner (the controller then fails the decode).
     $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = null;
-    // Fixture-only bisect matrix: (a) form WITHOUT the action field, (b)
-    // JSON WITH the action+cdata — isolating whether the action field or
+    // Fixture-only bisect matrix: (a) form without the action field, (b)
+    // JSON with the action+cdata — isolating whether the action field or
     // the form content-type is the differentiator on this runner.
     $GLOBALS['kiwi_last_siteverify_bisect_form_noaction'] = null;
     $GLOBALS['kiwi_last_siteverify_bisect_form_match'] = null;
     $GLOBALS['kiwi_last_siteverify_bisect_form_mismatch'] = null;
     $GLOBALS['kiwi_last_siteverify_bisect_json_action'] = null;
-    $GLOBALS['kiwi_last_siteverify_bisect_padded'] = null;
-    // Fixture-only deterministic bisect: a hardcoded token that ALWAYS
-    // carries "==" padding (52-byte plaintext), so the URL-encoded form
-    // body ALWAYS contains the %3D%3D escape sequence — the shape of
-    // every padded real token — regardless of the random nonce length of
-    // the actual token in this run.
-    $paddedToken = 'KzJSNHVKbWJ1aXYxcFM5WnF0dkRpUTB5a0UrSTlnZ2NONnMrN3VxNHBlND0uNjMuNy57fQ==';
-    try {
-        $pRequest = \Symfony\Component\HttpFoundation\Request::create('/kiwi-captacha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], http_build_query(['secret' => 'compat-secret-42', 'response' => $paddedToken, 'remoteip' => '127.0.0.1', 'action' => 'admin']));
-        $pPayload = json_decode((string) $controller->siteverify($pRequest)->getContent(), true);
-        $GLOBALS['kiwi_last_siteverify_bisect_padded'] = ($pPayload['success'] ?? null) === true ? 'ok' : ($pPayload['error-codes'][0] ?? '?');
-    } catch (\Throwable $e) {
-        $GLOBALS['kiwi_last_siteverify_bisect_padded'] = 'exception:'.get_class($e);
-    }
     foreach ([
         'noaction' => http_build_query(['secret' => (string) ($body['secret'] ?? ''), 'response' => (string) ($body['response'] ?? ''), 'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1')]),
         'match' => http_build_query(['secret' => (string) ($body['secret'] ?? ''), 'response' => (string) ($body['response'] ?? ''), 'remoteip' => (string) ($body['remoteip'] ?? $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), 'action' => 'checkout']),
@@ -1278,7 +1237,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     } catch (\Throwable $e) {
         $GLOBALS['kiwi_last_siteverify_strict_decoded_sha'] = 'decode-exception:'.get_class($e);
     }
-    // Fixture-only bisect: the SAME logical request as JSON (the original
+    //the same logical request as JSON (the original
     // wire) — if the form path rejects but the JSON path succeeds, the
     // strict form decoder is the differentiator on this runner.
     $GLOBALS['kiwi_last_siteverify_json_bisect'] = null;
@@ -1295,10 +1254,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         );
         $jsonResponse = $controller->siteverify($jsonRequest);
         $jsonPayload = json_decode((string) $jsonResponse->getContent(), true);
-        $jsonOutcome = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
         $GLOBALS['kiwi_last_siteverify_json_bisect'] = $jsonPayload['success'] ?? null;
-        $GLOBALS['kiwi_last_siteverify_json_bisect_code'] = ($jsonPayload['success'] ?? null) === true ? 'ok' : ($jsonPayload['error-codes'][0] ?? '?');
-        $GLOBALS['kiwi_last_siteverify_json_bisect_observer'] = $jsonOutcome['code'] ?? 'no-observer';
     } catch (\Throwable $e) {
         $GLOBALS['kiwi_last_siteverify_json_bisect'] = 'bisect-exception:'.get_class($e);
     }
@@ -1328,15 +1284,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $bMatch = $GLOBALS['kiwi_last_siteverify_bisect_form_match'] ?? 'n/a';
         $bMismatch = $GLOBALS['kiwi_last_siteverify_bisect_form_mismatch'] ?? 'n/a';
         $bJsonAction = $GLOBALS['kiwi_last_siteverify_bisect_json_action'] ?? 'n/a';
-        $bPadded = $GLOBALS['kiwi_last_siteverify_bisect_padded'] ?? 'n/a';
-        $replayCode = $GLOBALS['kiwi_last_siteverify_replay_code'] ?? 'n/a';
         $tokenProfile = sprintf('+%d/%%%d/=%d/_%d/-%d', $preDecode['token_plus'] ?? -1, $preDecode['token_slash'] ?? -1, $preDecode['token_eq'] ?? -1, $preDecode['token_underscore'] ?? -1, $preDecode['token_dash'] ?? -1);
-        $jsonCode = $GLOBALS['kiwi_last_siteverify_json_bisect_code'] ?? 'n/a';
-        $jsonObs = $GLOBALS['kiwi_last_siteverify_json_bisect_observer'] ?? 'n/a';
         $diagnostic = $formOutcome !== null
-            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s json_code=%s json_obs=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s padded=%s replay=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $bPadded, $replayCode, $tokenProfile)
+            ? sprintf('form_code=%s form_context=%s probe=%s json_bisect=%s strict_sha=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $formOutcomeCode, json_encode($formOutcome['context'] ?? null), $probe ?? 'n/a', var_export($bisect, true), $strictSha, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
             : ($preDecode !== null
-                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s json_code=%s json_obs=%s noaction=%s match=%s mismatch=%s json_action=%s padded=%s replay=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $jsonCode, $jsonObs, $bNoAction, $bMatch, $bMismatch, $bJsonAction, $bPadded, $replayCode, $tokenProfile)
+                ? sprintf('pre-decode: len=%d sha256=%s rebuilt_sha=%s strict_sha=%s decode=%s ct=%s raw_len=%d probe=%s json_bisect=%s noaction=%s match=%s mismatch=%s json_action=%s token=%s', $preDecode['response_len'], $preDecode['response_sha256'], $rebuiltSha, $strictSha, $preDecode['decode'], $preDecode['content_type'], $preDecode['raw_len'], $probe ?? 'n/a', var_export($bisect, true), $bNoAction, $bMatch, $bMismatch, $bJsonAction, $tokenProfile)
                 : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
