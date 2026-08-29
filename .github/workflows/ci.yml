@@ -88,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.1', '8.2', '8.3', '8.4']
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
     defaults:
       run:
         working-directory: packages/kiwicaptcha-php
@@ -126,13 +126,60 @@ jobs:
       - name: phpunit
         run: vendor/bin/phpunit
 
+  php-nightly:
+    # Non-gating forward-compatibility probe on the PHP 8.6 development
+    # line: setup-php v2.37.2 maps `nightly` to 8.6, the current
+    # pre-release branch (no stable 8.6 entry exists in its version
+    # map yet; switch the pin to '8.6' when the first stable release
+    # lands). Deliberately NOT in the protected-main required-check
+    # set, mirroring the Redis 8 compatibility lane: a nightly core may
+    # change behavior before 8.6 stabilizes, and this lane surfaces
+    # that drift as a visible warning instead of blocking the release
+    # gate. The stable 8.5 lane above is the gating evidence; this lane
+    # is aspirational.
+    name: PHP 8.6 nightly core (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: 'nightly'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+      - name: phpunit
+        run: vendor/bin/phpunit
+
   symfony:
     name: Symfony bundle (container + KernelBrowser)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        symfony: ['6.4', '7.x', '8.x']
+        include:
+          # Explicit PHP pairs per Symfony line: each lane runs the
+          # PHP the line is tested against upstream. 8.5 pairs with
+          # the 8.x line only, mirroring the previous 8.4 pairing:
+          # the 6.4 lane stays on its supported line (Symfony 6.4 is
+          # tested through PHP 8.4), and the 7.x lane keeps the
+          # original 8.2 pairing.
+          - symfony: '6.4'
+            php: '8.2'
+          - symfony: '7.x'
+            php: '8.2'
+          - symfony: '8.x'
+            php: '8.4'
+          - symfony: '8.x'
+            php: '8.5'
     defaults:
       run:
         working-directory: packages/kiwicaptcha/integrations/symfony
@@ -141,7 +188,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
-          php-version: ${{ matrix.symfony == '8.x' && '8.4' || '8.2' }}
+          php-version: ${{ matrix.php }}
           extensions: json, openssl, sodium
           coverage: none
       - name: composer install
@@ -160,7 +207,7 @@ jobs:
           done
           echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
           exit 1
-      - name: pin Symfony 8.x (PHP 8.4 for the 8.x line)
+      - name: pin Symfony 8.x
         # Only the five declared packages are pinned: --with requires the
         # temporary constraint to be a subset of composer.json, and the
         # transitive packages (config, dependency-injection, twig-bridge,
@@ -651,6 +698,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: install ripgrep
+        # The scan below is rg-based and the ubuntu runners do not ship
+        # ripgrep: the `if rg` gate would fail open (command-not-found)
+        # and the lane would silently never gate, so rg is installed
+        # before the scan.
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: scan product source for internal-history commentary
         run: |
           set -euo pipefail

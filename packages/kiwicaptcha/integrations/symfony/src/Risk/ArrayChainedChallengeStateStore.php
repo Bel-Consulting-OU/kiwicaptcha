@@ -123,10 +123,34 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $existing = $this->obligations[$obligationId] ?? null;
         if ($existing !== null) {
             $record = $this->records[$existing] ?? null;
-            if ($record !== null && $record['expiresAt'] > $this->clock()) {
-                // The obligation exists: return the existing chain id,
-                // raising the required rank/action when the new
-                // reassessment is stronger (never lower).
+            $live = false;
+            if ($record !== null) {
+                try {
+                    // The strict v2 decode, mirroring the Redis Lua
+                    // predicate's isValidChainRecord(): a corrupt
+                    // pointed-at record is never returned as the existing
+                    // chain (the Redis heal), and the record's own expiry
+                    // is the TTL equivalent (a Redis key is gone when its
+                    // TTL lapses; here the expiresAt field is checked).
+                    self::validateState($record);
+                    $live = $record['expiresAt'] > $this->clock();
+                } catch (MalformedChainedChallengeStateException $e) {
+                    // Corrupt record: the strict v2 decode fails, exactly
+                    // like the Redis Lua predicate's rejection — healed
+                    // below with the compare-delete + fresh create.
+                }
+                if (!$live) {
+                    // Unlike Redis there is no TTL sweep reaping the stale
+                    // record: it is removed with the mapping so the
+                    // corrupt/expired record never lingers unreferenced.
+                    unset($this->records[$existing]);
+                }
+            }
+            if ($live) {
+                // The obligation exists and its pointed-at record is valid:
+                // return the existing chain id, raising the required
+                // rank/action when the new reassessment is stronger (never
+                // lower).
                 if ($requiredRank > $record['requiredRank']) {
                     $this->records[$existing]['requiredRank'] = $requiredRank;
                     $this->records[$existing]['requiredAction'] = $requiredAction;

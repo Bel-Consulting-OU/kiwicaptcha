@@ -27,9 +27,9 @@ namespace KiwiCaptcha;
  * (and therefore the JSON) when no decoy is armed, never a JSON `null`,
  * and old payloads (no key) deserialize with null. An armed record is
  * protocol v3 (the decoy-capable canonical) and requires a v3-capable
- * verifier: an old verifier rejects version 3 as unknown, so the
- * capability becomes inferable from protocol_version, which is the
- * point.
+ * verifier: an old verifier rejects version 3 as unknown. The grammar
+ * is total: v2 => no decoy, v3 => decoy present. A stored version flip
+ * can never change the effective protocol.
  */
 final class Challenge
 {

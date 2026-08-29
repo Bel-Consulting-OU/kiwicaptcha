@@ -1343,7 +1343,7 @@ impl RedisChallengeStore {
     /// checkout-A block (the runtime-state GET; the cheap-failure cleanup
     /// and the terminal gate share the same connection, then it is
     /// released before the admission gate, the consume checkout and the
-    /// commit checkout — see the round-98 two-checkout model in
+    /// commit checkout — see the three-checkout model in
     /// [`ProductionVerifier::verify`]). Any command failure poisons the
     /// connection via [`Self::run_command`]; the caller must not continue
     /// on it.
@@ -2313,12 +2313,14 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
-        // 2. checkout A — the snapshot connection of the two-checkout
-        //    model (round-98 audit): it covers the runtime-state GET, the
-        //    cheap phase (incl. its fused delete-if-pending cleanup) and
-        //    the terminal gate, then is dropped before the admission gate
-        //    and the derivation. No pooled connection is ever held across
-        //    the memory-hard Argon2id hash: with the old single-checkout
+        // 2. checkout A — the snapshot connection of the three-checkout
+        //    model (snapshot/cheap on A, consume+WAIT on B, commit on C;
+        //    the derivation holds no connection): it covers the
+        //    runtime-state GET, the cheap phase (incl. its fused
+        //    delete-if-pending cleanup) and the terminal gate, then is
+        //    dropped before the admission gate and the derivation. No
+        //    pooled connection is ever held across
+        //    the memory-hard Argon2id hash: with the previous single-checkout
         //    flow, four concurrent Argon verifications exhausted a default
         //    4-slot pool (each held its slot through the derivation) and a
         //    fifth request failed with StorageUnavailable while Redis sat

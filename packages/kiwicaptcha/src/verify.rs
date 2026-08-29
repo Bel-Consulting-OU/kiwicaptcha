@@ -553,17 +553,24 @@ impl VerifyError {
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // Protocol version is part of the wire contract: 1 (legacy, migration
     // window), 2 (unarmed) and 3 (decoy-capable) exist — anything else is
-    // a corrupt/foreign record. The protocol-vs-decoy grammar is explicit:
-    // the `|decoy_field` segment is a protocol v3 canonical extension, so
-    // a v2 record carrying a `decoy_field` is rejected here — the v2
-    // canonical never includes the segment and such a record cannot have
-    // been signed by a conforming issuer (an armed issuance writes
-    // protocol v3). A v3 record without a decoy uses the plain 18-field
-    // canonical and is accepted leniently.
+    // a corrupt/foreign record. The protocol-vs-decoy grammar is explicit
+    // and total: the `|decoy_field` segment is a protocol v3 canonical
+    // extension, so a v2 record carrying a `decoy_field` is rejected here
+    // (the v2 canonical never includes the segment and such a record
+    // cannot have been signed by a conforming issuer — an armed issuance
+    // writes protocol v3), and a v3 record without a decoy is rejected
+    // too: the decoy is mandatory on v3, so a signed v2 record with its
+    // stored version flipped to 3 can never verify (the canonical shape
+    // itself authenticates the protocol capability). v1 and v2 accept a
+    // null decoy; v3 requires a present decoy; v2 + decoy and v3 without
+    // one are malformed.
     if !(1..=3).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
     }
     if record.protocol_version == 2 && record.decoy_field.is_some() {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.protocol_version == 3 && record.decoy_field.is_none() {
         return Err(VerifyError::MalformedRecord);
     }
     if !crate::challenge::valid_identifier(&record.scope, 128) {
@@ -1882,18 +1889,21 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_three_without_a_decoy_verifies() {
-        // Protocol v3 is the decoy-capable canonical: a v3 record without
-        // a decoy uses the plain 18-field canonical, so a signed v2
-        // record re-versioned to 3 still verifies (the canonical and the
-        // signature are unchanged).
+    fn protocol_version_three_without_a_decoy_is_malformed() {
+        // Protocol v3 is the decoy-capable canonical and the decoy is
+        // mandatory on v3: a signed v2 record re-versioned to 3 (the
+        // stored-version-flip forgery — the same canonical bytes, the
+        // same valid signature) must be rejected as malformed, before
+        // any signature work. The canonical shape itself authenticates
+        // the protocol capability: v3 without a decoy cannot come from a
+        // conforming issuer.
         let mut record = make_record(8);
         record.protocol_version = 3;
         let counter = solve_for_test(&record).unwrap();
-        assert!(matches!(
+        assert_eq!(
             verify(&mut record, counter, 5000),
-            VerifyOutcome::Valid { .. }
-        ));
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
     }
 
     #[test]

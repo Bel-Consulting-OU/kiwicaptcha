@@ -1549,10 +1549,11 @@ final class Verifier
      * No `.`, `:` or `|` is allowed, so the canonical segment structure
      * can never be altered by a stored value. A non-conforming name is
      * a corrupt or foreign record: MalformedRecord, the Rust
-     * `validate_record` decoy check. The segment rides a protocol v3
-     * record (an armed issuance writes version 3); a v2 record carrying
-     * a decoy is rejected by the protocol gate above, and a v3 record
-     * without one uses the plain 18-field canonical (lenient).
+     * `validate_record` decoy check. The protocol-vs-decoy grammar is
+     * total: the segment rides a protocol v3 record (an armed issuance
+     * writes version 3), so a v2 record carrying a decoy is rejected by
+     * the protocol gate above. A v3 record without one (absent or null)
+     * is rejected too, because the decoy is mandatory on v3.
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -1566,16 +1567,23 @@ final class Verifier
         // Protocol version is part of the wire contract: 1 (legacy,
         // migration window), 2 (current, unarmed) and 3 (the
         // decoy-capable canonical) exist. Anything else is a corrupt or
-        // foreign record. A protocol-v2 record that carries a decoy is
-        // rejected explicitly: the v2 canonical never includes the
-        // `|decoy_field` segment, so the combination cannot come from a
-        // conforming issuer (an armed issuance writes protocol v3) — the
-        // capability becomes inferable from protocol_version, which is
-        // the point.
+        // foreign record. The protocol-vs-decoy grammar is total: a
+        // protocol-v2 record that carries a decoy is rejected explicitly
+        // (the v2 canonical never includes the `|decoy_field` segment,
+        // so the combination cannot come from a conforming issuer — an
+        // armed issuance writes protocol v3), and a protocol-v3 record
+        // without one is rejected too. The decoy is mandatory on v3, so
+        // a signed v2 record with its stored version flipped to 3 keeps
+        // the plain 18-field canonical bytes and is refused here. The
+        // capability is fully inferable from the authenticated canonical
+        // shape, which is the point.
         if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2 && $record->protocolVersion !== 3) {
             return false;
         }
         if ($record->protocolVersion === 2 && $record->decoyField !== null) {
+            return false;
+        }
+        if ($record->protocolVersion === 3 && $record->decoyField === null) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
@@ -1586,7 +1594,7 @@ final class Verifier
         ) {
             return false;
         }
-        // The decoy (honeypot) field name is an authenticated v2 canonical
+        // The decoy (honeypot) field name is an authenticated v3 canonical
         // field: when present it must match the exact shape the issuer
         // mints and the widget driver renders — 1..=64 bytes of
         // [A-Za-z0-9_-] (no `.`, `:` or `|`, so the canonical segment
@@ -2043,10 +2051,12 @@ final class Verifier
      * milliseconds: the span between the record's high-resolution
      * issuance timestamp (issued_at_ns, wall-clock epoch microseconds
      * written by the issuing host) and this verification's receipt
-     * clock. Exposed on the valid outcomes of the consumed/valid and
-     * replay-of-valid paths as unforgeable behavioral evidence for the
-     * risk layer — the client-reported token duration is forgeable and
-     * is never consulted.
+     * clock. Exposed only on the valid outcome of a fresh derivation,
+     * the consumed/valid path and the resultless-resume path. A
+     * stored-success replay carries null instead: the retry's receipt
+     * is not the solve's endpoint, so the value remains unforgeable
+     * behavioral evidence for the risk layer. The client-reported
+     * token duration is forgeable and never consulted.
      *
      * The skew-tolerance semantics mirror {@see self::checkMinDuration()}
      * exactly: a receipt that precedes issuance is unmeasurable.
@@ -2250,9 +2260,9 @@ final class Verifier
      * splicing it breaks the signature. The decoy segment rides a
      * protocol v3 record: armed issuance writes version 3, and the
      * v2-plus-decoy combination is rejected by the structural gate. An
-     * unarmed record, a v2 or a leniently accepted v3 without a decoy,
-     * renders the legacy 18-field canonical bytes, byte-identical to the
-     * pre-extension format.
+     * unarmed record — a v2 — renders the legacy 18-field canonical
+     * bytes, byte-identical to the pre-extension format; a v3 record
+     * always carries the decoy segment (the decoy is mandatory on v3).
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {

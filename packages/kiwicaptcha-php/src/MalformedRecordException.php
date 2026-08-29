@@ -117,6 +117,22 @@ final class MalformedRecordException extends \RuntimeException
         return new self('record protocol_version 2 must not carry a "decoy_field" (the decoy segment is a protocol v3 canonical extension)');
     }
 
+    /**
+     * A protocol-v3 record without `decoy_field`: the decoy is mandatory
+     * on v3, since the v3 canonical is the 18-field base plus the
+     * `|decoy_field` segment. A v3 record without one cannot have come
+     * from a conforming issuer, because an armed issuance always writes
+     * the segment. The rejection closes the stored-version-flip window:
+     * a signed v2 record with its stored protocol_version flipped to 3
+     * keeps the plain 18-field canonical bytes and is refused here.
+     * The protocol capability is therefore fully inferable from the
+     * authenticated canonical shape, the v2-plus-decoy mirror.
+     */
+    public static function decoylessV3Record(): self
+    {
+        return new self('record protocol_version 3 must carry a "decoy_field" (the decoy segment is mandatory on the protocol v3 canonical)');
+    }
+
     public static function unexpectedNull(string $field): self
     {
         return new self(sprintf('record field "%s" must not be null', $field));

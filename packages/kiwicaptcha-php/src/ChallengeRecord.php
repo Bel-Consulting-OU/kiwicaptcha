@@ -19,18 +19,20 @@ namespace KiwiCaptcha;
  * carrying only `ip_hash` decode as `protocol_version` 1.
  *
  * Protocol v3 is the decoy-capable canonical: the v2 18-field base plus
- * the `|decoy_field` segment appended after `kid` exactly when the
- * record carries a decoy. An armed issuance writes protocol v3; an
- * unarmed issuance stays protocol v2, byte-identical to the pre-decoy
- * format. A v3 record without a decoy uses the plain 18-field canonical
- * (accepted leniently; new issuance never produces it). A
- * protocol-v2 record that carries `decoy_field` is rejected explicitly:
- * the v2 canonical never includes the segment, so the capability is
- * inferable from `protocol_version`. An old verifier rejects version 3
- * as unknown; a new verifier rejects a v2 record carrying a decoy.
- * `fromArray()` accepts protocol versions 1, 2 and 3 and rejects the
- * v2-plus-decoy combination; the verifier's malformed-record path
- * enforces the same split.
+ * the `|decoy_field` segment appended after `kid`. The decoy is
+ * mandatory on v3, so an armed issuance writes protocol v3 with the
+ * segment and an unarmed issuance stays protocol v2, byte-identical to
+ * the pre-decoy format. The protocol-vs-decoy grammar is total and
+ * enforced on both acceptance surfaces. A protocol-v2 record that
+ * carries `decoy_field` is rejected explicitly, since the v2 canonical
+ * never includes the segment. A protocol-v3 record without one is
+ * rejected too: a signed v2 record with its stored version flipped to 3
+ * can never verify, so the protocol capability is fully inferable from
+ * the authenticated canonical shape. An old verifier rejects version 3
+ * as unknown.
+ * `fromArray()` accepts protocol versions 1, 2 and 3 and rejects both
+ * forbidden combinations (v2-plus-decoy and decoyless-v3); the
+ * verifier's malformed-record path enforces the same split.
  *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record, which has `#[serde(default)]` and
@@ -178,7 +180,7 @@ final class ChallengeRecord
         public readonly ?string $hostname = null,
         // The server-issued decoy (honeypot) form-field name armed for
         // this challenge (see Issuer::DECOY_FIELD_POOL); null = no decoy
-        // (the legacy shape). Signed as the final v2 canonical segment,
+        // (the legacy shape). Signed as the final v3 canonical segment,
         // appended after the kid; the JSON key is omitted when null.
         public readonly ?string $decoyField = null,
     ) {
@@ -299,10 +301,12 @@ final class ChallengeRecord
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
      *   `issuer` null, `kid` 1).
-     * - Protocol versions 1, 2 and 3 are accepted; a protocol-v2 record
-     *   that carries `decoy_field` is rejected explicitly (the decoy
-     *   segment is a protocol v3 canonical extension — see the class
-     *   docblock for the wire-compatibility statement).
+     * - Protocol versions 1, 2 and 3 are accepted. The protocol-vs-decoy
+     *   grammar is total: a protocol-v2 record that carries `decoy_field`
+     *   is rejected explicitly, and a protocol-v3 record without one
+     *   (absent key or explicit JSON null) is rejected too. The decoy
+     *   segment is a protocol v3 canonical extension that v3 requires;
+     *   see the class docblock for the wire-compatibility statement.
      * - Integers must be real JSON integers within the Rust type ranges
      *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
      *   attempts_used/policy_version/kid, u64 for the timestamps).
@@ -436,17 +440,24 @@ final class ChallengeRecord
         }
 
         // The protocol-vs-decoy grammar: the decoy segment is a protocol
-        // v3 canonical extension. A v2 record that carries decoy_field
-        // is rejected explicitly — the v2 canonical never includes the
-        // segment, so such a record cannot have come from a conforming
-        // issuer (an armed issuance writes protocol v3). v1 (legacy,
-        // migration window), v2 (unarmed) and v3 (decoy-capable; a v3
-        // record without a decoy uses the plain 18-field canonical,
-        // leniently accepted) are the accepted protocol versions; the
+        // v3 canonical extension, and the grammar is total: v2 => no
+        // decoy, v3 => decoy present. A v2 record that carries
+        // decoy_field is rejected explicitly (the v2 canonical never
+        // includes the segment, so such a record cannot have come from a
+        // conforming issuer — an armed issuance writes protocol v3); a
+        // v3 record without one (absent key or explicit JSON null) is
+        // rejected too: the decoy is mandatory on v3, so a signed v2
+        // record with its stored version flipped to 3 keeps the plain
+        // 18-field canonical bytes and is refused here. v1 (legacy,
+        // migration window) and v2 (unarmed) accept a null decoy; the
         // verifier's malformed-record path enforces the same split.
         $protocolVersion = (int) ($data['protocol_version'] ?? 1);
-        if ($protocolVersion === 2 && isset($data['decoy_field']) && $data['decoy_field'] !== null) {
+        $decoyField = \array_key_exists('decoy_field', $data) ? $data['decoy_field'] : null;
+        if ($protocolVersion === 2 && $decoyField !== null) {
             throw MalformedRecordException::decoyOnV2Record();
+        }
+        if ($protocolVersion === 3 && $decoyField === null) {
+            throw MalformedRecordException::decoylessV3Record();
         }
 
         return new self(

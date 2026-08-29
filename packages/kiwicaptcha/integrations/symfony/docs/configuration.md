@@ -421,6 +421,23 @@ kiwi_captcha:
         #                                   # validator returns
         #                                   # temporary_unavailable and the
         #                                   # controller refuses issuance 503
+        #     decoy_v3_enabled: false        # PROTOCOL-V3 WRITER SWITCH
+        #                                   # (default false): when false,
+        #                                   # issuance NEVER arms the
+        #                                   # authenticated decoy and always
+        #                                   # emits protocol v2 (byte-
+        #                                   # compatible with parent-revision
+        #                                   # verifiers). When true, issuance
+        #                                   # MAY arm the decoy (v3), but
+        #                                   # ONLY when the central security-
+        #                                   # policy floor ({kiwi:<ns>}:
+        #                                   # security-policy
+        #                                   # min_protocol_version) is
+        #                                   # confirmed >= 3; a lower or
+        #                                   # unreadable floor falls back to
+        #                                   # v2 with a once-per-process
+        #                                   # warning. See operations.md
+        #                                   # "Protocol v3 two-phase rollout".
         #     result_receipt_signing_key: null  # OPTIONAL base64
         #                                   # 32-byte Ed25519 seed; when set,
         #                                   # valid verifications export

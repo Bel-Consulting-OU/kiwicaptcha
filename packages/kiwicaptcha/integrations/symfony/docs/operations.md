@@ -162,6 +162,48 @@ A binary whose max protocol or configured `risk.policy_version` is below the has
 Remove the key (or lower the fields) only after every node runs a compatible binary.
 When the key is absent, every binary's own configuration is authoritative (the default behavior).
 
+## Protocol v3 two-phase rollout
+
+Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
+The rollout must therefore be two-phase: reader capability first, writer emission second.
+The central `min_protocol_version` is a reader-capability floor: readiness keeps every binary whose max protocol is below it out of the pool.
+It is never a writer switch, so a new binary must not emit v3 while any serving verifier rejects it.
+
+This release keeps the writer switch off by default: `risk.decoy_v3_enabled` is false, so issuance never arms the decoy and always emits protocol v2, even with the adaptive risk engine wired.
+Enabling the switch alone is not enough: the challenge controller arms the decoy (emits v3) only when the confirmed central floor is `min_protocol_version >= 3`, read from the same `{kiwi:<ns>}:security-policy` hash through the SecurityEpochMonitor's cached central read.
+A floor below 3, an absent or corrupt floor, an unreadable central policy, or no security Redis at all fails safe to v2 emission with a once-per-process warning.
+v3 is never emitted on uncertainty, and availability is preserved.
+
+The procedure:
+
+```bash
+# 1. Deploy the new binaries EVERYWHERE (accept v2 + v3, still emitting v2).
+#    Confirm no old binary remains; the readiness probe keeps any binary
+#    whose max protocol is below the floor out of the pool.
+# 2. Raise the central floor to 3 — only now may v3 be emitted.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 3 min_policy_epoch 2
+# 3. Enable the writer switch on every node.
+#    risk.decoy_v3_enabled: true
+# 4. After >= the maximum challenge TTL (300 s), v2 compatibility may be
+#    retired; until then v2 emission stays safe for any still-serving
+#    unarmed flow.
+```
+
+A node with `risk.decoy_v3_enabled: true` whose central floor is below 3 logs a warning naming the floor and keeps emitting v2.
+A rollback is the reverse: lower the floor (or delete the key) before any older binary can be re-admitted, and the next re-read (one cache window) stops v3 emission automatically.
+
+Residual bounds and failure behavior:
+- Raising the floor does not drain old binaries atomically: a v2-only binary still processing in-flight requests rejects any v3 record it receives as malformed, and the solve is burned (fail closed, the client re-requests).
+  The operator drains through the readiness gate; the drain window is deployment-specific and must be confirmed before step 2.
+- Outstanding v3 records issued before a rollback stay valid in storage for up to their TTL (default 120 s, maximum 300 s).
+  New binaries keep verifying them; a re-admitted v2-only binary rejects them as malformed for the remainder of that TTL.
+  Wait at least the maximum challenge TTL after the floor drops before re-admitting old binaries, or accept the fail-closed rejection of the residual records.
+- After the floor is lowered, a node can keep emitting v3 for at most one cache window (`risk.security_epoch_cache_secs`, default 1 s), because the floor is re-read only when the window elapses.
+  A failed re-read clears the floor immediately (fail safe to v2), so the window only matters when the operator re-admits old binaries faster than one cache window.
+- Verification never consults the floor: a v3 record verifies on any v3-capable binary regardless of the current floor.
+  That is deliberate, since the floor is a writer coordination signal and readers accept what they support.
+
 The post-solve disposition record schema migrates in two phases.
 This release writes schema version 1 (chain_required records carry their chain_expires_at bound, a shape an earlier release already accepts) and reads both versions 1 and 2.
 A future release switches the writer to version 2 once the compatibility horizon has passed, and the version-1 schema is retired later still.

@@ -75,10 +75,11 @@ final class Issuer
      * No pool name can ever smuggle the `|` canonical-payload separator
      * or any other structurally meaningful character. PHP maintains the
      * identical pool (same names, same order) as the Rust
-     * `DECOY_FIELD_POOL`. The picked name is authenticated by the v2
-     * signature, so the two cores never need to agree on the pick, only
-     * on the pool's alphabet and the canonical-format extension
-     * documented on {@see self::canonicalPayload()}.
+     * `DECOY_FIELD_POOL`. The picked name is signed into the canonical
+     * input of the armed issuance (protocol v3), so the two cores never
+     * need to agree on the pick, only on the pool's alphabet and the
+     * canonical-format extension documented on
+     * {@see self::canonicalPayload()}.
      */
     public const DECOY_FIELD_POOL = [
         'company_website',
@@ -519,7 +520,9 @@ final class Issuer
      * drawn from {@see self::DECOY_FIELD_POOL}, so it can never contain
      * the `|` separator (the pool alphabet is `[a-z_]`; validation
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-     * - The segment is appended only when a decoy is armed. `null` renders
+     * - The segment is appended only when a decoy is armed, and the
+     * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy
+     * present. `null` renders
      * nothing extra, so the canonical string is byte-identical to the
      * pre-extension format. Outstanding unarmed challenges and
      * cross-language records keep verifying unchanged across the
@@ -536,7 +539,11 @@ final class Issuer
      * directions; armed records are protocol v3 and require a
      * v3-capable verifier (an old verifier rejects version 3 as
      * unknown — the capability becomes inferable from
-     * protocol_version, which is the point).
+     * protocol_version, which is the point). The grammar is enforced on
+     * both acceptance surfaces: a v2 record carrying `decoy_field` is
+     * malformed, and a v3 record without one is malformed too. The
+     * decoy is mandatory on v3, so a stored version flip can never
+     * change the effective protocol.
      */
     public static function canonicalPayload(
         string $nonce,

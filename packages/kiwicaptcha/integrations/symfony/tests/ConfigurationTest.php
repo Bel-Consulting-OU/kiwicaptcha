@@ -881,4 +881,16 @@ final class ConfigurationTest extends TestCase
         $this->expectException(InvalidConfigurationException::class);
         $this->process(['risk' => ['security_epoch_max_stale_secs' => 9]]);
     }
+
+    public function testDecoyV3EnabledDefaultsToFalse(): void
+    {
+        // The protocol-v3 writer switch (round-98 audit): the default is
+        // OFF, so a new deployment never emits v3 challenges (the
+        // parent-revision verifiers reject them) until the operator
+        // completes the two-phase rollout — deploy everywhere, raise the
+        // central min_protocol_version floor to 3, then enable.
+        self::assertFalse($this->process()['risk']['decoy_v3_enabled'], 'decoy_v3_enabled defaults to false (v2 emission)');
+        self::assertTrue($this->process(['risk' => ['decoy_v3_enabled' => true]])['risk']['decoy_v3_enabled']);
+        self::assertFalse($this->process(['risk' => ['decoy_v3_enabled' => false]])['risk']['decoy_v3_enabled']);
+    }
 }

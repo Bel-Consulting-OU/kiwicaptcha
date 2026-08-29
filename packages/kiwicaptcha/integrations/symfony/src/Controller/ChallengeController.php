@@ -21,6 +21,7 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\StorageInterface;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -134,6 +135,16 @@ final class ChallengeController
 
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
+    /**
+     * The once-per-process decoy-v3-gate warning guard: when
+     * risk.decoy_v3_enabled is true but the confirmed central
+     * min_protocol_version floor is below 3 (or unconfirmed), issuance
+     * falls back to protocol v2. This flag makes the actionable warning
+     * fire exactly once per process instead of once per issuance, so an
+     * issuance-rate log flood can never drown the signal.
+     */
+    private bool $decoyV3WarningLogged = false;
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -210,13 +221,82 @@ final class ChallengeController
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null,
         /**
-         * The clock for the stage-2 remaining-lifetime clip (unix
-         * seconds; null = time()). Injectable so the near-expiry
-         * adversarial tests pin the chain's remaining lifetime exactly.
-         */
+          * The clock for the stage-2 remaining-lifetime clip (unix
+          * seconds; null = time()). Injectable so the near-expiry
+          * adversarial tests pin the chain's remaining lifetime exactly.
+          */
         private readonly ?\Closure $now = null,
+        /**
+         * The protocol-v3 writer switch (risk.decoy_v3_enabled, default
+         * false): when false, issuance never arms the authenticated
+         * decoy and always emits protocol v2. A new binary stays
+         * byte-compatible with parent-revision verifiers that reject
+         * protocol 3 as unknown, even with the risk gateway wired. When
+         * true, issuance may arm the decoy (protocol v3), subject to
+         * {@see self::protocolV3EmissionEnabled()}: the central
+         * security-policy floor must confirm >= 3 first, and any
+         * uncertainty falls back to v2.
+         */
+        private readonly bool $decoyV3Enabled = false,
+        /**
+         * The issuance-side logger (when the app has one): receives the
+         * once-per-process warning when decoy_v3_enabled cannot take
+         * effect because the central protocol floor is below 3 or
+         * unconfirmed. A raising logger must never break issuance: the
+         * warning path is best-effort.
+         */
+        private readonly ?LoggerInterface $logger = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    }
+
+    /**
+     * The protocol-v3 emission gate implements the audit's two-phase
+     * rollout invariant: the decoy (protocol v3) is armed only when the
+     * operator's writer switch (risk.decoy_v3_enabled) is true. The
+     * confirmed central security-policy floor
+     * ({kiwi:<ns>}:security-policy min_protocol_version, read through
+     * the SecurityEpochMonitor's cached central-policy snapshot) must
+     * also be >= 3. The floor is the fleet-wide reader capability
+     * statement: the readiness probe keeps every binary whose max
+     * protocol is below the floor out of the pool. A floor >= 3
+     * therefore means every serving verifier accepts protocol v3 before
+     * any node emits it. A floor below 3, an absent or corrupt floor, an
+     * unreadable central policy or no central policy at all (null epoch
+     * monitor / null security Redis) all fail safe to protocol v2
+     * emission. v3 is never armed on uncertainty. The actionable warning
+     * fires once per process. The SecurityEpochMonitor's refresh() runs
+     * earlier in the pipeline (the max-stale check), so this read is the
+     * freshest cached central state.
+     */
+    private function protocolV3EmissionEnabled(): bool
+    {
+        if (!$this->decoyV3Enabled) {
+            return false;
+        }
+        $floor = $this->epochMonitor?->minProtocolVersion();
+        if ($floor !== null && $floor >= 3) {
+            return true;
+        }
+        if (!$this->decoyV3WarningLogged) {
+            $this->decoyV3WarningLogged = true;
+            $detail = $floor === null
+                ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
+                : sprintf('the central min_protocol_version is %d', $floor);
+            $message = sprintf(
+                'kiwicaptcha: risk.decoy_v3_enabled is true but protocol-v3 emission stays DISABLED — %s (below 3). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 3 only after every serving binary accepts protocol v3 '.
+                '(deploy the new binaries fleet-wide and confirm no old binary remains); until then issuance keeps emitting protocol v2.',
+                $detail,
+            );
+            try {
+                $this->logger?->warning($message);
+            } catch (\Throwable) {
+                // A raising logger must never break issuance.
+            }
+        }
+
+        return false;
     }
 
     public function challenge(Request $request): JsonResponse
@@ -1222,9 +1302,15 @@ final class ChallengeController
             // signs it into the canonical payload (protocol v3 record) and
             // the challenge response carries the authenticated
             // decoy_field — there is NO second nonce-hash decoy scheme in
-            // this controller.
+            // this controller. Arming is gated by the two-phase rollout
+            // invariant, {@see self::protocolV3EmissionEnabled()}: the
+            // operator's writer switch (risk.decoy_v3_enabled) must be
+            // true AND the confirmed central min_protocol_version floor
+            // must be >= 3; otherwise issuance emits protocol v2,
+            // byte-identical to the pre-decoy format, so a new node can
+            // never emit a challenge a parent-revision verifier rejects.
             $issuer = $this->issuerForTtl($ttlSecs);
-            $armDecoy = $this->risk !== null;
+            $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
             $challenge = $profile !== null
                 ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy)
                 : $issuer->issueWithDecoyField($scope, $clientIp, $armDecoy, $requestBinding, $hostname);

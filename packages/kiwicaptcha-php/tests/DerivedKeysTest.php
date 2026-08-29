@@ -196,8 +196,10 @@ final class DerivedKeysTest extends TestCase
      */
     private static function memoKeys(): array
     {
+        // ReflectionProperty is constructor-based accessible since PHP
+        // 8.1: getValue()/setValue() need no setAccessible() call (which
+        // is deprecated on PHP 8.5), so the accessor stays 8.1-clean.
         $property = new \ReflectionProperty(DerivedKeys::class, 'cache');
-        $property->setAccessible(true);
 
         /** @var array<string, DerivedKeys> $cache */
         $cache = $property->getValue();

@@ -1251,6 +1251,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The security-policy epoch a presented chain ticket must
             // match (a chain from an older epoch is refused).
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
+            // The protocol-v3 writer switch (risk.decoy_v3_enabled,
+            // default false): issuance arms the authenticated decoy only
+            // when this is true AND the SecurityEpochMonitor confirms the
+            // central min_protocol_version floor >= 3. The default keeps
+            // every deployment emitting protocol v2 — the two-phase
+            // rollout gate, see operations.md.
+            ->setArgument('$decoyV3Enabled', $config['risk']['decoy_v3_enabled'])
+            // The issuance-side logger (when the app has one) receives
+            // the once-per-process decoy_v3_enabled-but-floor-too-low
+            // warning.
+            ->setArgument('$logger', $loggerRef)
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Challenge route (configured prefix; see KiwiCaptchaRouteLoader).

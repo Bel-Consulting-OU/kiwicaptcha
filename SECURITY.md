@@ -35,8 +35,8 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 
 ## Release and branch governance
 
-- **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for the critical paths, 1 for the rest; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
-  All required security CI checks must pass (strict; the set is maintained in the ruleset, currently 27 check contexts including the standalone quick-start end-to-end job and the workflow-lint job).
+- **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for all changes; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
+  All required security CI checks must pass (strict; the set is maintained in the ruleset, currently 28 check contexts including the standalone quick-start end-to-end job, the PhpRedis Siteverify lane, and the workflow-lint job).
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
   The trust model: organization admins retain an explicit always-bypass.
   This is operational protection, not mathematical impossibility.

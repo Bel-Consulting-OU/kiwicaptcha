@@ -125,12 +125,14 @@ pub enum BindingMode {
 ///   full-parameter canonical input and a nonce-bound `binding_tag` —
 ///   byte-identical to the pre-decoy record format.
 /// - `protocol_version == 3` (decoy-capable): the v2 canonical base plus
-///   the `|decoy_field` segment appended after `kid` when the record
-///   carries a decoy; a v3 record without a decoy uses the plain
-///   18-field canonical (lenient; new issuance never produces it). A v2
-///   record carrying a `decoy_field` is rejected by validation — the v2
-///   canonical never includes the segment, so the decoy capability is
-///   always inferable from the version.
+///   the `|decoy_field` segment appended after `kid`. The decoy is
+///   mandatory on v3 — a v3 record without a decoy is rejected by
+///   validation, so a stored version flip (a signed v2 record re-versioned
+///   to 3) can never verify: the authenticated canonical shape itself
+///   establishes the protocol capability. A v2 record carrying a
+///   `decoy_field` is rejected by validation too — the v2 canonical never
+///   includes the segment, so v2 => no decoy and v3 => decoy present is
+///   the total grammar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChallengeRecord {
@@ -195,13 +197,15 @@ pub struct ChallengeRecord {
     /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`
     /// (the unarmed issuance format, byte-identical to the pre-decoy
     /// records); 3 = the decoy-capable canonical — the v2 18-field base
-    /// plus the `|decoy_field` segment appended after `kid` when the
-    /// record carries a decoy. New records are issued with 3 when a decoy
+    /// plus the `|decoy_field` segment appended after `kid`, with the
+    /// decoy mandatory on v3. New records are issued with 3 when a decoy
     /// is armed and 2 otherwise; 1 is the serde default so stored pre-v2
-    /// records keep verifying during the migration window (max TTL). A
-    /// v2 record carrying a `decoy_field` is rejected by validation: the
-    /// v2 canonical never includes the segment, so the decoy capability
-    /// is always inferable from the version.
+    /// records keep verifying during the migration window (max TTL). The
+    /// protocol-vs-decoy grammar is total and validated: a v2 record
+    /// carrying a `decoy_field` AND a v3 record without one are both
+    /// rejected as malformed, so the protocol capability is fully
+    /// inferable from the authenticated canonical shape — a stored
+    /// version flip can never change the effective protocol.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
     /// Region the challenge was issued for. It is an authenticated field of
@@ -262,7 +266,8 @@ pub struct ChallengeRecord {
     /// requires a v3-capable verifier: an old verifier rejects version 3
     /// as unknown, so the capability is always inferable from
     /// `protocol_version` — a v2 record carrying `decoy_field` is
-    /// rejected explicitly by validation.
+    /// rejected explicitly by validation, and a v3 record without a decoy
+    /// is rejected too (the decoy is mandatory on v3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
@@ -558,12 +563,14 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   pre-extension format and the record stays `protocol_version == 2`,
 ///   so unarmed records and cross-language records keep verifying
 ///   unchanged across the upgrade.
-/// - Wire compatibility: unarmed records are byte-identical both
-///   directions; armed records are protocol v3 and require a v3-capable
-///   verifier (an old verifier rejects version 3 as unknown — the
-///   capability becomes inferable from `protocol_version`, which is the
-///   point). A v2 record carrying a `decoy_field` is rejected by
-///   validation: the v2 canonical never includes the segment.
+/// - The grammar is total: v2 => no decoy segment, v3 => decoy segment
+///   present. Validation enforces both directions, so the protocol
+///   capability is fully inferable from the authenticated canonical
+///   shape — a stored version flip (a signed v2 record re-versioned to
+///   3) keeps the plain 18-field canonical and is rejected as
+///   malformed, and a v2 record carrying `decoy_field` is rejected too
+///   (an old verifier rejects version 3 as unknown — the capability
+///   becomes inferable from `protocol_version`, which is the point).
 /// - PHP parity (exact recipe for the PHP core): build the same 18-field
 ///   base string, then append `'|' . $decoyField` if and only if the record
 ///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
@@ -867,10 +874,10 @@ pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 /// validation alphabet here, so no pool name can ever smuggle the `|`
 /// canonical-payload separator or any other structurally meaningful
 /// character. PHP maintains the identical pool (same names, same order);
-/// the picked name is authenticated by the v2 signature, so the two cores
-/// never need to agree on the pick, only on the pool's alphabet and the
-/// canonical-format extension documented on
-/// [`canonical_signing_input_v2`].
+/// the picked name is signed into the canonical input of the armed
+/// issuance (protocol v3), so the two cores never need to agree on the
+/// pick, only on the pool's alphabet and the canonical-format extension
+/// documented on [`canonical_signing_input_v2`].
 pub const DECOY_FIELD_POOL: &[&str] = &[
     "company_website",
     "fax_number",

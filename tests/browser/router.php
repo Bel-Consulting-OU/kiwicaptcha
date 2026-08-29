@@ -711,13 +711,17 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
 /**
  * Mint a challenge (sha256-8 stage-1 or the stronger argon stage-2) and
  * persist its record file, mirroring the bundle's /challenge issuance.
+ * With $armDecoy the issuance goes through the real authenticated
+ * decoy path (issueWithDecoyField: protocol-v3 record, the decoy name
+ * signed into the canonical payload), the mirror of the bundle's
+ * risk.decoy_v3_enabled issuance.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null): ?array
 {
     $config = new Config(
         secretKey: $GLOBALS['kiwi_secret'],
         algorithm: $algorithm,
-        ttlSecs: 120,
+        ttlSecs: $ttlOverride ?? 120,
         mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
         t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
         p: 1,
@@ -727,7 +731,9 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm)
     );
     $storage = new ArrayStorage();
     $issuer = new Issuer($config, $storage, now: static fn (): int => time());
-    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
+    $challenge = $armDecoy
+        ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding)
+        : $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
     $record = $storage->find($challenge->nonce);
     if ($record === null) {
         return null;
@@ -921,19 +927,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $body = json_decode($rawBody, true);
     $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
-    $config = new Config(
-        secretKey: $secret,
-        algorithm: $algorithm,
-        ttlSecs: $ttlOverride ?? 120,
-        mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
-        t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
-        p: 1,
-        targetBits: 8,
-        argon2TargetBits: 4,
-        minDurationMs: 0,
-    );
-    $issueStorage = new ArrayStorage();
-    $issuer = new Issuer($config, $issueStorage, now: static fn (): int => time());
     // The bundle maps incumbent sitekeys -> policy scopes server-side
     // (sitekey_allowlist); the fixture mirrors that mapping so compat
     // challenges are issued under the intended scope.
@@ -994,17 +987,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // when redeemed under txn-B — the stored proof really carries the
     // binding, exactly like the bundle's issuance.
     $presentedBinding = isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
-    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $presentedBinding);
-    $record = $issueStorage->find($challenge->nonce);
-    if ($record === null) {
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride);
+    if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
 
         return true;
     }
-    $tmp = tempnam(sys_get_temp_dir(), 'kiw'); 
-    file_put_contents($tmp, json_encode($record->toArray()));
-    rename($tmp, recordFile($challenge->nonce));
     // Provider-compatible metadata bound at issuance —
     // action/cData from the widget's challenge request are stored against
     // the nonce (server-owned; validated provider shapes).
@@ -1025,16 +1014,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         }
         $metaTmp = tempnam(sys_get_temp_dir(), 'kiwm');
         file_put_contents($metaTmp, json_encode(['action' => $action, 'cdata' => $cdata]));
-        rename($metaTmp, metadataFile($challenge->nonce));
+        rename($metaTmp, metadataFile($challenge['nonce']));
     }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
-    $out = $challenge->toArray();
+    $out = $challenge;
     // Risk-v2 fixture: ?decoy=1 makes the fixture emit the server-issued
     // decoy (honeypot) field name, mirroring the bundle's risk-enabled
     // issuance response.
     if (($_GET['decoy'] ?? '') === '1') {
-        $out['decoy_field'] = 'decoy_'.substr(hash('sha256', $challenge->nonce), 0, 8);
+        $out['decoy_field'] = 'decoy_'.substr(hash('sha256', $challenge['nonce']), 0, 8);
     }
     echo json_encode($out);
 
@@ -1297,6 +1286,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     return true;
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/honeypot-check') {
+    // The form-submission honeypot fixture: the mirror of the bundle
+    // validator's formDecoyEvidence. After a valid verification the
+    // submitted form is checked for a non-empty value under the exact
+    // authenticated decoy name of the verified outcome (the protocol-v3
+    // record's decoyField, the same name the challenge response
+    // carried). Any other field name is ignored: a decoy name is
+    // server-issued and a mismatched name is not this challenge's
+    // decoy. Evidence only, never a gate: the proof outcome decides.
+    $rawBody = (string) file_get_contents('php://input');
+    $body = json_decode($rawBody, true);
+    $fields = [];
+    if (is_array($body) && isset($body['form']) && is_array($body['form'])) {
+        $fields = $body['form'];
+    } else {
+        parse_str($rawBody, $fields);
+    }
+    header('Content-Type: application/json');
+    $token = (isset($fields['kiwi__token']) && is_string($fields['kiwi__token'])) ? $fields['kiwi__token'] : '';
+    if ($token === '' && is_array($body) && isset($body['token']) && is_string($body['token'])) {
+        $token = $body['token'];
+    }
+    $nonce = (string) (explode('.', (string) base64_decode($token, true))[0] ?? '');
+    if ($nonce === '' || !is_file(recordFile($nonce))) {
+        echo json_encode(['ok' => false, 'code' => 'record_not_found']);
+
+        return true;
+    }
+    $storage = new ArrayStorage();
+    $record = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true));
+    $storage->store($record);
+    $scope = (isset($body['scope']) && is_string($body['scope'])) ? $body['scope'] : 'login';
+    $outcome = (new Verifier($storage))->verify($token, $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), expectedRequestBinding: $record->requestBinding);
+    if ($outcome->isOk()) {
+        @unlink(recordFile($nonce));
+    } else {
+        echo json_encode(['ok' => false, 'code' => $outcome->code()]);
+
+        return true;
+    }
+    $decoyField = \method_exists($outcome, 'decoyField') ? $outcome->decoyField() : null;
+    $honeypotHit = false;
+    if (\is_string($decoyField) && $decoyField !== '') {
+        $value = $fields[$decoyField] ?? null;
+        $honeypotHit = \is_string($value) && $value !== '';
+    }
+    echo json_encode(['ok' => true, 'honeypot_hit' => $honeypotHit, 'decoy_field' => $decoyField]);
+
+    return true;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $body = json_decode((string) file_get_contents('php://input'), true);
     header('Content-Type: application/json');
@@ -1425,7 +1465,8 @@ if ($path === '/' || $path === '/index.html') {
     // with the explicit data-kiwi-risk-context="coarse" opt-in attribute
     // (without it the driver never sends client_context).
     $endpointQuery = [];
-    if (($_GET['decoy'] ?? '') === '1') $endpointQuery[] = 'decoy=1';
+    $decoyParam = (string) ($_GET['decoy'] ?? '');
+    if ($decoyParam === '1' || $decoyParam === 'pool') $endpointQuery[] = 'decoy='.$decoyParam;
     if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);

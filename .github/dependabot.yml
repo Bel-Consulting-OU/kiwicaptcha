@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /packages/kiwicaptcha
+    schedule:
+      interval: weekly
+  - package-ecosystem: composer
+    directory: /packages/kiwicaptcha-php
+    schedule:
+      interval: weekly
+  - package-ecosystem: composer
+    directory: /packages/kiwicaptcha/integrations/symfony
+    schedule:
+      interval: weekly

@@ -34,11 +34,13 @@ use PHPUnit\Framework\TestCase;
  *    stored record, carries the `decoy_field` key; it is absent, not
  *    null.
  *  - the decoy is authenticated: stripping, renaming or splicing it
- *    breaks the signature the verifier re-checks. A protocol-v2 record
- *    that carries decoy_field is rejected explicitly (the v2 canonical
- *    never includes the segment), so the capability becomes inferable
- *    from protocol_version; a v3 record without a decoy uses the plain
- *    18-field canonical (lenient).
+ *    breaks the signature the verifier re-checks. The protocol-vs-decoy
+ *    grammar is total. A protocol-v2 record
+ *    that carries decoy_field is rejected explicitly, since the v2
+ *    canonical never includes the segment. A protocol-v3 record without
+ *    one is rejected too, because the decoy is mandatory on v3. The
+ *    capability is therefore inferable from protocol_version, and a
+ *    stored version flip can never change the effective protocol.
  *  - stored values must match `[A-Za-z0-9_-]{1,64}`, the malformed-record
  *    fail-closed.
  *  - legacy records and tokens with no decoy key anywhere keep
@@ -315,12 +317,16 @@ final class DecoyFieldTest extends TestCase
     public function testTheDecoyIsCoveredByTheSignature(): void
     {
         // Any change to the authenticated decoy name breaks the signature:
-        // renaming it or stripping it from an armed v3 record both fail
-        // the verification. Splicing a decoy onto an unarmed v2 record is
-        // rejected by the protocol grammar itself — the v2 canonical
-        // never includes the segment, so the v2-plus-decoy combination
-        // cannot come from a conforming issuer (MalformedRecord, see
-        // testV2RecordCarryingADecoyIsRejected).
+        // renaming it fails the verification as BadSignature. Stripping it
+        // from an armed v3 record is now refused by the grammar itself —
+        // the decoy is mandatory on v3, so the stripped record is
+        // decoyless-v3 MalformedRecord (the parser gate refuses it, and
+        // the hand-rolled equivalent fails the verifier's structural
+        // validation before any signature work). Splicing a decoy onto an
+        // unarmed v2 record is rejected by the protocol grammar too — the
+        // v2 canonical never includes the segment, so the v2-plus-decoy
+        // combination cannot come from a conforming issuer
+        // (MalformedRecord, see testV2RecordCarryingADecoyIsRejected).
         $storage = new ArrayStorage();
         $issuer = $this->issuer($storage);
 
@@ -349,10 +355,49 @@ final class DecoyFieldTest extends TestCase
         $renamed['decoy_field'] = $other;
         self::assertSame(VerifyError::BadSignature, $this->verifyWithMutatedRecord($renamed, $armed->nonce, $armedToken));
 
-        // Stripped (the client-cannot-remove-it property).
+        // Stripped (the client-cannot-remove-it property): the parser
+        // gate refuses the decoyless v3 combination outright.
         $stripped = $armedRecord->toArray();
         unset($stripped['decoy_field']);
-        self::assertSame(VerifyError::BadSignature, $this->verifyWithMutatedRecord($stripped, $armed->nonce, $armedToken));
+        try {
+            ChallengeRecord::fromArray($stripped);
+            self::fail('a stripped (decoyless) v3 record must be refused by fromArray');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('protocol_version 3', $e->getMessage());
+        }
+        // The hand-rolled equivalent (bypassing the parser) fails the
+        // verifier's structural validation as MalformedRecord — the
+        // stored version could never verify as a plain-18-field v3.
+        $handRolled = new ChallengeRecord(
+            nonce: $armedRecord->nonce,
+            scope: $armedRecord->scope,
+            bindingTag: $armedRecord->bindingTag,
+            issuedAt: $armedRecord->issuedAt,
+            expiresAt: $armedRecord->expiresAt,
+            algorithm: $armedRecord->algorithm,
+            mKib: $armedRecord->mKib,
+            t: $armedRecord->t,
+            p: $armedRecord->p,
+            targetBits: $armedRecord->targetBits,
+            salt: $armedRecord->salt,
+            prefix: $armedRecord->prefix,
+            challenge: $armedRecord->challenge,
+            minDurationMs: $armedRecord->minDurationMs,
+            issuedAtNs: $armedRecord->issuedAtNs,
+            protocolVersion: 3,
+            region: $armedRecord->region,
+            policyVersion: $armedRecord->policyVersion,
+            requestBinding: $armedRecord->requestBinding,
+            issuer: $armedRecord->issuer,
+            kid: $armedRecord->kid,
+            hostname: $armedRecord->hostname,
+            decoyField: null,
+        );
+        $freshStorage = new ArrayStorage();
+        $freshStorage->store($handRolled);
+        $verifier2 = new Verifier($freshStorage, now: static fn (): int => Vectors::NOW);
+        $outcome2 = $verifier2->verify($armedToken, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $armedRecord->issuedAtNs + 1_000_000);
+        self::assertSame(VerifyError::MalformedRecord, $outcome2->error, 'a stripped v3 record fails closed as MalformedRecord — never a plain-canonical verification');
     }
 
     public function testV2RecordCarryingADecoyIsRejected(): void
@@ -443,7 +488,10 @@ final class DecoyFieldTest extends TestCase
         }
 
         // The armed record itself stays valid, and the boundary shapes
-        // pass: a 64-byte name, the full alphabet, null and absent.
+        // pass: a 64-byte name, the full alphabet. An explicit JSON null
+        // on an armed (v3) record is a decoyless v3 record, so the
+        // combination is refused; the null
+        // Option semantics survive on v2 (see the v2-based check below).
         self::assertSame($record->decoyField, ChallengeRecord::fromArray($record->toArray())->decoyField);
         $edge = $record->toArray();
         $edge['decoy_field'] = str_repeat('a', 64);
@@ -452,7 +500,21 @@ final class DecoyFieldTest extends TestCase
         self::assertSame('A-Z_0-9-allowed', ChallengeRecord::fromArray($edge)->decoyField);
         $null = $record->toArray();
         $null['decoy_field'] = null;
-        self::assertNull(ChallengeRecord::fromArray($null)->decoyField, 'an explicit JSON null decodes to null (serde Option semantics)');
+        try {
+            ChallengeRecord::fromArray($null);
+            self::fail('a protocol-v3 record with an explicit JSON null decoy must be refused');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('protocol_version 3', $e->getMessage());
+        }
+        // The same explicit JSON null on an unarmed v2 record decodes to
+        // null (serde Option semantics — v2 => no decoy).
+        $v2 = $record->toArray();
+        $v2['protocol_version'] = 2;
+        unset($v2['decoy_field']);
+        self::assertNull(ChallengeRecord::fromArray($v2)->decoyField, 'a decoyless v2 record (absent key) decodes to null');
+        $v2Null = $v2;
+        $v2Null['decoy_field'] = null;
+        self::assertNull(ChallengeRecord::fromArray($v2Null)->decoyField, 'an explicit JSON null decodes to null on v2 (serde Option semantics)');
     }
 
     public function testVerifierFailsClosedOnANonConformingStoredDecoyName(): void
@@ -610,18 +672,34 @@ final class DecoyFieldTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('a legacy-shape v2 record must keep verifying, got %s', $outcome->code()));
     }
 
-    public function testV3RecordWithoutADecoyUsesThePlainCanonicalLeniently(): void
+    public function testV3RecordWithoutADecoyIsRejected(): void
     {
-        // The v3 grammar is the decoy-capable canonical: a v3 record
-        // without a decoy is accepted (lenient; new issuance never
-        // produces it) and verifies against the plain 18-field canonical
-        // bytes — exactly the unarmed shape.
+        // The protocol-vs-decoy grammar is total (round-98 audit): the
+        // decoy is mandatory on v3, so a signed v2 record with its stored
+        // version flipped to 3 (the same canonical bytes, the same valid
+        // signature) must be rejected on both acceptance surfaces — the
+        // strict parser (ChallengeRecord::fromArray) and the verifier's
+        // malformed-record path. The authenticated canonical shape
+        // itself establishes the protocol capability.
         $storage = new ArrayStorage();
         $challenge = $this->issuer($storage)->issue('login', Vectors::CLIENT_IP);
         $issued = $storage->find($challenge->nonce);
         self::assertNotNull($issued);
         self::assertSame(2, $issued->protocolVersion, 'fixture is an unarmed v2 record');
 
+        // fromArray: the version flip is refused explicitly.
+        $flipped = $issued->toArray();
+        $flipped['protocol_version'] = 3;
+        try {
+            ChallengeRecord::fromArray($flipped);
+            self::fail('a protocol-v3 record without a decoy must be rejected by fromArray');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('protocol_version 3', $e->getMessage());
+            self::assertStringContainsString('decoy_field', $e->getMessage());
+        }
+
+        // The verifier's malformed-record path rejects the same
+        // combination on a hand-rolled record (never through fromArray).
         $v3 = new ChallengeRecord(
             nonce: $issued->nonce,
             scope: $issued->scope,
@@ -647,21 +725,12 @@ final class DecoyFieldTest extends TestCase
             hostname: $issued->hostname,
             decoyField: null,
         );
-
-        // Round-trips through the strict parser without the key.
-        $roundTripped = ChallengeRecord::fromArray($v3->toArray());
-        self::assertSame(3, $roundTripped->protocolVersion);
-        self::assertNull($roundTripped->decoyField);
-        self::assertArrayNotHasKey('decoy_field', $roundTripped->toArray());
-
-        // Verifies against the plain 18-field canonical (the signature
-        // covers exactly the base fields).
         $freshStorage = new ArrayStorage();
-        $freshStorage->store($roundTripped);
+        $freshStorage->store($v3);
         $token = SolutionToken::create($challenge->nonce, $this->solveCounter($challenge), 5000, [])->encode();
         $verifier = new Verifier($freshStorage, now: static fn (): int => Vectors::NOW);
-        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $roundTripped->issuedAtNs + 1_000_000);
-        self::assertTrue($outcome->isOk(), sprintf('a v3 record without a decoy uses the plain 18-field canonical, got %s', $outcome->code()));
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $v3->issuedAtNs + 1_000_000);
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a decoyless v3 record fails closed as MalformedRecord — the stored version flip can never verify');
     }
 
     public function testProtocolVersionAcceptanceIsOneTwoAndThree(): void
@@ -669,9 +738,11 @@ final class DecoyFieldTest extends TestCase
         // The wire contract: protocol versions 1 (legacy migration
         // window, the genuine v1 vector — covered by
         // testLegacyV1RecordAndTokenStillVerify), 2 (unarmed) and 3 (the
-        // decoy-capable canonical) verify; anything else is a corrupt or
-        // foreign record. The strict parser stays the serde mirror (any
-        // u8 parses — the version value is not a serde-level
+        // decoy-capable canonical, where the decoy is mandatory — a v3
+        // record without one is MalformedRecord, see
+        // testV3RecordWithoutADecoyIsRejected) exist; anything else is a
+        // corrupt or foreign record. The strict parser stays the serde
+        // mirror (any u8 parses — the version value is not a serde-level
         // constraint), the verifier's malformed-record path applies the
         // acceptance gate.
         $storage = new ArrayStorage();
@@ -681,17 +752,59 @@ final class DecoyFieldTest extends TestCase
         $counter = $this->solveCounter($challenge);
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
 
-        foreach ([2, 3] as $version) {
-            $data = $issued->toArray();
-            $data['protocol_version'] = $version;
-            self::assertSame($version, ChallengeRecord::fromArray($data)->protocolVersion, "protocol version {$version} must parse");
+        // v2 (unarmed) verifies; v3 without a decoy is refused by the
+        // strict parser AND the verifier's grammar gate (the serde
+        // mirror itself accepts any u8, but the grammar is a
+        // fromArray-level rejection like the v2-plus-decoy mirror).
+        $data = $issued->toArray();
+        $data['protocol_version'] = 2;
+        self::assertSame(2, ChallengeRecord::fromArray($data)->protocolVersion, 'protocol version 2 must parse');
+        $fresh = new ArrayStorage();
+        $fresh->store(ChallengeRecord::fromArray($data));
+        $verifier = new Verifier($fresh, now: static fn (): int => Vectors::NOW);
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
+        self::assertTrue($outcome->isOk(), sprintf('protocol version 2 must verify (the unarmed 18-field canonical), got %s', $outcome->code()));
 
-            $fresh = new ArrayStorage();
-            $fresh->store(ChallengeRecord::fromArray($data));
-            $verifier = new Verifier($fresh, now: static fn (): int => Vectors::NOW);
-            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
-            self::assertTrue($outcome->isOk(), sprintf('protocol version %d must verify (the unarmed 18-field canonical), got %s', $version, $outcome->code()));
+        $flipped = $issued->toArray();
+        $flipped['protocol_version'] = 3;
+        try {
+            ChallengeRecord::fromArray($flipped);
+            self::fail('a decoyless v3 record must be refused by fromArray');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('decoy_field', $e->getMessage());
         }
+        // The hand-rolled equivalent (bypassing the parser) fails the
+        // verifier's malformed-record path.
+        $v3 = new ChallengeRecord(
+            nonce: $issued->nonce,
+            scope: $issued->scope,
+            bindingTag: $issued->bindingTag,
+            issuedAt: $issued->issuedAt,
+            expiresAt: $issued->expiresAt,
+            algorithm: $issued->algorithm,
+            mKib: $issued->mKib,
+            t: $issued->t,
+            p: $issued->p,
+            targetBits: $issued->targetBits,
+            salt: $issued->salt,
+            prefix: $issued->prefix,
+            challenge: $issued->challenge,
+            minDurationMs: $issued->minDurationMs,
+            issuedAtNs: $issued->issuedAtNs,
+            protocolVersion: 3,
+            region: $issued->region,
+            policyVersion: $issued->policyVersion,
+            requestBinding: $issued->requestBinding,
+            issuer: $issued->issuer,
+            kid: $issued->kid,
+            hostname: $issued->hostname,
+            decoyField: null,
+        );
+        $freshV3 = new ArrayStorage();
+        $freshV3->store($v3);
+        $verifier3 = new Verifier($freshV3, now: static fn (): int => Vectors::NOW);
+        $outcome3 = $verifier3->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
+        self::assertSame(VerifyError::MalformedRecord, $outcome3->error, 'a decoyless v3 record fails closed as MalformedRecord');
 
         foreach ([0, 4, 255] as $version) {
             $data = $issued->toArray();

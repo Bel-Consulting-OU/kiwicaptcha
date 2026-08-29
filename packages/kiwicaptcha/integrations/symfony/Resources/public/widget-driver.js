@@ -1435,7 +1435,12 @@
       lastCancelNotifyAt = now;
       lastCancelNonce = nonce;
       try {
-        fetch(endpoint + "/cancel", {
+        // The cancel endpoint is the challenge path plus the /cancel
+        // suffix. A query-bearing challenge endpoint must not swallow
+        // the suffix into the query string, or the notification misses
+        // the server's route and the abandoned record is never retired.
+        var cancelUrl = endpoint.split("?")[0] + "/cancel";
+        fetch(cancelUrl, {
           method: "POST",
           credentials: "same-origin",
           cache: "no-store",
@@ -1774,7 +1779,13 @@
     var decoyName = W.dataset.kiwiDecoyName || null;
     delete W.dataset.kiwiDecoyName;
     if (!decoyName) return;
-    var t = W.querySelector ? W.querySelector("[data-kiwi-token]") : null;
+    // The token input lives next to the widget node, in the same
+    // container (the standard renderer layout), so the decoy input is
+    // searched in the widget subtree first and then the container —
+    // the same roots the init path resolves the token element from.
+    var container = W.closest ? W.closest(".kiwi-container") : null;
+    var t = (W.querySelector ? W.querySelector("[data-kiwi-token]") : null)
+      || (container && container.querySelector ? container.querySelector("[data-kiwi-token]") : null);
     var host = t ? t.parentNode : null;
     var input = host ? host.querySelector('input[name="' + decoyName + '"]') : null;
     if (input && input.parentNode) input.parentNode.removeChild(input);
