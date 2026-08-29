@@ -455,15 +455,16 @@ final class RealRedisIntegrationTest extends TestCase
         $this->client->del('{kiwi:ci-health}:security-policy');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready without a central policy key');
 
-        // Compatible central policy (protocol 2, epoch 1).
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '2', 'min_policy_epoch', '1');
+        // Compatible central policy (protocol 3, epoch 1): the decoy-
+        // capable v3 canonical is this binary's max protocol.
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready with a compatible central policy');
 
         // A newer protocol or epoch takes the binary out of the pool.
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
-        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 3 > the binary max (2)');
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '4', 'min_policy_epoch', '1');
+        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 4 > the binary max (3)');
 
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '2', 'min_policy_epoch', '2');
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '2');
         self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1');
 
         // Live stays 200 while ready fails.

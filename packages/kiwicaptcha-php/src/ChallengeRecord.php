@@ -18,6 +18,20 @@ namespace KiwiCaptcha;
  * together, matching serde's duplicate-field rejection. Legacy records
  * carrying only `ip_hash` decode as `protocol_version` 1.
  *
+ * Protocol v3 is the decoy-capable canonical: the v2 18-field base plus
+ * the `|decoy_field` segment appended after `kid` exactly when the
+ * record carries a decoy. An armed issuance writes protocol v3; an
+ * unarmed issuance stays protocol v2, byte-identical to the pre-decoy
+ * format. A v3 record without a decoy uses the plain 18-field canonical
+ * (accepted leniently; new issuance never produces it). A
+ * protocol-v2 record that carries `decoy_field` is rejected explicitly:
+ * the v2 canonical never includes the segment, so the capability is
+ * inferable from `protocol_version`. An old verifier rejects version 3
+ * as unknown; a new verifier rejects a v2 record carrying a decoy.
+ * `fromArray()` accepts protocol versions 1, 2 and 3 and rejects the
+ * v2-plus-decoy combination; the verifier's malformed-record path
+ * enforces the same split.
+ *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record, which has `#[serde(default)]` and
  * accepts an absent field. PHP's one-shot model never increments it;
@@ -81,13 +95,16 @@ namespace KiwiCaptcha;
  * `decoyField` is the server-issued decoy (honeypot) form-field name
  * armed for this challenge (see {@see Issuer::DECOY_FIELD_POOL}). Null =
  * no decoy armed (the default, and the shape every pre-decoy record
- * carries). The name is an authenticated v2 canonical field: the final
+ * carries). The name is an authenticated canonical field: the final
  * segment `|<decoy_field>`, appended after the `kid` (see
  * {@see Issuer::canonicalPayload()}), so a stored/tampered record cannot
- * change or drop it without breaking the signature. Wire-compatible both
- * directions: the JSON key is absent when null (`skip_serializing_if`),
- * so pre-decoy writers and readers keep their exact byte format, and a
- * decoy-armed record simply carries one extra string key. Absent in
+ * change or drop it without breaking the signature. Wire compatibility:
+ * unarmed records are byte-identical to the pre-decoy format. The JSON
+ * key is absent when null (`skip_serializing_if`), so pre-decoy writers
+ * and readers keep their exact byte format. A decoy-armed record is
+ * protocol v3 and requires a v3-capable verifier: an old verifier
+ * rejects version 3 as unknown, so the capability becomes inferable
+ * from protocol_version, which is the point. Absent in
  * legacy stored records; a present value must match the decoy alphabet
  * `[A-Za-z0-9_-]{1,64}`, see {@see Config::isValidDecoyFieldName()},
  * and is enforced on read and by the verifier's malformed-record path.
@@ -282,6 +299,10 @@ final class ChallengeRecord
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
      *   `issuer` null, `kid` 1).
+     * - Protocol versions 1, 2 and 3 are accepted; a protocol-v2 record
+     *   that carries `decoy_field` is rejected explicitly (the decoy
+     *   segment is a protocol v3 canonical extension — see the class
+     *   docblock for the wire-compatibility statement).
      * - Integers must be real JSON integers within the Rust type ranges
      *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
      *   attempts_used/policy_version/kid, u64 for the timestamps).
@@ -412,6 +433,20 @@ final class ChallengeRecord
             if (!Config::isValidDecoyFieldName($data['decoy_field'])) {
                 throw MalformedRecordException::invalidDecoyField();
             }
+        }
+
+        // The protocol-vs-decoy grammar: the decoy segment is a protocol
+        // v3 canonical extension. A v2 record that carries decoy_field
+        // is rejected explicitly — the v2 canonical never includes the
+        // segment, so such a record cannot have come from a conforming
+        // issuer (an armed issuance writes protocol v3). v1 (legacy,
+        // migration window), v2 (unarmed) and v3 (decoy-capable; a v3
+        // record without a decoy uses the plain 18-field canonical,
+        // leniently accepted) are the accepted protocol versions; the
+        // verifier's malformed-record path enforces the same split.
+        $protocolVersion = (int) ($data['protocol_version'] ?? 1);
+        if ($protocolVersion === 2 && isset($data['decoy_field']) && $data['decoy_field'] !== null) {
+            throw MalformedRecordException::decoyOnV2Record();
         }
 
         return new self(

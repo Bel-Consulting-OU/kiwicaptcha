@@ -99,14 +99,6 @@ final class ChallengeController
     private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:|:-]{1,64}$/i';
 
     /**
-     * The server-issued decoy field name, a bounded per-issuance value
-     * derived from the challenge nonce. The widget renders it as a hidden
-     * honeypot field; a bot that fills it echoes it back as honeypot
-     * evidence.
-     */
-    private const DECOY_FIELD_PREFIX = 'decoy_';
-
-    /**
      * Headers carrying client identity or forwarding trust: each must
      * appear at most once, since intermediaries pick different values on
      * duplicates. A duplicate gets 400 `DUPLICATE_HEADER` before any
@@ -1224,11 +1216,18 @@ final class ChallengeController
             // Issuance always uses the canonical client IP. A per-sitekey
             // ttl_secs override mints through a TTL-variant issuer,
             // {@see self::issuerForTtl()}, so the signed lifetime carries
-            // the override.
+            // the override. The adaptive-risk surface (risk wired) arms
+            // the authenticated decoy: the issuer picks a random
+            // pool name per issuance, {@see Issuer::issueWithDecoyField()},
+            // signs it into the canonical payload (protocol v3 record) and
+            // the challenge response carries the authenticated
+            // decoy_field — there is NO second nonce-hash decoy scheme in
+            // this controller.
             $issuer = $this->issuerForTtl($ttlSecs);
+            $armDecoy = $this->risk !== null;
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
-                : $issuer->issue($scope, $clientIp, $requestBinding, $hostname);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy)
+                : $issuer->issueWithDecoyField($scope, $clientIp, $armDecoy, $requestBinding, $hostname);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random
@@ -1492,18 +1491,15 @@ final class ChallengeController
             throw $e;
         }
 
-        // Risk-v2 decoy field: when the adaptive risk engine is enabled,
-        // the issuance response carries the server-issued decoy field name
-        // so the widget can render a hidden honeypot field; a bot that
+        // The challenge response carries the authenticated decoy field
+        // name exactly when the issuance armed one: Challenge::toArray()
+        // includes `decoy_field` for an armed (protocol v3) issuance, so
+        // the widget can render the hidden honeypot field; a bot that
         // fills it echoes the marker back in a later challenge request,
         // which the risk-v2 surface feeds as honeypot evidence. The name
-        // is a bounded per-issuance value.
+        // is the issuer's authenticated per-issuance value, never a
+        // nonce-derived reconstruction.
         $challengeData = $challenge->toArray();
-        if ($this->risk !== null) {
-            // Deterministic per issuance: the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet.
-            $challengeData['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $challenge->nonce), 0, 8);
-        }
 
         // Handoff: the challenge is durably issued and stored, the metadata
         // identity persisted, and (stage 2) the chain durably transitioned
@@ -2590,8 +2586,8 @@ final class ChallengeController
      * challenge from its stored record. The key set and order are the
      * same the original Challenge::toArray() produced (nonce, challenge,
      * salt, algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
-     * prefix), plus the deterministic decoy_field when the risk engine is
-     * enabled. Byte-identical with the original response.
+     * prefix), plus the record's authenticated decoy_field when the
+     * issuance armed one. Byte-identical with the original response.
      *
      * @param array<string, mixed> $recordData a ChallengeRecord's toArray()
      */
@@ -2856,10 +2852,13 @@ final class ChallengeController
             'minDurationMs' => $data['min_duration_ms'],
             'prefix' => $data['prefix'],
         ];
-        if ($this->risk !== null) {
-            // Deterministic per issuance: the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet.
-            $response['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $data['nonce']), 0, 8);
+        // The authenticated decoy name of the replayed record: the
+        // original response carried exactly this value (the issuer's
+        // per-issuance pool pick, signed into the canonical payload), so
+        // the rebuilt response is byte-identical — never a nonce-derived
+        // reconstruction.
+        if ($record->decoyField !== null) {
+            $response['decoy_field'] = $record->decoyField;
         }
 
         return $response;

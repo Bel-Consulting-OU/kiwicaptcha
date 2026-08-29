@@ -83,8 +83,16 @@ final class RiskV2IntegrationTest extends TestCase
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('sha256', $data['algorithm']);
 
-        // The server-issued decoy field name rides the issuance response.
-        self::assertMatchesRegularExpression('/^decoy_[0-9a-f]{8}$/D', (string) $data['decoy_field']);
+        // The authenticated decoy field name rides the issuance response:
+        // the issuer's per-issuance pool pick (armed issuance, protocol
+        // v3) — never a decoy_<hash> nonce-hash reconstruction.
+        self::assertIsString($data['decoy_field'] ?? null);
+        self::assertContains($data['decoy_field'], Issuer::DECOY_FIELD_POOL, 'the issuance response carries the issuer\'s authenticated pool name');
+        self::assertNotSame(
+            'decoy_'.substr(hash('sha256', (string) $data['nonce']), 0, 8),
+            $data['decoy_field'],
+            'the decoy name must not be a nonce-hash reconstruction (the audit\'s "no second nonce-hash scheme")',
+        );
 
         // The decoy marker fed the risk gateway as the DecoyFieldSubmitted
         // event (evidence), alongside the pre-issue assessment.

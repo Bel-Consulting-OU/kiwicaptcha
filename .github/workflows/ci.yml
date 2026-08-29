@@ -1052,3 +1052,8 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test --features redis --test cross_language redis_runtime_state_interop_with_php -- --nocapture
+      - name: Protocol-v3 decoy interoperability (PHP/Rust armed issuance, v2-plus-decoy rejection)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_v3_decoy_interop_with_php -- --nocapture

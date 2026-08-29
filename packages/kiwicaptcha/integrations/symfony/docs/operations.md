@@ -70,9 +70,11 @@ Two gate backends:
   The per-scope cap is a concentration cap, not a guaranteed share: it prevents one busy scope from monopolizing the shared capacity, and explicit values must be strictly below the global cap.
   See [security-hardening.md](security-hardening.md#argon2-admission-wait-queue-bound).
   For the cap to be an absolute operational invariant, the maximum verification request runtime must stay below the lease lifetime (`argon2_lease_ms`, default 45000 ms).
-  The lease-expiry-before-hash-termination invariant is mechanical, enforced at container compile time: `argon2_max_verification_runtime_ms` (default 30000) bounds the wall-clock a single verification derivation may take in this deployment.
-  The container refuses to compile unless `argon2_lease_ms` exceeds the runtime cap by the 5000 ms safety margin, so the defaults give 45000 > 30000 + 5000 = 35000 and compile.
-  The runtime cap is a deployment bound enforced at compile time only: it is never enforced per-request inside the blocking hash, and it is the bound that guarantees the lease outlives any permitted verification.
+  The lease-expiry-before-hash-termination invariant is an SLO, enforced at container compile time: `argon2_max_verification_runtime_ms` (default 30000) declares the wall-clock a single verification derivation may take in this deployment.
+  The container refuses to compile unless `argon2_lease_ms` exceeds the declared runtime by the 5000 ms safety margin, so the defaults give 45000 > 30000 + 5000 = 35000 and compile.
+  The declared runtime is a deployment bound only: it is never enforced per-request inside the blocking hash, so the lease can still expire while a hash runs on a pathological host (severe CPU starvation, throttling).
+  Fencing keeps correctness on expiry: a dead lease can never be misused by its former owner.
+  The concurrency cap itself can still be exceeded during the expiry window on such hosts, so size the bound and the margin accordingly and monitor hash times.
   Example: PHP `request_terminate_timeout = 30s` with the default 45 s lease (plus a safety margin).
   Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).
 - **In-process gate (per-process).** Without a Redis client the cap is enforced per PHP process (`src/Security/InProcessArgonGate.php`, token-set based).
@@ -130,7 +132,7 @@ PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under c
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 2` (this binary's max protocol) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 3` (this binary's max protocol: the decoy-capable v3 canonical) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative;
   - the memory-budget invariant holds (only when `risk.container_memory_mib` is configured):
     `argon2_max_concurrent_verifications × the fixed Argon verification envelope (risk.argon_verification_memory_kib, the risk ladder's worst-case per-verification memory; default 16384 KiB) + 256 MiB headroom <= container_memory_mib`.
@@ -141,7 +143,8 @@ PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under c
     Document this in your deployment.
     With a concurrency cap of 0 (= unlimited) the invariant uses 1 hash, so only the headroom is guaranteed.
     Set a finite cap for a meaningful check.
-    The calculation is protective because the live-hash bound holds by construction: the mechanical lease/runtime invariant (see "Argon2id verification concurrency cap") guarantees live hashes never exceed the configured concurrency, so the worst case is exactly the configured concurrency, never more.
+    The calculation is protective because the live-hash bound is the deployment's declared SLO: the lease/runtime invariant (see "Argon2id verification concurrency cap") makes the configured concurrency the planning case.
+    Under a compliant hash the worst case is the configured concurrency, never more.
 
 Argon queue fullness and transient timeouts never fail readiness.
 All responses carry `Cache-Control: no-store` + `Pragma: no-cache`.

@@ -28,7 +28,7 @@ use Symfony\Component\HttpFoundation\Response;
  *      3. the central security-policy state is compatible: the Redis key
  *         `{kiwi:<ns>}:security-policy` (a hash with
  *         `min_protocol_version` and `min_policy_epoch`). When the key is
- *         present, ready requires min_protocol_version <= 2 (this
+ *         present, ready requires min_protocol_version <= 3 (this
  *         binary's max protocol version) and min_policy_epoch <= the
  *         configured risk.policy_version. A newer central policy
  *         (mixed-version rolling deployments, rollbacks) takes an
@@ -58,12 +58,14 @@ use Symfony\Component\HttpFoundation\Response;
 final class KiwiHealthController
 {
     /**
-     * The binary's maximum challenge protocol version. A central
-     * security-policy hash demanding a higher version means this binary
-     * cannot verify the challenges the fleet now issues, so it must not
-     * be ready.
+     * The binary's maximum challenge protocol version: 3 since the
+     * decoy-capable canonical (protocol v3) landed — armed issuance
+     * writes version 3 and the verifier accepts versions 1, 2 and 3. A
+     * central security-policy hash demanding a higher version means this
+     * binary cannot verify the challenges the fleet now issues, so it
+     * must not be ready.
      */
-    public const MAX_PROTOCOL_VERSION = 2;
+    public const MAX_PROTOCOL_VERSION = 3;
 
     /** Fixed headroom of the memory-budget invariant, in MiB. */
     public const MEMORY_HEADROOM_MIB = 256;

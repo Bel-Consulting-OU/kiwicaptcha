@@ -1198,11 +1198,12 @@ final class VerifierGateTest extends TestCase
         self::assertTrue($o2->isOk(), sprintf('unbound record must verify without an IP, got %s', $o2->code()));
     }
 
-    public function testProtocolVersion3IsMalformed(): void
+    public function testUnknownProtocolVersionIsMalformed(): void
     {
-        // Only protocol versions 1 (legacy migration) and 2 (current)
-        // exist in the wire contract; anything else is a corrupt or
-        // foreign record.
+        // Protocol versions 1 (legacy migration window), 2 (unarmed) and
+        // 3 (the decoy-capable canonical) exist in the wire contract;
+        // anything else is a corrupt or foreign record. Version 4 stands
+        // in for the unknown-version class.
         $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
@@ -1224,7 +1225,7 @@ final class VerifierGateTest extends TestCase
             challenge: $record->challenge,
             minDurationMs: $record->minDurationMs,
             issuedAtNs: $record->issuedAtNs,
-            protocolVersion: 3,
+            protocolVersion: 4,
         ));
         $counter = 0;
         do {

@@ -121,8 +121,16 @@ pub enum BindingMode {
 ///   `nonce|scope|ip_hash|issued_at`; `binding_tag` carries the legacy
 ///   `hash_ip` value (the sha256 digest of secret and ip) and reads the legacy `ip_hash` JSON
 ///   key via serde alias. Kept verifiable for the migration window (max TTL).
-/// - `protocol_version == 2` (current): signed with the v2 full-parameter
-///   canonical input and a nonce-bound `binding_tag`.
+/// - `protocol_version == 2` (current, unarmed): signed with the v2
+///   full-parameter canonical input and a nonce-bound `binding_tag` —
+///   byte-identical to the pre-decoy record format.
+/// - `protocol_version == 3` (decoy-capable): the v2 canonical base plus
+///   the `|decoy_field` segment appended after `kid` when the record
+///   carries a decoy; a v3 record without a decoy uses the plain
+///   18-field canonical (lenient; new issuance never produces it). A v2
+///   record carrying a `decoy_field` is rejected by validation — the v2
+///   canonical never includes the segment, so the decoy capability is
+///   always inferable from the version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChallengeRecord {
@@ -184,9 +192,16 @@ pub struct ChallengeRecord {
     #[serde(default)]
     pub attempts_used: u32,
     /// Protocol version: 1 = legacy v1 canonical signing + legacy `ip_hash`
-    /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`.
-    /// New records are issued with 2; 1 is the serde default so stored
-    /// pre-v2 records keep verifying during the migration window (max TTL).
+    /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`
+    /// (the unarmed issuance format, byte-identical to the pre-decoy
+    /// records); 3 = the decoy-capable canonical — the v2 18-field base
+    /// plus the `|decoy_field` segment appended after `kid` when the
+    /// record carries a decoy. New records are issued with 3 when a decoy
+    /// is armed and 2 otherwise; 1 is the serde default so stored pre-v2
+    /// records keep verifying during the migration window (max TTL). A
+    /// v2 record carrying a `decoy_field` is rejected by validation: the
+    /// v2 canonical never includes the segment, so the decoy capability
+    /// is always inferable from the version.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
     /// Region the challenge was issued for. It is an authenticated field of
@@ -235,15 +250,19 @@ pub struct ChallengeRecord {
     /// The server-issued decoy (honeypot) form-field name armed for this
     /// challenge (see [`DECOY_FIELD_POOL`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
-    /// an authenticated v2 canonical field — the final segment
-    /// `|<decoy_field>`, appended after the `kid` (the v2 canonical
-    /// signing input, documented below) — so a stored/tampered record
-    /// cannot change or drop it without breaking the signature.
+    /// an authenticated canonical field of protocol v3 — the final segment
+    /// `|<decoy_field>`, appended after the `kid` (the canonical signing
+    /// input, documented below) — so a stored/tampered record cannot
+    /// change or drop it without breaking the signature.
     ///
-    /// Wire-compatible both directions: the JSON key is absent when `None`
+    /// Wire compatibility: unarmed records are byte-identical to the
+    /// pre-decoy format — the JSON key is absent when `None`
     /// (`skip_serializing_if`), so pre-decoy writers and readers keep
-    /// their exact byte format, and a decoy-armed record simply carries
-    /// one extra string key.
+    /// their exact byte format. A decoy-armed record is protocol v3 and
+    /// requires a v3-capable verifier: an old verifier rejects version 3
+    /// as unknown, so the capability is always inferable from
+    /// `protocol_version` — a v2 record carrying `decoy_field` is
+    /// rejected explicitly by validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
@@ -510,14 +529,14 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2 canonical input (`protocol_version == 2`): the full parameter
+/// Protocol v2/v3 canonical input: the full parameter
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
 /// `region`, `request_binding` and `issuer` render as the empty segment when
 /// unset; `kid` is the final field, appended after the issuer.
 ///
-/// # The decoy-field extension (round-97)
+/// # The decoy-field extension (protocol v3)
 ///
 /// When the issuer arms a decoy (honeypot) form field
 /// (`issue_challenge_with_decoy`), the field name is appended as ONE extra
@@ -533,11 +552,18 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   from [`DECOY_FIELD_POOL`], so it can never contain the `|` separator
 ///   (the pool alphabet is `[a-z_]`; validation accepts `[A-Za-z0-9_-]`
 ///   only, 1..=64 bytes).
-/// - The segment is appended only when a decoy is armed. `None` renders
+/// - The segment is appended only when a decoy is armed, and an armed
+///   record is issued as `protocol_version == 3`. `None` renders
 ///   nothing extra — the canonical string is byte-identical to the
-///   pre-extension format, so outstanding challenges and cross-language
-///   records keep verifying unchanged across the upgrade, and the extension
-///   is invisible until a deployment opts in.
+///   pre-extension format and the record stays `protocol_version == 2`,
+///   so unarmed records and cross-language records keep verifying
+///   unchanged across the upgrade.
+/// - Wire compatibility: unarmed records are byte-identical both
+///   directions; armed records are protocol v3 and require a v3-capable
+///   verifier (an old verifier rejects version 3 as unknown — the
+///   capability becomes inferable from `protocol_version`, which is the
+///   point). A v2 record carrying a `decoy_field` is rejected by
+///   validation: the v2 canonical never includes the segment.
 /// - PHP parity (exact recipe for the PHP core): build the same 18-field
 ///   base string, then append `'|' . $decoyField` if and only if the record
 ///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
@@ -1041,11 +1067,12 @@ pub fn issue_challenge(
 /// predictable decoy), sets it on the client-facing
 /// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
 /// input from that key) AND on the stored record's authenticated
-/// `decoy_field`, signed into the v2 canonical input as the final
+/// `decoy_field`, signed into the canonical input as the final
 /// `|<decoy_field>` segment — a client cannot strip or swap the decoy
-/// without breaking the signature the verifier re-checks. `false` behaves
-/// exactly like [`issue_challenge`] (no decoy, byte-identical canonical
-/// string).
+/// without breaking the signature the verifier re-checks. An armed
+/// issuance writes `protocol_version == 3` (the decoy-capable canonical);
+/// `false` behaves exactly like [`issue_challenge`] (no decoy,
+/// `protocol_version == 2`, byte-identical canonical string).
 #[allow(clippy::too_many_arguments)]
 pub fn issue_challenge_with_decoy(
     config: &ChallengeConfig,
@@ -1192,16 +1219,17 @@ fn issue_challenge_inner(
         .min_duration_ms
         .unwrap_or_else(|| config.min_duration_ms_for(target_bits));
 
-    // Protocol v2: sign the full-parameter canonical input so no issuance
-    // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
-    // without breaking the signature. The challenge string is
-    // `base64(canonical).hex_tag` — same structure as v1. The signature is
-    // computed with the `HKDF`-derived challenge key, never the
+    // Protocol v2/v3: sign the full-parameter canonical input so no
+    // issuance parameter (algorithm, difficulty, TTL, salt, …) can be
+    // tampered with without breaking the signature. The challenge string
+    // is `base64(canonical).hex_tag` — same structure as v1. The signature
+    // is computed with the `HKDF`-derived challenge key, never the
     // master secret directly.
     //
     // The decoy (honeypot) field name, when armed, is picked before the
     // canonical input is built: it is an authenticated issuance parameter
-    // (the final `|<decoy_field>` segment), signed like every other.
+    // (the final `|<decoy_field>` segment), signed like every other, and
+    // the record is issued as protocol v3.
     let decoy_field: Option<String> = if arm_decoy_field {
         Some(pick_decoy_field()?.to_string())
     } else {
@@ -1225,7 +1253,10 @@ fn issue_challenge_inner(
         min_duration_ms,
         issued_at_ns: now_ns,
         attempts_used: 0,
-        protocol_version: 2,
+        // Armed issuance writes protocol v3 (the decoy-capable canonical,
+        // signed with the decoy segment when present); unarmed issuance
+        // stays v2, byte-identical to the pre-decoy format.
+        protocol_version: if arm_decoy_field { 3 } else { 2 },
         region: config.region.clone(),
         policy_version: config.policy_version,
         request_binding: request_binding.map(str::to_string),
@@ -2068,8 +2099,10 @@ mod tests {
     #[test]
     fn decoy_field_issuance_arms_a_signed_pool_name() {
         // Armed: the client-facing token and the stored record both carry
-        // a pool name, the canonical input ends with the `|<name>` segment,
-        // and the signature verifies over that exact extended input.
+        // a pool name, the record is issued as protocol v3 (the
+        // decoy-capable canonical), the canonical input ends with the
+        // `|<name>` segment, and the signature verifies over that exact
+        // extended input.
         let issued = issue_challenge_with_decoy(
             &profile_base_config(),
             "login",
@@ -2088,6 +2121,10 @@ mod tests {
         );
         assert!(valid_decoy_field_name(&decoy));
         assert_eq!(issued.record.decoy_field.as_deref(), Some(decoy.as_str()));
+        assert_eq!(
+            issued.record.protocol_version, 3,
+            "an armed issuance writes protocol v3 (the decoy-capable canonical)"
+        );
 
         let canonical = canonical_signing_input_v2(&issued.record);
         assert!(
@@ -2097,7 +2134,7 @@ mod tests {
         assert_eq!(
             canonical.split('|').count(),
             19,
-            "v2 canonical input: 18 base fields + the decoy segment"
+            "v3 canonical input: the 18-field v2 base + the decoy segment"
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
@@ -2141,10 +2178,10 @@ mod tests {
 
     #[test]
     fn decoy_field_disabled_keeps_the_old_wire_and_canonical_format() {
-        // The plain path (and the explicit false arm) issues NO decoy: the
-        // canonical string keeps the exact pre-extension shape (18 fields,
-        // kid last — byte-identical), and neither JSON surface carries the
-        // key.
+        // The plain path (and the explicit false arm) issues NO decoy and
+        // stays protocol v2: the canonical string keeps the exact
+        // pre-extension shape (18 fields, kid last — byte-identical), and
+        // neither JSON surface carries the key.
         for issued in [
             issue_challenge(
                 &profile_base_config(),
@@ -2170,6 +2207,10 @@ mod tests {
         ] {
             assert!(issued.challenge.decoy_field.is_none());
             assert!(issued.record.decoy_field.is_none());
+            assert_eq!(
+                issued.record.protocol_version, 2,
+                "an unarmed issuance stays protocol v2, byte-identical to the pre-decoy format"
+            );
             let canonical = canonical_signing_input_v2(&issued.record);
             assert_eq!(
                 canonical.split('|').count(),

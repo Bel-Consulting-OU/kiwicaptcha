@@ -209,16 +209,22 @@ is never forced) are the privacy contract; see
     #                                    # by the 5000 ms safety margin
     #                                    # (compiled, see operations.md).
     # argon2_max_verification_runtime_ms: 30000
-    #                                    # maximum wall-clock a single Argon2
+    #                                    # the deployment SLO for the
+    #                                    # wall-clock a single Argon2
     #                                    # verification derivation may take
     #                                    # in this deployment, in ms. The
     #                                    # lease must exceed it by the 5000
     #                                    # ms safety margin (defaults: 45000
     #                                    # > 30000 + 5000 = 35000), enforced
     #                                    # at container compile time; the
-    #                                    # runtime cap is a deployment bound
-    #                                    # only, never enforced per-request
-    #                                    # inside the blocking hash.
+    #                                    # declared runtime is a deployment
+    #                                    # bound only, never an enforced
+    #                                    # wall-clock timeout inside the
+    #                                    # blocking hash (a pathological host
+    #                                    # can still outlive the lease:
+    #                                    # fencing keeps correctness, the
+    #                                    # concurrency cap may be exceeded
+    #                                    # in that expiry window).
     # argon2_semaphore_namespace: '%kernel.project_dir%'
     #                                       # per-deployment discriminator for
     #                                       # the Redis lease set and the

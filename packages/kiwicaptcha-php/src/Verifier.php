@@ -109,20 +109,24 @@ namespace KiwiCaptcha;
  * cancelled record is never redeemable and can never produce a
  * successful outcome.
  *
- * Server-measured solve duration: every valid outcome, the fresh
- * consumed/valid path, the identity-proven replay of a stored success,
- * and the resumed-operation recoveries, carries
- * {@see VerifyOutcome::solveDurationMs()}, the span between the
- * record's issued_at_ns and the verification receipt clock. It is
- * computed only from server-written timestamps, the client-reported
- * token duration is forgeable and never consulted, so the risk layer
- * can consume it as unforgeable graded behavioral evidence. The field
- * is nullable and additive: null on every non-valid outcome, for a
- * record whose issuance clock is unknown, and for a receipt preceding
- * issuance within the clock-skew tolerance. That is exactly the skew
- * semantics of the minimum-duration floor, where the elapsed time
- * cannot be measured reliably, see
- * {@see self::measurableSolveDurationMs()}.
+ * Server-measured solve duration: every fresh derivation's valid
+ * outcome carries {@see VerifyOutcome::solveDurationMs()}, the span
+ * between the record's issued_at_ns and the verification receipt
+ * clock. The fresh paths are the consumed/valid path and the
+ * resumed-operation recoveries. It is computed only from
+ * server-written timestamps, the client-reported token duration is
+ * forgeable and never consulted, so the risk layer can consume it as
+ * unforgeable graded behavioral evidence. An identity-proven replay of
+ * a stored success carries null instead: the retry's receipt is not
+ * the solve's endpoint, so re-computing the span for the replay would
+ * report a confidently incorrect value. The shared PHP/Rust spec is
+ * that solveDurationMs exists only for a fresh derivation, see
+ * {@see VerifyOutcome::fromStoredResult()}. The field is nullable and
+ * additive: null on every non-valid outcome, for a record whose
+ * issuance clock is unknown, and for a receipt preceding issuance
+ * within the clock-skew tolerance. That is exactly the skew semantics
+ * of the minimum-duration floor, where the elapsed time cannot be
+ * measured reliably, see {@see self::measurableSolveDurationMs()}.
  */
 final class Verifier
 {
@@ -928,6 +932,7 @@ final class Verifier
                 $record->nonce,
                 $record->requestBinding,
                 solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs),
+                decoyField: $record->decoyField,
             );
         } finally {
             if ($lease !== null) {
@@ -957,12 +962,16 @@ final class Verifier
      * (crash between consume and commit) is ambiguous and reported as
      * ConsumeIndeterminate.
      *
-     * The identity-proven replay of a stored success carries the
+     * The identity-proven replay of a stored success carries NO
      * server-measured solve duration, see
-     * {@see self::measurableSolveDurationMs()}, computed from the
-     * replayed record's issuance clock and this verification's receipt
-     * — unforgeable behavioral evidence for the risk layer, never the
-     * client-reported duration.
+     * {@see self::measurableSolveDurationMs()}: the retry's receipt is
+     * not the solve's endpoint, so {@see VerifyOutcome::solveDurationMs()}
+     * is null on the stored-result acceptance. The shared PHP/Rust spec
+     * is that the duration exists only for a fresh derivation. The
+     * authenticated decoy (honeypot) field name of the replayed record
+     * is exposed on the outcome instead: the ConsumedRecord carries the
+     * record, so the stored path populates it exactly like the fresh
+     * path.
      *
      * The failed-barrier replay guard runs before a stored success is
      * accepted: the consume and commit mutations that produced it may
@@ -1006,7 +1015,12 @@ final class Verifier
                 $consumed->record->nonce,
                 $consumed->consumedResult->binding,
                 true,
-                $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+                // The stored-result acceptance reports no solve
+                // duration: the retry's receipt is not the solve's
+                // endpoint, so the measured span is null (the shared
+                // PHP/Rust spec, see the method docblock).
+                null,
+                $consumed->record->decoyField,
             );
         }
 
@@ -1226,7 +1240,12 @@ final class Verifier
                     $consumed->record->nonce,
                     $consumed->consumedResult->binding,
                     true,
-                    $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+                    // The committed-result acceptance is a stored-result
+                    // replay: no solve duration (the retry's receipt is
+                    // not the solve's endpoint), the authenticated decoy
+                    // name comes from the replayed record.
+                    null,
+                    $consumed->record->decoyField,
                 )
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
@@ -1441,7 +1460,7 @@ final class Verifier
             $claimOwner = null;
 
             return $valid
-                ? VerifyOutcome::valid($record->nonce, $binding, solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs))
+                ? VerifyOutcome::valid($record->nonce, $binding, solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs), decoyField: $record->decoyField)
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         } finally {
             if ($claimOwner !== null) {
@@ -1481,7 +1500,10 @@ final class Verifier
      * acceptance, and a barrier or shortfall failure maps to the
      * retryable StorageUnavailable (never a generic exception escaping
      * the verifier). A stored invalid outcome is deterministic and
-     * replays to any caller.
+     * replays to any caller. The accepted stored success carries no
+     * solve duration (the retry's receipt is not the solve's endpoint,
+     * the shared PHP/Rust spec) and the authenticated decoy name from
+     * the replayed record.
      */
     private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
     {
@@ -1498,7 +1520,8 @@ final class Verifier
                 $after->record->nonce,
                 $after->consumedResult->binding,
                 true,
-                $this->measurableSolveDurationMs($after->record, $receiptNs),
+                null,
+                $after->record->decoyField,
             )
             : VerifyOutcome::invalid(VerifyError::InsufficientWork);
     }
@@ -1520,13 +1543,16 @@ final class Verifier
      * `[A-Za-z0-9._:-]+`, 1..128 bytes; the alphabet itself makes the
      * legacy '|' separator rejection unnecessary.
      *
-     * The decoy (honeypot) field name is an authenticated v2 canonical
+     * The decoy (honeypot) field name is an authenticated canonical
      * field: when present it must match the exact shape the issuer mints
      * and the widget driver renders, 1..=64 bytes of `[A-Za-z0-9_-]`.
      * No `.`, `:` or `|` is allowed, so the canonical segment structure
      * can never be altered by a stored value. A non-conforming name is
      * a corrupt or foreign record: MalformedRecord, the Rust
-     * `validate_record` decoy check.
+     * `validate_record` decoy check. The segment rides a protocol v3
+     * record (an armed issuance writes version 3); a v2 record carrying
+     * a decoy is rejected by the protocol gate above, and a v3 record
+     * without one uses the plain 18-field canonical (lenient).
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -1537,10 +1563,19 @@ final class Verifier
      */
     private function validateRecord(ChallengeRecord $record): bool
     {
-        // Protocol version is part of the wire contract: only 1 (legacy,
-        // migration window) and 2 (current) exist. Anything else is a
-        // corrupt or foreign record.
-        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2) {
+        // Protocol version is part of the wire contract: 1 (legacy,
+        // migration window), 2 (current, unarmed) and 3 (the
+        // decoy-capable canonical) exist. Anything else is a corrupt or
+        // foreign record. A protocol-v2 record that carries a decoy is
+        // rejected explicitly: the v2 canonical never includes the
+        // `|decoy_field` segment, so the combination cannot come from a
+        // conforming issuer (an armed issuance writes protocol v3) — the
+        // capability becomes inferable from protocol_version, which is
+        // the point.
+        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2 && $record->protocolVersion !== 3) {
+            return false;
+        }
+        if ($record->protocolVersion === 2 && $record->decoyField !== null) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
@@ -1777,9 +1812,11 @@ final class Verifier
 
         // 1b. Protocol version gate: v1 (legacy, less comprehensively
         //     signed) is only accepted during an explicit migration window;
-        //     v2 has been the issuance format longer than the maximum
-        //     challenge lifetime, so any surviving v1 record is stale or
-        //     foreign.
+        //     v2 has been the unarmed issuance format longer than the
+        //     maximum challenge lifetime, so any surviving v1 record is
+        //     stale or foreign. Protocol v3 (the decoy-capable canonical)
+        //     is accepted; the structural gate of validateRecord already
+        //     rejected the v2-plus-decoy combination and unknown versions.
         if ($record->protocolVersion === 1 && !$this->acceptLegacyV1) {
             return VerifyError::MalformedRecord;
         }
@@ -2207,11 +2244,14 @@ final class Verifier
      * immutable parameter (kid included), so a valid signature proves the
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
-     * carries an armed decoy (honeypot) field, the name is covered too —
+     * carries an armed decoy (honeypot) field, the name is covered too:
      * it is the final `|<decoy_field>` segment appended after the kid
      * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
-     * splicing it breaks the signature. An unarmed record renders the
-     * legacy 18-field canonical bytes, byte-identical to the
+     * splicing it breaks the signature. The decoy segment rides a
+     * protocol v3 record: armed issuance writes version 3, and the
+     * v2-plus-decoy combination is rejected by the structural gate. An
+     * unarmed record, a v2 or a leniently accepted v3 without a decoy,
+     * renders the legacy 18-field canonical bytes, byte-identical to the
      * pre-extension format.
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool

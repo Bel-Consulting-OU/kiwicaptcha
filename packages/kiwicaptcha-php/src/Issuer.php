@@ -21,12 +21,15 @@ namespace KiwiCaptcha;
   *                request_binding and issuer render as the empty segment
   *                when unset; policy_version as the configured
   *                security-policy epoch; kid as the configured signing
-  *                key id, the final canonical field. When a decoy
-  *                (honeypot) field is armed, see
-  *                {@see self::issueWithDecoyField()}, exactly one more
-  *                segment is appended after the kid:
-  *                ...|{issuer}|{kid}|{decoy_field} — see
-  *                {@see self::canonicalPayload()}.
+  *                key id, the final canonical field. Protocol v3 is the
+  *                decoy-capable canonical: when a decoy (honeypot) field
+  *                is armed, see {@see self::issueWithDecoyField()},
+  *                exactly one more segment is appended after the kid,
+  *                ...|{issuer}|{kid}|{decoy_field}, and the stored
+  *                record's protocol_version is 3 — see
+  *                {@see self::canonicalPayload()}. Unarmed issuance
+  *                stays protocol v2, byte-identical to the pre-decoy
+  *                format.
  *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
  *                an `HKDF`-derived purpose key, see {@see DerivedKeys}.
  *                The master secret is never used directly as the signing
@@ -171,13 +174,16 @@ final class Issuer
      * The name is set on the client-facing
      * {@see Challenge::$decoyField}, the key the widget driver renders
      * the hidden input from, and on the stored record's authenticated
-     * {@see ChallengeRecord::$decoyField}. It is signed into the v2
-     * canonical input as the final `|<decoy_field>` segment. A client
+     * {@see ChallengeRecord::$decoyField}. It is signed into the
+     * canonical input as the final `|<decoy_field>` segment, and the
+     * stored record's protocol_version is 3 (the decoy-capable
+     * canonical): an old verifier rejects version 3 as unknown, so the
+     * capability becomes inferable from protocol_version. A client
      * cannot strip or swap the decoy without breaking the signature the
      * verifier re-checks. `false` (or
      * the plain {@see self::issue()}) behaves exactly like the legacy
-     * path: no decoy, byte-identical canonical string, and neither JSON
-     * surface carries the key.
+     * path: protocol v2, no decoy, byte-identical canonical string, and
+     * neither JSON surface carries the key.
      */
     public function issueWithDecoyField(
         string $scope,
@@ -300,7 +306,11 @@ final class Issuer
             // persisted to shared storage). The name/JSON key stay
             // issuedAtNs for ChallengeRecord serialization stability.
             issuedAtNs: (int) (microtime(true) * 1_000_000),
-            protocolVersion: 2,
+            // Protocol version by decoy arm: an armed record carries the
+            // decoy-capable canonical (the `|decoy_field` segment after
+            // the kid), so it is protocol v3; an unarmed record keeps
+            // protocol v2 with the byte-identical 18-field canonical.
+            protocolVersion: $decoyField !== null ? 3 : 2,
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -341,7 +351,10 @@ final class Issuer
      *
      * Delegates to the normal {@see self::issue()} path, so the wire
      * format, signing, and storage are identical to a regular issue; only
-     * the parameters differ.
+     * the parameters differ. When `$armDecoyField` is true the issuance
+     * is the armed variant, {@see self::issueWithDecoyField()}: a
+     * random pool name is picked per issuance, the record is protocol v3
+     * and the authenticated name rides the challenge response.
      *
      * @throws \InvalidArgumentException when the profile is invalid (or the
      *                                   scope is invalid, per issue())
@@ -353,6 +366,7 @@ final class Issuer
         ?int $now = null,
         ?string $requestBinding = null,
         ?string $hostname = null,
+        bool $armDecoyField = false,
     ): Challenge {
         $profile->validate();
 
@@ -408,7 +422,8 @@ final class Issuer
 
         // The hostname (server-owned issuance metadata) must
         // survive the profile path.
-        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding, $hostname);
+        return (new self($config, $this->storage, $nowFn, $this->region))
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname);
     }
 
     /**
@@ -486,11 +501,13 @@ final class Issuer
      * field, appended after `issuer`; it is always present (the
      * configured signing key id, default 1).
      *
-     * # The decoy-field extension
+     * # The decoy-field extension (protocol v3)
      *
      * When the issuer arms a decoy (honeypot) form field, the field
      * name is appended as one extra final segment after the `kid`; see
-     * {@see self::issueWithDecoyField()}.
+     * {@see self::issueWithDecoyField()}. Armed records are protocol
+     * v3; unarmed records stay protocol v2, byte-identical to the
+     * pre-decoy format.
      *
      * ```text
      * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
@@ -504,16 +521,22 @@ final class Issuer
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
      * - The segment is appended only when a decoy is armed. `null` renders
      * nothing extra, so the canonical string is byte-identical to the
-     * pre-extension format. Outstanding challenges and cross-language
-     * records keep verifying unchanged across the upgrade, and the
-     * extension is invisible until a deployment opts in. The exact
-     * recipe: build the same 18-field base string, then append
-     * `'|' . $decoyField` if and only if the record carries a non-null
-     * `decoy_field`; sign/HMAC-verify the result with the `HKDF`-derived
-     * challenge key (`K_challenge`) exactly as before. The stored record
-     * JSON carries the optional string key `decoy_field` (absent when
-     * null — not a JSON `null` key); the client-facing challenge response
-     * carries the optional key `decoy_field` with the same value.
+     * pre-extension format. Outstanding unarmed challenges and
+     * cross-language records keep verifying unchanged across the
+     * upgrade, and the extension is invisible until a deployment opts
+     * in. The exact recipe: build the same 18-field base string, then
+     * append `'|' . $decoyField` if and only if the record carries a
+     * non-null `decoy_field`; sign/HMAC-verify the result with the
+     * `HKDF`-derived challenge key (`K_challenge`) exactly as before.
+     * The stored record JSON carries the optional string key
+     * `decoy_field` (absent when null — not a JSON `null` key); the
+     * client-facing challenge response carries the optional key
+     * `decoy_field` with the same value.
+     * - Wire compatibility: unarmed records are byte-identical in both
+     * directions; armed records are protocol v3 and require a
+     * v3-capable verifier (an old verifier rejects version 3 as
+     * unknown — the capability becomes inferable from
+     * protocol_version, which is the point).
      */
     public static function canonicalPayload(
         string $nonce,

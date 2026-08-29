@@ -104,6 +104,19 @@ final class MalformedRecordException extends \RuntimeException
         return new self('record field "decoy_field" must be 1-64 characters of [A-Za-z0-9_-]');
     }
 
+    /**
+     * A protocol-v2 record that carries `decoy_field`: the decoy segment
+     * is a protocol v3 canonical extension and the v2 canonical never
+     * includes it. A conforming armed issuance writes protocol v3, so
+     * the combination is a corrupt or foreign record, rejected
+     * explicitly (the capability becomes inferable from
+     * protocol_version, which is the point).
+     */
+    public static function decoyOnV2Record(): self
+    {
+        return new self('record protocol_version 2 must not carry a "decoy_field" (the decoy segment is a protocol v3 canonical extension)');
+    }
+
     public static function unexpectedNull(string $field): self
     {
         return new self(sprintf('record field "%s" must not be null', $field));

@@ -78,13 +78,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
 
     /**
-     * The mechanical safety margin (ms) between the Argon admission lease
-     * (argon2_lease_ms) and the deployment's maximum verification runtime
-     * (argon2_max_verification_runtime_ms): the lease must exceed the
-     * runtime by at least this margin, or the container refuses to
-     * compile. The margin absorbs clock skew and lease bookkeeping so the
-     * lease-expiry-before-hash-termination invariant holds by
-     * construction, not by operator promise.
+     * The SLO safety margin (ms) between the Argon admission lease
+     * (argon2_lease_ms) and the deployment's declared maximum verification
+     * runtime (argon2_max_verification_runtime_ms): the lease must exceed
+     * the declared runtime by at least this margin, or the container
+     * refuses to compile. The margin absorbs clock skew and lease
+     * bookkeeping so the lease-expiry-before-hash-termination invariant
+     * is a deliberate deployment SLO, not a silent operator promise. The
+     * declared runtime is not an enforced wall-clock timeout around the
+     * blocking Argon hash: on a pathological host a hash can still outlive
+     * the lease (fencing keeps correctness, resource concurrency may
+     * still be exceeded in the expiry window).
      */
     private const ARGON_LEASE_SAFETY_MARGIN_MS = 5000;
 
@@ -301,18 +305,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // than the configured concurrency cap (positive feedback: more
         // contention -> longer hashes -> more expiries). Renewal during
         // the blocking native hash is impractical in PHP, so the
-        // invariant is made mechanical: the deployment bounds the
-        // maximum verification runtime
+        // deployment declares its SLO: the maximum verification runtime
         // (argon2_max_verification_runtime_ms) and the lease must exceed
         // it by the safety margin, enforced at container compile time in
         // every environment (a misconfiguration is fatal everywhere,
-        // exactly like the other argon validations). The runtime cap is
-        // a deployment bound only: it is never enforced per-request
-        // inside the blocking hash, and the semaphore keeps using
-        // argon2_lease_ms as today.
+        // exactly like the other argon validations). The declared runtime
+        // is a deployment bound only: it is never enforced per-request
+        // inside the blocking hash (there is no real execution bound
+        // around the blocking Argon call), so the lease-expiry-during-
+        // hash remains theoretically possible on a pathological host —
+        // fencing keeps correctness, the resource concurrency cap may
+        // still be exceeded in that expiry window.
         if ($config['argon2_lease_ms'] <= $config['argon2_max_verification_runtime_ms'] + self::ARGON_LEASE_SAFETY_MARGIN_MS) {
             throw new \LogicException(sprintf(
-                'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the runtime cap is the mechanical bound that guarantees the lease outlives any permitted verification.',
+                'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the declared runtime is the deployment SLO that the lease must outlive by the margin (not an enforced wall-clock bound around the blocking hash).',
                 $config['argon2_lease_ms'],
                 $config['argon2_max_verification_runtime_ms'],
                 self::ARGON_LEASE_SAFETY_MARGIN_MS,
@@ -1339,7 +1345,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // runs. /health/ready is 200 only when the signing keys are
         // configured, the security Redis answers a (cached) PING and the
         // central security-policy state is compatible
-        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 2 and
+        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 3 and
         // min_policy_epoch <= risk.policy_version; key absent = the
         // binary's own config is authoritative). Argon queue fullness and
         // transient probe timeouts never fail readiness.
