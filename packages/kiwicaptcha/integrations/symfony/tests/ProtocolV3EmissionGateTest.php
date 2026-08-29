@@ -27,7 +27,7 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
 /**
- * The protocol-v3 two-phase rollout gate (round-98 audit): the challenge
+ * The protocol-v3 two-phase rollout gate: the challenge
  * controller arms the authenticated decoy (protocol v3 emission) only
  * when risk.decoy_v3_enabled is true AND the central security-policy
  * floor ({kiwi:<ns>}:security-policy min_protocol_version, read through
@@ -123,7 +123,7 @@ final class ProtocolV3EmissionGateTest extends TestCase
 
     public function testDefaultConfigEmitsV2EvenWithRiskWired(): void
     {
-        // The round-98 finding: a new node used to arm the decoy whenever
+        // A new node used to arm the decoy whenever
         // risk was wired, immediately emitting protocol v3 challenges the
         // parent revision's verifiers reject as malformed. The default
         // (decoy_v3_enabled false) must keep emission at protocol v2 —
@@ -239,7 +239,7 @@ final class ProtocolV3EmissionGateTest extends TestCase
         // readiness gate), and the next issuance — after the monitor's
         // cache window elapses — must emit protocol v2 again. A
         // sticky/monotonic floor would keep emitting v3 records those
-        // binaries reject as malformed (the round-98 finding).
+        // binaries reject as malformed.
         $clock = [0.0];
         $stack = $this->stack(true, 3, static function () use (&$clock): float {
             return $clock[0];

@@ -539,10 +539,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // re-run on the core's replay path, which is exactly why this
         // gate must hold for everything except the proven identity.
         if ($outcome->isOk() && $this->isStoredResult($outcome) && $operationId === null) {
-            // Native replay risk feedback (round-97): the classic replay
+            // Native replay risk feedback: the classic replay
             // of a solved token — a stored-valid, same-identity
             // retained-state retry without an explicit operation id —
-            // previously returned here with zero risk-model signal, so a
+            // used to return here with zero risk-model signal, so a
             // static identity replaying a consumed token polluted no
             // counters. The feedback is the same ReplayAttempt outcome
             // the core's AlreadyConsumed path feeds (RiskFeedback), with
@@ -588,7 +588,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // retained-state replays enrich the model; server and
             // deployment-context outcomes produce no client event, so a
             // client is never punished for a backend or rollout
-            // condition). Previously the failures returned here without
+            // condition). The failures used to return here without
             // any evidence, leaving bad_proof, malformed and replay
             // counters fed only by issuance debt and velocity. The
             // evidence carries the canonical client IP only when one

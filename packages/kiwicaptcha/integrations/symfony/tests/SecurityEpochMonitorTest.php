@@ -132,8 +132,8 @@ final class SecurityEpochMonitorTest extends TestCase
 
     public function testEpochBumpNeverDisablesTheIssuerExpectation(): void
     {
-        // The security boundary the audit found: the monitor previously
-        // rotated the shared verifier with rotateDeploymentExpectations()
+        // The security boundary: the monitor used to
+        // rotate the shared verifier with rotateDeploymentExpectations()
         // carrying a null issuer, so a central epoch bump silently
         // disabled issuer enforcement on every later verification. The
         // monitor now mutates only the policy epoch. The verifier starts
@@ -287,7 +287,7 @@ final class SecurityEpochMonitorTest extends TestCase
         // protocol is >= the floor, so a lowered floor means the operator
         // admitted older binaries back into the pool — v3 emission must
         // stop on the next re-read. A monotonic max would keep emitting
-        // v3 challenges those binaries reject (the round-98 finding).
+        // v3 challenges those binaries reject.
         [, $verifier] = $this->pair(1);
         $redis = new FakePredisClient();
         $this->setCentralEpoch($redis, 1);

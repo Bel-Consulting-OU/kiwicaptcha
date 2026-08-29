@@ -138,7 +138,7 @@ final class DerivedKeysTest extends TestCase
     {
         // The memo key must be structurally unambiguous: (null, M) derives
         // the global root, ("", M) the tenant root with info
-        // "kiwi/v2/tenant/" + "" — different derivations that the old
+        // "kiwi/v2/tenant/" + "" — different derivations that the earlier
         // "(\0-joined)" key collapsed onto one entry. Both the memo keys
         // and the derived keys must differ.
         $global = DerivedKeys::fromMaster(Vectors::SECRET, null);

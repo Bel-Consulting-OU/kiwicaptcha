@@ -263,7 +263,7 @@ final class ChainStateMachineModelTest extends TestCase
         // The expired chain's generation is sealed (its invariants held on
         // every step), and the fresh chain of the same obligation starts a
         // brand-new generation at the available state — never a stage-1
-        // downgrade, never a resurrection of the old chain's state.
+        // downgrade, never a resurrection of the prior chain's state.
         ChainStateWalk::run('hand-generation', new ArrayChainDriver(), [
             ['createOrGet', ['rank' => 1]],
             ['reserve', ['owner' => ChainStateWalk::OWNERS[0]]],
@@ -332,7 +332,7 @@ final class ChainStateMachineModelTest extends TestCase
         self::assertSame($chain->chainId, $store->obligationChainId($obligationEpoch1), 'the epoch-1 obligation maps the chain');
         self::assertNull($store->obligationChainId($obligationEpoch2), 'the epoch-2 obligation does not exist');
         self::assertNull($service->findOpenRequirement('login', 'txn-alpha', 2), 'the new epoch sees no open chain — the outstanding ticket is invalidated');
-        self::assertSame(1, $service->requirementFor($chain->chainId)?->policyVersion, 'the chain record carries the OLD epoch, which the new-epoch admission refuses');
+        self::assertSame(1, $service->requirementFor($chain->chainId)?->policyVersion, 'the chain record carries the prior epoch, which the new-epoch admission refuses');
     }
 
     public function testATicketCannotBeReplayedUnderADifferentOperationIdentity(): void

@@ -29,8 +29,7 @@ use KiwiCaptcha\VerifyError;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The mixed-fleet invariants of the protocol-v3 two-phase rollout
- * (round-98 audit).
+ * The mixed-fleet invariants of the protocol-v3 two-phase rollout.
  * A v3-armed challenge issued under a confirmed central floor of 3
  * verifies through the current verifier, which accepts v2 and v3.
  * The same record is rejected as MalformedRecord by a simulated
@@ -150,7 +149,7 @@ final class MixedFleetRolloutInvariantTest extends TestCase
 
     public function testTheSameV3RecordIsRejectedByAV2OnlyVerifierSimulator(): void
     {
-        // The old-generation side of the invariant, the failure the
+        // The prior-generation side of the invariant, the failure the
         // two-phase rollout protects against: the parent-revision
         // verifier's protocol acceptance set is {1, 2}, so the very
         // same record and token fail closed as MalformedRecord — the

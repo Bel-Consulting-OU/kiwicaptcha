@@ -87,8 +87,8 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * takeover would let a second owner win the same nonce. The
  * single-writer invariant needs the barrier too. The non-mutating
  * paths (a busy claim, a refused finalize) perform no write and never
- * WAIT. A complete claim is an acceptance of a previously-mutated
- * terminal disposition: it establishes the causal replication fence
+ * WAIT. A complete claim is an acceptance of a terminal disposition
+ * mutated before the fence: it establishes the causal replication fence
  * before returning the terminal record. The finalize may have
  * landed with its WAIT failing, and a promotion could otherwise
  * silently reverse the accepted decision. An idempotent retry can

@@ -324,7 +324,7 @@ final class FakePredisClient extends \Predis\Client
 
     /**
      * The shared Lua emulation, dispatched on the script body's header
-     * comment (the same dispatch the old EVAL-only fake used).
+     * comment (the same dispatch the legacy EVAL-only fake used).
      *
      * @param list<string> $keys
      * @param list<mixed>  $args

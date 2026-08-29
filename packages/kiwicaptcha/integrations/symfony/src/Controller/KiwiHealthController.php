@@ -200,7 +200,7 @@ final class KiwiHealthController
      *
      * Second, the maximum accepted historical and cross-service record
      * envelope (ChallengeProfile::argon64, 65536 KiB). The verifier's
-     * process ceilings still accept previously-issued or cross-service
+     * process ceilings still accept pre-rotation or cross-service
      * records up to this ceiling, so a concurrent verification of such
      * a record can reach 64 MiB even though nothing new is issued
      * there.

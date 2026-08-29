@@ -583,7 +583,7 @@ fn two_concurrent_verifies_exactly_one_derives() {
 
 #[test]
 fn cancelled_argon_record_never_acquires_an_admission_slot() {
-    // Round-94 audit: a cancelled Argon record is terminal, so verify()
+    // A cancelled Argon record is terminal, so verify()
     // reads the runtime state after the cheap phase and before the
     // admission gate: RecordNotFound with zero acquires. An attacker who
     // cancels a challenge once cannot then flood syntactically valid
@@ -677,7 +677,7 @@ fn cancelled_argon_record_never_acquires_an_admission_slot() {
 
 #[test]
 fn consumed_argon_record_with_matching_identity_replays_without_admission() {
-    // Round-94 audit: an already-consumed Argon record resolves through
+    // An already-consumed Argon record resolves through
     // the identity gate from the runtime-state read, before the
     // admission gate: a same-operation replay returns the retained
     // stored outcome with zero acquires.
@@ -750,7 +750,7 @@ fn consumed_argon_record_with_matching_identity_replays_without_admission() {
 
 #[test]
 fn consumed_argon_record_with_wrong_or_null_identity_is_already_consumed_without_admission() {
-    // Round-94 audit: the wrong-identity and no-identity replays of an
+    // The wrong-identity and no-identity replays of an
     // already-consumed Argon record resolve as AlreadyConsumed from the
     // runtime-state read, with zero acquires — one solved token never
     // funds a second operation and never captures admission capacity.
@@ -865,7 +865,7 @@ fn replay_after_valid_verify_is_identity_gated() {
     // The consumed record is kept with the committed outcome — an exact
     // identity retry returns the same Valid from the stored result,
     // distinguishable from a fresh success (and carrying no recomputed
-    // solve duration — the round-98 spec).
+    // solve duration — the cross-language spec).
     assert_eq!(
         verify_with(
             &verifier,
@@ -935,7 +935,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
     );
 
     // T + A exact retry → the retained Valid (from_stored_result=true),
-    // with no recomputed solve duration (the round-98 spec: a replayed
+    // with no recomputed solve duration (the cross-language spec: a replayed
     // receipt measures the retry, not the original solve).
     assert_eq!(
         verify_with(
@@ -1731,7 +1731,7 @@ fn sha256_records_are_never_gated() {
 
 #[test]
 fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
-    // The round-98 protocol-v3 contract end to end: an armed issuance
+    // The protocol-v3 contract end to end: an armed issuance
     // writes protocol v3 with the `|decoy_field` canonical segment, the
     // record stores and verifies like any other, and the armed
     // challenge string carries the decoy name in its base64 payload.
@@ -1769,7 +1769,7 @@ fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
 
 #[test]
 fn unarmed_v2_record_verifies_unchanged() {
-    // The unarmed side of the round-98 contract: plain issuance stays
+    // The unarmed side of the contract: plain issuance stays
     // protocol v2 and verifies byte-identically to the pre-decoy format.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("v2-unarmed");
@@ -1846,12 +1846,12 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
 
 #[test]
 fn single_key_then_keyring_revokes_the_old_single_secret() {
-    // The round-98 derived-keys reset: a verifier that verified under the
+    // The derived-keys reset: a verifier that verified under the
     // single-key path is switched to a keyring via
-    // `with_secrets_by_kid` — the old single secret must no longer verify
+    // `with_secrets_by_kid` — the prior single secret must no longer verify
     // and the keyring's kid must verify. Without the cache reset the
     // stale u32::MAX sentinel map survives and every kid resolution
-    // fails UnknownKid (or worse, serves the old keys).
+    // fails UnknownKid (or worse, serves the prior keys).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("secret-switch-single");
     let verifier = verifier_for(&url, &prefix);
@@ -1880,8 +1880,8 @@ fn single_key_then_keyring_revokes_the_old_single_secret() {
     // Switch to the keyring: kid 1 now maps to the new secret.
     let switched = verifier.with_secrets_by_kid([(1u32, SECRET_2.to_string())]);
 
-    // The old single secret no longer verifies: a kid-1 record signed
-    // with the old secret fails the signature check under the new secret's keys.
+    // The prior single secret no longer verifies: a kid-1 record signed
+    // with the prior secret fails the signature check under the new secret's keys.
     switched.store().store(&issued_a.record).unwrap();
     assert_eq!(
         verify_at(&switched, &token_a, issued_a.record.issued_at_ns),
@@ -1933,7 +1933,7 @@ fn keyring_replacement_revokes_the_replaced_kid() {
         solve_for_test(&issued_b.record).expect("4-bit sha solves"),
     );
 
-    // Prime the cache under ring A (kid 5 = the old secret).
+    // Prime the cache under ring A (kid 5 = the prior secret).
     let verifier = verifier_for(&url, &prefix).with_secrets_by_kid([(5u32, SECRET.to_string())]);
     verifier.store().store(&issued_a.record).unwrap();
     assert!(matches!(
@@ -5147,7 +5147,7 @@ fn resume_derivation_is_serialized_by_the_atomic_claim() {
 
 #[test]
 fn resume_loser_with_a_pre_held_claim_never_acquires_argon_capacity() {
-    // Round-93 audit: the claim comes first, before the Argon admission
+    // The claim comes first, before the Argon admission
     // gate. A second recovery racing an already-held claim must lose at
     // the claim and answer ConsumeIndeterminate (the resultless reread)
     // while never acquiring an Argon capacity slot; only after the
@@ -5542,7 +5542,7 @@ fn resume_commit_requires_current_claim_ownership() {
 
 #[test]
 fn verify_costs_three_checkouts_and_three_store_commands_on_the_happy_path() {
-    // The round-98 three-checkout verify path: a full happy-path
+    // The three-checkout verify path: a full happy-path
     // verification performs exactly three pool checkouts (observed as
     // the r2d2 checkout validation PINGs) — the snapshot connection
     // (runtime-state GET + the cheap phase), the consume connection
@@ -5616,7 +5616,7 @@ fn verify_costs_three_checkouts_and_three_store_commands_on_the_happy_path() {
     assert_eq!(
         count("PING"),
         3,
-        "exactly THREE pool checkouts (snapshot, consume, commit — the round-98 three-checkout model); log: {log:?}"
+        "exactly THREE pool checkouts (snapshot, consume, commit — the three-checkout model); log: {log:?}"
     );
     assert_eq!(count("GET"), 1, "the single runtime-state snapshot");
     let evalsha = |argc: usize| {
@@ -5833,7 +5833,7 @@ fn sub_millisecond_spans_floor_toward_zero() {
 
 #[test]
 fn stored_result_replay_carries_no_recomputed_solve_duration() {
-    // The round-98 spec: the server-measured solve duration is computed
+    // The server-measured solve duration is computed
     // only for a fresh derivation, whose receipt instant belongs to the
     // solve being measured. A same-operation replay of a stored success
     // reports None — a replayed receipt at t=30 s would measure the
@@ -5936,7 +5936,7 @@ fn resume_commit_valid_carries_the_server_measured_solve_duration() {
 
     // The retry now resolves the committed outcome: the stored-result
     // acceptance on the resume fast path carries NO recomputed duration
-    // (the round-98 spec — the retry's receipt is not the solve's).
+    // (the cross-language spec — the retry's receipt is not the solve's).
     match verifier.resume_consumed_operation(
         &token,
         identity,
@@ -6117,7 +6117,7 @@ fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
 }
 
 // ── failover fault injection (hermetic fake endpoint) ─────────────────
-// The round-99 fault-injection surface: the fake endpoint can drop the
+// The fault-injection surface: the fake endpoint can drop the
 // connection on a matching command (a client-visible I/O error), answer
 // an error reply, or report a replica-wait shortfall, so the fail-closed
 // classifications of the production verifier are pinned without Redis.

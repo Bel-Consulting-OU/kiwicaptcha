@@ -338,7 +338,7 @@ impl VerifyOutcome {
     /// verifier's clock-skew tolerance — exactly the semantics of the
     /// minimum-duration floor — and always for a stored-success replay
     /// (`from_stored_result == true`), whose receipt measures the retry,
-    /// not the original solve (the round-98 spec, shared with PHP).
+    /// not the original solve (the cross-language spec, shared with PHP).
     pub fn solve_duration_ms(&self) -> Option<u64> {
         match self {
             VerifyOutcome::Valid {
@@ -2855,7 +2855,7 @@ mod tests {
         // could not detect a challenge that expired while the proof was
         // deriving, so the closure answers the first call (receipt)
         // inside the window and the second call (post-derive) past
-        // expiry — the exact race the round-80 field could not express.
+        // expiry — the exact race the closure-time field could not express.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let expires_at = record.expires_at;

@@ -1,4 +1,4 @@
-//! Protocol-v3 two-phase rollout invariants (round-98 audit), Rust side.
+//! Protocol-v3 two-phase rollout invariants, Rust side.
 //!
 //! The mixed-fleet contract: a decoy-armed (protocol v3) record issued
 //! by the current generation verifies through the current verifier,

@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The protocol-v3 mixed-fleet verification invariants, the PHP mirror
- * of the two-phase rollout contract (round-98 audit).
+ * of the two-phase rollout contract.
  * A v3-armed challenge, the decoy-capable canonical, verifies through
  * the current verifier, whose acceptance set is {1, 2, 3}.
  * The same record and token are rejected as MalformedRecord by the
@@ -91,7 +91,7 @@ final class ProtocolV3FleetCompatTest extends TestCase
 
     public function testTheSameV3RecordIsRejectedByAV2OnlyVerifierSimulator(): void
     {
-        // The old-generation side of the invariant, the failure the
+        // The prior-generation side of the invariant, the failure the
         // two-phase rollout protects against: the parent-revision
         // verifier's acceptance set is {1, 2}, so the very same record
         // and token fail closed as MalformedRecord. The rollout keeps

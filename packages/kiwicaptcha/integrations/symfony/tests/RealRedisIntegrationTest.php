@@ -233,7 +233,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(3, $this->client->zcard($sourceKey), 'the per-source bound counts the three LIVE members (ZCARD after the score prune — well-defined under the members\' differing expiry scores)');
         self::assertSame(3, $this->client->zcard('{kiwi:ci}:outstanding:global:live'), 'the live-outstanding membership holds the three admitted nonces');
 
-        // Key-level retention (P1): a ZSET score is data, not a key
+        // Key-level retention: a ZSET score is data, not a key
         // expiry — the admission EXPIREATs both membership keys at the
         // latest member deadline + margin, so an abandoned source's key
         // (whose name carries the keyed source pseudonym) can never
@@ -241,7 +241,7 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertGreaterThan(0, $this->client->ttl($sourceKey), 'the source ZSET key carries a key-level EXPIREAT');
         self::assertGreaterThan(0, $this->client->ttl('{kiwi:ci}:outstanding:global:live'), 'the global ZSET key carries a key-level EXPIREAT');
 
-        // Clock domain (P1/P2): the member deadlines are computed from
+        // Clock domain: the member deadlines are computed from
         // Redis TIME + the relative lifetime inside the script, so the
         // score sits at approximately Redis-now + 60 — a PHP/Redis clock
         // skew can never expire a still-valid member early.
@@ -278,7 +278,7 @@ final class RealRedisIntegrationTest extends TestCase
 
     public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
     {
-        // P1/P2: the admission write is protected by the configured
+        // The admission write is protected by the configured
         // replica-durability barrier exactly like the challenge storage —
         // a successful admission issues one verified WAIT, and a refused
         // admission (no write) never WAITs.

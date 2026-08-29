@@ -438,7 +438,7 @@ final class ValidatorTest extends TestCase
         self::assertNull($validator->verifiedJti());
     }
 
-// ── failure-path risk feedback (round-95) ─────────────────────────────────
+// ── failure-path risk feedback ─────────────────────────────────────────
 
     public function testFailedSolveWithRiskEnabledRecordsFailureFeedbackAndViolates(): void
     {
@@ -512,7 +512,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the risk-gateway-absent path stays a plain violation (the optional call is a no-op)');
     }
 
-// ── success-path risk feedback (round-95) ────────────────────────────────
+// ── success-path risk feedback ─────────────────────────────────────────
 
     public function testValidSolveWithoutReassessmentRecordsSolveSuccessFeedbackWithClientIp(): void
     {
@@ -546,7 +546,7 @@ final class ValidatorTest extends TestCase
         self::assertSame([], $store->observations, 'no client IP means no per-IP evidence, never an empty-string pseudonym');
     }
 
-// ── replay-branch risk feedback (round-97) ────────────────────────────────
+// ── replay-branch risk feedback ────────────────────────────────────────
 
     public function testStoredValidSameIdentityReplayEmitsReplayRiskFeedbackAndViolates(): void
     {
@@ -630,7 +630,7 @@ final class ValidatorTest extends TestCase
         self::assertSame([], $risk['store']->observations, 'no client IP means no replay feedback, never an empty-string pseudonym');
     }
 
-// ── ambiguous-forwarding risk feedback (round-97) ─────────────────────────
+// ── ambiguous-forwarding risk feedback ─────────────────────────────────
 
     public function testAmbiguousForwardingFeedsMalformedEvidenceOnTheSocketPeerAndViolates(): void
     {
@@ -891,7 +891,7 @@ final class ValidatorTest extends TestCase
 
     public function testBindingMismatchFailsBeforeTheConsume(): void
     {
-        // P2/P3 regression: the request-binding enforcement moved into the
+        // Regression: the request-binding enforcement moved into the
         // core's pre-consume phase. A wrong-transaction proof must fail
         // without consuming the challenge (no deterministic result is
         // committed and nothing is released), so the valid proof is not
@@ -917,7 +917,7 @@ final class ValidatorTest extends TestCase
 
     public function testStoredResultRetryRepairsTheOutstandingRelease(): void
     {
-        // P2 regression: the release used to be skipped for stored-result
+        // Regression: the release used to be skipped for stored-result
         // retries, so a transient release failure during the original
         // verification could never be repaired by the same logical
         // operation's retry. solved() is idempotent and ZREM-gated, so
@@ -967,7 +967,7 @@ final class ValidatorTest extends TestCase
 
     public function testReleaseSidecarReadFailureIsBestEffort(): void
     {
-        // P2: the entire release — the plain sidecar GET included — sits
+        // The entire release — the plain sidecar GET included — sits
         // inside the exception boundary, so a Redis failure on the read
         // can never fail a valid solve (the memberships decay by their
         // deadlines and the same logical operation's retry re-releases).
@@ -998,7 +998,7 @@ final class ValidatorTest extends TestCase
 
     public function testOutstandingCountsTheCompleteVerifierValidityEnvelopeUnderIssuerSkew(): void
     {
-        // P1/P2: the accounting lifetime is the nominal TTL plus the core
+        // The accounting lifetime is the nominal TTL plus the core
         // verifier's permitted future-issuance skew (MAX_CLOCK_SKEW), so a
         // distributed issuer clock ahead of the Redis clock can never make
         // the anti-stockpiling caps undercount a still-verifier-valid

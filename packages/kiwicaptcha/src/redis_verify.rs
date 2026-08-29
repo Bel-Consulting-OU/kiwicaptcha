@@ -89,7 +89,7 @@
 //! identity recorded atomically when supplied) → checkout B released →
 //! identity-gated resolution of the retained state when the record was
 //! already consumed → re-validation of the consumed record → derive hash
-//! (once; NO connection held — the round-98 audit property, so a
+//! (once; NO connection held — the hard property, so a
 //! memory-hard derivation never occupies a pool slot) → final
 //! re-validation with a fresh clock read + current expectations →
 //! leading-zero check → checkout C (best-effort commit_result + WAIT) →
@@ -1798,7 +1798,7 @@ return 1
     /// replica set advanced through the preceding primary replication
     /// stream, including an earlier uncertain write from another
     /// connection. A bare WAIT on a connection that wrote nothing cannot
-    /// prove another connection's write (the round-72 read-only barrier
+    /// prove another connection's write (the read-only barrier
     /// hole). A shortfall fails closed. No-op when `wait_replicas == 0`.
     pub fn establish_replication_fence(&self, what: &str) -> redis::RedisResult<()> {
         let (wait_replicas, wait_timeout_ms) = self.wait_config();
@@ -2005,7 +2005,7 @@ pub struct ProductionVerifier {
     /// the verifier's lifetime (the verifier owns immutable secrets — a
     /// master secret never changes under a running verifier; the only
     /// exception is the builder's [`ProductionVerifier::with_secrets_by_kid`],
-    /// which replaces the secret set and resets this cache so the old
+    /// which replaces the secret set and resets this cache so the prior
     /// keys can never survive the replacement). The cheap
     /// phase runs up to four `HKDF` derivations per verification without
     /// this cache (signature + IP binding, each re-checked after the
@@ -2079,10 +2079,10 @@ impl ProductionVerifier {
     ///
     /// The per-kid `HKDF` purpose-key cache is reset here: the cache is
     /// keyed on the configured secrets, so replacing them must invalidate
-    /// every previously derived key. Without the reset, a later `set()`
+    /// every key derived earlier. Without the reset, a later `set()`
     /// is a no-op and the stale cache keeps serving the replaced secrets
-    /// — an in-process secret replacement would fail to revoke the old
-    /// key (the round-98 finding: single-key → keyring leaves only the
+    /// — an in-process secret replacement would fail to revoke the prior
+    /// key (single-key → keyring leaves only the
     /// `u32::MAX` sentinel entry and kid resolution yields
     /// `UnknownKid`; keyring A → keyring B keeps deriving with A's
     /// keys).
@@ -2254,7 +2254,7 @@ impl ProductionVerifier {
     /// released → identity-gated resolution of the retained state when
     /// the record was already consumed → re-validation of the consumed
     /// record → single derive, with NO pooled connection held (the
-    /// round-98 audit property: a memory-hard Argon2id derivation must
+    /// hard property: a memory-hard Argon2id derivation must
     /// never occupy a verification-store slot; a default 4-slot pool
     /// serves 4 concurrent Argon derivations plus any further request) →
     /// leading-zero check → lease released by Drop → checkout C
@@ -2338,7 +2338,7 @@ impl ProductionVerifier {
             //     connection): the runtime state carries the decoded record
             //     for every non-missing kind, so the peek and the
             //     runtime-state gate below fold into one snapshot — the
-            //     round-95 mirror of the PHP combined read, where the
+            //     mirror of the PHP combined read, where the
             //     verifier skips find() entirely. This snapshot is the
             //     single record source on the verification path;
             //     cheap-failure cleanup (step 3) may add a further storage
@@ -2947,7 +2947,7 @@ impl ProductionVerifier {
     /// diverge on what a retained outcome means.
     ///
     /// The identity-proven replay of a stored success carries NO
-    /// server-measured solve duration (the round-98 spec, shared with
+    /// server-measured solve duration (the cross-language spec, shared with
     /// the PHP core): the duration is computed only for a fresh
     /// derivation, whose receipt instant belongs to the solve being
     /// measured. A replayed receipt measures the retry's elapsed time,
@@ -2988,7 +2988,7 @@ impl ProductionVerifier {
                         return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
                     }
                     // The stored-success replay carries NO server-measured
-                    // solve duration (the round-98 spec): the duration is
+                    // solve duration (the cross-language spec): the duration is
                     // computed only for a fresh derivation, whose receipt
                     // instant belongs to the solve being measured. A
                     // replayed receipt measures the retry's elapsed time,
@@ -3070,7 +3070,7 @@ impl ProductionVerifier {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
         // The same canonical helper as every other binding enforcement
-        // site (exact Option-equality; the old nullable replay path is
+        // site (exact Option-equality; the legacy nullable replay path is
         // gone, so a committed result can never replay through an
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
@@ -3475,7 +3475,7 @@ mod tests {
     }
 
     /// The builder's secret replacement must invalidate the per-kid cache:
-    /// the write-once `OnceLock` keeps the map built under the OLD secret
+    /// the write-once `OnceLock` keeps the map built under the prior secret
     /// set, so without the reset a single-key → keyring switch leaves
     /// only the `u32::MAX` sentinel entry (kid resolution yields
     /// UnknownKid) and a keyring A → keyring B switch keeps serving A's

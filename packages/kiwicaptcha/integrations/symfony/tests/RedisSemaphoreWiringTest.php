@@ -92,7 +92,7 @@ final class RedisSemaphoreWiringTest extends TestCase
      */
     public function testLegacyArgon2MaxWaitersAliasStillWiresTheSemaphoreWithDeprecation(): void
     {
-        // The old name described a waiters guard, but the value is a
+        // The legacy name described a waiters guard, but the value is a
         // bounded saturation-pressure counter (admission is immediate and
         // non-blocking; nothing queues). The alias still wires the same
         // value, and the config tree raises the Symfony deprecation

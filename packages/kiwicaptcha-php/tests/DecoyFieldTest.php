@@ -589,7 +589,7 @@ final class DecoyFieldTest extends TestCase
         self::assertStringNotContainsString(
             'decoy_field',
             json_encode($plainRecord->toArray(), JSON_UNESCAPED_SLASHES),
-            'the record key must be absent (not JSON null) when no decoy is armed — the old byte format',
+            'the record key must be absent (not JSON null) when no decoy is armed — the legacy byte format',
         );
         self::assertStringNotContainsString(
             'decoy_field',
@@ -674,7 +674,7 @@ final class DecoyFieldTest extends TestCase
 
     public function testV3RecordWithoutADecoyIsRejected(): void
     {
-        // The protocol-vs-decoy grammar is total (round-98 audit): the
+        // The protocol-vs-decoy grammar is total: the
         // decoy is mandatory on v3, so a signed v2 record with its stored
         // version flipped to 3 (the same canonical bytes, the same valid
         // signature) must be rejected on both acceptance surfaces — the

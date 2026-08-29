@@ -884,7 +884,7 @@ final class ConfigurationTest extends TestCase
 
     public function testDecoyV3EnabledDefaultsToFalse(): void
     {
-        // The protocol-v3 writer switch (round-98 audit): the default is
+        // The protocol-v3 writer switch: the default is
         // OFF, so a new deployment never emits v3 challenges (the
         // parent-revision verifiers reject them) until the operator
         // completes the two-phase rollout — deploy everywhere, raise the

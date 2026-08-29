@@ -765,7 +765,7 @@ pub struct Issued {
 ///
 /// Entries older than 1 second are pruned lazily on every `get` and `put`,
 /// and the map is HARD-bounded: a `put` that would exceed the maximum
-/// evicts the oldest entry, so 256 is a real memory maximum regardless of
+/// evicts the least-recently-used entry, so 256 is a real memory maximum regardless of
 /// how many distinct IP+scope pairs arrive within a window.
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
@@ -971,7 +971,7 @@ impl ChallengeCache {
         // Hard bound: pruning removes only expired entries, so a burst
         // of distinct fresh keys inside one TTL window could otherwise
         // grow the map without limit. After the prune, the map is still
-        // over the maximum: evict the oldest entry (the linear scan is
+        // over the maximum: evict the least-recently-used entry (the linear scan is
         // acceptable at the 256-entry scale; a cache miss is already the
         // cheaper alternative to a fresh issuance, and the bound is what
         // matters: 256 is a real maximum, not a per-second rate).
@@ -1906,10 +1906,10 @@ mod tests {
 
     #[test]
     fn challenge_cache_is_hard_bounded_even_with_all_fresh_entries() {
-        // The audit's finding: pruning removes only expired entries, so
+        // The finding: pruning removes only expired entries, so
         // a burst of distinct fresh keys inside one window could
-        // previously grow the map without limit. The hard bound evicts
-        // the oldest entry after the prune, so 256 is a real maximum.
+        // grow the map without limit. The hard bound evicts
+        // the least-recently-used entry after the prune, so 256 is a real maximum.
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),

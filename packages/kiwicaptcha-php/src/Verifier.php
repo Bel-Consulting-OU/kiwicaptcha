@@ -64,20 +64,20 @@ namespace KiwiCaptcha;
  * without burning the record). A runtime-state capable storage (the
  * {@see ChallengeRuntimeStateReadableInterface} seam, implemented by
  * the Redis and array backends) reads the record and the terminal
- * state in a single snapshot GET that doubles as the peek (round-95
- * audit fix). The runtime-state snapshot is the single record source
+ * state in a single snapshot GET that doubles as the peek. The
+ * runtime-state snapshot is the single record source
  * on the verification and replay paths. Cheap-failure cleanup and
  * exotic-storage fallbacks may add further storage transitions, which
  * never weaken the one-shot consume authority. A
  * cancelled or missing record answers RecordNotFound directly. An
  * already-consumed record resolves through the shared identity-gated
  * resolution of the consume-returned envelope, decoded from the same
- * snapshot bytes. Neither ever burns a scarce Argon admission slot
- * (round-94 audit fix). The consume-and-re-derive proof phase
+ * snapshot bytes. Neither ever burns a scarce Argon admission slot.
+ * The consume-and-re-derive proof phase
  * follows, and a post-derive final revalidation against the current
  * server clock and the current expectations precedes the commit of
  * the deterministic result, for both valid and invalid derivations
- * (round-95 audit fix, Rust parity).
+ * (Rust parity).
  *
  * The cheap-phase checks are shared with the narrowly authorized
  * consumed-operation resume path. See {@see self::resumeConsumedOperation()}.
@@ -467,10 +467,10 @@ final class Verifier
         $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
 
         // The record source is a single snapshot for storages with the
-        // {@see ChallengeRuntimeStateReadableInterface} capability
-        // (round-95 audit fix): runtimeState() decodes the full
+        // {@see ChallengeRuntimeStateReadableInterface} capability:
+        // runtimeState() decodes the full
         // envelope — the record for every non-Missing kind, plus the
-        // retained consumed envelope — from one GET. The old flow read
+        // retained consumed envelope — from one GET. The earlier flow read
         // the same key three times: find() here, runtimeState() at
         // step 7b, consumedState() on the consumed branch. The cheap
         // phase below and the terminal-state gate at step 7b consume
@@ -607,7 +607,7 @@ final class Verifier
             } else {
                 // The retained-state tri-state. When the runtime-state
                 // snapshot already resolved the terminal state (the
-                // round-95 pattern), it is served from the snapshot:
+                // snapshot-read pattern), it is served from the snapshot:
                 // never a second GET through retainedConsumedState()
                 // -> consumedState(). This is the MissingClientIp
                 // retry path on an atomic storage (whose fused cleanup
@@ -681,7 +681,7 @@ final class Verifier
             } else {
                 // The retained-state tri-state. When the runtime-state
                 // snapshot already resolved the terminal state (the
-                // round-95 pattern), it is served from the snapshot:
+                // snapshot-read pattern), it is served from the snapshot:
                 // never a second GET through retainedConsumedState()
                 // -> consumedState(). This is the MissingClientIp
                 // retry path on an atomic storage (whose fused cleanup
@@ -706,9 +706,8 @@ final class Verifier
             }
         }
 
-        // 7b. Terminal-state resolution before the Argon admission gate
-        //     (round-94 audit fix, single-snapshot on the main path
-        //     since round-95): a
+        // 7b. Terminal-state resolution before the Argon admission gate:
+        //     a
         //     cancelled or already-consumed record must never acquire a
         //     scarce admission slot, and a terminal record's outcome is
         //     fully determined. The gate now decides on the same
@@ -723,7 +722,7 @@ final class Verifier
         //     resolution the consume-returned envelope uses via
         //     {@see self::resolveConsumedRecord()}, again with no slot
         //     burned, from the envelope that rode on the snapshot (the
-        //     round-95 fix deleted the old second GET). A backend failure
+        //     single-snapshot fix removed the earlier second GET). A backend failure
         //     on the retained read maps exactly like the find() failure:
         //     the retryable StorageUnavailable, never a new error class.
         //     A pending record falls through to the legacy admission ->
@@ -732,7 +731,7 @@ final class Verifier
         //     first-race window. A record that vanishes after the
         //     snapshot (a pending read, then a concurrent delete) is
         //     answered by the consume transition's null as RecordNotFound,
-        //     exactly the pre-round-95 interleaving.
+        //     exactly the earlier interleaving.
         if ($runtime !== null) {
             if ($runtime->kind === ChallengeRuntimeStateKind::Cancelled) {
                 // Cancelled: the terminal marker of the cancellation
@@ -751,7 +750,7 @@ final class Verifier
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
-                // consumedState(), the old second GET. The shipped
+                // consumedState(), the earlier second GET. The shipped
                 // backends decode the record and the envelope from the
                 // same bytes, so this branch never runs for them.
                 if ($this->storage instanceof ConsumedStateReadableInterface) {
@@ -889,8 +888,8 @@ final class Verifier
             // 10. Post-derive final revalidation: re-check against the
             //     current server clock and the current expectations
             //     before the leading-zero verdict, matching the Rust
-            //     mirror's unconditional final_revalidate (round-95
-            //     audit fix). The check runs for both a valid and an
+            //     mirror's unconditional final_revalidate. The check
+            //     runs for both a valid and an
             //     invalid derivation, so a record that expired during
             //     the derivation commits Expired even when the proof
             //     was insufficient — never a stale InsufficientWork.
@@ -1066,8 +1065,8 @@ final class Verifier
      * are re-checked like the ordinary post-derive final revalidation:
      * the expiry re-read, then the policy epoch, region and issuer. A
      * deadline crossing or a rotation landing mid-derivation refuses the
-     * resume, for both a valid and an invalid derivation (round-95 audit
-     * fix, Rust parity): an insufficient proof on an expired record
+     * resume, for both a valid and an invalid derivation (Rust parity):
+     * an insufficient proof on an expired record
      * commits Expired, never InsufficientWork. The minimum-duration
      * floor is exempt (it was passed before
      * the consume; it is not a security deadline). The signed expiry is
@@ -1302,7 +1301,7 @@ final class Verifier
         // only the short lease, never a poison marker. The claim sits
         // after the cheap-phase revalidation and before the admission
         // gate: a claim loser never acquires an Argon capacity slot
-        // (audit fix: the old order leaked a slot for the whole lease
+        // (the earlier order leaked a slot for the whole lease
         // TTL), and a refused or unavailable capacity lease releases
         // the claim it held in the finally below, so a CapacityExceeded
         // loser never leaves a poison claim behind for later retries. A
@@ -1380,8 +1379,8 @@ final class Verifier
             // Post-derive final revalidation: the same current-clock and
             // current-expectation re-check the ordinary verify() runs
             // after its derivation, step 10 of {@see self::verify()}. It
-            // runs for both a valid and an invalid derivation (round-95
-            // audit fix): the Rust mirror re-reads the clock after the
+            // runs for both a valid and an invalid derivation (Rust
+            // parity): the Rust mirror re-reads the clock after the
             // derivation before the leading-zero verdict, so an invalid
             // derivation on a record that expired mid-derive commits
             // Expired, never a stale InsufficientWork. First the expiry

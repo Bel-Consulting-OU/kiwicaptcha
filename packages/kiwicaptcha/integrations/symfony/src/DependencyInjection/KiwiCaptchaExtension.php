@@ -641,7 +641,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setPublic(true));
         // The recovery-claim derivation TTL (resume_claim_ttl_secs) is
         // wired by name ($resumeClaimTtlSecs) when the installed core's
-        // Verifier declares the parameter (added in the round-94 core);
+        // Verifier declares the parameter (a core addition);
         // an older core simply keeps its constructor default. The guard
         // exists because Symfony's ResolveNamedArgumentsPass refuses a
         // named argument the class does not declare at container compile
@@ -2068,7 +2068,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
     /**
      * Whether the installed core's Verifier constructor declares the
-     * `$resumeClaimTtlSecs` parameter (the round-94 recovery-claim TTL).
+     * `$resumeClaimTtlSecs` parameter (the recovery-claim TTL).
      * The bundle wires the named argument only when the parameter exists,
      * because Symfony's ResolveNamedArgumentsPass refuses named arguments
      * the class does not declare, at container compile time.

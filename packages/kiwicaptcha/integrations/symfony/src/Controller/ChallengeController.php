@@ -2346,7 +2346,7 @@ final class ChallengeController
                     return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
-                // margin): the old nonce must become provably
+                // margin): the prior nonce must become provably
                 // non-redeemable before the chain is rearmed — the atomic
                 // pending->cancelled transition. If the cancellation wins,
                 // the outstanding slot is released and the chain rearmed;

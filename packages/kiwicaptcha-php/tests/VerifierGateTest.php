@@ -308,14 +308,14 @@ final class VerifierGateTest extends TestCase
         self::assertSame(1, $gate->releases, 'the lease must be released exactly once after a successful acquire');
     }
 
-    // ── Terminal-state admission pre-check (round-94 audit fix) ─────────
+    // ── Terminal-state admission pre-check ─────────────────────────────
 
     public function testCancelledArgonRecordReturnsRecordNotFoundWithoutAcquiringAdmission(): void
     {
         // A well-formed solved token for a cancelled Argon record
         // resolves to the pinned RecordNotFound through the
         // pre-admission terminal-state check, without acquiring an
-        // Argon admission slot (previously the admission happened first
+        // Argon admission slot (the admission used to happen first
         // and the consume transition then revealed the terminal state
         // as missing).
         $record = $this->argon2Record();
@@ -603,7 +603,7 @@ final class VerifierGateTest extends TestCase
     public function testNoCapabilityStorageKeepsTheLegacyAdmissionThenRecordNotFoundBehavior(): void
     {
         // A storage without the runtime-state capability (and without
-        // the consumed-state capability) keeps the OLD behavior: a
+        // the consumed-state capability) keeps the prior behavior: a
         // well-formed token for a cancelled record still acquires an
         // Argon admission slot, and the consume transition then reveals
         // the terminal state as RecordNotFound.

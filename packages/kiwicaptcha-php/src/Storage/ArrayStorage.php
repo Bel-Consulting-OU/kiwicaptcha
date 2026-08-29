@@ -84,7 +84,7 @@ use KiwiCaptcha\ChallengeRuntimeState;
  *
  * Bounded retention: `store()` first prunes expired entries. When the
  * map is at the hard cap, {@see self::DEFAULT_MAX_ENTRIES} or the
- * constructor's $maxEntries, it evicts the oldest-expiring entries
+ * constructor's $maxEntries, it evicts the earliest-expiring entries
  * first, so a long-lived CLI process sharing one storage instance can
  * never accumulate unbounded state.
  */
@@ -93,7 +93,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     /**
      * The default hard cap on retained entries. `store()` prunes
      * expired records first and then, only when the map is at the cap,
-     * evicts the oldest-expiring entries. A long-lived CLI process
+     * evicts the earliest-expiring entries. A long-lived CLI process
      * sharing one storage instance stays memory-bounded, matching what
      * the Redis backend gets for free from key TTLs.
      */

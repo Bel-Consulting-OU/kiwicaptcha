@@ -128,7 +128,7 @@ final class ChainStateWalk
                 // Fresh generation: the chain is absent (expired) or the
                 // mapping is gone (compare-deleted). The walk repairs it
                 // with a fresh chain id, exactly like the ticket service;
-                // the old generation is sealed by its per-step invariant
+                // the prior generation is sealed by its per-step invariant
                 // checks and its concrete record (terminal or otherwise)
                 // survives untouched — the model must never mutate it.
                 Assert::assertNull($mapped, $context.': the walk never repoints a live obligation');
