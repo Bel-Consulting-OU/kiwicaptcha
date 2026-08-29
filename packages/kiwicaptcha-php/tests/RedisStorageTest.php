@@ -9,6 +9,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Verifier;
@@ -526,9 +527,66 @@ final class RedisStorageTest extends TestCase
 
         $storage->consume('redis-nonce-1');
 
-        $evals = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EVAL'));
-        self::assertNotEmpty($evals, 'consume must go through eval for Predis');
-        self::assertStringContainsString('consume transition', (string) $evals[0][1][0], 'the atomic consume-transition Lua must be used (no GETDEL delete)');
+        $evals = $client->evals;
+        self::assertNotEmpty($evals, 'consume must go through the Lua script for Predis (EVALSHA after the SCRIPT LOAD warm-up)');
+        self::assertStringContainsString('consume transition', $evals[0]['script'], 'the atomic consume-transition Lua must be used (no GETDEL delete)');
+    }
+
+    public function testConsumeDecodesTheEnvelopeExactlyOnce(): void
+    {
+        // The record AND the recorded operation identity must come from
+        // ONE json_decode of the same stored bytes (the old path paid a
+        // second full parse in decodeIdentity()).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $consumed = $storage->consume('redis-nonce-1');
+
+        self::assertNotNull($consumed);
+        self::assertSame(1, $storage->envelopeDecodeCount(), 'consume() must json_decode the stored envelope exactly once');
+    }
+
+    public function testConsumeWithOperationIdentityDecodesTheEnvelopeExactlyOnce(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+
+        $consumed = $storage->consumeWithOperationIdentity('redis-nonce-1', 'order-42');
+
+        self::assertNotNull($consumed);
+        self::assertSame('order-42', $consumed->operationIdentity, 'the identity rides back on the single parse');
+        self::assertSame(1, $storage->envelopeDecodeCount(), 'consumeWithOperationIdentity() must json_decode the stored envelope exactly once');
+    }
+
+    public function testConsumedStateDecodesTheEnvelopeExactlyOnce(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+        $before = $storage->envelopeDecodeCount();
+
+        $state = $storage->consumedState('redis-nonce-1');
+
+        self::assertNotNull($state);
+        self::assertSame($before + 1, $storage->envelopeDecodeCount(), 'consumedState() must json_decode the stored envelope exactly once');
+    }
+
+    public function testRuntimeStateDecodesTheConsumedEnvelopeExactlyOnce(): void
+    {
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+        $before = $storage->envelopeDecodeCount();
+
+        $runtime = $storage->runtimeState('redis-nonce-1');
+
+        self::assertSame(\KiwiCaptcha\ChallengeRuntimeStateKind::Consumed, $runtime->kind);
+        self::assertNotNull($runtime->consumed);
+        self::assertSame($before + 1, $storage->envelopeDecodeCount(), 'the consumed runtime-state snapshot must json_decode the envelope exactly once');
     }
 
     public function testCommitResultStoresTheDeterministicOutcome(): void
@@ -687,9 +745,9 @@ final class RedisStorageTest extends TestCase
 
         $storage->commitResult('redis-nonce-1', false, null);
 
-        $evals = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EVAL'));
+        $evals = $client->evals;
         self::assertNotEmpty($evals);
-        self::assertStringContainsString('commit result', (string) $evals[1][1][0], 'commitResult must go through its own atomic Lua');
+        self::assertStringContainsString('commit result', $evals[1]['script'], 'commitResult must go through its own atomic Lua');
     }
 
     public function testConsumeReturnsTheCommittedResultOnRetry(): void
@@ -1111,7 +1169,12 @@ final class RedisStorageTest extends TestCase
 
         $verifier = new Verifier($storage);
         $identity = 'op-'.hash('sha256', 'backend|uuid|response');
-        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
+        // The round-96 exact-binding default would refuse the bound
+        // record; the test pins the stored-binding exposure, so the
+        // expectation is named unenforced (the binding is merely
+        // returned on the valid outcome).
+        $unenforced = RequestBindingExpectation::unenforced();
+        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity, bindingExpectation: $unenforced);
         self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
 
         // The consumed record persists with its exact integers intact;
@@ -1123,7 +1186,7 @@ final class RedisStorageTest extends TestCase
 
         // Deterministic retry: the exact same logical operation returns
         // the same stored result without re-deriving.
-        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
+        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity, bindingExpectation: $unenforced);
         self::assertTrue($replay->isOk(), 'the replay must return the stored result (got '.$replay->code().')');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame('txn-A', $replay->requestBinding, 'the stored binding must be exposed');
@@ -1457,7 +1520,12 @@ final class RedisStorageTest extends TestCase
             prefix: 'pre', challenge: 'ch', minDurationMs: 0, issuedAtNs: 1_700_000_000_000_000_000,
             region: null, requestBinding: null, issuer: 'kiwi', kid: 1, hostname: null,
         );
-        $storage = new \KiwiCaptcha\Storage\ArrayStorage();
+        // The storage clock pinned inside the record's lifetime: the
+        // ArrayStorage now applies the record's expires_at (Redis TTL
+        // parity — an expired record is absent to every read), and the
+        // 2023-era fixture record must stay readable to build the
+        // consumed envelope this test decodes.
+        $storage = new \KiwiCaptcha\Storage\ArrayStorage(now: static fn (): int => 1_700_000_060);
         $storage->store($record);
         $storage->consumeWithOperationIdentity($record->nonce, 'op-single-snapshot');
         self::assertTrue($storage->commitResult($record->nonce, true, null));
@@ -1501,7 +1569,10 @@ final class RedisStorageTest extends TestCase
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }
-        $storage = new \KiwiCaptcha\Storage\ArrayStorage();
+        // Storage clock pinned inside the record's lifetime (see the
+        // single-snapshot fixture above: the ArrayStorage applies
+        // expires_at with Redis TTL parity now).
+        $storage = new \KiwiCaptcha\Storage\ArrayStorage(now: static fn (): int => 1_700_000_060);
         $record = new \KiwiCaptcha\ChallengeRecord(
             nonce: 'n'.str_repeat('1', 43), scope: 'login', bindingTag: 'ip:127.0.0.1',
             issuedAt: 1_700_000_000, expiresAt: 1_700_000_120, algorithm: \KiwiCaptcha\PoWAlgorithm::Sha256,
@@ -1675,7 +1746,7 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
     /** @var array<string, string> in-memory keys, the fake "server" state */
     public array $store = [];
 
-    /** Number of times the fake connection received the EVAL command. */
+    /** Number of times the fake connection received the Lua script (EVAL or `EVALSHA`). */
     public int $evalInvocations = 0;
 
     private \Predis\Connection\ParametersInterface $parameters;
@@ -1691,10 +1762,22 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
 
     public function executeCommand(\Predis\Command\CommandInterface $command)
     {
-        if ($command->getId() !== 'EVAL') {
+        if ($command->getId() === 'SCRIPT') {
+            // `SCRIPT` `LOAD`: the server registers the body and answers
+            // with its sha1 (the storage's per-script sha cache).
+            $args = $command->getArguments();
+            if (strtoupper((string) ($args[0] ?? '')) === 'LOAD') {
+                return sha1((string) ($args[1] ?? ''));
+            }
+
+            return null;
+        }
+        if ($command->getId() !== 'EVAL' && $command->getId() !== 'EVALSHA') {
             return null;
         }
         $this->evalInvocations++;
+        // EVAL layout: [script, numKeys, key1..]; `EVALSHA` layout:
+        // [sha, numKeys, key1..] — the key sits at index 2 either way.
         $key = (string) ($command->getArguments()[2] ?? '');
 
         if ($this->evalInvocations === 1) {
