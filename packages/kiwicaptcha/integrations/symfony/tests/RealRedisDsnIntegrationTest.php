@@ -36,6 +36,17 @@ final class RealRedisDsnIntegrationTest extends TestCase
             self::markTestSkipped('KC_REDIS_URL not set — real-Redis DSN integration test skipped');
         }
 
+        // The redis_dsn contract is redis:// (plain) or rediss:// (TLS):
+        // the fail-closed validation refuses every other scheme so a
+        // malformed DSN never reaches the first request. The CI service
+        // publishes KC_REDIS_URL in Predis's native tcp:// scheme, which
+        // is an alias of redis:// for the same TCP connection, so the
+        // test maps the alias onto the contract shape before the kernel
+        // validates it.
+        if (str_starts_with($url, 'tcp://')) {
+            $url = 'redis://'.substr($url, strlen('tcp://'));
+        }
+
         return $url;
     }
 
