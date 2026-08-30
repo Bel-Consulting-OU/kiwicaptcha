@@ -714,9 +714,12 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
  * With $armDecoy the issuance goes through the real authenticated
  * decoy path (issueWithDecoyField: protocol-v3 record, the decoy name
  * signed into the canonical payload), the mirror of the bundle's
- * risk.decoy_v3_enabled issuance.
+ * risk.decoy_v3_enabled issuance. $pinnedDecoy (fixture-only) pins the
+ * armed name so a spec can force a deliberate collision with an
+ * application field; the pinned name is signed into the record exactly
+ * like any other armed name.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null): ?array
 {
     $config = new Config(
         secretKey: $GLOBALS['kiwi_secret'],
@@ -732,7 +735,7 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm,
     $storage = new ArrayStorage();
     $issuer = new Issuer($config, $storage, now: static fn (): int => time());
     $challenge = $armDecoy
-        ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding)
+        ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)
         : $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
     $record = $storage->find($challenge->nonce);
     if ($record === null) {
@@ -987,7 +990,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // when redeemed under txn-B — the stored proof really carries the
     // binding, exactly like the bundle's issuance.
     $presentedBinding = isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
-    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride);
+    // ?decoy=pool&decoyname=<name> pins the authenticated armed name (the
+    // fixture-only issuer seam signs the pinned name into the record), so
+    // a spec can force a deliberate collision with an application field.
+    $pinnedDecoy = (string) ($_GET['decoyname'] ?? '');
+    $pinnedDecoy = $pinnedDecoy !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $pinnedDecoy) === 1 ? $pinnedDecoy : null;
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy);
     if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
@@ -1021,11 +1029,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $out = $challenge;
     // Risk-v2 fixture: ?decoy=1 makes the fixture emit the server-issued
     // decoy (honeypot) field name, mirroring the bundle's risk-enabled
-    // issuance response. The name comes from the combinatorial grammar
-    // (deterministic per nonce, so a given challenge always renders the
-    // same strategy in the browser specs); ?decoyname=... overrides the
-    // emitted name with a fixed one, so specs can drive every rendering
-    // variant deterministically.
+    // issuance response. The name is a grammar prefix (deterministic per
+    // nonce) plus a fresh random suffix — the response-only surface, the
+    // record itself is unarmed; ?decoyname=... overrides the emitted name
+    // with a fixed one, so specs can pin the exact name (for ?decoy=pool
+    // it pins the authenticated armed name too, see mintChallenge).
     if (($_GET['decoy'] ?? '') === '1') {
         $override = (string) ($_GET['decoyname'] ?? '');
         if ($override !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $override) === 1) {
@@ -1037,6 +1045,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
                 hexdec(substr($h, 2, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY),
                 hexdec(substr($h, 4, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT3_FORM),
             );
+        }
+    }
+    // ?strategy=N emits the non-authenticated rendering-strategy hint
+    // (0-5) the widget driver honors when present, so the three-engine
+    // lane can force every polymorphic variant deterministically.
+    // Production responses omit it.
+    if (($_GET['strategy'] ?? '') !== '' && ctype_digit((string) $_GET['strategy'])) {
+        $strategy = (int) $_GET['strategy'];
+        if ($strategy >= 0 && $strategy <= 5) {
+            $out['strategy'] = $strategy;
         }
     }
     echo json_encode($out);
@@ -1343,6 +1361,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/honeypot-check') {
     $decoyField = \method_exists($outcome, 'decoyField') ? $outcome->decoyField() : null;
     $honeypotHit = false;
     if (\is_string($decoyField) && $decoyField !== '') {
+        // Array-shaped parameters under the decoy name (e.g.
+        // billing_address_line[]=x) are not a scalar decoy value: the
+        // deterministic answer is no hit, never an error. A forced
+        // same-name collision with an application field parses to a
+        // single value that may read as a hit; the guarantee is that an
+        // accidental collision is impossible (the 64-bit suffix), and
+        // the response is always deterministic — never a 500.
         $value = $fields[$decoyField] ?? null;
         $honeypotHit = \is_string($value) && $value !== '';
     }
@@ -1482,6 +1507,7 @@ if ($path === '/' || $path === '/index.html') {
     $decoyParam = (string) ($_GET['decoy'] ?? '');
     if ($decoyParam === '1' || $decoyParam === 'pool') $endpointQuery[] = 'decoy='.$decoyParam;
     if (($_GET['decoyname'] ?? '') !== '') $endpointQuery[] = 'decoyname='.rawurlencode((string) $_GET['decoyname']);
+    if (($_GET['strategy'] ?? '') !== '' && ctype_digit((string) $_GET['strategy'])) $endpointQuery[] = 'strategy='.rawurlencode((string) $_GET['strategy']);
     if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);

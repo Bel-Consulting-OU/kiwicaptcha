@@ -5,15 +5,100 @@ The bundle is configured under the `kiwi_captcha` key in
 default and validation. Options are validated at container-compile time where
 possible; the same bounds are enforced by the core package at runtime.
 
+## Quick start (verified flow)
+
+An ordinary installation configures four keys and nothing else. The
+profile fills every safety-relevant default, the secret comes from the
+environment, and the DSN builds every Redis-backed service:
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    secret_key: '%env(KIWI_SECRET_KEY)%'
+    public_base_url: 'https://captcha.example.com'
+    redis_dsn: 'redis://127.0.0.1:6379/0'
+```
+
+- `.env`: `KIWI_SECRET_KEY`, generated with `openssl rand -hex 32`.
+- `public_base_url` and `redis_dsn` are literals in the config file. This
+  bundle version validates both shapes at container build time, before
+  `%env()` placeholders resolve, so a placeholder there fails the boot.
+  The secret stays env-managed because the bundle validates it at
+  runtime, not at build time.
+- Install the client library: `composer require predis/predis`.
+- The Flex recipe ships this exact file; see
+  [flex-recipe.md](flex-recipe.md).
+
+Boot check: `bin/console kiwicaptcha:doctor` reports one status per
+check and exits non-zero on any failure. The minimal config above must
+reach `[PASS] Redis reachability`, `[PASS] Storage atomicity` and no
+`[FAIL]` row; every remaining `[WARN]` row names the deployment
+decision still open.
+
+What the DSN builds: the challenge storage
+(`KiwiCaptcha\Storage\RedisStorage`, atomic, so the production storage
+guard passes), the distributed issuance rate limiter, the Argon2id
+admission semaphore and, under `high_abuse`, the risk state store. An
+explicit service id wins over the DSN for its knob (`storage`,
+`redis_service`, `risk.redis_service`); see "Advanced configuration"
+below.
+
 ## Protection profiles
 
 Ordinary deployments operate at the policy level: set one
 `protection_profile` and let the bundle derive the safety-relevant knobs
 you do not set. The profile fills **safe derived defaults** for the knobs
-it governs; an explicitly configured knob always wins over the profile.
-With `protection_profile: null` (the default) every knob keeps its
-individual default and behavior is byte-identical to the pre-profile
-configuration.
+it governs. With `protection_profile: null` (the default) every knob
+keeps its individual default and behavior is byte-identical to the
+pre-profile configuration.
+
+**The profile is the LOWEST-precedence configuration layer.** Symfony
+merges your config files in order, so the bundle applies the profile as
+the first, weakest layer of that merge: an explicit value in **any**
+config file always wins over the profile. This matters for layered
+configurations:
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+    rate_limit: 1          # explicit: wins over the profile's rate_limit 5
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    rate_limit: 100        # a LATER layer's explicit value also wins
+```
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: compatibility   # the LAST profile wins
+```
+
+The layering semantics:
+
+- The **final profile** is the last config layer whose
+  `protection_profile` is set; later layers override earlier ones.
+- The profile fills its derived defaults only where no layer set the
+  knob explicitly. The profile defaults are the first array of the
+  merge, so a later layer that carries only `protection_profile` can
+  never override an explicit setting from an earlier layer. A base
+  `rate_limit: 1` stays 1 under a prod `protection_profile: high_abuse`
+  overlay, and the profile's other defaults still apply where no layer
+  set them.
+- Nested values merge key-by-key: an explicit `risk.weights.replay` in
+  one layer wins, and the profile still fills the other weights.
+- `high_abuse` chained step-up engages when
+  `risk.request_binding_authority` is wired in **any** layer; the
+  conditional is evaluated on the final merged configuration. Without
+  an authority anywhere, chaining stays off. An explicit
+  `risk.chaining.enabled` always wins, and an explicit `true` without an
+  authority is still refused at compile time.
 
 ```yaml
 kiwi_captcha:
@@ -59,23 +144,24 @@ Profile rationale:
   with protocol-v3 emission, which only engages once the central
   `min_protocol_version` floor confirms. Chained-challenge step-up
   engages automatically when `risk.request_binding_authority` is wired
-  in the same configuration file.
+  in any configuration layer (the conditional runs on the final merged
+  configuration).
 - compatibility maximizes integration compatibility: sha256, a
   conservative 300 s TTL (Turnstile token-lifetime parity), binding off
   (IP churn behind NAT/mobile), risk and the decoy surface off
   (protocol-v2 emission), no behavioral coupling.
 
-The profiles never override an explicitly configured knob: the fill
-happens at configuration-normalization time and only for keys that are
-absent from your configuration. `protection_profile: null` and any value
-outside the four names are refused.
+The profiles never override an explicitly configured knob: the profile
+defaults are merged as the lowest-precedence layer, so they apply only
+where the key is absent from your configuration. `protection_profile:
+null` and any value outside the four names are refused.
 
 ## Advanced configuration
 
 The per-knob reference below is the advanced layer. Most deployments set
-only a `protection_profile`, `secret_key`, `public_base_url` and a shared
-storage, and never touch these knobs. Every option stays available and
-documented; a knob set explicitly always wins over the profile.
+only a `protection_profile`, `secret_key`, `public_base_url` and
+`redis_dsn`, and never touch these knobs. Every option stays available
+and documented; a knob set explicitly always wins over the profile.
 
 ### Base configuration
 
@@ -91,9 +177,11 @@ kiwi_captcha:
     route_prefix: /kiwi-captcha             # challenge endpoint prefix; the form
                                             # widget and standalone widget both
                                             # derive their endpoint from it
-    # Production requires a shared storage (Redis). The bundle fails fast with
-    # a LogicException if ArrayStorage is configured outside the test/dev
-    # environment (kernel.environment or APP_ENV).
+    # Production requires a shared storage (Redis). With redis_dsn set,
+    # the bundle constructs the Redis-backed services itself — no
+    # storage service wiring needed. Without a DSN the bundle fails fast
+    # with a LogicException if ArrayStorage is configured outside the
+    # test/dev environment (kernel.environment or APP_ENV).
     # storage: kiwicaptcha.storage.redis    # atomic pending→consumed Lua
     #                                       # transition: the consumed
     #                                       # record and its deterministic
@@ -102,6 +190,37 @@ kiwi_captcha:
     #                                       # observes the consumed state
     #                                       # instead of re-verifying
 ```
+
+### Redis (`redis_dsn`)
+
+`redis_dsn` is the first-class, high-level Redis connection setting. Set
+one DSN and the bundle builds every Redis-backed service from it:
+
+```yaml
+kiwi_captcha:
+    redis_dsn: 'redis://user:pass@redis.example.com:6379/0?prefix=kiwi'
+```
+
+What the DSN builds:
+
+- The challenge storage (`KiwiCaptcha\Storage\RedisStorage`; atomic, so
+  the production storage guard passes), the distributed issuance rate
+  limiter, the Argon2id admission semaphore and, when risk is enabled,
+  the risk state store. All of them run over one `Predis\Client` built
+  from the DSN, so install `predis/predis` first
+  (`composer require predis/predis`).
+- The DSN shape is `redis://host:port/db?password=...&prefix=...` (or
+  `rediss://` for TLS). The DSN is handed to `Predis\Client` verbatim;
+  a malformed DSN (wrong scheme, no host) fails closed at container
+  build time, and an unreachable server is a runtime error on the first
+  command, like any wired client.
+- An explicit service id wins over the DSN wherever both are set:
+  `storage` (your own `StorageInterface` service), `redis_service`
+  (your own client for the limiter/semaphore) and
+  `risk.redis_service` (your own `Predis\Client` for the risk state).
+  The DSN keeps filling the knobs you did not set.
+- With `redis_dsn: null` (the default) every existing wiring stays
+  byte-identical.
 
 Validation notes:
 
@@ -310,7 +429,9 @@ is never forced) are the privacy contract; see
     #                                       # gate and the atomic rate
     #                                       # limiter; when null, the
     #                                       # storage's own client is reused
-    #                                       # if storage is RedisStorage
+    #                                       # if storage is RedisStorage, or
+    #                                       # the redis_dsn client is used
+    #                                       # when redis_dsn is set
     # strict_kid_verification: false        # OPTIONAL strict current-kid
     #                                       # verification: when true,
     #                                       # strict keyring resolution is
@@ -382,8 +503,10 @@ kiwi_captcha:
         # The risk-v1 state lives in Redis (EVALSHA of the canonical Lua).
         # Required: risk.redis_service (a Predis\Client service id) — or the
         # bundle's redis_service / RedisStorage client when it is a Predis
-        # client. phpredis (\Redis) is NOT supported by the risk engine, and
-        # risk.enabled without any Predis client fails at container compile.
+        # client, or the redis_dsn client (a Predis\Client) when redis_dsn
+        # is set. phpredis (\Redis) is NOT supported by the risk engine,
+        # and risk.enabled without any Predis client fails at container
+        # compile.
         # redis_service: kiwicaptcha.risk.redis
         namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag
         # master_secret: '%env(KIWI_RISK_SECRET)%'

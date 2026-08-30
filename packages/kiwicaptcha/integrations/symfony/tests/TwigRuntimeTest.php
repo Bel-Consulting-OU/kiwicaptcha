@@ -192,12 +192,18 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('data-kiwi-request-binding', $driver, 'the driver reads the server-rendered binding attribute');
         self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
         self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
-        self::assertStringNotContainsString('getRandomValues', $driver, 'the driver must never generate bindings with crypto.getRandomValues');
-        // Math.random exists exactly twice — the per-widget
-        // data-kiwi-instance debugging marker and the per-widget hCaptcha
-        // response-key marker. It must never appear in the binding path:
-        // the binding is assigned from the container attribute only
+        // crypto.getRandomValues is allowed exactly once (the call): the
+        // client-side `CSPRNG` draw of the decoy (honeypot) rendering
+        // strategy — a presentation dimension, never a security boundary
+        // and never a binding. The binding path stays attribute-only
         // (asserted above).
-        self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');
+        self::assertSame(1, substr_count($driver, 'crypto.getRandomValues(buf)'), 'crypto.getRandomValues must be limited to the decoy-strategy draw — bindings are never synthesized client-side');
+        // Math.random exists exactly three times — the per-widget
+        // data-kiwi-instance debugging marker, the per-widget hCaptcha
+        // response-key marker, and the presentation-only fallback of the
+        // decoy-strategy draw on engines without crypto.getRandomValues.
+        // It must never appear in the binding path: the binding is
+        // assigned from the container attribute only (asserted above).
+        self::assertSame(3, substr_count($driver, 'Math.random'), 'Math.random must be limited to the instance-id, response-key and decoy-strategy fallback markers — bindings are never synthesized client-side');
     }
 }

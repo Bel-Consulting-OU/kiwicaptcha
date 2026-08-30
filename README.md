@@ -17,7 +17,7 @@ The security property is the proof-of-work cost; everything else is defense-in-d
 The anti-abuse layer adapts per source without storing identities: only keyed ephemeral pseudonyms (HMAC-derived, epoch-rotating, never a raw IP or a stable identifier), plus aggregate, identity-free statistics.
 It can arm an authenticated decoy, bound to the specific challenge it was issued with, that generic automation may fill.
 Decoys are probabilistic automation evidence, never a sole security boundary.
-An attacker who knows the entire architecture gains no advantage.
+Knowledge of the architecture does not invalidate KiwiCaptcha's core security guarantees.
 The exact decoy vocabulary, scoring weights, escalation thresholds, classifiers, and other adaptation-sensitive parameters are intentionally not published.
 Strategic silence buys adaptation time; it is not a security guarantee.
 The guarantees and non-guarantees are stated in [the security document](SECURITY.md).

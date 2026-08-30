@@ -6,11 +6,14 @@ import { fileURLToPath } from 'node:url';
 
 // Polymorphic decoy rendering: the driver renders the
 // authenticated server-issued decoy (honeypot) name with one of six
-// bounded rendering strategies chosen per challenge as a pure function of
-// the name (FNV-1a 32-bit hash, mirrored from the driver). This spec
-// drives every strategy deterministically through the fixture's
-// ?decoy=1&decoyname=<name> knob and asserts the invariants that hold
-// for ALL of them:
+// bounded rendering strategies chosen per challenge independently of the
+// name — each challenge draws its strategy from the client-side `CSPRNG`,
+// and the fixture's /challenge response may carry an optional
+// non-authenticated `strategy` hint (0-5) that the driver honors when
+// present (production responses omit it). This spec drives every
+// strategy deterministically through the fixture's
+// ?decoy=1&decoyname=<name>&strategy=<id> knob and asserts the
+// invariants that hold for ALL of them:
 //  - exactly ONE decoy input carrying the authenticated name
 //  - invisible to humans (display:none, hidden attribute, or offscreen)
 //  - non-interactive: tabindex=-1, aria-hidden, never in the tab order
@@ -21,6 +24,10 @@ import { fileURLToPath } from 'node:url';
 //    exactly one fresh decoy, unarmed issuance renders no decoy at all
 // The evidence semantics (filled exact name rides the next challenge
 // request as honeypot markers) are covered by risk-v2.spec.mjs.
+//
+// This spec is portable: it runs in Chromium, Firefox and WebKit via
+// playwright.a11y.config.mjs with no engine-specific APIs, so variants 3
+// (offscreen) and 5 (deferred) are proven on all three engines.
 
 const specDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -35,25 +42,21 @@ function assetPath(name) {
   throw new Error(`cannot locate ${name}; tried ${candidates.join(', ')}`);
 }
 
-// One grammar name per strategy, precomputed with the driver's exact
-// FNV-1a variant function (verified below before any DOM assertion).
+// The fixture emits one strategy per test via the ?strategy=<id> knob;
+// the driver honors the hint when present. The wrapper class of the
+// wrapped variants is a separate client-side choice per challenge from a
+// small bounded set — the assertions below only pin membership in that
+// set, never a specific class.
 const STRATEGIES = [
-  { id: 0, name: 'secondary_contact_number' },
-  { id: 1, name: 'secondary_contact_email' },
-  { id: 2, name: 'secondary_contact_name' },
-  { id: 3, name: 'secondary_contact_phone' },
-  { id: 4, name: 'secondary_contact_url' },
-  { id: 5, name: 'secondary_contact_line' },
+  { id: 0 },
+  { id: 1 },
+  { id: 2 },
+  { id: 3 },
+  { id: 4 },
+  { id: 5 },
 ];
 
-function fnv1a32(name) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < name.length; i++) {
-    h ^= name.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h >>> 0;
-}
+const WRAP_CLASSES = ['kiwi-form-aux', 'kiwi-form-aux-alt', 'kiwi-field-aux', 'kiwi-aux-group'];
 
 const AXE_RULES = [
   'color-contrast', 'aria-allowed-attr', 'aria-hidden-body', 'aria-hidden-focus',
@@ -68,7 +71,7 @@ async function solve(page, timeout = 60_000) {
 // The decoy element facts a strategy must satisfy, read in one browser
 // round trip so the assertions below are race-free.
 async function decoyFacts(page, name) {
-  return page.evaluate((n) => {
+  return page.evaluate(([n, wrapClasses]) => {
     const token = document.querySelector('[data-kiwi-token]');
     const input = document.querySelector(`input[name="${n}"]`);
     if (!input) return { present: false };
@@ -86,7 +89,8 @@ async function decoyFacts(page, name) {
       position: cs.position,
       left: cs.left,
       hiddenAttr: input.hasAttribute('hidden'),
-      wrapped: !!(host && wrap !== host && wrap.className === 'kiwi-form-aux'),
+      owner: input.getAttribute('data-kiwi-owner'),
+      wrapped: !!(host && wrap !== host && wrapClasses.indexOf(wrap.className) !== -1),
       inHost: !!(host && host.contains(input)),
       // beforeToken: true when the decoy (or its wrapper) precedes the
       // token input among the host's element children.
@@ -97,28 +101,31 @@ async function decoyFacts(page, name) {
       })(),
       tokenParentChildren: token ? token.parentNode.children.length : 0,
     };
-  }, name);
+  }, [name, WRAP_CLASSES]);
 }
 
 test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
   for (const strategy of STRATEGIES) {
     test(`strategy ${strategy.id}: one authenticated decoy input, invisible, non-interactive, axe-clean`, async ({ page }) => {
-      expect(fnv1a32(strategy.name) % 6, 'the strategy fixture must match the driver variant function').toBe(strategy.id);
-      await page.goto(`/?decoy=1&decoyname=${strategy.name}`);
+      // The fixture's ?strategy= knob is the deterministic driver: the
+      // hint rides the challenge response and the driver honors it. The
+      // authenticated name comes from the challenge response (the
+      // fixture knows what it issued); the DOM never exposes it.
+      const respP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'));
+      await page.goto(`/?decoy=1&strategy=${strategy.id}`);
       await solve(page);
+      const data = await (await respP).json();
+      expect(data.decoy_field, 'the response must carry the authenticated decoy name').toBeTruthy();
+      const name = data.decoy_field;
+      await expect(page.locator(`input[name="${name}"]`)).toHaveCount(1);
 
-      // The tracked name on the widget is the authenticated name, and
-      // exactly one input carries it.
-      const tracked = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
-      expect(tracked).toBe(strategy.name);
-      await expect(page.locator(`input[name="${strategy.name}"]`)).toHaveCount(1);
-
-      const facts = await decoyFacts(page, strategy.name);
+      const facts = await decoyFacts(page, name);
       expect(facts.present).toBe(true);
       expect(facts.type).toBe('text');
       expect(facts.tabIndex).toBe(-1);
       expect(facts.ariaHidden).toBe('true');
       expect(facts.value).toBe('');
+      expect(facts.owner, 'every Kiwi-created decoy node carries the ownership marker').toBe('decoy');
       expect(facts.inHost, 'the decoy must live inside the token form host').toBe(true);
 
       // Invisible to humans under every strategy.
@@ -161,14 +168,20 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
 
   test('strategy 5 (deferred): the decoy input appears only after the first solve completes', async ({ page }) => {
     // The deferred strategy records the name at issuance but creates the
-    // input only when the solve completes. With an argon2id challenge the
-    // solving window is long enough to prove the input is absent during
-    // the solve and present afterwards.
+    // input only when the solve completes. The proof is deterministic
+    // and timing-free: the challenge response is held by a route gate,
+    // a MutationObserver watches the form host, and the gate is then
+    // released. If the strategy were NOT deferred, the input would be
+    // inserted while the token is still empty (at response processing)
+    // and the observer would catch it; with the deferred strategy the
+    // input exists only after the solve, when the token is already
+    // written. The assertion holds on every engine regardless of solve
+    // speed.
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
-<div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=1&decoyname=secondary_contact_line" data-kiwi-scope="login" data-kiwi-algorithm="argon2id">
+<div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=1&strategy=5" data-kiwi-scope="login" data-kiwi-algorithm="argon2id">
   <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
   <div class="kiwi-widget" data-kiwi-widget data-state="idle" role="status" aria-live="polite">
     <div class="kiwi-icon-wrapper"><svg></svg><div class="kiwi-glow"></div></div>
@@ -184,53 +197,106 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
     await page.route('**/argon-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
+    // The route gate holds the challenge response until the observer is
+    // installed, so no response processing can race the instrumentation.
+    let releaseGate;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    let challengeData = null;
+    await page.route('**/challenge?*', async (route) => {
+      const resp = await route.fetch();
+      const data = await resp.json();
+      challengeData = data;
+      await gate;
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
+    });
     await page.goto('/argon-form');
+    await page.waitForFunction(() => document.querySelector('[data-kiwi-widget]').getAttribute('data-state') === 'connecting', null, { timeout: 30_000 });
+    // The route handler holds the response; poll until it has captured it
+    // (the connecting state precedes the fetch dispatch, so the capture
+    // may lag the state by a moment).
+    await expect.poll(() => challengeData, { timeout: 30_000 }).toBeTruthy();
+    const name = challengeData.decoy_field;
+    expect(name, 'the held response must carry the authenticated decoy name').toBeTruthy();
 
-    // While the widget is solving, the deferred input must not exist.
-    await page.waitForFunction(
-      () => document.querySelector('[data-kiwi-widget]').getAttribute('data-state') === 'solving',
-      null,
-      { timeout: 60_000 }
-    );
-    const duringSolve = await page.evaluate(() => !!document.querySelector('input[name="secondary_contact_line"]'));
-    expect(duringSolve, 'the deferred decoy must not exist during the first solve').toBe(false);
+    // The observer resolves with the violation flag: true when the decoy
+    // input appears while the token is still empty (a non-deferred
+    // insert at response processing), false when the token write comes
+    // first (the deferred flush runs synchronously with it).
+    const observed = page.evaluate((n) => new Promise((resolve) => {
+      const token = document.querySelector('[data-kiwi-token]');
+      const host = token.parentNode;
+      let insertedBeforeTokenWrite = false;
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        observer.disconnect();
+        clearInterval(timer);
+        clearTimeout(deadline);
+        resolve(value);
+      };
+      const check = () => {
+        if (token.value !== '') {
+          finish({ insertedBeforeTokenWrite });
+          return;
+        }
+        if (host.querySelector(`input[name="${n}"]`)) {
+          insertedBeforeTokenWrite = true;
+          finish({ insertedBeforeTokenWrite });
+        }
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(host, { childList: true, subtree: true });
+      // The token write is a property set (no mutation record), so the
+      // fallback poll covers a solve that completes without any DOM
+      // mutation before it. The deadline turns a failed solve into a
+      // visible test failure instead of a hang.
+      const timer = setInterval(check, 5);
+      const deadline = setTimeout(() => finish({ insertedBeforeTokenWrite, timedOut: true }), 30_000);
+    }), name);
+    releaseGate();
+    const result = await observed;
+    expect(result.timedOut, 'the solve must complete so the deferred flush is observable').not.toBe(true);
+    expect(result.insertedBeforeTokenWrite, 'the deferred decoy must not exist before the first solve completes').toBe(false);
 
+    // After the solve the deferred input exists, exactly once, with the
+    // invariant surface of the strategy-0 look.
     await solve(page);
-    await expect(page.locator('input[name="secondary_contact_line"]'), 'the deferred decoy appears after the solve').toHaveCount(1);
-    await expect(page.locator('input[name="secondary_contact_line"]')).toHaveAttribute('tabindex', '-1');
+    await expect(page.locator(`input[name="${name}"]`), 'the deferred decoy appears after the solve').toHaveCount(1);
+    await expect(page.locator(`input[name="${name}"]`)).toHaveAttribute('tabindex', '-1');
+    await expect(page.locator(`input[name="${name}"]`)).toHaveAttribute('data-kiwi-owner', 'decoy');
   });
 
-  test('unarmed issuance renders no decoy input and tracks no name', async ({ page }) => {
+  test('unarmed issuance renders no decoy input and carries no name', async ({ page }) => {
     await page.goto('/');
     await solve(page);
     const state = await page.evaluate(() => {
-      const w = document.querySelector('[data-kiwi-widget]');
+      // Decoy inputs are Kiwi-owned nodes carrying the ownership marker;
+      // the kiwi_* inputs (token, request binding) are driver-owned
+      // fields, never decoys.
       return {
-        tracked: w.dataset.kiwiDecoyName || null,
-        deferred: w.dataset.kiwiDecoyDeferred || null,
-        // Decoy inputs are grammar-shaped names the driver rendered; the
-        // kiwi_* inputs (token, request binding) are driver-owned fields,
-        // never decoys.
-        decoys: Array.from(document.querySelectorAll('input')).filter((el) => /^[a-z]+_[a-z]+_[a-z]+$/.test(el.name) && !/^kiwi_/.test(el.name)).length,
+        owned: Array.from(document.querySelectorAll('input[data-kiwi-owner="decoy"]')).length,
+        decoys: Array.from(document.querySelectorAll('input')).filter((el) => el.getAttribute('data-kiwi-owner') === 'decoy').length,
       };
     });
-    expect(state.tracked).toBeNull();
-    expect(state.deferred).toBeNull();
+    expect(state.owned).toBe(0);
     expect(state.decoys).toBe(0);
   });
 
   test('reset removes the rendered decoy; reissue replaces it with exactly one fresh decoy', async ({ page }) => {
     // The reissue flow is driven by the fixture route override: the
-    // first challenge response carries names[0], the re-solve after the
-    // reset carries names[1]. The two names map to different rendering
-    // strategies (2 and 4), so the replacement is proven across
-    // strategies, not just within one.
+    // first challenge response carries names[0] with strategy 2, the
+    // re-solve after the reset carries names[1] with strategy 4, so the
+    // replacement is proven across strategies, not just within one.
     const names = ['secondary_contact_name', 'secondary_contact_url'];
     let issued = 0;
     await page.route('**/challenge*', async (route) => {
       const resp = await route.fetch();
       const data = await resp.json();
       data.decoy_field = names[issued % names.length];
+      data.strategy = issued % 2 === 0 ? 2 : 4;
       issued++;
       await route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
     });
@@ -253,13 +319,12 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
     // fresh challenge carries names[1] and renders exactly one decoy
     // input — never a stale echo of the prior one.
     await solve(page);
-    const freshName = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
-    expect(freshName).toBe(names[1]);
+    const freshName = names[1];
     await expect(page.locator(`input[name="${freshName}"]`)).toHaveCount(1);
     await expect(page.locator(`input[name="${oldName}"]`), 'the stale decoy must never linger').toHaveCount(0);
     const totalDecoys = await page.evaluate(() => {
       const host = document.querySelector('[data-kiwi-token]').parentNode;
-      return Array.from(host.querySelectorAll('input')).filter((el) => /^[a-z]+_[a-z]+_[a-z]+$/.test(el.name) && !/^kiwi_/.test(el.name)).length;
+      return Array.from(host.querySelectorAll('input')).filter((el) => el.getAttribute('data-kiwi-owner') === 'decoy').length;
     });
     expect(totalDecoys, 'exactly one decoy input after the reissue').toBe(1);
   });

@@ -28,8 +28,9 @@ use PHPUnit\Framework\TestCase;
  *    gains exactly one segment, `|<decoy_field>`, appended after the
  *    kid, 19 segments with the decoy last; the stored record's
  *    protocol_version is 3. The name comes from the shared
- *    combinatorial grammar, see {@see Issuer::composeDecoyName()},
- *    a 27,840-name space.
+ *    combinatorial grammar, see {@see Issuer::composeDecoyName()}:
+ *    a 27,840-prefix space with a per-issuance 16-hex `CSPRNG` suffix,
+ *    an armed space of 27,840 * 2^64 names.
  *  - unarmed: protocol v2, byte-identical to the pre-extension 18-field
  *    format, and neither JSON surface, client-facing challenge nor
  *    stored record, carries the `decoy_field` key; it is absent, not
@@ -97,17 +98,19 @@ final class DecoyFieldTest extends TestCase
         return $counter - 1;
     }
 
-    // ── (a) armed issuance: pool name, 19 segments, decoy last ──────
+    // ── (a) armed issuance: armed name, 19 segments, decoy last ─────
 
-    public function testArmedIssuanceSignsAGrammarNameAsTheFinalCanonicalSegment(): void
+    public function testArmedIssuanceSignsAnArmedNameAsTheFinalCanonicalSegment(): void
     {
         $storage = new ArrayStorage();
         $challenge = $this->issuer($storage)->issueWithDecoyField('login', Vectors::CLIENT_IP);
 
         $decoy = $challenge->decoyField;
         self::assertNotNull($decoy, 'an armed issuance must carry a decoy field name');
-        self::assertTrue(Issuer::isGrammarDecoyName($decoy), "the decoy name must come from the combinatorial grammar (got {$decoy})");
+        self::assertTrue(Issuer::isGrammarDecoyName($decoy), "the decoy name must be a grammar prefix plus suffix (got {$decoy})");
+        self::assertTrue(Issuer::isGrammarDecoyPrefix(substr((string) $decoy, 0, -17)), 'the name must start with a grammar prefix');
         self::assertTrue(Config::isValidDecoyFieldName($decoy));
+        self::assertLessThanOrEqual(47, \strlen($decoy), 'the armed name (prefix + suffix) must be at most 47 bytes');
 
         // The stored record carries the same armed name, under protocol
         // v3 (the decoy-capable canonical).
@@ -820,13 +823,13 @@ final class DecoyFieldTest extends TestCase
         }
     }
 
-    // ── (g) combinatorial grammar: space, validity, collisions ────────
+    // ── (g) combinatorial grammar: prefix space, suffix, validity ─────
 
     /**
-     * The deterministic name for a linear index into the 27,840-name
-     * grammar space (`SLOT1` * `SLOT2` * `SLOT3`).
+     * The deterministic grammar prefix for a linear index into the
+     * 27,840-prefix space (`SLOT1` * `SLOT2` * `SLOT3`).
      */
-    private function grammarNameAt(int $idx): string
+    private function grammarPrefixAt(int $idx): string
     {
         $slot2Size = \count(Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY);
         $slot3Size = \count(Issuer::DECOY_GRAMMAR_SLOT3_FORM);
@@ -834,41 +837,41 @@ final class DecoyFieldTest extends TestCase
         $s2 = intdiv($idx % ($slot2Size * $slot3Size), $slot3Size);
         $s3 = $idx % $slot3Size;
 
-        return Issuer::composeDecoyName($s1, $s2, $s3);
+        return Issuer::composeDecoyPrefix($s1, $s2, $s3);
     }
 
-    public function testGrammarSpaceIsLargeAndEveryNameValid(): void
+    public function testGrammarPrefixSpaceIsLargeAndEveryPrefixValid(): void
     {
-        // The combinatorial space: `SLOT1` * `SLOT2` * `SLOT3` = 32 * 29 * 30 = 27,840 distinct names
+        // The combinatorial prefix space: `SLOT1` * `SLOT2` * `SLOT3` = 32 * 29 * 30 = 27,840 distinct prefixes
         // (each triple joins to a unique string), thousands+, and every
         // member complies with the [A-Za-z0-9_-]{1,64} validation shape
-        // (the longest composed name is 30 bytes).
+        // (the longest prefix is 30 bytes).
         self::assertSame(27_840, Issuer::decoyGrammarSpaceSize());
         $seen = [];
         for ($i = 0; $i < Issuer::decoyGrammarSpaceSize(); $i++) {
-            $name = $this->grammarNameAt($i);
-            self::assertTrue(Config::isValidDecoyFieldName($name), "{$name} must comply with the validation shape");
-            self::assertLessThanOrEqual(64, \strlen($name), "{$name} must be at most 64 bytes");
-            self::assertTrue(Issuer::isGrammarDecoyName($name));
-            $seen[$name] = true;
+            $prefix = $this->grammarPrefixAt($i);
+            self::assertTrue(Config::isValidDecoyFieldName($prefix), "{$prefix} must comply with the validation shape");
+            self::assertLessThanOrEqual(64, \strlen($prefix), "{$prefix} must be at most 64 bytes");
+            self::assertTrue(Issuer::isGrammarDecoyPrefix($prefix));
+            $seen[$prefix] = true;
         }
-        self::assertCount(Issuer::decoyGrammarSpaceSize(), $seen, 'every triple must compose a unique name');
+        self::assertCount(Issuer::decoyGrammarSpaceSize(), $seen, 'every triple must compose a unique prefix');
 
         // A 20,000-draw sample (seeded, deterministic) must not collapse
-        // into a small distinct set: the effective space is the grammar
-        // space, not an accidentally tiny subset.
+        // into a small distinct set: the effective prefix space is the
+        // grammar space, not an accidentally tiny subset.
         mt_srand(42);
         $drawn = [];
         for ($i = 0; $i < 20_000; $i++) {
-            $drawn[$this->grammarNameAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1))] = true;
+            $drawn[$this->grammarPrefixAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1))] = true;
         }
-        self::assertGreaterThanOrEqual(1_000, \count($drawn), '20,000 draws must hit more than 1,000 distinct names (got '.\count($drawn).')');
+        self::assertGreaterThanOrEqual(1_000, \count($drawn), '20,000 draws must hit more than 1,000 distinct prefixes (got '.\count($drawn).')');
     }
 
-    public function testConsecutiveDrawCollisionsAreBoundedByTheSpace(): void
+    public function testConsecutiveDrawCollisionsAreBoundedByThePrefixSpace(): void
     {
         // Fixed-seed statistical test: 10,000 consecutive pairs drawn
-        // uniformly from the 27,840-name space. The expected number of
+        // uniformly from the 27,840-prefix space. The expected number of
         // equal consecutive pairs is ~10,000 / 27,840 ~ 0.36. The bound
         // is < 2 collisions, i.e. a deterministic pass at the ~1/N
         // collision probability per pair.
@@ -876,13 +879,48 @@ final class DecoyFieldTest extends TestCase
         $collisions = 0;
         $previous = null;
         for ($i = 0; $i < 10_000; $i++) {
-            $current = $this->grammarNameAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1));
+            $current = $this->grammarPrefixAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1));
             if ($previous !== null && $previous === $current) {
                 $collisions++;
             }
             $previous = $current;
         }
         self::assertLessThan(2, $collisions, "10,000 consecutive pairs must collide < 2 times (got {$collisions})");
+    }
+
+    public function testArmedNameSuffixIs16LowercaseHexFrom8RandomBytes(): void
+    {
+        // The suffix generator: exactly 16 lowercase hex characters, the
+        // bin2hex of 8 `CSPRNG` bytes — the 64 random bits that make an
+        // armed name unguessable and accidental collision impossible.
+        $suffix = Issuer::decoyNameSuffix();
+        self::assertMatchesRegularExpression('/^[0-9a-f]{16}$/D', $suffix, "the suffix must be 16 lowercase hex chars (got {$suffix})");
+
+        // Two consecutive draws must differ: the suffix is a fresh draw
+        // per call, so identical suffixes across a handful of draws would
+        // indicate a broken RNG, not a collision.
+        $seen = [];
+        for ($i = 0; $i < 20 && \count($seen) < 2; $i++) {
+            $seen[Issuer::decoyNameSuffix()] = true;
+        }
+        self::assertGreaterThanOrEqual(2, \count($seen), 'consecutive suffixes must vary');
+    }
+
+    public function testTwoConsecutiveArmedNamesDifferInTheSuffix(): void
+    {
+        // The statistical core of the collision guarantee: two consecutive
+        // armed compositions differ with overwhelming probability, and
+        // when they differ it is the suffix that differs (the prefix may
+        // repeat, the suffix never does at this sample scale — 2^-64 per
+        // pair).
+        $seenSuffixes = [];
+        for ($i = 0; $i < 40; $i++) {
+            $name = Issuer::composeDecoyName(0, 0, 0);
+            self::assertTrue(Issuer::isGrammarDecoyName($name), "{$name} must be an armed grammar name");
+            self::assertLessThanOrEqual(47, \strlen($name), "{$name} must be at most 47 bytes (the 64-byte validation bound)");
+            $seenSuffixes[substr($name, -16)] = true;
+        }
+        self::assertCount(40, $seenSuffixes, '40 consecutive armed compositions must carry 40 distinct 64-bit suffixes');
     }
 
     public function testGrammarVocabulariesArePinnedAndBounded(): void
@@ -934,12 +972,53 @@ final class DecoyFieldTest extends TestCase
                 "the legacy pool word {$legacy} must remain a vocabulary entry"
             );
         }
-        self::assertTrue(Issuer::isGrammarDecoyName('secondary_contact_phone'));
-        self::assertTrue(Issuer::isGrammarDecoyName('billing_company_url'));
-        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact'));
-        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_extra'));
-        self::assertFalse(Issuer::isGrammarDecoyName('Secondary_Contact_Phone'));
-        self::assertFalse(Issuer::isGrammarDecoyName('company|website'));
+        self::assertTrue(Issuer::isGrammarDecoyPrefix('secondary_contact_phone'));
+        self::assertTrue(Issuer::isGrammarDecoyPrefix('billing_company_url'));
+        self::assertFalse(Issuer::isGrammarDecoyPrefix('secondary_contact'));
+        self::assertFalse(Issuer::isGrammarDecoyPrefix('secondary_contact_phone_extra'));
+        self::assertFalse(Issuer::isGrammarDecoyPrefix('Secondary_Contact_Phone'));
+        self::assertFalse(Issuer::isGrammarDecoyPrefix('company|website'));
+        // The full armed shape: a prefix plus the 16-hex suffix. A bare
+        // prefix is a plausible real field name, so only the suffix makes
+        // an armed name; a prefix without it is not an armed name.
+        self::assertTrue(Issuer::isGrammarDecoyName('secondary_contact_phone_a3f9c21d8e5b7401'));
+        self::assertTrue(Issuer::isGrammarDecoyName('billing_address_line_0000000000000000'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_000000000000000'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_00000000000000000'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_ABCDEF0123456789'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_000000000000000g'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_extra_0000000000000000'));
+    }
+
+    public function testIssueWithDecoyFieldOverridePinsTheArmedName(): void
+    {
+        // The fixture/test seam: an explicit name override is used
+        // verbatim (so the browser fixture can force a deliberate
+        // same-name collision with an application field), and the same
+        // alphabet validation applies to it.
+        $storage = new ArrayStorage();
+        $pinned = 'billing_address_line_a3f9c21d8e5b7401';
+        $challenge = $this->issuer($storage)->issueWithDecoyField('login', Vectors::CLIENT_IP, true, null, null, $pinned);
+        self::assertSame($pinned, $challenge->decoyField);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame($pinned, $record->decoyField, 'the pinned name is signed into the record like any other armed name');
+        self::assertStringEndsWith('|'.$pinned, $this->decodedCanonical($challenge));
+
+        foreach (['', str_repeat('x', 65), 'company|website', 'company.website'] as $bad) {
+            try {
+                $this->issuer($storage)->issueWithDecoyField('login', Vectors::CLIENT_IP, true, null, null, $bad);
+                self::fail('an invalid pinned decoy name must be refused');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('decoy name override', $e->getMessage());
+            }
+        }
+        // The override is a seam: the default path still draws the
+        // random armed name.
+        $fresh = $this->issuer($storage)->issueWithDecoyField('login', Vectors::CLIENT_IP);
+        self::assertNotSame($pinned, $fresh->decoyField);
+        self::assertTrue(Issuer::isGrammarDecoyName($fresh->decoyField));
     }
 
     public function testRedisCommandCountIsIdenticalForArmedAndUnarmed(): void

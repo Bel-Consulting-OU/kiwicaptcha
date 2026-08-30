@@ -29,6 +29,16 @@ async function solve(page, timeout = 60_000) {
   await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout });
 }
 
+// The next challenge response's authenticated decoy name (the decoy name
+// is response-known; the DOM never carries a tracking attribute). The
+// promise must be registered before the navigation that triggers the
+// challenge fetch.
+function challengeDecoyName(page) {
+  return page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+    .then((resp) => resp.json())
+    .then((data) => data.decoy_field ?? null);
+}
+
 async function readCapture(page, name) {
   const resp = await page.request.get(`http://127.0.0.1:8085/capture/${name}`);
   const data = await resp.json();
@@ -72,11 +82,12 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
   });
 
   test('a decoy_field response renders one hidden non-interactive decoy input inside the token form host', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await page.goto('/?decoy=1');
     await solve(page);
 
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
-    expect(name, 'the tracked decoy name must be the server-issued name').toBeTruthy();
+    const name = await nameP;
+    expect(name, 'the decoy name must be the server-issued name').toBeTruthy();
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     // The honeypot input is hidden from humans AND assistive tech: never
@@ -124,10 +135,11 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     await page.route('**/decoy-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
+    const nameP = challengeDecoyName(page);
     await page.goto('/decoy-form');
     await solve(page);
 
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const name = await nameP;
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     // A bot's filler — the driver never auto-fills; the value the form
@@ -148,10 +160,11 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     // ttl=3: the solved credential expires 3s after the solve; the
     // expiry-driven re-solve presents a NEW challenge request that must
     // carry the still-filled decoy as honeypot evidence.
+    const nameP = challengeDecoyName(page);
     await page.goto('/?decoy=1&ttl=3&capture=res');
     await solve(page);
 
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const name = await nameP;
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
@@ -162,6 +175,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     await page.waitForTimeout(3500);
     const expired = await page.evaluate((wid) => window.KiwiCaptcha.isExpired(wid), widgetId);
     expect(expired).toBe(true);
+    // The fresh decoy name is captured from the re-solve's challenge
+    // response (registered before the re-solve fetch fires).
+    const freshNameP = challengeDecoyName(page);
     await page.evaluate((wid) => window.KiwiCaptcha.execute(wid), widgetId);
     await solve(page);
 
@@ -171,7 +187,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.honeypot).toBe('bot@example.com');
     // The re-issuance rendered its OWN per-issuance decoy: the stale
     // input was replaced, exactly one decoy input remains.
-    const freshName = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const freshName = await freshNameP;
     await expect(page.locator(`input[name="${freshName}"]`)).toHaveCount(1);
     await expect(page.locator(`input[name="${name}"]`)).toHaveCount(0);
   });

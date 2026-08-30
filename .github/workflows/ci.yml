@@ -167,14 +167,15 @@ jobs:
     # required-check names. The gate reads the matrix aggregate result,
     # which GitHub computes from the per-cell results with the worst
     # first ordering: failure, then cancelled, then skipped, then
-    # success. A skipped cell (a future path filter) therefore surfaces
-    # as a skipped aggregate and must not fail the gate; the success or
-    # skipped whitelist below passes exactly when every required cell
-    # succeeded or was skipped, and fails exactly when any cell failed
-    # or was cancelled. The job runs even when a cell failed, via the
-    # `if: always()`. The 8.6 nightly lane is deliberately NOT in
-    # `needs`: it is non-gating by design and must stay outside the
-    # required evidence.
+    # success. The whitelist below accepts exactly `success`: anything
+    # else — a failed cell, a cancelled cell or a skipped cell — exits
+    # 1. A lane that is legitimately non-applicable must itself execute
+    # a deterministic no-op/pass rather than being skipped (nothing in
+    # this workflow is path-filtered today, so no lane is ever skipped;
+    # a future path filter must keep that contract). The job runs even
+    # when a cell failed, via the `if: always()`. The 8.6 nightly lane
+    # is deliberately NOT in `needs`: it is non-gating by design and
+    # must stay outside the required evidence.
     name: PHP core supported-matrix
     needs: [php]
     if: always()
@@ -182,12 +183,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: every required PHP core cell succeeded or was skipped
+      - name: every required PHP core cell succeeded
         run: |
           set -euo pipefail
           case '${{ needs.php.result }}' in
-            success|skipped)
-              echo "PHP core supported-matrix OK: every required cell succeeded or was skipped"
+            success)
+              echo "PHP core supported-matrix OK: every required cell succeeded"
+              ;;
+            skipped)
+              echo "::error::PHP core supported-matrix: a required cell was skipped — a lane that is non-applicable must execute a deterministic no-op/pass, never skip"
+              exit 1
               ;;
             *)
               echo "::error::PHP core supported-matrix: a required matrix cell failed or was cancelled"
@@ -272,12 +277,14 @@ jobs:
     # change the externally visible required-check names. The gate
     # reads the matrix aggregate result, which GitHub computes from the
     # per-cell results with the worst first ordering: failure, then
-    # cancelled, then skipped, then success. A skipped cell (a future
-    # path filter) therefore surfaces as a skipped aggregate and must
-    # not fail the gate; the success or skipped whitelist below passes
-    # exactly when every required cell succeeded or was skipped, and
-    # fails exactly when any cell failed or was cancelled. The job runs
-    # even when a cell failed, via the `if: always()`.
+    # cancelled, then skipped, then success. The whitelist below
+    # accepts exactly `success`: anything else — a failed cell, a
+    # cancelled cell or a skipped cell — exits 1. A lane that is
+    # legitimately non-applicable must itself execute a deterministic
+    # no-op/pass rather than being skipped (nothing in this workflow is
+    # path-filtered today, so no lane is ever skipped; a future path
+    # filter must keep that contract). The job runs even when a cell
+    # failed, via the `if: always()`.
     name: Symfony supported-matrix
     needs: [symfony]
     if: always()
@@ -285,12 +292,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: every required Symfony matrix cell succeeded or was skipped
+      - name: every required Symfony matrix cell succeeded
         run: |
           set -euo pipefail
           case '${{ needs.symfony.result }}' in
-            success|skipped)
-              echo "Symfony supported-matrix OK: every required cell succeeded or was skipped"
+            success)
+              echo "Symfony supported-matrix OK: every required cell succeeded"
+              ;;
+            skipped)
+              echo "::error::Symfony supported-matrix: a required cell was skipped — a lane that is non-applicable must execute a deterministic no-op/pass, never skip"
+              exit 1
               ;;
             *)
               echo "::error::Symfony supported-matrix: a required matrix cell failed or was cancelled"
@@ -1105,19 +1116,28 @@ jobs:
 
   perf-budget:
     # Deterministic performance budgets. The hard byte limits run first
-    # and are gating: the three widget-driver copies and the
-    # challenge-response JSON must stay under their caps or this job
-    # fails. The synthetic-load benchmark step then measures issuance
-    # and verification p50/p95 under a fixed workload; its timing step
-    # is non-gating by design (a shared GitHub runner is too noisy for a
-    # hard latency gate), so a timing regression surfaces loudly without
-    # blocking the merge lane while a byte regression blocks it. The
-    # benchmark's relative ratchet is documented as noisy-runner-tolerant
-    # in tools/perf-bench.php.
+    # and are gating: the three widget-driver copies (raw, gzip and
+    # brotli) and the challenge-response JSON must stay under their caps
+    # or this job fails. The synthetic-load benchmark steps then measure
+    # issuance and verification p50/p95 under fixed workloads — the
+    # ArrayStorage SHA baseline, the real-Redis SHA path (a redis
+    # service on 6399, the KC_REDIS_URL contract of perf-bench.php), the
+    # Argon2id admission path (64 MiB, t=3) and the risk-enabled
+    # controller path. Every timing step is non-gating by design (a
+    # shared GitHub runner is too noisy for a hard latency gate), so a
+    # timing regression surfaces loudly without blocking the merge lane
+    # while a byte regression blocks it. The benchmark's relative
+    # ratchets are documented as noisy-runner-tolerant in
+    # tools/perf-bench.php and tools/perf-bench-risk.php.
     name: Performance budgets
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6399:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
@@ -1125,14 +1145,38 @@ jobs:
           php-version: '8.2'
           extensions: json, openssl, sodium
           coverage: none
+      - name: install brotli (compressed widget-driver budgets)
+        # The ubuntu runners ship gzip but no brotli; the compressed
+        # budget is enforced only when a brotli encoder exists, so the
+        # runner installs the CLI (perf-budget.sh falls back to the
+        # python3 brotli module and notes a skipped cap when neither is
+        # available on a local machine).
+        run: sudo apt-get update && sudo apt-get install -y brotli
       - name: install PHP core (the challenge-response measure issues real challenges)
         working-directory: packages/kiwicaptcha-php
         run: composer install --no-interaction --prefer-dist
-      - name: hard byte budgets (widget-driver copies + challenge response)
+      - name: install Symfony bundle (risk-enabled controller benchmark)
+        # perf-bench-risk.php drives the real ChallengeController with
+        # the adaptive risk engine wired, so the bundle vendor must
+        # exist (the kiwicaptcha-php/risk-php dependencies ride along).
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: composer install --no-interaction --no-scripts --prefer-dist
+      - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge response)
         run: bash packages/kiwicaptcha/tools/perf-budget.sh
-      - name: synthetic-load benchmark (p50/p95, non-gating timing)
+      - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench.php
+      - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, non-gating timing)
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-bench.php --redis
+      - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, non-gating timing)
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench.php --argon
+      - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, non-gating timing)
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php
 
   cross-language:
     name: Cross-language (both directions)

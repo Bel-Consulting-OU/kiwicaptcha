@@ -33,6 +33,7 @@ use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\VerifyOutcome;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Exception\BadRequestException;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
@@ -2084,11 +2085,20 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * ignored: a decoy name is server-issued and a mismatched name is
      * not this challenge's decoy. Evidence only: never a gate and never
      * affects the proof validity. Never throws: a broken gateway must
-     * never break the form.
+     * never break the form, and an ARRAY-shaped parameter under the
+     * decoy name (e.g. billing_address_line[]=x) is not a scalar decoy
+     * value — the deterministic answer is no evidence, never a
+     * BadRequestException from the input bag.
      */
     private function formDecoyEvidence(Request $request, string $expectedField): bool
     {
-        $value = $request->request->get($expectedField);
+        try {
+            $value = $request->request->get($expectedField);
+        } catch (BadRequestException) {
+            // A non-scalar (array-shaped) parameter under the decoy name:
+            // no usable decoy value — skip the evidence, never a 500.
+            return false;
+        }
         if (!\is_string($value) || $value === '') {
             return false;
         }
@@ -2285,7 +2295,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     {
         $binding = $request?->attributes->get(self::REQUEST_BINDING_ATTRIBUTE);
         if (!\is_string($binding) || $binding === '') {
-            $binding = $request?->request->get('kiwi_request_binding');
+            try {
+                $binding = $request?->request->get('kiwi_request_binding');
+            } catch (BadRequestException) {
+                // An array-shaped kiwi_request_binding parameter is not a
+                // usable binding: deterministic no-binding, never a 500.
+                $binding = null;
+            }
         }
 
         return \is_string($binding) && $binding !== '' ? $binding : null;

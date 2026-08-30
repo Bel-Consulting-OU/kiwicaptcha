@@ -83,6 +83,8 @@ use Symfony\Component\DependencyInjection\Reference;
 final class KiwiCaptchaExtension extends Extension implements PrependExtensionInterface
 {
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
+    private const DSN_REDIS_CLIENT_ID = 'kiwi_captcha.redis.dsn';
+    private const DSN_STORAGE_ID = 'kiwi_captcha.storage.redis_dsn';
 
     /**
      * The SLO safety margin (ms) between the Argon admission lease
@@ -141,7 +143,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     public function load(array $configs, ContainerBuilder $container): void
     {
         $configuration = new Configuration();
-        $config = $this->processConfiguration($configuration, $configs);
+        // The protection profile is the LOWEST-precedence configuration
+        // layer: its defaults are prepended as the first array of the
+        // processing stack, so an explicit value in ANY config file wins
+        // (Symfony's Processor normalizes and merges each array in stack
+        // order; a later layer carrying only `protection_profile` can
+        // therefore never inject profile defaults that override earlier
+        // explicit settings). ProtectionProfileDefaults::finalize() then
+        // applies the chaining postcondition (the profile-derived
+        // chaining default engages only when a request-binding authority
+        // exists in the final merged configuration).
+        $config = $this->processConfiguration($configuration, ProtectionProfileDefaults::stack($configs));
+        $config = ProtectionProfileDefaults::finalize($config, $configs);
         // Canonicalize the historical secrets map once, at configuration
         // processing time: every downstream consumer (the verifier keyring
         // and the Siteverify security-context digest) receives the same
@@ -393,16 +406,48 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $this->requireProductionPublicBaseUrl($config['public_base_url'], $config['same_origin_only'], $environment);
         }
 
-        $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+        // redis_dsn is the high-level Redis connection setting: when set
+        // (and the corresponding explicit service-id knob is NOT set),
+        // the extension constructs the Redis-backed services itself from
+        // the DSN — the challenge storage (RedisStorage), the distributed
+        // rate limiter, the Argon admission and the risk state. An
+        // explicit service id always wins over the DSN for its knob:
+        // `storage` (a custom StorageInterface service), `redis_service`
+        // (a custom client for the limiter/semaphore) and
+        // `risk.redis_service` (a custom Predis client for the risk
+        // state) keep their documented precedence. The DSN client is a
+        // Predis\Client, the same client family the risk engine requires,
+        // so one connection drives every Redis-backed service.
+        $dsnClientRef = null;
+        if ($config['redis_dsn'] !== null) {
+            $dsnClientRef = $this->buildDsnRedisClient((string) $config['redis_dsn'], $container);
+        }
+        $storageExplicitlySet = self::configLayerDefines($configs, 'storage');
+        if ($dsnClientRef !== null && !$storageExplicitlySet) {
+            // The DSN-built challenge storage: the ordinary production
+            // deployment needs no storage service wiring at all.
+            $container->setDefinition(self::DSN_STORAGE_ID, new Definition(RedisStorage::class, [$dsnClientRef]));
+            $storageRef = new Reference(self::DSN_STORAGE_ID);
+            $storageId = self::DSN_STORAGE_ID;
+        } else {
+            $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+            $storageId = $config['storage'];
+        }
         $this->requireAtomicStorageWhenNeeded(
             $storageRef,
-            $config['storage'],
+            $storageId,
             $this->environment($container),
             (bool) ($config['allow_best_effort_storage'] ?? false),
             $config['risk']['siteverify_secrets'] ?? [],
             $container,
         );
-        $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+        if ($dsnClientRef !== null && $config['redis_service'] === null) {
+            // No explicit client service id: the DSN client drives the
+            // distributed rate limiter and the Argon admission.
+            $redisRef = $dsnClientRef;
+        } else {
+            $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+        }
 
         // Hard distributed-resource semantics (the architectural
         // invariant): a deployment claiming a temporal issuance limit
@@ -1752,6 +1797,64 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $client = $definition->getArgument(0);
 
         return $client instanceof Reference ? $client : null;
+    }
+
+    /**
+     * Build the Predis client defined from the high-level redis_dsn
+     * setting (the bundle's DSN-backed client pattern: one
+     * Predis\Client constructed from the connection DSN, driving the
+     * challenge storage, the distributed rate limiter, the Argon
+     * admission and the risk state store).
+     *
+     * Fail-closed shape validation: the DSN must be a redis:// or
+     * rediss:// URL with a host, refused at container build time with an
+     * actionable message instead of failing the first request. A
+     * reachable-but-absent server is a runtime error on the first
+     * command (Predis connects lazily), exactly like every other wired
+     * client.
+     */
+    private function buildDsnRedisClient(string $dsn, ContainerBuilder $container): Reference
+    {
+        if (!class_exists(\Predis\Client::class)) {
+            throw new \LogicException(
+                'kiwi_captcha.redis_dsn requires predis/predis (composer require predis/predis): the DSN-backed Redis client is built as a Predis\Client so the same connection drives the challenge storage, the distributed rate limiter, the Argon admission semaphore and the risk state store (the risk engine is typed Predis\Client).'
+            );
+        }
+        $parts = parse_url($dsn);
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        if (!\is_string($scheme) || !\in_array($scheme, ['redis', 'rediss'], true)
+            || !\is_string($host) || $host === ''
+        ) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.redis_dsn must be a redis:// or rediss:// URL with a host (got "%s") — the DSN is handed to Predis\Client verbatim, so a malformed DSN fails closed at container build time instead of failing the first request.',
+                $dsn,
+            ));
+        }
+        if (!$container->hasDefinition(self::DSN_REDIS_CLIENT_ID)) {
+            $container->setDefinition(self::DSN_REDIS_CLIENT_ID, (new Definition(\Predis\Client::class, [$dsn]))->setPublic(true));
+        }
+
+        return new Reference(self::DSN_REDIS_CLIENT_ID);
+    }
+
+    /**
+     * Whether any raw configuration layer explicitly defines the key
+     * (array_key_exists semantics, so an explicit null counts as set).
+     * Used to decide whether an explicit service-id knob wins over the
+     * high-level redis_dsn setting.
+     *
+     * @param array<int, array<string, mixed>> $configs
+     */
+    private static function configLayerDefines(array $configs, string $key): bool
+    {
+        foreach ($configs as $layer) {
+            if (\is_array($layer) && \array_key_exists($key, $layer)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function environment(ContainerBuilder $container): string

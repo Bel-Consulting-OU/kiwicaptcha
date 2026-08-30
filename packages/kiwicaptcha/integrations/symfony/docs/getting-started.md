@@ -32,16 +32,19 @@ Add the placeholder values to `.env` and replace them with real secrets:
 ```
 KIWI_SECRET_KEY=change-me-to-a-random-32-byte-value
 KIWI_PUBLIC_URL=https://captcha.example.com
+KIWI_REDIS_DSN=redis://127.0.0.1:6379/0
 ```
 
 Generate the secret with `openssl rand -hex 32`. `KIWI_PUBLIC_URL` is
 the deployment's canonical https origin (the same-origin check compares
-against it, never the Host header).
+against it, never the Host header). `KIWI_REDIS_DSN` is the high-level
+Redis connection setting (see below); the recipe installs a localhost
+placeholder you change for production.
 
 ### 3. Choose a protection profile and configure
 
 Ordinary deployments configure at the policy level: one
-`protection_profile`, the secret, the public URL, and a shared storage.
+`protection_profile`, the secret, the public URL, and the Redis DSN.
 
 ```yaml
 # config/packages/kiwi_captcha.yaml
@@ -49,10 +52,12 @@ kiwi_captcha:
     protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
 ```
 
 The profile fills safe derived defaults for the safety-relevant knobs
-you do not set; an explicitly configured knob always wins. Profiles:
+you do not set; an explicit value in any config file always wins (the
+profile is the lowest-precedence configuration layer). Profiles:
 
 - `balanced` equals the current defaults (byte-identical to no profile).
 - `privacy_strict` is the strongest first-party privacy: no IP-derived
@@ -65,15 +70,25 @@ you do not set; an explicitly configured knob always wins. Profiles:
 
 The full matrix is in [configuration.md](configuration.md#protection-profiles).
 
-**Production requires a shared storage (Redis).** The bundle fails fast with
-a `LogicException` if `ArrayStorage` is configured outside the test/dev
-environment (`kernel.environment` or `APP_ENV`), since it cannot enforce
-single-use across workers. Use `RedisStorage`, whose atomic pending→consumed
-Lua transition retains the consumed record and its deterministic result
-through TTL. A later caller observes the consumed state instead of
-re-verifying (Redis 6.2+). PSR-6 pools work but cannot express atomic
-get-and-delete, so single-use under concurrency is best-effort
-(read-then-delete). Wire the storage service in your application:
+**`redis_dsn` builds the Redis-backed services automatically.** When the
+DSN is set, the bundle constructs the challenge storage
+(`KiwiCaptcha\Storage\RedisStorage` — the atomic backend production
+requires), the distributed issuance rate limiter, the Argon2id admission
+semaphore and (when risk is enabled) the risk state store. All of them
+run over one `Predis\Client` built from the DSN. Install the client
+library once:
+
+```bash
+composer require predis/predis
+```
+
+Without `redis_dsn` the bundle fails fast with a `LogicException` if
+`ArrayStorage` is configured outside the test/dev environment
+(`kernel.environment` or `APP_ENV`), since it cannot enforce single-use
+across workers.
+
+**Advanced escape hatch:** an explicit service id always wins over the
+DSN for its knob. Wire your own services when you need to:
 
 ```yaml
 # config/services.yaml (example)
@@ -89,14 +104,30 @@ kiwi_captcha:
     protection_profile: balanced
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
-    storage: kiwicaptcha.storage.redis
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+    storage: kiwicaptcha.storage.redis   # your storage wins over the DSN-built one
+    # redis_service: my.redis.client     # your client wins for the limiter/semaphore
+    # risk.redis_service: my.predis.client   # your Predis client wins for the risk state
 ```
+
+`RedisStorage` uses an atomic pending→consumed Lua transition that
+retains the consumed record and its deterministic result through TTL. A
+later caller observes the consumed state instead of re-verifying (Redis
+6.2+). PSR-6 pools work but cannot express atomic get-and-delete, so
+single-use under concurrency is best-effort (read-then-delete).
 
 See [operations.md](operations.md) for the deployment requirements
 (rate limiting, trusted proxies, security Redis contract).
 
 > `KIWI_SECRET_KEY` is the same key used by the Rust implementation, so a
 > Symfony app and a Rust service can verify each other's challenges.
+
+> **Verified minimal configuration.** The quick start in
+> [configuration.md](configuration.md#quick-start-verified-flow) is the
+> verified flow (smoke-tested end to end): `public_base_url` and
+> `redis_dsn` are literals in the config file, because this bundle
+> version validates both shapes at container build time, before
+> `%env()` placeholders resolve; `secret_key` stays env-managed.
 
 ### 4. Include the widget
 

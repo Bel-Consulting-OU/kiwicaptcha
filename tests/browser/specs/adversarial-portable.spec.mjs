@@ -13,20 +13,29 @@ import { fileURLToPath } from 'node:url';
 // state-driven.
 //
 // The fixture knobs: ?decoy=pool arms the real authenticated decoy
-// issuance (protocol-v3 record, signed grammar-composed name);
-// ?decoy=1 emits a response-only decoy name composed deterministically
-// from the nonce; ?decoyname=... overrides the emitted name with a
-// fixed one, so a spec can pin a given rendering variant. POST
-// /honeypot-check mirrors the bundle validator's formDecoyEvidence. A
-// non-empty value under the exact authenticated decoy name reports a
-// hit, any other name is ignored. Evidence is additive: the proof
-// outcome decides and the hit rides alongside it as signal, so the
-// fixture answer for an exact-name fill is ok:true with the hit
-// reported, a probabilistic observation and never a hard gate.
+// issuance (protocol-v3 record, signed grammar-prefix-plus-suffix
+// name); ?decoy=1 emits a response-only decoy name composed
+// deterministically from the nonce; ?decoyname=... overrides the
+// emitted name with a fixed one (for ?decoy=pool it pins the
+// authenticated armed name too, so a spec can force a deliberate
+// collision with an application field); ?strategy=0..5 emits the
+// non-authenticated rendering-strategy hint the driver honors when
+// present. POST /honeypot-check mirrors the bundle validator's
+// formDecoyEvidence. A non-empty value under the exact authenticated
+// decoy name reports a hit, any other name is ignored. Evidence is
+// additive: the proof outcome decides and the hit rides alongside it
+// as signal, so the fixture answer for an exact-name fill is ok:true
+// with the hit reported, a probabilistic observation and never a hard
+// gate.
+//
+// The decoy name is never exposed through a DOM tracking attribute:
+// tests learn it from the challenge response (the fixture knows what it
+// issued), and the widget's private state is authoritative for cleanup.
 //
 // The decoy presentation is polymorphic: a bounded set of rendering
-// strategies is chosen per challenge as a pure function of the name.
-// The assertions here pin the invariant surface every strategy keeps:
+// strategies is chosen per challenge from the client-side `CSPRNG` (the
+// fixture's strategy hint forces each variant deterministically). The
+// assertions here pin the invariant surface every strategy keeps:
 // one input, invisible to humans, non-interactive, off the autofill
 // candidate surface, empty until a filler touches it.
 
@@ -43,11 +52,11 @@ function assetPath(name) {
   throw new Error(`cannot locate ${name}; tried ${candidates.join(', ')}`);
 }
 
-// The server-side combinatorial naming space: three position-specific
-// vocabularies joined with '_' ({slot1}_{slot2}_{slot3}), the shape the
-// fixture's armed issuance picks from. The assertions here pin the
+// The server-side armed naming space: a grammar prefix
+// ({slot1}_{slot2}_{slot3}) plus the 16-lowercase-hex suffix, the shape
+// the fixture's armed issuance picks from. The assertions here pin the
 // rendered name to that shape.
-const DECOY_NAME_SHAPE = /^[a-z]+_[a-z]+_[a-z]+$/;
+const DECOY_NAME_SHAPE = /^[a-z]+_[a-z]+_[a-z]+_[0-9a-f]{16}$/;
 
 // A fixed grammar-shaped name that is never the authenticated one for
 // the wrong-name scenarios (the fixture ignores any name it did not
@@ -90,11 +99,14 @@ function tokenNonce(page, token) {
   return page.evaluate((t) => atob(t).split('.')[0], token);
 }
 
-async function decoyName(page) {
-  return page.evaluate(() => {
-    const w = document.querySelector('[data-kiwi-widget]');
-    return w ? w.dataset.kiwiDecoyName : null;
-  });
+// The next challenge response's authenticated decoy name. The promise
+// must be registered before the navigation (or reset) that triggers the
+// challenge fetch — the decoy name is response-known, never a DOM
+// tracking attribute.
+function challengeDecoyName(page) {
+  return page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+    .then((resp) => resp.json())
+    .then((data) => data.decoy_field ?? null);
 }
 
 // The fill path real autofill engines use: the native value setter
@@ -180,9 +192,10 @@ async function decoySurface(page, name) {
 
 test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   test('decoy creation: one hidden non-interactive input named from the authenticated grammar', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await page.goto('/?decoy=pool');
     await solve(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     expect(name, 'the armed name must come from the server-side naming space').toMatch(DECOY_NAME_SHAPE);
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
@@ -205,10 +218,11 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   });
 
   test('decoy submission: the serialized payload and the real POST body carry the filled decoy', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     const token = await page.locator('[data-kiwi-token]').inputValue();
     await simulateAutofill(page, `input[name="${name}"]`, 'bot@example.com');
     await simulateAutofill(page, 'input[name="email"]', 'user@example.com');
@@ -229,10 +243,11 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   });
 
   test('authenticated decoy name: the exact fill reports additive evidence while the proof stays valid', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     const token = await page.locator('[data-kiwi-token]').inputValue();
     await simulateAutofill(page, `input[name="${name}"]`, 'bot@example.com');
 
@@ -249,10 +264,11 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   });
 
   test('a wrong decoy name is ignored: no false hit, the proof stays valid', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     const wrong = name === WRONG_DECOY_NAME ? 'alternate_contact_phone' : WRONG_DECOY_NAME;
     const token = await page.locator('[data-kiwi-token]').inputValue();
     await simulateAutofill(page, `input[name="${wrong}"]`, 'bot@example.com');
@@ -267,39 +283,38 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
   });
 
   test('reset clears the rendered decoy; a re-solve renders exactly one fresh decoy', async ({ page }) => {
-    // ?decoyname pins the fixture's emitted name, so the rendered input
-    // is deterministic across engines and runs.
-    await page.goto('/?decoy=1&decoyname=secondary_contact_number');
+    // ?decoyname pins the fixture's emitted name (an armed-shape name),
+    // so the rendered input is deterministic across engines and runs.
+    await page.goto('/?decoy=1&decoyname=secondary_contact_number_a3f9c21d8e5b7401');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name1 = 'secondary_contact_number';
-    expect(await decoyName(page)).toBe(name1);
+    const name1 = 'secondary_contact_number_a3f9c21d8e5b7401';
     const decoy = page.locator(`input[name="${name1}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
       el.value = 'bot@example.com';
     });
 
-    // The reset removes the tracked name and the rendered input
+    // The reset removes the owned decoy node and the private state
     // synchronously. The public reset re-initializes immediately on the
     // current driver, so the widget moves on to a fresh solve; the
     // re-acquire click below stays a no-op while the widget is already
     // started and re-acquires after a state-only reset, so the test
     // holds under either lifecycle contract.
+    const name2P = challengeDecoyName(page);
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
     await page.evaluate((id) => {
       window.KiwiCaptcha.reset(id);
-      // The reset removes the decoy input synchronously (kiwiClearDecoy
-      // before the fresh initWidget starts its async re-acquisition).
-      // The fixture pins the decoy name, so the re-issued challenge
-      // re-renders a same-named input asynchronously; asserting inside
-      // this same evaluate observes the guaranteed-absent moment, never
-      // the re-render race.
-      const shape = /^[a-z]+_[a-z]+_[a-z]+$/;
-      const decoys = Array.from(document.querySelectorAll('input'))
-        .filter((el) => shape.test(el.name) && !/^kiwi_/.test(el.name));
+      // The reset removes the owned decoy synchronously (the private
+      // owned set + the data-kiwi-owner marker, before the fresh
+      // initWidget starts its async re-acquisition). The fixture pins
+      // the decoy name, so the re-issued challenge re-renders a
+      // same-named input asynchronously; asserting inside this same
+      // evaluate observes the guaranteed-absent moment, never the
+      // re-render race.
+      const decoys = Array.from(document.querySelectorAll('input[data-kiwi-owner="decoy"]'));
       if (decoys.length !== 0) {
-        throw new Error('the reset must remove the rendered decoy input synchronously: found ' + decoys.length);
+        throw new Error('the reset must remove the rendered decoy synchronously: found ' + decoys.length);
       }
     }, wid);
     await page.evaluate(() => {
@@ -310,14 +325,10 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
       }
     });
     await solve(page);
-    const name2 = await decoyName(page);
+    const name2 = await name2P;
     expect(name2).toMatch(DECOY_NAME_SHAPE);
     await expect(page.locator(`input[name="${name2}"]`), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);
-    const remaining = await page.evaluate(() => {
-      const shape = /^[a-z]+_[a-z]+_[a-z]+$/;
-      return Array.from(document.querySelectorAll('input'))
-        .filter((el) => shape.test(el.name) && !/^kiwi_/.test(el.name)).length;
-    });
+    const remaining = await page.evaluate(() => document.querySelectorAll('input[data-kiwi-owner="decoy"]').length);
     expect(remaining, 'the form never accumulates decoy inputs').toBe(1);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     const result = await verifyToken(page, origin, token);
@@ -338,32 +349,29 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     });
     await page.goto('/?decoy=1');
     await solve(page);
-    expect(await decoyName(page)).toBe('company_website_url');
+    await expect(page.locator('input[name="company_website_url"]')).toHaveCount(1);
     const stale = page.locator('input[name="company_website_url"]');
-    await expect(stale).toHaveCount(1);
     await stale.evaluate((el) => {
       el.value = 'stale';
     });
 
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    const name2P = challengeDecoyName(page);
     await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
     await solve(page);
-    expect(await decoyName(page)).toBe('alternate_contact_phone');
+    expect(await name2P).toBe('alternate_contact_phone');
     await expect(page.locator('input[name="company_website_url"]'), 'the stale input must leave the form').toHaveCount(0);
     await expect(page.locator('input[name="alternate_contact_phone"]')).toHaveCount(1);
-    const remaining = await page.evaluate(() => {
-      const shape = /^[a-z]+_[a-z]+_[a-z]+$/;
-      return Array.from(document.querySelectorAll('input'))
-        .filter((el) => shape.test(el.name) && !/^kiwi_/.test(el.name)).length;
-    });
+    const remaining = await page.evaluate(() => document.querySelectorAll('input[data-kiwi-owner="decoy"]').length);
     expect(remaining, 'the form must never accumulate stale honeypot fields').toBe(1);
   });
 
   test('BFCache round-trip: persisted pageshow clears state, the decoy and the token, with no auto-solve', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await page.goto('/?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     await expect(page.locator(`input[name="${name}"]`)).toHaveCount(1);
     await page.evaluate(() => {
       window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
@@ -409,6 +417,17 @@ ${WIDGET_MARKUP}
     await page.route('**/multi-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
+    // The per-widget authenticated decoy names are collected from the
+    // challenge responses and matched to their widgets by nonce (the
+    // token each widget wrote carries the nonce of its own challenge).
+    const challengeResponses = [];
+    page.on('response', (resp) => {
+      if (resp.request().method() === 'POST' && resp.url().includes('/challenge') && !resp.url().includes('/cancel')) {
+        resp.json().then((d) => {
+          if (d && typeof d.nonce === 'string') challengeResponses.push({ nonce: d.nonce, decoyField: d.decoy_field ?? null });
+        }).catch(() => {});
+      }
+    });
     await page.goto('/multi-form');
     const origin = await fixtureOrigin(page);
     const widgets = page.locator('[data-kiwi-widget]');
@@ -427,10 +446,10 @@ ${WIDGET_MARKUP}
     expect(resultB.body.ok).toBe(true);
 
     const state = await page.evaluate((shape) => {
-      const nameA = document.querySelector('#ca [data-kiwi-widget]').dataset.kiwiDecoyName;
-      const nameB = document.querySelector('#cb [data-kiwi-widget]').dataset.kiwiDecoyName;
-      const inputA = document.querySelector('#ca input[name="' + nameA + '"]');
-      const inputB = document.querySelector('#cb input[name="' + nameB + '"]');
+      const nameA = document.querySelector('#ca input[data-kiwi-owner="decoy"]')?.name ?? null;
+      const nameB = document.querySelector('#cb input[data-kiwi-owner="decoy"]')?.name ?? null;
+      const inputA = document.querySelector(`#ca input[name="${nameA}"]`);
+      const inputB = document.querySelector(`#cb input[name="${nameB}"]`);
       const tokenHostA = document.querySelector('#ca [data-kiwi-token]').parentNode;
       const tokenHostB = document.querySelector('#cb [data-kiwi-token]').parentNode;
       return {
@@ -445,6 +464,14 @@ ${WIDGET_MARKUP}
     expect(state.shapedB).toBe(true);
     expect(state.hostA).toBe(true);
     expect(state.hostB).toBe(true);
+    // The rendered names are the response-known names of the matching
+    // challenges (each widget's token nonce identifies its response).
+    const nonceA = await tokenNonce(page, tokenA);
+    const nonceB = await tokenNonce(page, tokenB);
+    const respFor = (nonce) => challengeResponses.find((r) => r.nonce === nonce)?.decoyField ?? null;
+    expect(state.nameA).toBe(respFor(nonceA));
+    expect(state.nameB).toBe(respFor(nonceB));
+    expect(state.nameA).not.toBe(state.nameB);
 
     // A public reset of one widget must not touch the other: its token,
     // state and decoy stay live while the reset widget reacquires.
@@ -555,10 +582,11 @@ ${WIDGET_MARKUP}
 
 test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
   test('autofill-style fills: only the exact authenticated decoy name yields additive evidence', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
-    const name = await decoyName(page);
+    const name = await nameP;
 
     // Phase one: a password manager fills the real fields the way
     // native autofill does (value setter plus input and change events).
@@ -581,8 +609,10 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
     // Phase two: a filler that guesses another grammar name is ignored.
     const wrong = name === WRONG_DECOY_NAME ? 'alternate_contact_phone' : WRONG_DECOY_NAME;
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    const name2P = challengeDecoyName(page);
     await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
     await solve(page);
+    const name2 = await name2P;
     const token2 = await page.locator('[data-kiwi-token]').inputValue();
     await page.evaluate((n) => {
       const input = document.createElement('input');
@@ -597,13 +627,14 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
     });
     expect(result.body.ok).toBe(true);
     expect(result.body.honeypot_hit, 'a guessed grammar name is ignored server-side').toBe(false);
-    expect(result.body.decoy_field).toBe(await decoyName(page));
+    expect(result.body.decoy_field).toBe(name2);
 
     // Phase three: the exact authenticated name fires the evidence,
     // additively — the valid proof keeps its ok:true verdict.
+    const name3P = challengeDecoyName(page);
     await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
     await solve(page);
-    const name3 = await decoyName(page);
+    const name3 = await name3P;
     const token3 = await page.locator('[data-kiwi-token]').inputValue();
     await simulateAutofill(page, `input[name="${name3}"]`, 'bot@example.com');
     result = await honeypotCheck(page, origin, {
@@ -616,9 +647,10 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
   });
 
   test('autocomplete semantics: the decoy stays off the autofill candidate surface and out of the real-field names', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
-    const name = await decoyName(page);
+    const name = await nameP;
     expect(name).toMatch(DECOY_NAME_SHAPE);
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
@@ -653,6 +685,7 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
   });
 
   test('form-assistance DOM mutations: wrapping the form and adding attributes leave the lifecycle and evidence intact', async ({ page }) => {
+    const nameP = challengeDecoyName(page);
     await serveFormPage(page, '/challenge?decoy=pool');
     await solve(page);
     const origin = await fixtureOrigin(page);
@@ -675,13 +708,14 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
     // below consumes that token, so the proof validation and the decoy
     // evidence are asserted on the same single-use record.
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    const name2P = challengeDecoyName(page);
     await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
     await solve(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
 
     // The decoy evidence still fires for the exact authenticated name,
     // and the wrapped form still serializes the decoy next to the token.
-    const name = await decoyName(page);
+    const name = await name2P;
     await simulateAutofill(page, `input[name="${name}"]`, 'bot@example.com');
     const hit = await honeypotCheck(page, origin, {
       kiwi__token: token,
@@ -694,5 +728,130 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
     expect(serialized[name]).toBe('bot@example.com');
     const surface = await decoySurface(page, name);
     expect(['off', 'new-password'], 'the decoy keeps its autofill-neutral attribute').toContain(surface.autocomplete);
+  });
+
+  test('a FORCED same-name collision: the app field survives cleanup, the server answer stays deterministic', async ({ page }) => {
+    // The 64-bit suffix makes an accidental collision cryptographically
+    // impossible; this test forces one on purpose with the fixture's
+    // name-pinning knob (?decoy=pool&decoyname=... pins the authenticated
+    // armed name). A real application field carries the same name as the
+    // Kiwi decoy, with a legitimate value.
+    const PINNED = 'billing_address_line_a3f9c21d8e5b7401';
+    const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
+    const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<form id="f" action="/form-submit" method="post">
+  <label>App field <input type="text" id="app-field" name="${PINNED}" value="legit app value" /></label>
+  <div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=pool&decoyname=${PINNED}" data-kiwi-scope="login">
+    <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
+${WIDGET_MARKUP}
+  </div>
+</form>
+<script>${glue}</script><script>${driver}</script></body></html>`;
+    await page.route('**/collision-form', (route) =>
+      route.fulfill({ contentType: 'text/html', body: html })
+    );
+    await page.goto('/collision-form');
+    await solve(page);
+    const origin = await fixtureOrigin(page);
+
+    // The Kiwi decoy renders its OWN node next to the same-named app
+    // field: exactly one owned node, and the app field keeps its value.
+    const state = await page.evaluate((n) => {
+      const owned = document.querySelectorAll('input[data-kiwi-owner="decoy"]');
+      const app = document.querySelector(`#app-field`);
+      const decoyInput = document.querySelector(`input[data-kiwi-owner="decoy"]`);
+      return {
+        ownedCount: owned.length,
+        totalSameName: document.querySelectorAll(`input[name="${n}"]`).length,
+        appValue: app ? app.value : null,
+        decoyName: decoyInput ? decoyInput.name : null,
+      };
+    }, PINNED);
+    expect(state.ownedCount).toBe(1);
+    expect(state.decoyName).toBe(PINNED);
+    expect(state.totalSameName, 'the app field and the Kiwi decoy coexist under one name').toBe(2);
+    expect(state.appValue, 'the application value must survive the decoy render').toBe('legit app value');
+
+    // The application's legitimate value is never destroyed by Kiwi
+    // cleanup: a reset removes only the owned decoy node — the same-named
+    // app field stays in the form with its value.
+    const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    const afterReset = await page.evaluate(({ id, n }) => {
+      // The reset removes the owned decoy synchronously (the private
+      // owned set + the data-kiwi-owner marker, before the fresh
+      // initWidget starts its async re-acquisition). The fixture pins
+      // the decoy name, so the re-issued challenge re-renders a
+      // same-named input asynchronously; asserting inside this same
+      // evaluate observes the guaranteed-absent moment, never the
+      // re-render race.
+      window.KiwiCaptcha.reset(id);
+      const owned = document.querySelectorAll('input[data-kiwi-owner="decoy"]');
+      const app = document.querySelector('#app-field');
+      return {
+        ownedCount: owned.length,
+        sameNameCount: document.querySelectorAll(`input[name="${n}"]`).length,
+        appValue: app ? app.value : null,
+        appPresent: !!app,
+      };
+    }, { id: wid, n: PINNED });
+    expect(afterReset.ownedCount, 'the reset removes only the owned decoy node').toBe(0);
+    expect(afterReset.sameNameCount, 'the app field is the only same-named field after the reset').toBe(1);
+    expect(afterReset.appPresent).toBe(true);
+    expect(afterReset.appValue, 'the reset must never destroy the app field value').toBe('legit app value');
+
+    // Server side: the forced collision reads as the parsed single value
+    // (an order-dependent duplicate-form-key request parses to one
+    // value) — the answer is deterministic, never a 500. With the app
+    // value present, the parsed value is non-empty: the forced-collision
+    // semantics read it as a hit, and the proof stays valid.
+    await solve(page);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    const result = await honeypotCheck(page, origin, {
+      kiwi__token: token,
+      [PINNED]: 'legit app value',
+    });
+    expect(result.body.ok, 'a forced collision must never break the proof verdict').toBe(true);
+    expect(typeof result.body.honeypot_hit).toBe('boolean');
+    expect(result.body.decoy_field).toBe(PINNED);
+    // The raw duplicate-key wire body (the app value then the empty
+    // decoy) parses last-wins deterministically under PHP semantics:
+    // the empty decoy value is the parsed one — no hit, never a 500.
+    const token2P = challengeDecoyName(page);
+    await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
+    await solve(page);
+    await token2P;
+    const token2 = await page.locator('[data-kiwi-token]').inputValue();
+    const wire = `kiwi__token=${encodeURIComponent(token2)}&${encodeURIComponent(PINNED)}=legit%20app%20value&${encodeURIComponent(PINNED)}=`;
+    const rawResp = await page.request.post(`${origin}/honeypot-check`, {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      data: wire,
+    });
+    expect(rawResp.status(), 'the duplicate-key wire body must answer deterministically, never a 500').toBe(200);
+    const rawBody = await rawResp.json();
+    expect(rawBody.ok).toBe(true);
+    expect(rawBody.honeypot_hit).toBe(false);
+  });
+
+  test('an array-shaped parameter under the decoy name is deterministic, never a 500', async ({ page }) => {
+    // billing_address_line[]=x under the exact authenticated decoy name:
+    // an array-shaped parameter is not a scalar decoy value, so the
+    // deterministic answer is no hit — the mirror of the bundle
+    // validator's array-safe formDecoyEvidence.
+    const PINNED = 'billing_address_line_a3f9c21d8e5b7401';
+    await page.goto(`/?decoy=pool&decoyname=${PINNED}`);
+    await solve(page);
+    const origin = await fixtureOrigin(page);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    const wire = `kiwi__token=${encodeURIComponent(token)}&${encodeURIComponent(PINNED)}[]=x`;
+    const resp = await page.request.post(`${origin}/honeypot-check`, {
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      data: wire,
+    });
+    expect(resp.status(), 'an array-shaped decoy parameter must never 500').toBe(200);
+    const body = await resp.json();
+    expect(body.ok, 'the proof stays valid under an array-shaped decoy parameter').toBe(true);
+    expect(body.honeypot_hit, 'an array-shaped parameter is no scalar decoy value').toBe(false);
+    expect(body.decoy_field).toBe(PINNED);
   });
 });

@@ -1165,7 +1165,14 @@
     // so a captured generation from before the reset must never match).
     var prevRecord = kiwiWidgets[widgetId];
     var newGen = prevRecord ? prevRecord.gen + 1 : 1;
-    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false, responseKey: "hkey-" + Math.random().toString(36).slice(2, 10), start: null };
+    // The decoy state is PRIVATE per widget (never exposed on the DOM):
+    // the authenticated name, the deferred flag, the client-side strategy
+    // and wrapper-class picks, and the set of owned decoy nodes. The
+    // state object SURVIVES re-inits (an expiry-triggered re-solve must
+    // still see a filled decoy as evidence, and the owned nodes must stay
+    // removable), so it is carried over from the previous record.
+    var decoyState = (prevRecord && prevRecord.decoyState) ? prevRecord.decoyState : { name: null, deferred: false, nodes: [], className: null, variant: null };
+    kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false, responseKey: "hkey-" + Math.random().toString(36).slice(2, 10), start: null, decoyState: decoyState };
     // Neutral role: the widget is a passive status/group, never a
     // checkbox, and it is NOT focusable — the retry button is.
     // Compatibility wrappers remain semantically neutral: accessibility
@@ -1366,17 +1373,27 @@
     // ignored). The driver renders ONE hidden text input with that name
     // inside the same form/host as the token input, so the protected form
     // submission carries it. The presentation is POLYMORPHIC: a bounded
-    // set of rendering strategies (see kiwiDecoyVariantFor) is chosen per
-    // challenge as a pure function of the authenticated name, so the same
-    // name always renders the same way and the server never needs to know
-    // which strategy is in use. Every strategy keeps the input invisible
-    // to humans, non-interactive (tabindex=-1, aria-hidden, no focus) and
-    // off the browser's autofill candidate surface (autocomplete off or
+    // set of rendering strategies is chosen per challenge INDEPENDENTLY of
+    // the name — each challenge draws its strategy from the client-side
+    // CSPRNG (crypto.getRandomValues), so the strategy is a separate
+    // random dimension a bot cannot derive from the served name. The
+    // fixture's /challenge response may carry an optional NON-AUTHENTICATED
+    // `strategy` hint (an integer 0-5) that the driver honors when present
+    // (production responses omit it; deterministic tests use it to force
+    // each variant). Every strategy keeps the input invisible to humans,
+    // non-interactive (tabindex=-1, aria-hidden, no focus) and off the
+    // browser's autofill candidate surface (autocomplete off or
     // new-password, never a labelled visible field). The driver NEVER
     // auto-fills it: a human never types into it — a bot's filler is
-    // exactly the evidence. The rendered name is tracked on the widget
-    // element and cleared when the widget resets, so a re-solve never
-    // echoes a stale decoy.
+    // exactly the evidence.
+    // The wrapper/container class names of the wrapped variants vary from
+    // a small bounded set (a client-side choice per challenge), and every
+    // variant remains accessible and autofill-safe; the cleanup logic is
+    // class-agnostic and never depends on the class names.
+    // The strategy choice is presentation-only: a bot that learned to
+    // classify every rendering gains nothing, because the decoy
+    // evidence, the proof-of-work, the state machine and the replay and
+    // risk controls are all independent of it.
     // The six strategies: 0 = bare input, display:none, after the token;
     // 1 = the same input inside a wrapper span; 2 = bare input with the
     // hidden attribute, before the token; 3 = bare offscreen input after
@@ -1384,30 +1401,80 @@
     // token; 5 = the strategy-0 look, but created only once the first
     // solve completes (deferred creation timing).
     var KIWI_DECOY_VARIANT_COUNT = 6;
-    function kiwiDecoyVariantFor(name) {
-      var h = 0x811c9dc5;
-      for (var i = 0; i < name.length; i++) {
-        h ^= name.charCodeAt(i);
-        h = Math.imul(h, 0x01000193) >>> 0;
+    var KIWI_DECOY_WRAP_CLASSES = ["kiwi-form-aux", "kiwi-form-aux-alt", "kiwi-field-aux", "kiwi-aux-group"];
+    // A client-side CSPRNG word (crypto.getRandomValues). The fallback on
+    // engines without it is presentation-only: the strategy and the
+    // wrapper class are never security boundaries — the authenticated
+    // decoy name and the server-side checks are.
+    function kiwiCspUint32() {
+      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+        var buf = new Uint32Array(1);
+        window.crypto.getRandomValues(buf);
+        return buf[0] >>> 0;
       }
-      return h % KIWI_DECOY_VARIANT_COUNT;
+      return Math.floor(Math.random() * 4294967296) >>> 0;
     }
-    function kiwiInsertDecoyInput(host, decoyName, variant) {
+    function kiwiDecoyVariantFor(data) {
+      var hint = data && typeof data.strategy === "number" ? data.strategy : null;
+      if (hint !== null && hint >= 0 && hint < KIWI_DECOY_VARIANT_COUNT && hint === Math.floor(hint)) {
+        return hint;
+      }
+      return kiwiCspUint32() % KIWI_DECOY_VARIANT_COUNT;
+    }
+    // The owned decoy input of this widget's private state, or null when
+    // none is (still) rendered. The owned set is authoritative: a
+    // same-named application field is never found, never read, never
+    // removed. The owned node may be the wrapper span of a wrapped
+    // variant, so the input is resolved through it.
+    function kiwiOwnedDecoyInput(state) {
+      var nodes = state.nodes || [];
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (!node || !node.parentNode) continue;
+        if (node.tagName === "INPUT") return node;
+        var inner = node.querySelector ? node.querySelector("input") : null;
+        if (inner && inner.parentNode) return inner;
+      }
+      return null;
+    }
+    // Remove the owned decoy nodes: ONLY nodes that are both in the
+    // widget's private owned set and carry the data-kiwi-owner="decoy"
+    // marker. A node is never identified or removed by name match, so an
+    // application field with the same name is never touched.
+    function kiwiRemoveOwnedDecoys(state) {
+      var nodes = state.nodes || [];
+      state.nodes = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (!node || !node.parentNode) continue;
+        if (!node.getAttribute || node.getAttribute("data-kiwi-owner") !== "decoy") continue;
+        try { node.parentNode.removeChild(node); } catch (e) {}
+      }
+    }
+    function kiwiInsertDecoyInput(host, decoyName, variant, state) {
       var input = document.createElement("input");
       input.type = "text";
       input.name = decoyName;
       input.value = "";
       input.setAttribute("tabindex", "-1");
       input.setAttribute("aria-hidden", "true");
+      // The ownership marker: every Kiwi-created decoy node carries this
+      // internal attribute. It is never relied on by the server and never
+      // submitted with the form; cleanup removes a node only when it is
+      // both in the private owned set AND carries the marker.
+      input.setAttribute("data-kiwi-owner", "decoy");
       var before = variant === 2 || variant === 4;
       var el = input;
       if (variant === 1 || variant === 4) {
         var wrap = document.createElement("span");
-        wrap.className = "kiwi-form-aux";
+        if (!state.className) state.className = KIWI_DECOY_WRAP_CLASSES[kiwiCspUint32() % KIWI_DECOY_WRAP_CLASSES.length];
+        wrap.className = state.className;
+        wrap.setAttribute("data-kiwi-owner", "decoy");
         wrap.appendChild(input);
         el = wrap;
       }
       host.insertBefore(el, before ? tokenEl : tokenEl.nextSibling);
+      state.nodes.push(el);
       if (variant === 0 || variant === 1 || variant === 5) {
         input.style.display = "none";
         input.setAttribute("autocomplete", "off");
@@ -1436,44 +1503,47 @@
       if (!tokenEl) return;
       var host = tokenEl.parentNode;
       if (!host) return;
-      // A re-issued challenge carries a NEW per-issuance decoy name:
-      // the previous rendered input (if any) is removed so the form never
-      // accumulates stale honeypot fields.
-      var previous = W.dataset.kiwiDecoyName || null;
+      // A re-issued challenge carries a NEW per-issuance decoy name: any
+      // decoy nodes owned under the earlier name are removed so the form
+      // never accumulates stale honeypot fields.
+      var previous = decoyState.name;
       if (previous && previous !== decoyName) {
-        kiwiRemoveDecoyInput(host, previous);
+        kiwiRemoveOwnedDecoys(decoyState);
+        decoyState.className = null;
       }
-      W.dataset.kiwiDecoyName = decoyName;
-      // A same-name reissue (the ~1/27,840 collision) finds the rendered
-      // input already in the host: the variant is a pure function of the
-      // name, so the existing input is already correct — never duplicate.
-      if (host.querySelector('input[name="' + decoyName + '"]')) {
-        delete W.dataset.kiwiDecoyDeferred;
+      decoyState.name = decoyName;
+      // A same-name reissue finds the owned input already in the host:
+      // the rendering never duplicates it. The owned set decides — never
+      // a name query, so a same-named application field cannot be
+      // mistaken for the decoy.
+      if (kiwiOwnedDecoyInput(decoyState)) {
+        decoyState.deferred = false;
         return;
       }
-      var variant = kiwiDecoyVariantFor(decoyName);
+      var variant = kiwiDecoyVariantFor(data);
+      decoyState.variant = variant;
       if (variant === 5) {
         // The deferred strategy records the name now and creates the
         // input when the first solve completes (kiwiFlushDecoy), so the
         // decoy surface appears only after a real solve attempt.
-        W.dataset.kiwiDecoyDeferred = "1";
+        decoyState.deferred = true;
         return;
       }
-      delete W.dataset.kiwiDecoyDeferred;
-      kiwiInsertDecoyInput(host, decoyName, variant);
+      decoyState.deferred = false;
+      kiwiInsertDecoyInput(host, decoyName, variant, decoyState);
     }
     function kiwiFlushDecoy() {
-      if (!W || !W.dataset || !tokenEl) return;
-      if (!W.dataset.kiwiDecoyDeferred) return;
-      delete W.dataset.kiwiDecoyDeferred;
-      var decoyName = W.dataset.kiwiDecoyName || null;
+      if (!W || !tokenEl) return;
+      if (!decoyState.deferred) return;
+      decoyState.deferred = false;
+      var decoyName = decoyState.name;
       if (!decoyName) return;
       var host = tokenEl.parentNode;
       if (!host) return;
-      kiwiInsertDecoyInput(host, decoyName, 5);
+      kiwiInsertDecoyInput(host, decoyName, 5, decoyState);
     }
     function kiwiClearDecoy() {
-      kiwiClearDecoyFor(W);
+      kiwiClearDecoyState(decoyState);
     }
     function resetToIdle() {
       clearInterval(countdownTimer);
@@ -1691,13 +1761,15 @@
         // the form and FILLED, the decoy field name + a bounded value ride
         // the challenge request as honeypot evidence — NEVER a gate, and
         // the value is truncated to the server's 256-byte bound. An empty
-        // decoy contributes nothing.
-        var renderedDecoy = W.dataset.kiwiDecoyName || null;
-        if (renderedDecoy && tokenEl) {
-          var decoyHost = tokenEl.parentNode;
-          var decoyInput = decoyHost ? decoyHost.querySelector('input[name="' + renderedDecoy + '"]') : null;
+        // decoy contributes nothing. The read is ownership-based: the
+        // value comes from the widget's own decoy node, never from a
+        // name query, so a same-named application field is never mistaken
+        // for the decoy.
+        var decoyState = (kiwiWidgets[widgetId] || {}).decoyState || null;
+        if (decoyState && decoyState.name && tokenEl) {
+          var decoyInput = kiwiOwnedDecoyInput(decoyState);
           if (decoyInput && decoyInput.parentNode && typeof decoyInput.value === "string" && decoyInput.value !== "") {
-            reqBody.decoy_field = renderedDecoy;
+            reqBody.decoy_field = decoyState.name;
             reqBody.honeypot = kiwiBoundBytes(decoyInput.value, 256);
           }
         }
@@ -1847,37 +1919,30 @@
   var kiwiResetHooks = [];
 
   // ── Per-widget lifecycle bookkeeping ────────────────────────────────
-  // The rendered server-issued decoy (honeypot) input is tracked by NAME on
-  // the widget element (shared across re-inits — an expiry-triggered
-  // re-solve must still see a filled decoy as evidence), and cleared by the
-  // shared helper below on every reset path (BFCache restore, the public
-  // reset API, destroy teardown).
-  function kiwiRemoveDecoyInput(host, decoyName) {
-    if (!host || typeof host.querySelector !== "function") return;
-    var input = host.querySelector('input[name="' + decoyName + '"]');
-    if (!input || !input.parentNode) return;
-    var wrap = input.parentNode;
-    if (wrap !== host && wrap.nodeType === 1 && wrap.className === "kiwi-form-aux") {
-      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
-    } else if (input.parentNode) {
-      input.parentNode.removeChild(input);
+  // The rendered server-issued decoy (honeypot) input is owned per widget:
+  // the authoritative set of created nodes lives in the PRIVATE decoy
+  // state on the widget record (carried across re-inits — an
+  // expiry-triggered re-solve must still see a filled decoy as evidence),
+  // every Kiwi-created node also carries the internal
+  // data-kiwi-owner="decoy" marker, and every reset path (BFCache
+  // restore, the public reset API, destroy teardown) removes ONLY nodes
+  // that are both in the owned set and carry the marker — never a node
+  // identified by name match, so an application field with the same name
+  // is never touched.
+  function kiwiClearDecoyState(state) {
+    if (!state) return;
+    var nodes = state.nodes || [];
+    state.nodes = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (!node || !node.parentNode) continue;
+      if (!node.getAttribute || node.getAttribute("data-kiwi-owner") !== "decoy") continue;
+      try { node.parentNode.removeChild(node); } catch (e) {}
     }
-  }
-  function kiwiClearDecoyFor(W) {
-    if (!W || !W.dataset) return;
-    var decoyName = W.dataset.kiwiDecoyName || null;
-    delete W.dataset.kiwiDecoyName;
-    delete W.dataset.kiwiDecoyDeferred;
-    if (!decoyName) return;
-    // The token input lives next to the widget node, in the same
-    // container (the standard renderer layout), so the decoy input is
-    // searched in the widget subtree first and then the container —
-    // the same roots the init path resolves the token element from.
-    var container = W.closest ? W.closest(".kiwi-container") : null;
-    var t = (W.querySelector ? W.querySelector("[data-kiwi-token]") : null)
-      || (container && container.querySelector ? container.querySelector("[data-kiwi-token]") : null);
-    var host = t ? t.parentNode : null;
-    kiwiRemoveDecoyInput(host, decoyName);
+    state.name = null;
+    state.deferred = false;
+    state.className = null;
+    state.variant = null;
   }
   // destroy(element|selector) needs to reverse EVERYTHING initWidget
   // attached: listeners (registered in a per-element registry so they can
@@ -1993,9 +2058,10 @@
     kiwiCancelGeneration(id);
     var W = r.W;
     if (W) {
-      // The reset clears the rendered decoy (tracked name + input): a
-      // re-solve must not echo a stale server-issued honeypot name.
-      kiwiClearDecoyFor(W);
+      // The reset clears the rendered decoy (owned nodes + private
+      // state): a re-solve must not echo a stale server-issued honeypot
+      // name, and only Kiwi-owned nodes are ever removed.
+      kiwiClearDecoyState(r.decoyState);
       var t = W.querySelector("[data-kiwi-token]");
       if (t) t.value = "";
       if (r.options && r.options.responseField) {

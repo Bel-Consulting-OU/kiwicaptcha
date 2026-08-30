@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use KiwiCaptcha\Config;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
@@ -24,7 +25,19 @@ final class ConfigurationTest extends TestCase
             'secret_key' => str_repeat('a', 32),
         ], $overrides);
 
-        return (new Processor())->processConfiguration(new Configuration(), [$config]);
+        // The profile expansion is the extension's job (the profile is
+        // the LOWEST-precedence configuration layer, prepended as the
+        // first array of the processing stack), so the single-array
+        // helper applies the same stack + chaining postcondition the
+        // extension applies. This keeps the processed outcome of a
+        // single-array config byte-identical to the historical
+        // beforeNormalization expansion.
+        $processed = (new Processor())->processConfiguration(
+            new Configuration(),
+            ProtectionProfileDefaults::stack([$config]),
+        );
+
+        return ProtectionProfileDefaults::finalize($processed, [$config]);
     }
 
     public function testDifficultyBits21IsRejectedByTheTree(): void
@@ -67,6 +80,15 @@ final class ConfigurationTest extends TestCase
         self::assertNull($processed['redis_service']);
         self::assertNull($processed['rate_limit_pepper']);
         self::assertNull($processed['rate_limit_cache']);
+    }
+
+    public function testRedisDsnDefaultsToNullAndPassesThrough(): void
+    {
+        $processed = $this->process();
+
+        self::assertNull($processed['redis_dsn'], 'redis_dsn defaults to null = every Redis-backed service keeps its existing wiring');
+        self::assertSame('redis://127.0.0.1:6399/0', $this->process(['redis_dsn' => 'redis://127.0.0.1:6399/0'])['redis_dsn'], 'the tree accepts a plain redis:// DSN as a scalar');
+        self::assertSame('rediss://user:pass@captcha.example.com:6380/2?prefix=kiwi', $this->process(['redis_dsn' => 'rediss://user:pass@captcha.example.com:6380/2?prefix=kiwi'])['redis_dsn'], 'a rediss:// DSN with credentials, database and query parameters passes through untouched');
     }
 
     public function testNonRedisRateLimitFallbackFlagsDefaultToFalse(): void

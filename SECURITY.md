@@ -36,7 +36,7 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 ## Release and branch governance
 
 - **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for all changes; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
-  All required security CI checks must pass (strict; the set is maintained in the ruleset, currently 23 check contexts including the standalone quick-start end-to-end job, the PhpRedis Siteverify lane, the workflow-lint job and the two stable matrix aggregators).
+  All required security CI checks must pass (strict; the ruleset currently requires 24 check contexts, including the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the workflow-lint job and the two stable matrix aggregators).
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
   The trust model: organization admins retain an explicit always-bypass.

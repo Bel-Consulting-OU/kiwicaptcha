@@ -35,11 +35,11 @@ field (protocol v3) that generic automation may fill. The decoy is
 signed into the challenge record, and the verification checks it
 together with the record. It is probabilistic automation evidence, not
 a sole security boundary: the security property of the product is the
-proof-of-work cost, and the system remains secure even if an attacker
-knows the entire architecture. The exact decoy vocabulary, DOM
-variants, scoring weights, escalation thresholds and classifiers are
-intentionally not published; adaptive parameters are a moving target
-that silence buys time for.
+proof-of-work cost, and knowledge of the architecture does not
+invalidate KiwiCaptcha's core security guarantees. The exact decoy
+vocabulary, DOM variants, scoring weights, escalation thresholds and
+classifiers are intentionally not published; adaptive parameters are a
+moving target that silence buys time for.
 
 ## Privacy model
 

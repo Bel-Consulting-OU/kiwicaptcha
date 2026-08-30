@@ -554,12 +554,13 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid|decoy_field
 /// ```
 ///
-/// - `decoy_field` is the literal decoy name (e.g. `secondary_contact_phone`),
-///   drawn from the combinatorial grammar (see
-///   [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], [`DECOY_GRAMMAR_SLOT2_CATEGORY`]
-///   and [`DECOY_GRAMMAR_SLOT3_FORM`]), so it can never contain the `|`
-///   separator (the grammar alphabet is `[a-z_]`; validation accepts
-///   `[A-Za-z0-9_-]` only, 1..=64 bytes).
+/// - `decoy_field` is the literal armed decoy name (e.g.
+///   `billing_address_line_a3f9c21d8e5b7401`): a grammar prefix drawn
+///   from the combinatorial vocabularies ([`DECOY_GRAMMAR_SLOT1_QUALIFIER`],
+///   [`DECOY_GRAMMAR_SLOT2_CATEGORY`] and
+///   [`DECOY_GRAMMAR_SLOT3_FORM`]) plus the 16-hex `CSPRNG` suffix, so it
+///   can never contain the `|` separator (the alphabet is `[a-z_0-9]`;
+///   validation accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
 /// - The segment is appended only when a decoy is armed, and an armed
 ///   record is issued as `protocol_version == 3`. `None` renders
 ///   nothing extra — the canonical string is byte-identical to the
@@ -868,28 +869,42 @@ pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 /// The combinatorial decoy-name grammar, the server-side naming space for
 /// decoy (honeypot) form fields. When a deployment arms the decoy surface
 /// ([`issue_challenge_with_decoy`]), the issuer draws one lowercase word
-/// per slot (`CSPRNG`) and joins them with '_': {slot1}_{slot2}_{slot3},
-/// e.g. `secondary_contact_phone` or `billing_company_url`. The three
-/// position-specific vocabularies below are shared verbatim with the PHP
+/// per slot (`CSPRNG`) and joins them with '_' to form the grammar prefix
+/// {slot1}_{slot2}_{slot3}, e.g. `secondary_contact_phone` or
+/// `billing_company_url`. The three position-specific vocabularies below
+/// are shared verbatim with the PHP
 /// `Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` /
 /// `_SLOT3_FORM` (same words, same order). The pick itself is never
 /// coordinated between the languages: the issuing core signs whatever it
 /// picked, and verification validates alphabet plus canonical, never the
 /// name.
 ///
-/// Space size: `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len() = 32 * 29 * 30 =
-/// 27,840 distinct names. Each triple joins to a unique string because
-/// '_' cannot occur inside a word, and every name is `[a-z_]+` of at
-/// most 30 bytes (the longest word is 10 bytes), a subset of the
-/// `[A-Za-z0-9_-]{1,64}` shape the widget driver and the validation
-/// accept. No name can ever smuggle the `|` canonical-payload separator.
+/// The armed name is the prefix plus a per-issuance random suffix:
+/// {slot1}_{slot2}_{slot3}_{suffix} with a 16-lowercase-hex suffix drawn
+/// from 8 [`security_random`] bytes (see [`compose_decoy_prefix`] and
+/// [`decoy_name_suffix`]), e.g.
+/// `billing_address_line_a3f9c21d8e5b7401`. The suffix is the collision
+/// disambiguator: an application field whose name equals a grammar prefix
+/// (a plausible real field name, e.g. `billing_address_line`) can still
+/// collide with an armed name only when it also equals the per-issuance
+/// 64-bit suffix. The accidental-match probability for a given issued
+/// name is 2^-64, so a forced collision is a deliberate act, never an
+/// accident.
+///
+/// Prefix space size: `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len() =
+/// 32 * 29 * 30 = 27,840 distinct prefixes. Each triple joins to a
+/// unique string because '_' cannot occur inside a word. The prefix is
+/// `[a-z_]+` of at most 30 bytes (the longest word is 10 bytes); the
+/// armed name adds 1 + 16 bytes for the '_' + suffix, at most 47 bytes.
+/// Every armed name is a subset of the `[A-Za-z0-9_-]{1,64}` shape the
+/// widget driver and the validation accept. No name can ever smuggle the
+/// `|` canonical-payload separator.
 /// The legacy 10-name pool words (company_website, fax_number, ...) all
 /// remain present as vocabulary entries, but the `SELECTION` is
 /// combinatorial: a fixed 10-name pool is log2(10) ~ 3.32 bits of
-/// enumerable space, the grammar's space is log2(27,840) ~ 14.8 bits,
-/// and the probability that two consecutive challenges share a name is
-/// ~1/N with N = 27,840, i.e. ~3.6e-5 per pair, negligible over
-/// realistic issuance.
+/// enumerable space, the grammar prefix space is log2(27,840) ~ 14.8
+/// bits, and the armed name space is 27,840 * 2^64, so two consecutive
+/// challenges share a full name with probability ~2^-64.
 pub const DECOY_GRAMMAR_SLOT1_QUALIFIER: &[&str] = &[
     "secondary",
     "alternate",
@@ -1007,17 +1022,18 @@ pub(crate) fn valid_decoy_field_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// The combinatorial space size, `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len().
+/// The combinatorial prefix space size, `SLOT1`.len() * `SLOT2`.len() *
+/// `SLOT3`.len().
 pub const fn decoy_grammar_space_size() -> usize {
     DECOY_GRAMMAR_SLOT1_QUALIFIER.len()
         * DECOY_GRAMMAR_SLOT2_CATEGORY.len()
         * DECOY_GRAMMAR_SLOT3_FORM.len()
 }
 
-/// Whether `name` is a member of the combinatorial grammar space: three
-/// underscore-joined vocabulary words, each from its position-specific
-/// list, within the `[A-Za-z0-9_-]{1,64}` validation shape.
-pub fn is_grammar_decoy_name(name: &str) -> bool {
+/// Whether `name` is a grammar prefix: three underscore-joined
+/// vocabulary words, each from its position-specific list, within the
+/// `[A-Za-z0-9_-]{1,64}` validation shape.
+pub fn is_grammar_decoy_prefix(name: &str) -> bool {
     if !valid_decoy_field_name(name) {
         return false;
     }
@@ -1032,30 +1048,83 @@ pub fn is_grammar_decoy_name(name: &str) -> bool {
         && DECOY_GRAMMAR_SLOT3_FORM.contains(&s3)
 }
 
-/// Pick a random decoy field name from the combinatorial grammar with the
-/// `CSPRNG` (never a weak/insecure fallback — an RNG failure propagates to
-/// the caller as [`SignError::Rng`], exactly like the nonce/salt draws).
-/// Each slot draws an unbiased index via rejection sampling; the three
-/// words are then joined with '_'.
+/// Whether `name` is an armed decoy name: a grammar prefix
+/// ([`is_grammar_decoy_prefix`]) plus '_' plus the 16 lowercase hex
+/// suffix characters, within the `[A-Za-z0-9_-]{1,64}` validation shape.
+pub fn is_grammar_decoy_name(name: &str) -> bool {
+    if !valid_decoy_field_name(name) {
+        return false;
+    }
+    let mut parts = name.split('_');
+    let (Some(s1), Some(s2), Some(s3), Some(suffix), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&s1)
+        && DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&s2)
+        && DECOY_GRAMMAR_SLOT3_FORM.contains(&s3)
+        && suffix.len() == 16
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The deterministic grammar prefix for the given vocabulary indices,
+/// {slot1}_{slot2}_{slot3}. Pure and public so tests can enumerate the
+/// prefix space, pin the vocabularies, and run fixed-seed collision
+/// statistics without touching the `CSPRNG`.
+pub fn compose_decoy_prefix(slot1: usize, slot2: usize, slot3: usize) -> String {
+    format!(
+        "{}_{}_{}",
+        DECOY_GRAMMAR_SLOT1_QUALIFIER[slot1],
+        DECOY_GRAMMAR_SLOT2_CATEGORY[slot2],
+        DECOY_GRAMMAR_SLOT3_FORM[slot3]
+    )
+}
+
+/// The per-issuance random suffix of an armed decoy name: 16 lowercase
+/// hex characters drawn from 8 bytes of the `CSPRNG`, 64 random bits.
+/// The suffix is the collision disambiguator of the armed name space: a
+/// grammar prefix alone is a plausible real field name, so only the
+/// suffix makes an armed name unguessable and accidental collision
+/// impossible. Mirrors the PHP `Issuer::decoyNameSuffix`.
+fn decoy_name_suffix() -> Result<String, SignError> {
+    let bytes = security_random::<8>().map_err(|_| SignError::Rng)?;
+    Ok(hex::encode(&bytes))
+}
+
+/// Pick a random armed decoy field name with the `CSPRNG` (never a
+/// weak/insecure fallback — an RNG failure propagates to the caller as
+/// [`SignError::Rng`], exactly like the nonce/salt draws): a grammar
+/// prefix (each slot draws an unbiased index via rejection sampling)
+/// plus the fresh 16-hex suffix.
 fn pick_decoy_field() -> Result<String, SignError> {
     Ok(format!(
-        "{}_{}_{}",
-        pick_decoy_slot(DECOY_GRAMMAR_SLOT1_QUALIFIER)?,
-        pick_decoy_slot(DECOY_GRAMMAR_SLOT2_CATEGORY)?,
-        pick_decoy_slot(DECOY_GRAMMAR_SLOT3_FORM)?,
+        "{}_{}",
+        compose_decoy_prefix(
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT1_QUALIFIER.len())?,
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT2_CATEGORY.len())?,
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT3_FORM.len())?,
+        ),
+        decoy_name_suffix()?,
     ))
 }
 
-/// One unbiased vocabulary draw: rejection sampling over a single `CSPRNG`
-/// byte, so every word in the vocabulary has exactly equal probability
-/// (a plain modulo of a byte would bias vocabularies whose length does
-/// not divide 256).
-fn pick_decoy_slot(vocab: &'static [&'static str]) -> Result<&'static str, SignError> {
-    let limit = 256 - (256 % vocab.len());
+/// One unbiased vocabulary index draw: rejection sampling over a single
+/// `CSPRNG` byte, so every word in the vocabulary has exactly equal
+/// probability (a plain modulo of a byte would bias vocabularies whose
+/// length does not divide 256).
+fn pick_decoy_slot_index(vocab_len: usize) -> Result<usize, SignError> {
+    let limit = 256 - (256 % vocab_len);
     loop {
         let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
         if (byte as usize) < limit {
-            return Ok(vocab[byte as usize % vocab.len()]);
+            return Ok(byte as usize % vocab_len);
         }
     }
 }
@@ -1219,11 +1288,13 @@ pub fn issue_challenge(
 /// (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
 /// [`issue_challenge`] in every other respect (same wire format, same
 /// signing, same storage); when `arm_decoy_field` is true the issuer picks
-/// a fresh combinatorial name from the decoy grammar (see
-/// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], `CSPRNG`; a fresh independent pick
-/// per issuance — with the 26,880-name space the probability that two
-/// consecutive challenges share a name is ~1/N ~ 3.7e-5, negligible over
-/// realistic issuance), sets it on the client-facing
+/// a fresh armed name, a grammar prefix plus a fresh 16-hex `CSPRNG`
+/// suffix (see [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], `CSPRNG`; a fresh
+/// independent pick per issuance — the suffix gives every issuance its
+/// own 64 random bits, so the probability that two consecutive
+/// challenges share a full name is ~2^-64, and accidental collision
+/// with any other name, application fields included, is
+/// cryptographically impossible), sets it on the client-facing
 /// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
 /// input from that key) AND on the stored record's authenticated
 /// `decoy_field`, signed into the canonical input as the final
@@ -2258,9 +2329,10 @@ mod tests {
     // ── decoy (honeypot) field issuance ──────────────────────────────
 
     #[test]
-    fn decoy_field_issuance_arms_a_signed_pool_name() {
+    fn decoy_field_issuance_arms_a_signed_armed_name() {
         // Armed: the client-facing token and the stored record both carry
-        // a pool name, the record is issued as protocol v3 (the
+        // the armed name (a grammar prefix plus the 16-hex suffix, at
+        // most 47 bytes), the record is issued as protocol v3 (the
         // decoy-capable canonical), the canonical input ends with the
         // `|<name>` segment, and the signature verifies over that exact
         // extended input.
@@ -2278,9 +2350,18 @@ mod tests {
         let decoy = issued.challenge.decoy_field.clone().expect("decoy armed");
         assert!(
             is_grammar_decoy_name(&decoy),
-            "the decoy name must come from the combinatorial grammar (got {decoy})"
+            "the decoy name must be a grammar prefix plus suffix (got {decoy})"
+        );
+        assert!(
+            is_grammar_decoy_prefix(&decoy[..decoy.len() - 17]),
+            "the name must start with a grammar prefix"
         );
         assert!(valid_decoy_field_name(&decoy));
+        assert!(
+            decoy.len() <= 47,
+            "the armed name (prefix + suffix) must be at most 47 bytes (got {})",
+            decoy.len()
+        );
         assert_eq!(issued.record.decoy_field.as_deref(), Some(decoy.as_str()));
         assert_eq!(
             issued.record.protocol_version, 3,
@@ -2338,23 +2419,23 @@ mod tests {
     }
 
     #[test]
-    fn decoy_grammar_space_is_large_and_every_name_valid() {
-        // The combinatorial space: `SLOT1` * `SLOT2` * `SLOT3` = 32 * 29 * 30 =
-        // 27,840 distinct names (each triple joins to a unique string),
-        // thousands+, and every member complies with the
+    fn decoy_grammar_prefix_space_is_large_and_every_prefix_valid() {
+        // The combinatorial prefix space: `SLOT1` * `SLOT2` * `SLOT3` =
+        // 32 * 29 * 30 = 27,840 distinct prefixes (each triple joins to a
+        // unique string), thousands+, and every member complies with the
         // `[A-Za-z0-9_-]{1,64}` validation shape the widget driver and
-        // the stored-record validator accept (the longest composed name
-        // is 30 bytes).
+        // the stored-record validator accept (the longest prefix is 30
+        // bytes; the armed name adds 17 more).
         let space = decoy_grammar_space_size();
         assert_eq!(space, 27_840);
         assert!(
             space > 1_000,
-            "the grammar space must be thousands+ (got {space})"
+            "the grammar prefix space must be thousands+ (got {space})"
         );
         let mut all: Vec<String> = Vec::with_capacity(space);
-        for (i, s1) in DECOY_GRAMMAR_SLOT1_QUALIFIER.iter().enumerate() {
-            for (j, s2) in DECOY_GRAMMAR_SLOT2_CATEGORY.iter().enumerate() {
-                for (k, s3) in DECOY_GRAMMAR_SLOT3_FORM.iter().enumerate() {
+        for s1 in DECOY_GRAMMAR_SLOT1_QUALIFIER {
+            for s2 in DECOY_GRAMMAR_SLOT2_CATEGORY {
+                for s3 in DECOY_GRAMMAR_SLOT3_FORM {
                     let name = format!("{s1}_{s2}_{s3}");
                     assert!(
                         valid_decoy_field_name(&name),
@@ -2365,36 +2446,35 @@ mod tests {
                         "{name} must be at most 64 bytes (got {})",
                         name.len()
                     );
-                    assert!(is_grammar_decoy_name(&name));
+                    assert!(is_grammar_decoy_prefix(&name));
                     all.push(name);
-                    let _ = (i, j, k);
                 }
             }
         }
         all.sort();
         all.dedup();
-        assert_eq!(all.len(), space, "every triple must compose a unique name");
+        assert_eq!(
+            all.len(),
+            space,
+            "every triple must compose a unique prefix"
+        );
 
         // A 20,000-draw sample (seeded, deterministic) must not collapse
-        // into a small distinct set — the effective space is the grammar
-        // space, not an accidentally tiny subset.
+        // into a small distinct set — the effective prefix space is the
+        // grammar space, not an accidentally tiny subset.
         let mut rng = StdRng::seed_from_u64(42);
         let mut drawn = std::collections::HashSet::new();
         for _ in 0..20_000 {
             let idx = rng.gen_range(0..space);
-            let s1 = idx / (29 * 30);
-            let s2 = (idx % (29 * 30)) / 30;
-            let s3 = idx % 30;
-            drawn.insert(format!(
-                "{}_{}_{}",
-                DECOY_GRAMMAR_SLOT1_QUALIFIER[s1],
-                DECOY_GRAMMAR_SLOT2_CATEGORY[s2],
-                DECOY_GRAMMAR_SLOT3_FORM[s3]
+            drawn.insert(compose_decoy_prefix(
+                idx / (29 * 30),
+                (idx % (29 * 30)) / 30,
+                idx % 30,
             ));
         }
         assert!(
             drawn.len() > 1_000,
-            "20,000 draws must hit more than 1,000 distinct names (got {})",
+            "20,000 draws must hit more than 1,000 distinct prefixes (got {})",
             drawn.len()
         );
     }
@@ -2402,27 +2482,19 @@ mod tests {
     #[test]
     fn decoy_grammar_consecutive_draw_collisions_are_bounded() {
         // Fixed-seed statistical test: 10,000 consecutive pairs drawn
-        // uniformly from the 27,840-name space. The expected number of
+        // uniformly from the 27,840-prefix space. The expected number of
         // equal consecutive pairs is ~10,000 / 27,840 ~ 0.36. The bound
         // is set at < 2 collisions, i.e. a deterministic pass at the
-        // ~1/N collision probability per pair.
+        // ~1/N collision probability per pair. The full armed-name
+        // collision probability is 2^-64 per pair (the suffix), so the
+        // prefix-space statistic pins the grammar half only.
         let space = decoy_grammar_space_size();
         let mut rng = StdRng::seed_from_u64(7);
-        let name_at = |idx: usize| {
-            let s1 = idx / (29 * 30);
-            let s2 = (idx % (29 * 30)) / 30;
-            let s3 = idx % 30;
-            format!(
-                "{}_{}_{}",
-                DECOY_GRAMMAR_SLOT1_QUALIFIER[s1],
-                DECOY_GRAMMAR_SLOT2_CATEGORY[s2],
-                DECOY_GRAMMAR_SLOT3_FORM[s3]
-            )
-        };
         let mut collisions = 0u32;
         let mut previous: Option<String> = None;
         for _ in 0..10_000 {
-            let current = name_at(rng.gen_range(0..space));
+            let idx = rng.gen_range(0..space);
+            let current = compose_decoy_prefix(idx / (29 * 30), (idx % (29 * 30)) / 30, idx % 30);
             if previous.as_deref() == Some(current.as_str()) {
                 collisions += 1;
             }
@@ -2431,6 +2503,64 @@ mod tests {
         assert!(
             collisions < 2,
             "10,000 consecutive pairs must collide < 2 times (got {collisions})"
+        );
+    }
+
+    #[test]
+    fn decoy_name_suffix_is_16_lowercase_hex_from_8_random_bytes() {
+        // The suffix generator: exactly 16 lowercase hex characters, the
+        // hex of 8 `CSPRNG` bytes — the 64 random bits that make an
+        // armed name unguessable and accidental collision impossible.
+        let suffix = decoy_name_suffix().unwrap();
+        assert_eq!(suffix.len(), 16, "the suffix must be 16 hex chars");
+        assert!(
+            suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "the suffix must be lowercase hex (got {suffix})"
+        );
+
+        // Two consecutive draws must differ: a fresh draw per call, so
+        // identical suffixes across a handful of draws would indicate a
+        // broken RNG, not a collision.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            seen.insert(decoy_name_suffix().unwrap());
+            if seen.len() >= 2 {
+                break;
+            }
+        }
+        assert!(seen.len() >= 2, "consecutive suffixes must vary");
+    }
+
+    #[test]
+    fn two_consecutive_armed_names_differ_in_the_suffix() {
+        // The statistical core of the collision guarantee: 40 consecutive
+        // armed compositions carry 40 distinct 64-bit suffixes (2^-64 per
+        // pair), every composed name complies with the full validation
+        // shape, and the armed name stays under the 64-byte bound (at
+        // most 47 bytes).
+        let mut seen_suffixes = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let name = compose_decoy_prefix(0, 0, 0) + "_" + &decoy_name_suffix().unwrap();
+            assert!(
+                is_grammar_decoy_name(&name),
+                "{name} must be an armed grammar name"
+            );
+            assert!(
+                valid_decoy_field_name(&name),
+                "{name} must comply with the [A-Za-z0-9_-]{{1,64}} validation shape"
+            );
+            assert!(
+                name.len() <= 47,
+                "{name} must be at most 47 bytes (the 64-byte validation bound)"
+            );
+            seen_suffixes.insert(name[name.len() - 16..].to_string());
+        }
+        assert_eq!(
+            seen_suffixes.len(),
+            40,
+            "40 consecutive armed compositions must carry 40 distinct 64-bit suffixes"
         );
     }
 
@@ -2486,11 +2616,37 @@ mod tests {
                 "the legacy pool word {legacy} must remain a vocabulary entry"
             );
         }
-        assert!(is_grammar_decoy_name("secondary_contact_phone"));
-        assert!(is_grammar_decoy_name("billing_company_url"));
-        assert!(!is_grammar_decoy_name("secondary_contact"));
-        assert!(!is_grammar_decoy_name("secondary_contact_phone_extra"));
-        assert!(!is_grammar_decoy_name("Secondary_Contact_Phone"));
+        assert!(is_grammar_decoy_prefix("secondary_contact_phone"));
+        assert!(is_grammar_decoy_prefix("billing_company_url"));
+        assert!(!is_grammar_decoy_prefix("secondary_contact"));
+        assert!(!is_grammar_decoy_prefix("secondary_contact_phone_extra"));
+        assert!(!is_grammar_decoy_prefix("Secondary_Contact_Phone"));
+        assert!(!is_grammar_decoy_prefix("company|website"));
+        // The full armed shape: a prefix plus the 16-hex suffix. A bare
+        // prefix is a plausible real field name, so only the suffix makes
+        // an armed name; a prefix without it is not an armed name.
+        assert!(is_grammar_decoy_name(
+            "secondary_contact_phone_a3f9c21d8e5b7401"
+        ));
+        assert!(is_grammar_decoy_name(
+            "billing_address_line_0000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name("secondary_contact_phone"));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_00000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_ABCDEF0123456789"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_000000000000000g"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_extra_0000000000000000"
+        ));
     }
 
     #[test]

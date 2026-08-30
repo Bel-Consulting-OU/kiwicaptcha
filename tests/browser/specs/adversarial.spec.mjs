@@ -33,12 +33,12 @@ function assetPath(name) {
   throw new Error(`cannot locate ${name}; tried ${candidates.join(', ')}`);
 }
 
-// The armed decoy names come from the combinatorial grammar (three
-// underscore-joined vocabulary slots); a name is a grammar member when
-// it is three lowercase underscore-separated words within the
-// [A-Za-z0-9_-]{1,64} shape.
+// The armed decoy names come from the server-side naming space: a
+// grammar prefix (three underscore-joined vocabulary slots) plus the
+// 16-lowercase-hex suffix; a name is a grammar member when it matches
+// that shape within the [A-Za-z0-9_-]{1,64} bound.
 function isGrammarDecoyName(name) {
-  return typeof name === 'string' && /^[a-z]+_[a-z]+_[a-z]+$/.test(name) && name.length <= 64;
+  return typeof name === 'string' && /^[a-z]+_[a-z]+_[a-z]+_[0-9a-f]{16}$/.test(name) && name.length <= 64;
 }
 
 function decodeToken(token) {
@@ -479,10 +479,13 @@ test.describe('KiwiCaptcha adversarial submission validation', () => {
   });
 
   test('a filled armed decoy field is detected server-side against the authenticated name', async ({ page }) => {
+    const nameP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+      .then((resp) => resp.json())
+      .then((d) => d.decoy_field ?? null);
     await page.goto('/?decoy=pool');
     await solve(page);
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
-    expect(isGrammarDecoyName(name), 'the armed name must come from the combinatorial grammar').toBe(true);
+    const name = await nameP;
+    expect(isGrammarDecoyName(name), 'the armed name must come from the server-side naming space').toBe(true);
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
@@ -502,9 +505,12 @@ test.describe('KiwiCaptcha adversarial submission validation', () => {
   });
 
   test('the wrong decoy name is ignored: no false honeypot hit, the proof stays valid', async ({ page }) => {
+    const nameP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+      .then((resp) => resp.json())
+      .then((d) => d.decoy_field ?? null);
     await page.goto('/?decoy=pool');
     await solve(page);
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const name = await nameP;
     const wrong = name === 'company_website' ? 'fax_number' : 'company_website';
     const token = await page.locator('[data-kiwi-token]').inputValue();
     const resp = await page.request.post('http://127.0.0.1:8085/honeypot-check', { form: {
@@ -716,9 +722,12 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
   });
 
   test('a reset clears the rendered decoy input: stale honeypot fields never linger in the form', async ({ page }) => {
+    const nameP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+      .then((resp) => resp.json())
+      .then((d) => d.decoy_field ?? null);
     await page.goto('/?decoy=1');
     await solve(page);
-    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const name = await nameP;
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
@@ -729,8 +738,11 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
     });
     await expect(decoy, 'the reset must remove the rendered decoy input').toHaveCount(0);
     await page.locator('[data-kiwi-retry]').click();
+    const freshNameP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
+      .then((resp) => resp.json())
+      .then((d) => d.decoy_field ?? null);
     await solve(page);
-    const freshName = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const freshName = await freshNameP;
     await expect(page.locator(`input[name="${freshName}"]`), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);
     await expect(page.locator(`input[name="${name}"]`)).toHaveCount(0);
   });

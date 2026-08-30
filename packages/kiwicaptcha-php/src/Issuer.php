@@ -65,28 +65,42 @@ final class Issuer
      * for decoy (honeypot) form fields. When a deployment arms the decoy
      * surface, see {@see self::issueWithDecoyField()}, the issuer draws
      * one lowercase word per slot with `random_int` (`CSPRNG`) and joins
-     * them with '_': {slot1}_{slot2}_{slot3}, e.g. `secondary_contact_phone`
-     * or `billing_company_url`. The three position-specific vocabularies
-     * below are shared verbatim with the Rust
-     * `DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` / `_SLOT3_FORM`
-     * (same words, same order). The pick itself is never coordinated
-     * between the languages: the issuing core signs whatever it picked,
-     * and verification validates alphabet plus canonical, never the name.
+     * them with '_' to form the grammar prefix {slot1}_{slot2}_{slot3},
+     * e.g. `secondary_contact_phone` or `billing_company_url`. The three
+     * position-specific vocabularies below are shared verbatim with the
+     * Rust `DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` /
+     * `_SLOT3_FORM` (same words, same order). The pick itself is never
+     * coordinated between the languages: the issuing core signs whatever
+     * it picked, and verification validates alphabet plus canonical,
+     * never the name.
      *
-     * Space size: len(`SLOT1`) * len(`SLOT2`) * len(`SLOT3`) = 32 * 29 *
-     * 30 = 27,840 distinct names. Each triple joins to a unique string,
-     * because '_' cannot occur inside a word. Every name is `[a-z_]+` of
-     * at most 30 bytes (the longest word is 10 bytes), a subset of the
+     * The armed name is the prefix plus a per-issuance random suffix:
+     * {slot1}_{slot2}_{slot3}_{suffix} with a 16-lowercase-hex suffix
+     * drawn from 8 `CSPRNG` bytes, e.g.
+     * `billing_address_line_a3f9c21d8e5b7401`, see
+     * {@see self::composeDecoyName()} and {@see self::decoyNameSuffix()}.
+     * The suffix is the collision disambiguator: an application field
+     * whose name equals a grammar prefix (a plausible real field name,
+     * e.g. `billing_address_line`) can still collide with an armed name
+     * only when it also equals the per-issuance 64-bit suffix. The
+     * accidental-match probability for a given issued name is 2^-64, so
+     * a forced collision is a deliberate act, never an accident.
+     *
+     * Prefix space size: len(`SLOT1`) * len(`SLOT2`) * len(`SLOT3`) =
+     * 32 * 29 * 30 = 27,840 distinct prefixes. Each triple joins to a
+     * unique string, because '_' cannot occur inside a word. The prefix
+     * is `[a-z_]+` of at most 30 bytes (the longest word is 10 bytes);
+     * the armed name adds 1 + 16 bytes for the '_' + suffix, at most 47
+     * bytes. Every armed name is a subset of the
      * `[A-Za-z0-9_-]{1,64}` shape the widget driver and the validation
      * accept, see {@see Config::isValidDecoyFieldName()}. No name can
      * ever smuggle the `|` canonical-payload separator. The legacy
      * 10-name pool words (company_website, fax_number, ...) all remain
-     * present as vocabulary entries. The `SELECTION` is combinatorial:
-     * a fixed 10-name pool is log2(10) ~ 3.32 bits of enumerable space.
-     * The grammar's space is log2(27,840) ~ 14.8 bits. The probability
-     * that two consecutive challenges share a name is ~1/N with
-     * N = 27,840, i.e. ~3.6e-5 per pair, negligible over realistic
-     * issuance.
+     * present as vocabulary entries. The prefix selection is
+     * combinatorial: a fixed 10-name pool is log2(10) ~ 3.32 bits of
+     * enumerable space, the grammar prefix space is log2(27,840) ~ 14.8
+     * bits. The armed name space is 27,840 * 2^64, so two consecutive
+     * challenges share a full name with probability ~2^-64.
      */
     public const DECOY_GRAMMAR_SLOT1_QUALIFIER = [
         'secondary', 'alternate', 'billing', 'office', 'personal', 'company',
@@ -188,11 +202,12 @@ final class Issuer
      * (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
      * {@see self::issue()} in every other respect: same wire format,
      * same signing, same storage. When `$armDecoyField` is true the
-     * issuer picks a fresh combinatorial name from the grammar, see
-     * {@see self::composeDecoyName()}, `CSPRNG`, a fresh independent
-     * draw per issuance. With the 27,840-name space the probability
-     * that two consecutive challenges share a name is ~1/N ~ 3.6e-5,
-     * negligible over realistic issuance.
+     * issuer picks a fresh armed name, a grammar prefix plus a fresh
+     * 16-hex `CSPRNG` suffix, see {@see self::composeDecoyName()}. The
+     * suffix gives every issuance its own 64 random bits, so the
+     * probability that two consecutive challenges share a full name is
+     * ~2^-64 — accidental collision with any other name, application
+     * fields included, is cryptographically impossible.
      * The name is set on the client-facing
      * {@see Challenge::$decoyField}, the key the widget driver renders
      * the hidden input from, and on the stored record's authenticated
@@ -206,6 +221,14 @@ final class Issuer
      * the plain {@see self::issue()}) behaves exactly like the legacy
      * path: protocol v2, no decoy, byte-identical canonical string, and
      * neither JSON surface carries the key.
+     *
+     * `$decoyNameOverride` is a fixture/test seam: when non-null the
+     * armed name is exactly this value (validated against the same
+     * `[A-Za-z0-9_-]{1,64}` alphabet) instead of a fresh random pick.
+     * Production callers omit it.
+     *
+     * @throws \InvalidArgumentException when `$decoyNameOverride` is set
+     *                                   but not a valid decoy field name
      */
     public function issueWithDecoyField(
         string $scope,
@@ -213,19 +236,25 @@ final class Issuer
         bool $armDecoyField = true,
         ?string $requestBinding = null,
         ?string $hostname = null,
+        ?string $decoyNameOverride = null,
     ): Challenge {
+        if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
+            throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
+        }
+
         return $this->issueChallenge(
             $scope,
             $clientIp,
             $requestBinding,
             $hostname,
-            $armDecoyField ? self::pickDecoyField() : null,
+            $armDecoyField ? ($decoyNameOverride ?? self::pickDecoyField()) : null,
         );
     }
 
     /**
-     * Pick a random decoy field name from the combinatorial grammar with
-     * the `CSPRNG`, `random_int`, never a weak or insecure fallback. An
+     * Pick a random armed decoy field name: a grammar prefix plus the
+     * fresh 16-hex `CSPRNG` suffix, see {@see self::composeDecoyName()},
+     * never a weak or insecure fallback. An
      * RNG failure propagates to the caller as a Random\RandomException,
      * exactly like the nonce/salt draws. Mirrors the Rust
      * `pick_decoy_field`.
@@ -240,15 +269,29 @@ final class Issuer
     }
 
     /**
-     * The deterministic name for the given slot indices, {slot1}_{slot2}_{slot3}.
-     * Pure and public so tests can enumerate the space, pin the
-     * vocabularies, and run fixed-seed collision statistics without
-     * touching the `CSPRNG`.
+     * The per-issuance random suffix of an armed decoy name: 16
+     * lowercase hex characters drawn from 8 bytes of the `CSPRNG`
+     * (`random_bytes`), 64 random bits. The suffix is the collision
+     * disambiguator of the armed name space: a grammar prefix alone is
+     * a plausible real field name, so only the suffix makes an armed
+     * name unguessable and accidental collision impossible. Mirrors the
+     * Rust `decoy_name_suffix`.
+     */
+    public static function decoyNameSuffix(): string
+    {
+        return bin2hex(random_bytes(8));
+    }
+
+    /**
+     * The deterministic grammar prefix for the given slot indices,
+     * {slot1}_{slot2}_{slot3}. Pure and public so tests can enumerate
+     * the prefix space, pin the vocabularies, and run fixed-seed
+     * collision statistics without touching the `CSPRNG`.
      *
      * @throws \OutOfBoundsException when any index is outside its
      *                               vocabulary
      */
-    public static function composeDecoyName(int $slot1, int $slot2, int $slot3): string
+    public static function composeDecoyPrefix(int $slot1, int $slot2, int $slot3): string
     {
         $s1 = self::DECOY_GRAMMAR_SLOT1_QUALIFIER[$slot1] ?? null;
         $s2 = self::DECOY_GRAMMAR_SLOT2_CATEGORY[$slot2] ?? null;
@@ -261,7 +304,23 @@ final class Issuer
     }
 
     /**
-     * The combinatorial space size, len(SLOT1) * len(SLOT2) * len(SLOT3).
+     * The armed decoy name for the given slot indices:
+     * {slot1}_{slot2}_{slot3}_{suffix}, the grammar prefix composed by
+     * {@see self::composeDecoyPrefix()} plus the per-issuance 16-hex
+     * `CSPRNG` suffix, e.g. `billing_address_line_a3f9c21d8e5b7401`.
+     * At most 47 bytes, a subset of the `[A-Za-z0-9_-]{1,64}` shape.
+     *
+     * @throws \OutOfBoundsException when any index is outside its
+     *                               vocabulary
+     */
+    public static function composeDecoyName(int $slot1, int $slot2, int $slot3): string
+    {
+        return self::composeDecoyPrefix($slot1, $slot2, $slot3).'_'.self::decoyNameSuffix();
+    }
+
+    /**
+     * The combinatorial prefix space size, len(SLOT1) * len(SLOT2) *
+     * len(SLOT3).
      */
     public static function decoyGrammarSpaceSize(): int
     {
@@ -271,11 +330,11 @@ final class Issuer
     }
 
     /**
-     * Whether $name is a member of the combinatorial grammar space: three
-     * underscore-joined vocabulary words, each from its position-specific
-     * list, within the `[A-Za-z0-9_-]{1,64}` validation shape.
+     * Whether $name is a grammar prefix: three underscore-joined
+     * vocabulary words, each from its position-specific list, within the
+     * `[A-Za-z0-9_-]{1,64}` validation shape.
      */
-    public static function isGrammarDecoyName(string $name): bool
+    public static function isGrammarDecoyPrefix(string $name): bool
     {
         if (!Config::isValidDecoyFieldName($name)) {
             return false;
@@ -288,6 +347,28 @@ final class Issuer
         return \in_array($parts[0], self::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
             && \in_array($parts[1], self::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
             && \in_array($parts[2], self::DECOY_GRAMMAR_SLOT3_FORM, true);
+    }
+
+    /**
+     * Whether $name is an armed decoy name: a grammar prefix, see
+     * {@see self::isGrammarDecoyPrefix()}, plus '_' plus the 16
+     * lowercase hex suffix characters, within the
+     * `[A-Za-z0-9_-]{1,64}` validation shape.
+     */
+    public static function isGrammarDecoyName(string $name): bool
+    {
+        if (!Config::isValidDecoyFieldName($name)) {
+            return false;
+        }
+        $parts = explode('_', $name);
+        if (\count($parts) !== 4) {
+            return false;
+        }
+
+        return \in_array($parts[0], self::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
+            && \in_array($parts[1], self::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
+            && \in_array($parts[2], self::DECOY_GRAMMAR_SLOT3_FORM, true)
+            && preg_match('/^[0-9a-f]{16}$/D', $parts[3]) === 1;
     }
 
     /**
@@ -592,10 +673,11 @@ final class Issuer
      *   issuer|kid|decoy_field
      * ```
      *
-     * - `decoy_field` is the literal decoy name (e.g. `secondary_contact_phone`),
-     * drawn from the combinatorial grammar, see
+     * - `decoy_field` is the literal armed decoy name: a grammar prefix
+     * plus the 16-hex `CSPRNG` suffix (e.g.
+     * `billing_address_line_a3f9c21d8e5b7401`), see
      * {@see self::composeDecoyName()}, so it can never contain
-     * the `|` separator (the grammar alphabet is `[a-z_]`; validation
+     * the `|` separator (the alphabet is `[a-z_0-9]`; validation
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
      * - The segment is appended only when a decoy is armed, and the
      * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy

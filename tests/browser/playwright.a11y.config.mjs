@@ -1,17 +1,27 @@
 import { defineConfig } from '@playwright/test';
 
-// The cross-engine lane runs three suites in Chromium + Firefox +
+// The cross-engine lane runs five suites in Chromium + Firefox +
 // WebKit: the WCAG 2.2 AA evidence set (axe/static checks, keyboard-only
 // scenarios, live-region assertions, 200% resize, 320px reflow, text
 // spacing, reduced motion, forced colors, RTL + long translations), the
-// cross-browser critical-path smoke suite, and the portable adversarial
+// cross-browser critical-path smoke suite, the portable adversarial
 // subset (decoy lifecycle, BFCache round-trips, abort isolation, form
-// serialization, dynamic widgets, autofill compatibility). The
-// engine-specific torture cases stay on the chromium-only default
-// config.
+// serialization, dynamic widgets, autofill compatibility), the
+// portable polymorphic-decoy suite (all six rendering strategies driven
+// deterministically via the fixture's strategy hint, the offscreen and
+// deferred variants included), and the portable engine form-assistance
+// evidence suite (Firefox-style heuristic fills, WebKit-style
+// composition and delayed commits, Chromium-style silent previews, the
+// offscreen variant under every fill, and the AT-snapshot exclusion of
+// the decoy), and the portable targeted-bot adaptation suite (a bot
+// that learned the six rendering strategies and the decoy-name grammar
+// gains nothing: every strategy's DOM signature is asserted non-trivial
+// to classify, and the server-side evidence surface stays identical).
+// The engine-specific torture cases stay on the
+// chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },
