@@ -402,6 +402,16 @@ jobs:
           command -v redis-server >/dev/null || { echo "::error::redis-server is missing on PATH" >&2; exit 1; }
           command -v redis-cli >/dev/null || { echo "::error::redis-cli is missing on PATH" >&2; exit 1; }
           php -r 'if (!extension_loaded("pcntl") || !extension_loaded("posix")) { fwrite(STDERR, "pcntl/posix missing\n"); exit(1); } echo "pcntl/posix OK\n";'
+      - name: install Symfony bundle vendor (cluster semaphore tests)
+        # The cluster suite's RedisAdmissionSemaphore tests run the
+        # bundle's real semaphore against the live cluster; without the
+        # bundle vendor they skip (the keyslot tests cover the key
+        # shapes instead). The lane installs the vendor so every test
+        # of the four real-Redis suites runs — the lane's fail-on-skip
+        # contract is that a missing piece fails the lane, never that a
+        # test silently no-ops.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: composer install --no-interaction --no-scripts --prefer-dist
       - name: real-Redis fault/topology/death suites
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
