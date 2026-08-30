@@ -686,6 +686,11 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
     let calls = 0;
     await page.route('**/challenge?*', async (route) => {
       calls++;
+      // The abandonment is driven deterministically by the solve
+      // deadline: a schema-valid argon2id challenge at the maximum
+      // in-contract memory (mKib 65536 = 64 MiB, t 6) with a 1-second
+      // TTL expires 500 ms into the solve, so the attempt always
+      // abandons instead of solving.
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -693,12 +698,12 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
           nonce: 'exhaust-adv-' + calls,
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
-          targetBits: 255,
-          algorithm: 'sha256',
-          mKib: 0,
-          t: 1,
+          algorithm: 'argon2id',
+          targetBits: 10,
+          mKib: 65536,
+          t: 6,
           p: 1,
-          ttlSecs: 120,
+          ttlSecs: 1,
           minDurationMs: 0,
         }),
       });
@@ -737,10 +742,14 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
       window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
     });
     await expect(decoy, 'the reset must remove the rendered decoy input').toHaveCount(0);
-    await page.locator('[data-kiwi-retry]').click();
+    // The response listener must be registered before the click: the
+    // retry click reacquires synchronously, and a response that lands
+    // between the click dispatch and a later listener attach would be
+    // missed (a load-sensitive race on localhost).
     const freshNameP = page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'))
       .then((resp) => resp.json())
       .then((d) => d.decoy_field ?? null);
+    await page.locator('[data-kiwi-retry]').click();
     await solve(page);
     const freshName = await freshNameP;
     await expect(page.locator(`input[name="${freshName}"]`), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);

@@ -12,6 +12,7 @@ use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\Tests\Fixtures\FailoverHookingClient;
+use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
@@ -25,9 +26,11 @@ use PHPUnit\Framework\TestCase;
  * One scenario deletes the key between the snapshot read and the
  * consume transition.
  *
- * Runs when `KC_REDIS_URL` or `TEST_REDIS_URL` is set (the shared
- * real-Redis env of the monorepo CI); skips otherwise, like every
- * other real-Redis suite.
+ * Runs in the dedicated "PHP core real-Redis fault/topology" CI lane,
+ * which publishes `KC_REDIS_URL` and `TEST_REDIS_URL` and sets
+ * `KIWI_REQUIRE_REAL_REDIS_TESTS=1`; with the flag on, a missing or
+ * unreachable Redis fails the suite instead of skipping. With the flag
+ * off the suite skips like every other real-Redis suite.
  */
 final class FailoverPromotionStateLossRealRedisTest extends TestCase
 {
@@ -39,12 +42,9 @@ final class FailoverPromotionStateLossRealRedisTest extends TestCase
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }
-        $url = getenv('KC_REDIS_URL');
-        if (!\is_string($url) || $url === '') {
-            $url = getenv('TEST_REDIS_URL');
-        }
-        if (!\is_string($url) || $url === '') {
-            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis promotion-state-loss suite runs in the CI Redis-service job');
+        $url = RealRedisTestEnv::requireRedis('the real-Redis promotion-state-loss suite');
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis promotion-state-loss suite runs in the dedicated real-Redis CI lane');
         }
         try {
             $probe = new \Predis\Client($url, ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
@@ -52,6 +52,7 @@ final class FailoverPromotionStateLossRealRedisTest extends TestCase
 
             return $probe;
         } catch (\Throwable) {
+            RealRedisTestEnv::failWhenRequired('no Redis is reachable at the configured KC_REDIS_URL/TEST_REDIS_URL', 'the real-Redis promotion-state-loss suite');
             self::markTestSkipped('no Redis at the configured KC_REDIS_URL/TEST_REDIS_URL');
         }
     }

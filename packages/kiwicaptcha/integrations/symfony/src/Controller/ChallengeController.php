@@ -159,7 +159,7 @@ final class ChallengeController
         private readonly ?string $defaultRequestBinding = null,
         private readonly bool $enforceOrigin = false,
         private readonly ?ClientIpResolver $clientIpResolver = null,
-        private readonly ?string $publicBaseUrl = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin $expectedOrigin = null,
         private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         private readonly ?int $challengeTtlSecs = null,
@@ -1287,12 +1287,11 @@ final class ChallengeController
         try {
             // The record carries server-owned issuance metadata (Siteverify
             // `hostname`), never signed, never sent. The value comes from
-            // the server-configured public_base_url, so a forged Host
-            // header can never influence the reported hostname; without
-            // public_base_url the hostname stays null.
-            $hostname = $this->publicBaseUrl !== null
-                ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
-                : null;
+            // the server-configured public_base_url (the validated
+            // expected origin), so a forged Host header can never
+            // influence the reported hostname; without public_base_url
+            // the hostname stays null.
+            $hostname = $this->expectedOrigin?->host();
             // Issuance always uses the canonical client IP. A per-sitekey
             // ttl_secs override mints through a TTL-variant issuer,
             // {@see self::issuerForTtl()}, so the signed lifetime carries
@@ -3008,9 +3007,13 @@ final class ChallengeController
      * are allowed; a browser cross-site POST always carries one. When
      * present, the Origin must match the expected origin, which comes from
      * server config (public_base_url) when configured, so a forged Host
-     * header can never shift the expected origin. The comparison uses the
-     * same structured normalization as the allowlist,
-     * {@see self::normalizeOrigin()}; without public_base_url the
+     * header can never shift the expected origin. The configured value is
+     * received as the validated ExpectedOrigin object. The extension
+     * refuses anything that is not a canonical https origin before this
+     * point: a literal at container build time, an env-resolved value at
+     * service construction. The request-side candidate uses the same
+     * structured normalization as the allowlist,
+     * {@see self::normalizeOrigin()}. Without public_base_url the
      * expected origin is derived from the request's own scheme and host
      * (fine for localhost and dev; production deployments behind shared
      * infrastructure should set public_base_url).
@@ -3022,11 +3025,10 @@ final class ChallengeController
             return true;
         }
 
-        if ($this->publicBaseUrl !== null) {
-            $expected = self::normalizeOrigin($this->publicBaseUrl);
+        if ($this->expectedOrigin !== null) {
             $candidate = self::normalizeOrigin($origin);
 
-            return $expected !== null && $candidate !== null && $expected === $candidate;
+            return $candidate !== null && $this->expectedOrigin->normalized() === $candidate;
         }
 
         $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');

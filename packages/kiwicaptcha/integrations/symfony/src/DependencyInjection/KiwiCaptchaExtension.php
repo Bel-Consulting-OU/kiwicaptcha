@@ -29,6 +29,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
+use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -85,6 +86,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
     private const DSN_REDIS_CLIENT_ID = 'kiwi_captcha.redis.dsn';
     private const DSN_STORAGE_ID = 'kiwi_captcha.storage.redis_dsn';
+    private const EXPECTED_ORIGIN_ID = 'kiwi_captcha.expected_origin';
 
     /**
      * The SLO safety margin (ms) between the Argon admission lease
@@ -396,14 +398,37 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
         // Production never derives the expected origin from an arbitrary
         // Host header. When same_origin_only (the default) is active in a
-        // production environment, public_base_url is required and
-        // validated at container compile time, so the config trap
-        // (falling back to request Host) becomes a boot error.
+        // production environment, public_base_url is required, so the
+        // config trap (falling back to request Host) becomes a boot
+        // error. A Symfony %env()% placeholder is accepted here: the
+        // container resolves it at compile/runtime, and the resolved
+        // value receives the identical validation from the runtime lane
+        // (ExpectedOrigin::fromPublicBaseUrl) when the controller is
+        // constructed — the placeholder itself is opaque at build time.
         $environment = $this->environment($container);
         if (\in_array($environment, ['test', 'dev'], true) === false
             && ($config['same_origin_only'] || $config['risk']['enforce_origin'] || ($config['risk']['siteverify_secrets'] ?? []) !== [])
         ) {
-            $this->requireProductionPublicBaseUrl($config['public_base_url'], $config['same_origin_only'], $environment);
+            $this->requireProductionPublicBaseUrl($config['public_base_url'], $environment);
+        }
+        // The canonical-HTTPS origin contract is one validator with two
+        // lanes, both fail-closed. A literal value is validated here at
+        // container build time in every environment (test/dev included):
+        // the runtime guard would refuse a broken literal at controller
+        // construction anyway, so the build fails early with the
+        // actionable message. An env-resolved value skips this lane and
+        // is validated by the exact same contract
+        // (ExpectedOrigin::publicBaseUrlViolation) when the ExpectedOrigin
+        // service is constructed at runtime, never reaching the
+        // controller unvalidated.
+        if ($config['public_base_url'] !== null && !self::isEnvPlaceholder($config['public_base_url'])) {
+            $violation = ExpectedOrigin::publicBaseUrlViolation($config['public_base_url']);
+            if ($violation !== null) {
+                throw new \LogicException(sprintf(
+                    'KiwiCaptcha: public_base_url %s — a literal value is validated at container build time; an env-managed value is validated with the same canonical-HTTPS contract when the challenge controller is constructed.',
+                    $violation,
+                ));
+            }
         }
 
         // redis_dsn is the high-level Redis connection setting: when set
@@ -517,7 +542,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 }
                 if ($poolClass === null) {
                     throw new \LogicException(sprintf(
-                        'kiwi_captcha.rate_limit_cache ("%s") cannot be resolved to a service class at container compile time — the production pool guard fails closed (an uninspectable pool cannot be proven cross-worker, exactly like the storage path\'s unresolvable-class refusal). Reference a concrete pool service id whose class is visible to the extension: the id may carry %%parameter%% placeholders and alias hops, but they must resolve to a real definition whose class (literal or %%param%%) is resolvable here. An external pool service the extension cannot see must be aliased or defined before this bundle loads.',
+                        'kiwi_captcha.rate_limit_cache ("%s") cannot be resolved to a service class, so the production pool guard fails closed (an uninspectable pool cannot be proven cross-worker, exactly like the storage path\'s unresolvable-class refusal). Reference a concrete pool service id whose class is visible to the extension: the id may carry %%parameter%% placeholders and alias hops, but they must resolve to a real definition whose class (literal or %%param%%) is resolvable here. An external pool service the extension cannot see must be aliased or defined before this bundle loads.',
                         $config['rate_limit_cache'],
                     ));
                 }
@@ -1232,6 +1257,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // per-sitekey map carries no binding dimension, so the global
         // server-owned mode is the only binding control.
         $sitekeyPolicy = $riskConfig['sitekeys'] ?? [];
+        // The same-origin expected origin comes from server config,
+        // never the Host header. The controller receives the validated
+        // ExpectedOrigin value object, never the raw string: a literal
+        // was validated at build time above, and an env-resolved value
+        // is validated by the same factory when the service is
+        // constructed, the runtime lane mirroring createDsnClient().
+        // A malformed resolved origin therefore fails closed with the
+        // typed LogicException naming the option instead of silently
+        // weakening the same-origin check.
+        $expectedOriginRef = null;
+        if ($config['public_base_url'] !== null) {
+            $expectedOriginRef = $this->buildExpectedOriginService((string) $config['public_base_url'], $container);
+        }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
@@ -1256,8 +1294,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // source).
             ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
             // The same-origin expected origin comes from server config,
-            // never the Host header.
-            ->setArgument('$publicBaseUrl', $config['public_base_url'])
+            // never the Host header: the controller receives the
+            // validated ExpectedOrigin object (or null when
+            // public_base_url is not configured).
+            ->setArgument('$expectedOrigin', $expectedOriginRef)
             // The per-scope issuance cap (fixed-window Redis
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
@@ -1640,18 +1680,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * The production origin invariant. The challenge controller's
+     * The production missing-origin rule. The challenge controller's
      * same-origin check must compare against server config
      * (public_base_url), never the request's own scheme+host, otherwise a
      * forged Host header defines the security boundary. Fail closed at
-     * boot: prod + same-origin enforcement + missing/invalid
-     * public_base_url is a configuration error. A Symfony %env(...)%
-     * placeholder is accepted here: the container resolves it at
-     * compile/runtime, so the literal-shape checks are skipped and the
-     * resolved value is consumed (and reported) by the controller and
-     * the doctor command.
+     * boot: prod + same-origin enforcement + missing public_base_url is a
+     * configuration error. A Symfony %env(...)% placeholder is accepted
+     * here: the container resolves it at compile/runtime, so the
+     * literal-shape checks are skipped and the resolved value is
+     * validated by the runtime lane (ExpectedOrigin::fromPublicBaseUrl)
+     * when the controller is constructed. The literal-shape contract
+     * itself lives in ExpectedOrigin::publicBaseUrlViolation and runs
+     * for every literal in every environment.
      */
-    private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, bool $sameOriginOnly, string $environment): void
+    private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, string $environment): void
     {
         if (self::isEnvPlaceholder($publicBaseUrl)) {
             return;
@@ -1662,23 +1704,29 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $environment,
             ));
         }
-        $parts = parse_url($publicBaseUrl);
-        $scheme = $parts['scheme'] ?? null;
-        $host = $parts['host'] ?? null;
-        $isHttps = $scheme === 'https';
-        if (!$isHttps) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must be an absolute https:// URL in production (got "'.$publicBaseUrl.'").');
+    }
+
+    /**
+     * Define the ExpectedOrigin service for a configured public_base_url.
+     * Both lanes construct it through the same runtime factory
+     * {@see ExpectedOrigin::fromPublicBaseUrl()}. A literal passed the
+     * build-time validation above and the factory re-validates it
+     * (idempotent), while an env placeholder is resolved by the
+     * container's parameter bag before the factory runs. The
+     * fail-closed canonical-origin validation therefore applies to the
+     * resolved value unseen by the load-time lane. The controller never
+     * receives the raw string.
+     */
+    private function buildExpectedOriginService(string $publicBaseUrl, ContainerBuilder $container): Reference
+    {
+        if (!$container->hasDefinition(self::EXPECTED_ORIGIN_ID)) {
+            $container->setDefinition(self::EXPECTED_ORIGIN_ID, (new Definition(ExpectedOrigin::class))
+                ->setFactory([ExpectedOrigin::class, 'fromPublicBaseUrl'])
+                ->setArguments([$publicBaseUrl])
+                ->setPublic(true));
         }
-        if ($host === null || (isset($parts['user']) || isset($parts['pass']))) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must carry a hostname and NO username/password (got "'.$publicBaseUrl.'").');
-        }
-        if (isset($parts['query']) || isset($parts['fragment'])) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must not carry a query or fragment (got "'.$publicBaseUrl.'").');
-        }
-        $path = $parts['path'] ?? '';
-        if ($path !== '' && $path !== '/') {
-            throw new \LogicException('KiwiCaptcha: public_base_url must have an empty path or "/" (got "'.$publicBaseUrl.'").');
-        }
+
+        return new Reference(self::EXPECTED_ORIGIN_ID);
     }
 
     /**
@@ -2134,7 +2182,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $class = $this->definitionClass((string) $bundleRedis, $container);
             if ($class === null) {
                 throw new \LogicException(
-                    'kiwi_captcha.risk.enabled cannot reuse the bundle Redis client: its service class is not visible to the '.
+                    'kiwi_captcha.risk.enabled cannot reuse the bundle Redis client: its service class stays invisible to the '.
                     'extension. Set risk.redis_service explicitly to a Predis\Client service id.'
                 );
             }
@@ -2183,7 +2231,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     /**
      * Resolve the %%parameter%% placeholders inside a definition's class,
      * e.g. `class: '%app.cache.class%'`, to the literal class name, or
-     * null when the class is not a resolvable string. A missing parameter
+     * null when the type stays unresolvable as a string. A missing parameter
      * is NOT silently ignored: the caller's unresolvable path applies,
      * mirroring requireAtomicStorageWhenNeeded()'s %param% class handling
      * but for any placeholder position, not only whole-string params.

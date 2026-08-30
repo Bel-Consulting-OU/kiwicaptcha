@@ -12,6 +12,7 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
@@ -924,7 +925,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
      */
     public function testForgedHostCannotAlterOriginChecksWithPublicBaseUrl(): void
     {
-        $controller = new ChallengeController($this->issuer(), null, true, null, null, null, null, [], false, null, null, false, null, 'https://app.example.com');
+        $controller = new ChallengeController($this->issuer(), null, true, null, null, null, null, [], false, null, null, false, null, ExpectedOrigin::fromPublicBaseUrl('https://app.example.com'));
 
         // Forged Host + matching forged Origin: rejected — the expected
         // origin is the configured base URL, not the request's host.

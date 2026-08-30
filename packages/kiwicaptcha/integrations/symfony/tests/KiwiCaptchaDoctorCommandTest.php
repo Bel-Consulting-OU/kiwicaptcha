@@ -7,6 +7,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailingRedisTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorSentinelRedisTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\TestKernel;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Command\Command;
@@ -63,6 +65,7 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
         // pass paths on the default kernel.
         self::assertStringContainsString('[PASS] Storage atomicity', $display);
+        self::assertStringContainsString('[PASS] Replication topology', $display, 'the default kernel has no Redis-backed storage and no aggregate client, so the authority-boundary check passes');
         self::assertStringContainsString('[PASS] Secret key', $display);
         self::assertStringContainsString('[PASS] Keyring state', $display);
         self::assertStringContainsString('[PASS] Public origin', $display);
@@ -95,5 +98,46 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('[FAIL] Redis reachability', $display);
         self::assertStringContainsString('[FAIL] Risk Redis', $display, 'the risk Redis ping uses the same broken client');
         self::assertStringContainsString('Summary: ', $display);
+    }
+
+    public function testDoctorWarnsOnASentinelAggregateWiredClient(): void
+    {
+        // The replication-topology check must detect the Predis
+        // Sentinel replication aggregate by client class and emit the
+        // explicit authority-change contract warning with the
+        // documented postures, without a live sentinel (the aggregate
+        // is built lazily; the reachability check fails on PING as in
+        // the failing-Redis kernel).
+        $tester = $this->doctor($this->containerFor(new DoctorSentinelRedisTestKernel('test', true)));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Replication topology', $display, 'an aggregate client must warn on the replication-topology check');
+        self::assertStringContainsString('SentinelReplication', $display, 'the detection must name the wired aggregate class');
+        self::assertStringContainsString(
+            'One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion',
+            $display,
+            'the WARN must carry the exact audit contract wording',
+        );
+        self::assertStringContainsString('fail_closed / operator_managed / best_effort', $display, 'the WARN must name the documented deployment postures');
+    }
+
+    public function testDoctorWarnsOnRedisBackedStorageWithoutTheVerifiedWaitKnob(): void
+    {
+        // Redis-backed storage with waitReplicas 0 is the default
+        // production shape: the promotion boundary applies and the
+        // check must warn with the exact audit contract wording, even
+        // though the wired client is a single-node direct connection.
+        $tester = $this->doctor($this->containerFor(new DoctorRedisStorageNoWaitKernel('test', true)));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Replication topology', $display, 'Redis-backed storage with waitReplicas 0 must warn on the replication-topology check');
+        self::assertStringContainsString('waitReplicas 0', $display);
+        self::assertStringContainsString(
+            'One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion',
+            $display,
+            'the WARN must carry the exact audit contract wording',
+        );
     }
 }

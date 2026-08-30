@@ -857,6 +857,49 @@
     return url.href;
   }
 
+  // ── Challenge response schema validation ────────────────────────────
+  // The endpoint is same-origin, but the response bytes are still
+  // untrusted input: the widget must never solve a forged or malformed
+  // challenge. The issuance contract (the ChallengeController response
+  // shape) is: algorithm sha256|argon2id, nonce a non-empty server-minted
+  // string, prefix a non-empty string, salt a non-empty base64 string
+  // that decodes to at least one byte, targetBits an integer within the
+  // algorithm's issuance ceiling (sha256 1..20, argon2id 1..10), the
+  // argon2id parameters in their issuance ranges (t 3..6, p 1,
+  // mKib 8*p..65536), and ttlSecs an integer 1..300 when present. A
+  // response that violates the contract is a challenge-content failure:
+  // the widget enters the controlled bounded-retry failure state instead
+  // of ever solving the response. Without the shape gate a forged
+  // well-formed response with targetBits 0 would be "solved" instantly
+  // and minted into a token that can never verify (and an out-of-contract
+  // ceiling like 255 would burn the bounded CPU budget on every attempt).
+  function kiwiValidateChallenge(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Challenge malformed");
+    var alg = data.algorithm === undefined ? "sha256" : data.algorithm;
+    if (alg !== "sha256" && alg !== "argon2id") throw new Error("Challenge malformed");
+    if (typeof data.nonce !== "string" || data.nonce.length < 1) throw new Error("Challenge malformed");
+    if (typeof data.prefix !== "string" || data.prefix.length < 1) throw new Error("Challenge malformed");
+    if (typeof data.salt !== "string" || data.salt.length < 1) throw new Error("Challenge malformed");
+    try {
+      var saltBytes = b64decode(data.salt);
+    } catch (e) {
+      throw new Error("Challenge malformed");
+    }
+    if (!saltBytes || saltBytes.length < 1) throw new Error("Challenge malformed");
+    var targetBits = data.targetBits;
+    if (typeof targetBits !== "number" || !isFinite(targetBits) || Math.floor(targetBits) !== targetBits) throw new Error("Challenge malformed");
+    if (targetBits < 1 || targetBits > (alg === "argon2id" ? 10 : 20)) throw new Error("Challenge malformed");
+    if (alg === "argon2id") {
+      var mKib = data.mKib, t = data.t, p = data.p;
+      if (typeof mKib !== "number" || !isFinite(mKib) || Math.floor(mKib) !== mKib || mKib < 8) throw new Error("Challenge malformed");
+      if (mKib > 65536) throw new Error("Challenge malformed");
+      if (typeof t !== "number" || !isFinite(t) || Math.floor(t) !== t || t < 3 || t > 6) throw new Error("Challenge malformed");
+      if (typeof p !== "number" || !isFinite(p) || Math.floor(p) !== p || p !== 1) throw new Error("Challenge malformed");
+      if (mKib < 8 * p) throw new Error("Challenge malformed");
+    }
+    if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
+  }
+
   // ── Coarse client-context descriptor (risk-v2 evidence) ─────────────
   // Built ONCE per page load from coarse navigator/window signals and sent
   // with every challenge request as the `client_context` field (the server
@@ -1814,6 +1857,10 @@
         // weaker solve. The client may only ever accept what it asked
         // for or more.
         if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
+        // The response shape gate: a forged or malformed challenge is a
+        // challenge-content failure (the controlled bounded-retry state),
+        // never a solve. The widget may only solve a well-formed issuance.
+        kiwiValidateChallenge(data);
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // RISK-V2 DECOY FIELD: the server-issued decoy (honeypot) name in
         // the issuance response is rendered as a hidden form input next to

@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Command;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use Composer\InstalledVersions;
 use KiwiCaptcha\AtomicDeleteIfPendingInterface;
@@ -97,6 +98,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $checks = [
             'Storage atomicity' => $this->checkStorage(),
             'Redis reachability' => $this->checkRedis($this->redis, 'storage/limiter Redis'),
+            'Replication topology' => $this->checkReplicationTopology(),
             'Secret key' => $this->checkSecret(),
             'Keyring state' => $this->checkKeyring(),
             'Public origin' => $this->checkPublicOrigin(),
@@ -183,6 +185,68 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
+     * The authority-change replay contract. Redis failover topologies
+     * (Predis Sentinel or master-slave replication aggregates and
+     * Redis Cluster aggregates) route commands through promotion
+     * machinery, and the verified-WAIT barrier is refused on them at
+     * construction, so waitReplicas stays 0 and the deployment has no
+     * cross-authority replay guarantee. A Redis-backed storage with
+     * waitReplicas 0 is the same posture on any topology: the
+     * promotion boundary applies, and replay-safe promotion is an
+     * operator contract, not an automatic property. The documented
+     * postures are fail_closed (the verified WAIT on a standalone
+     * authority, or no failover at all), operator_managed (promotion
+     * eligibility gated so a stale replica can never be elected) and
+     * best_effort (documented acceptance of the boundary); see
+     * docs/redis-topologies.md.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkReplicationTopology(): array
+    {
+        $aggregate = $this->predisAggregateLabel($this->redis, 'storage/limiter Redis')
+            ?? $this->predisAggregateLabel($this->riskRedis, 'risk Redis');
+        if ($aggregate !== null) {
+            return ['WARN', sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
+        }
+        if ($this->storage instanceof \KiwiCaptcha\Storage\RedisStorage) {
+            $waitReplicas = (int) ($this->config['risk']['redis']['wait_replicas'] ?? 0);
+            if ($waitReplicas <= 0) {
+                return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', \get_class($this->storage))];
+            }
+
+            return ['PASS', sprintf('Redis-backed storage (%s) with the verified-WAIT barrier (waitReplicas %d): acked writes reach every configured replica before success', \get_class($this->storage), $waitReplicas)];
+        }
+
+        return ['PASS', 'no Redis-backed storage and no aggregate client: one-shot atomicity is per-authority and no promotion boundary applies'];
+    }
+
+    /**
+     * Describe a wired client when it is a Predis replication or
+     * cluster aggregate (the failover topologies), null otherwise.
+     * The classification mirrors the core VerifiedWaitGuard, so a
+     * deployment the barrier refuses is exactly the deployment this
+     * check warns on.
+     *
+     * @return string|null null for a single-node direct connection
+     */
+    private function predisAggregateLabel(\Redis|\Predis\Client|null $client, string $label): ?string
+    {
+        if (!$client instanceof \Predis\Client) {
+            return null;
+        }
+        $connection = $client->getConnection();
+        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+            return sprintf('%s is a Predis replication aggregate (%s): Sentinel or master-slave failover', $label, \get_class($connection));
+        }
+        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+            return sprintf('%s is a Predis Redis Cluster aggregate (%s)', $label, \get_class($connection));
+        }
+
+        return null;
+    }
+
+    /**
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkSecret(): array
@@ -251,19 +315,9 @@ final class KiwiCaptchaDoctorCommand extends Command
 
             return ['WARN', 'public_base_url not set: the expected origin derives from the request Host header; set a canonical https origin in production'];
         }
-        $parts = parse_url($publicBaseUrl);
-        $scheme = $parts['scheme'] ?? null;
-        $host = $parts['host'] ?? null;
-        $path = $parts['path'] ?? '';
-        if ($scheme !== 'https'
-            || $host === null
-            || isset($parts['user'])
-            || isset($parts['pass'])
-            || isset($parts['query'])
-            || isset($parts['fragment'])
-            || ($path !== '' && $path !== '/')
-        ) {
-            return ['WARN', sprintf('public_base_url "%s" is not a clean https origin (scheme, host, no userinfo, no query/fragment, empty path)', $publicBaseUrl)];
+        $violation = ExpectedOrigin::publicBaseUrlViolation($publicBaseUrl);
+        if ($violation !== null) {
+            return ['WARN', sprintf('public_base_url "%s" %s', $publicBaseUrl, $violation)];
         }
 
         return ['PASS', sprintf('canonical origin %s from server config', $publicBaseUrl)];

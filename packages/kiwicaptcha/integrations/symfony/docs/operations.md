@@ -130,6 +130,24 @@ Redis-backed storage is recommended.
 The bundle fails fast with a `LogicException` if `ArrayStorage` is configured outside the test/dev environment, since it cannot enforce single-use across workers.
 PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under concurrency is then best-effort (read-then-delete).
 
+### Single use across an authority change
+
+The one-shot contract is authority-scoped, and the operator must hold the boundary explicitly:
+
+> One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion.
+
+The atomic pending→consumed transition is atomic per Redis authority on every topology (standalone, Sentinel, Cluster).
+A failover that promotes a stale replica can move the authority to a node that never received the consume, the deterministic result commit, or the terminal delete-if-pending deletion.
+That stale view can re-enable replay of a consumed or burned challenge.
+Replay-safe promotion is therefore a deployment invariant, never an automatic property of the failover.
+The deployment chooses and documents one of the three postures from [redis-topologies.md](../../../../../docs/redis-topologies.md#authority-change-replay-durability-the-deployment-posture).
+The postures:
+- `fail_closed`: the verified `WAIT` barrier on a standalone authority with the threshold covering every eligible failover target, or a consensus-capable store (`ReplicaWaitException` on a shortfall).
+- `operator_managed`: promotion eligibility gated so a lagging replica can never be elected.
+- `best_effort`: the boundary accepted and documented.
+`kiwicaptcha:doctor` warns with the exact contract wording above whenever the deployment has no cross-authority replay guarantee: a Predis Sentinel, master-slave or Cluster aggregate client, or Redis-backed storage with `waitReplicas` 0.
+The verified `WAIT` barrier itself is refused on Predis aggregates at construction (`VerifiedWaitGuard`), so an aggregate deployment always needs one of the documented postures; on a standalone authority the `risk.redis.wait_replicas` knob is the `fail_closed` lever.
+
 ## Health endpoints (rollback-resistant readiness)
 
 `risk.health.enabled` (default true) registers two GET endpoints under the route prefix:
@@ -314,6 +332,9 @@ CPU-only scaling amplifies the attack's cost instead of containing it.
 
 The deployment's public origin is `public_base_url`.
 See [security-hardening.md](security-hardening.md#same-origin-enforcement).
+The value is a canonical https origin in both configuration forms.
+A literal is validated at container build time; an env-managed `%env()%` value is validated with the same contract when the challenge controller is constructed at runtime.
+An invalid resolved value fails closed with an error naming `kiwi_captcha.public_base_url`.
 The issued records carry no Host-derived material.
 If your infrastructure terminates TLS and rewrites Host headers (shared hosting, multiple vhosts on one pool), set `public_base_url` explicitly.
 The same-origin check then ignores whatever Host the request carries.

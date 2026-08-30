@@ -191,6 +191,15 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if ($entry['consumed']) {
             return new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']);
         }
+        // The pending-envelope guard (the in-process mirror of the Redis
+        // consume script's raw-marker check): a pending record must not
+        // carry any terminal or claim field — a result, an operation
+        // identity, or a resume-claim lease. Only the consume transition
+        // itself may introduce them; a pending record that already
+        // carries one is refused with the missing semantics (null).
+        if ($entry['result'] !== null || $entry['operationIdentity'] !== null || $entry['claim'] !== null) {
+            return null;
+        }
         $this->records[$nonce]['consumed'] = true;
 
         return new ConsumedRecord($entry['record'], true, false, null, null);
@@ -213,6 +222,13 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         }
         if ($entry['consumed']) {
             return new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']);
+        }
+        // The pending-envelope guard, mirroring the Redis consume
+        // script's raw-marker check: a pending record that already
+        // carries a result, an operation identity or a resume-claim
+        // lease is refused with the missing semantics.
+        if ($entry['result'] !== null || $entry['operationIdentity'] !== null || $entry['claim'] !== null) {
+            return null;
         }
         $this->records[$nonce]['consumed'] = true;
         if ($validated !== null) {

@@ -9,6 +9,7 @@ use KiwiCaptcha\ConsumedOutcomeRecovery;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
+use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use PHPUnit\Framework\TestCase;
@@ -32,13 +33,14 @@ use PHPUnit\Framework\TestCase;
  * field, or an envelope that blocks a legitimate retry beyond the claim
  * TTL.
  *
- * Runs when `KC_REDIS_URL` or `TEST_REDIS_URL` is set, the shared
- * real-Redis env of the monorepo CI; skips otherwise, like every other
- * real-Redis suite. Requires the pcntl and posix extensions for the
- * forked workers; the suite skips when they are missing. The matrix
- * stays bounded: one record per boundary, a short claim TTL where the
- * test needs expiry inside the window, and a bounded wait for the
- * worker markers.
+ * Runs in the dedicated "PHP core real-Redis fault/topology" CI lane,
+ * which publishes `KC_REDIS_URL` and `TEST_REDIS_URL` and sets
+ * `KIWI_REQUIRE_REAL_REDIS_TESTS=1`; with the flag on, a missing or
+ * unreachable Redis, or missing pcntl/posix extensions, fails the
+ * suite instead of skipping. With the flag off the suite skips like
+ * every other real-Redis suite. The matrix stays bounded: one record
+ * per boundary, a short claim TTL where the test needs expiry inside
+ * the window, and a bounded wait for the worker markers.
  */
 final class WorkerDeathMatrixRealRedisTest extends TestCase
 {
@@ -54,15 +56,12 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }
-        if (!\function_exists('pcntl_fork') || !\function_exists('posix_kill') || !\function_exists('pcntl_waitpid')) {
+        if (!RealRedisTestEnv::requireExtensions(['pcntl', 'posix'], 'the real-Redis worker-death matrix')) {
             self::markTestSkipped('the pcntl and posix extensions are required for the forked workers');
         }
-        $url = getenv('KC_REDIS_URL');
-        if (!\is_string($url) || $url === '') {
-            $url = getenv('TEST_REDIS_URL');
-        }
-        if (!\is_string($url) || $url === '') {
-            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis death matrix runs in the Redis-service env');
+        $url = RealRedisTestEnv::requireRedis('the real-Redis worker-death matrix');
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis death matrix runs in the dedicated real-Redis CI lane');
         }
         try {
             $probe = new \Predis\Client($url, ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
@@ -70,6 +69,7 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
 
             return $probe;
         } catch (\Throwable) {
+            RealRedisTestEnv::failWhenRequired('no Redis is reachable at the configured KC_REDIS_URL/TEST_REDIS_URL', 'the real-Redis worker-death matrix');
             self::markTestSkipped('no Redis at the configured KC_REDIS_URL/TEST_REDIS_URL');
         }
     }

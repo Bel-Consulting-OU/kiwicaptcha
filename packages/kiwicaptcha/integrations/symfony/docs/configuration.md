@@ -31,6 +31,14 @@ kiwi_captcha:
   rediss:// with a host, fail-closed) when the client is constructed.
   A literal override in
   this file is still possible and keeps the same validation.
+- `public_base_url` carries the same canonical-origin contract in both
+  forms.
+  A literal is validated at container build time.
+  An env-resolved value is validated with the identical rule when the
+  challenge controller is constructed at runtime: https only, a host,
+  no credentials, no path, no query, no fragment.
+  An invalid resolved origin fails closed with an error naming
+  `kiwi_captcha.public_base_url`.
 - Install the client library: `composer require predis/predis`.
 - The Flex recipe ships this exact file; see
   [flex-recipe.md](flex-recipe.md).

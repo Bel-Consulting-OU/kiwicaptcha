@@ -9,12 +9,20 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\RedisStorage;
+use KiwiCaptcha\Tests\Fixtures\RealRedisTestEnv;
 use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis Cluster topology verification against a real three-master
- * cluster that this suite boots and tears down itself.
+ * Redis Cluster routing/atomicity compatibility against a real
+ * three-master cluster that this suite boots and tears down itself.
+ *
+ * This fixture is deliberately NOT a "Cluster HA verification": it
+ * boots masters with no replicas, so no failover, promotion or
+ * replica-side durability is exercised. Redis Cluster's
+ * high-availability behavior is a separate deployment concern (see
+ * docs/redis-topologies.md); what this fixture verifies is routing
+ * and per-record atomicity.
  *
  * The documented topology contract: every storage Lua script touches
  * exactly one key. The record key is the one key, and the resume
@@ -37,13 +45,15 @@ use PHPUnit\Framework\TestCase;
  * on each node's plain connection first; the actual transitions are
  * the single-key evalsha calls the storage performs.
  *
- * Runs when `KC_REDIS_URL` or `TEST_REDIS_URL` is set (the shared
- * real-Redis env of the monorepo CI) and a local redis-server build
- * with cluster support exists; skips otherwise, like every other
- * real-Redis suite. When the cluster cannot be booted, the slot
- * invariants are still asserted on the composed key strings through
- * the environment Redis (server keyslot where served, the canonical
- * CRC-16 computation otherwise).
+ * Runs in the dedicated "PHP core real-Redis fault/topology" CI lane,
+ * which publishes `KC_REDIS_URL` and `TEST_REDIS_URL` and sets
+ * `KIWI_REQUIRE_REAL_REDIS_TESTS=1`; with the flag on, a missing or
+ * unreachable Redis, or missing redis-server/redis-cli binaries, fails
+ * the suite instead of skipping. With the flag off the suite skips
+ * like every other real-Redis suite. When the cluster cannot be
+ * booted, the slot invariants are still asserted on the composed key
+ * strings through the environment Redis (server keyslot where served,
+ * the canonical CRC-16 computation otherwise).
  */
 final class RedisClusterTopologyTest extends TestCase
 {
@@ -105,12 +115,9 @@ final class RedisClusterTopologyTest extends TestCase
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }
-        $url = getenv('KC_REDIS_URL');
-        if (!\is_string($url) || $url === '') {
-            $url = getenv('TEST_REDIS_URL');
-        }
-        if (!\is_string($url) || $url === '') {
-            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis topology suites run in the CI Redis-service job');
+        $url = RealRedisTestEnv::requireRedis('the Redis Cluster topology suite');
+        if ($url === null) {
+            self::markTestSkipped('KC_REDIS_URL/TEST_REDIS_URL not set — the real-Redis topology suites run in the dedicated real-Redis CI lane');
         }
         try {
             $client = new \Predis\Client($url, ['timeout' => 3.0, 'read_write_timeout' => 3.0]);
@@ -118,6 +125,7 @@ final class RedisClusterTopologyTest extends TestCase
 
             return $client;
         } catch (\Throwable) {
+            RealRedisTestEnv::failWhenRequired('no Redis is reachable at the configured KC_REDIS_URL/TEST_REDIS_URL', 'the Redis Cluster topology suite');
             self::markTestSkipped('no Redis at the configured KC_REDIS_URL/TEST_REDIS_URL');
         }
     }
@@ -125,10 +133,10 @@ final class RedisClusterTopologyTest extends TestCase
     private function binariesOrSkip(): void
     {
         foreach (['redis-server', 'redis-cli'] as $binary) {
-            $path = trim((string) shell_exec('command -v '.$binary.' 2>/dev/null'));
-            if ($path === '') {
-                self::markTestSkipped("{$binary} not found on PATH — the cluster topology suite needs a local redis-server build with cluster support");
+            if (RealRedisTestEnv::requireBinary($binary, 'the Redis Cluster topology suite')) {
+                continue;
             }
+            self::markTestSkipped("{$binary} not found on PATH — the cluster topology suite needs a local redis-server build with cluster support");
         }
     }
 

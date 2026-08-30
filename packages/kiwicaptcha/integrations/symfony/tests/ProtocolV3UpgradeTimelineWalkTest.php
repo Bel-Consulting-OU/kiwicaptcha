@@ -57,7 +57,13 @@ use Symfony\Component\HttpFoundation\Request;
  * Redis with real second-bounded TTLs. The two clocks are separate by
  * design: the fake monitor clock only crosses the cache window, while
  * the simulated walk clock drives the ledger expiry math and the
- * phase boundaries. The walk is fully deterministic.
+ * phase boundaries.
+ *
+ * Runs in the dedicated "Real-Redis concurrency" CI lane, which
+ * publishes `KC_REDIS_URL` / `TEST_REDIS_URL` and sets
+ * `KIWI_REQUIRE_REAL_REDIS_TESTS=1`; with the flag on, a missing or
+ * unreachable Redis fails the walk instead of skipping. The walk is
+ * fully deterministic.
  */
 final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
 {
@@ -112,15 +118,18 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
     {
         $url = RedisTestUrl::resolve();
         if ($url === null) {
+            $this->failIfRealRedisRequired('no Redis test URL (KC_REDIS_URL / TEST_REDIS_URL) is set');
             self::markTestSkipped('no Redis test URL (KC_REDIS_URL / TEST_REDIS_URL) — real-Redis upgrade walk skipped');
         }
         if (!class_exists(\Predis\Client::class)) {
+            $this->failIfRealRedisRequired('predis/predis is not installed');
             self::markTestSkipped('predis/predis not installed');
         }
         $this->client = new \Predis\Client($url);
         try {
             $this->client->ping();
         } catch (\Throwable $e) {
+            $this->failIfRealRedisRequired('Redis is unreachable at the configured URL');
             self::markTestSkipped('Redis unreachable: '.$e->getMessage());
         }
         $this->client->flushdb();
@@ -128,6 +137,21 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         $this->verifier = new Verifier($this->storage);
         $this->simulator = new ProtocolV2OnlyVerifier($this->verifier, $this->storage);
         $this->ledger = [];
+    }
+
+    /**
+     * Fail the walk instead of skipping when the real-Redis CI lane
+     * loses its environment: the lane sets
+     * KIWI_REQUIRE_REAL_REDIS_TESTS=1 together with `KC_REDIS_URL` /
+     * `TEST_REDIS_URL`, so a missing or unreachable Redis there is a
+     * broken lane, not a legitimate skip.
+     */
+    private function failIfRealRedisRequired(string $why): void
+    {
+        $flag = getenv('KIWI_REQUIRE_REAL_REDIS_TESTS');
+        if (\is_string($flag) && $flag !== '' && $flag !== '0') {
+            self::fail('KIWI_REQUIRE_REAL_REDIS_TESTS is set but '.$why.' — the two-phase protocol-v3 upgrade walk must run in the real-Redis CI lane');
+        }
     }
 
     /**

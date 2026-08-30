@@ -9,7 +9,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * authorization and transition boundary in Lua.
  *
  * The PHP decoder, {@see RedisChainedChallengeStateStore::validateState()},
- * is strict: a record with an unknown state, wrong state-dependent
+ * is strict: a record with an unknown key (deny-unknown-fields), an
+ * unknown state, wrong state-dependent
  * owner/lease/stage2-nonce invariants or a malformed field is corrupt and
  * fails closed. The Lua scripts must preserve that contract at the point
  * of authorization, not only when PHP re-reads the record. This function
@@ -66,6 +67,16 @@ end
 local function isValidChainRecord(rec)
   if type(rec) ~= 'table' then
     return false
+  end
+  -- Deny unknown fields, the mirror of the PHP validateState's
+  -- deny-unknown-fields rule: a renamed or extra key (e.g. a
+  -- requestBinding spelled differently) is a corrupt or foreign record
+  -- and fails closed, exactly like the PHP decoder.
+  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true }
+  for k in pairs(rec) do
+    if not knownKeys[k] then
+      return false
+    end
   end
   if rec['v'] ~= 2 then
     return false

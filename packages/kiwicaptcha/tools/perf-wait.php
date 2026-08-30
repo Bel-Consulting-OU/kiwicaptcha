@@ -37,6 +37,15 @@ declare(strict_types=1);
  *    path. WAIT 1 on a replica-less node blocks the full timeout and
  *    replies 0.
  *
+ * This single-node run exercises the shortfall/fail-closed path only:
+ * on a single authority no replica can ever ack, so the numbers below
+ * are the unsatisfied-WAIT upper bound, not the production topology.
+ * The successful-acknowledgment numbers (issuance, consume and commit
+ * with a real replica acked, plus the replication-lag distribution)
+ * live in the sibling fixture perf-wait-replica.php, which boots a
+ * local primary plus replica and measures the same barrier on the
+ * acked path.
+ *
  * The fixture is non-gating on timing by design: it reports p50, p95
  * and the p95 delta of the barrier phase over the baseline, and the
  * recorded values live in the header as documentation. The only hard

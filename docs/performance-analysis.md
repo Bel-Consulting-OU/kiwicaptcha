@@ -27,6 +27,19 @@ The measurement tools:
   correctness-under-load suite against real Redis. It asserts the
   exactly-one-success contract under 4-way contention and spot-checks
   the Redis command count per lifecycle with a counting client.
+- `packages/kiwicaptcha/tools/perf-wait.php` measures the
+  verified-WAIT barrier round trip on a single Redis authority: WAIT
+  acknowledges 0 replicas there, so every barrier write fails closed
+  after the wait timeout (the shortfall/fail-closed path, the upper
+  bound of the barrier cost). Its recorded baselines live in the
+  script header.
+- `packages/kiwicaptcha/tools/perf-wait-replica.php` boots a real
+  local primary plus replica (WAIT 1 confirms the sync) and measures
+  the successful-acknowledgment path of the same barrier: issuance,
+  consume and commit with the replica acked, the replication-lag
+  distribution, and the shortfall behavior on the same fixture when
+  the replica is stopped. Its recorded baselines live in the script
+  header.
 
 ## Measured baselines
 
@@ -121,6 +134,29 @@ three. The contract is correct and fail-closed, and the cost only
 appears in replicated deployments, where it should be budgeted as a
 deployment property, not a code regression.
 
+The measured WAIT numbers are honest about which path they exercise.
+`tools/perf-wait.php` runs against the single-node service only: on a
+single authority WAIT acknowledges 0 replicas, so every barrier write
+fails closed with `ReplicaWaitException` after the wait timeout
+(recorded p50 about 101 ms, p95 about 202 ms at the 100 ms store
+timeout), and the reported deltas are the shortfall/fail-closed path,
+the upper bound of the barrier cost. `tools/perf-wait-replica.php`
+boots a real local primary plus replica (WAIT 1 confirms the sync)
+and measures the successful-acknowledgment numbers on the same
+`RedisStorage` barrier: with the replica acked, issuance p50 0.070 ms
+p95 0.151 ms, consume p50 0.126 ms p95 0.245 ms and commit p50 0.110
+ms p95 0.228 ms, against a no-barrier baseline of 0.065-0.078 ms p50
+(p95 deltas under +0.16 ms); the same fixture also records the
+replication-lag distribution (master-write to replica-visible p50
+0.060 ms p95 0.158 ms on loopback) and re-verifies the shortfall path
+by stopping the replica. The single-node shortfall delta and the
+replica-fixture shortfall delta agree, because both are the same
+unsatisfied-WAIT path; the ack-phase numbers are the production
+replication topology the single-node fixture cannot produce. Neither
+fixture gates on timing; the numbers above are the recorded
+baselines of 2026-08-30 (the conservative of three runs, local Mac,
+Redis 8.10, loopback primary + replica).
+
 The risk engine is not the bottleneck. At 0.065 ms p95 per issuance it
 is inside the noise of one Redis round trip. A 100x on the bundle path
 would have to come from the Redis round trips underneath the engine,
@@ -157,7 +193,10 @@ measured under concurrent load, because the derivation cost makes a
 multi-worker latency distribution dominated by CPU contention rather
 than by the Redis path; the serial bench and the admission gate bound
 it. The risk-enabled load variant of perf-load.php is not measured,
-because the php-core vendor does not carry the risk classes. A
-replicated deployment with `waitReplicas > 0` was not measured either;
-the round-trip amplification above is derived from the storage
-contract, not from a live replica bench.
+because the php-core vendor does not carry the risk classes. The
+replicated deployment numbers above come from the loopback
+primary+replica fixture (perf-wait-replica.php), one host and one
+local topology: they are evidence of the acked-WAIT cost on a quiet
+loopback, not capacity planning for a production replica set, and the
+shortfall numbers remain the fail-closed behavior, not a steady-state
+cost.

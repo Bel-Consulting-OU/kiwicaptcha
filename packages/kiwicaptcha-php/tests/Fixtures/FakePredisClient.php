@@ -15,7 +15,11 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *  - consume-transition script: marks the stored record consumed (keeps
  *    it) and returns {json, consumed_now, consumed_before, result_json};
  *    the one-shot transition, not a delete. A cancelled record is never
- *    consumable: the script reports it as missing (nil).
+ *    consumable: the script reports it as missing (nil), and the
+ *    pending-envelope guard refuses a pending record that already
+ *    carries a terminal or claim field (consumed_result,
+ *    operation_identity, resume_owner / resume_until), mirroring the
+ *    real Lua's raw-marker check.
  *  - cancel-transition script: flips a pending record to the terminal
  *    cancelled marker (kept until its TTL) and returns
  *    {state: cancelled-now | cancelled | consumed}; missing is nil.
@@ -357,6 +361,23 @@ final class FakePredisClient extends \Predis\Client
                 $res = $obj['consumed_result'] ?? null;
 
                 return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
+            }
+            if (($obj['state'] ?? 'pending') !== 'pending') {
+                // Any other state marker is never consumable, mirroring
+                // the real Lua's failed pending-marker splice.
+                return null;
+            }
+            // The pending-envelope guard, mirroring the real Lua's
+            // raw-marker check: a pending envelope that already carries a
+            // terminal or claim field (a non-null consumed_result, a
+            // non-null operation_identity, or any resume_owner /
+            // resume_until marker) is refused with the missing
+            // semantics.
+            if (($obj['consumed_result'] ?? null) !== null
+                || ($obj['operation_identity'] ?? null) !== null
+                || isset($obj['resume_owner'])
+                || isset($obj['resume_until'])) {
+                return null;
             }
             $obj['state'] = 'consumed';
             if (($args[0] ?? '') !== '') {

@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
+use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\EnvDsnTestKernel;
@@ -226,7 +227,9 @@ final class RedisDsnWiringTest extends TestCase
     public function testEnvPlaceholderPublicBaseUrlPassesTheProductionValidation(): void
     {
         // The production origin guard also tolerates the %env()% form:
-        // the resolved value is validated and consumed at runtime.
+        // the resolved value is validated at runtime when the
+        // ExpectedOrigin is constructed, never reaching the controller
+        // unvalidated.
         $container = $this->load([[
             'secret_key' => self::SECRET,
             'redis_dsn' => self::DSN,
@@ -234,7 +237,18 @@ final class RedisDsnWiringTest extends TestCase
         ]], 'prod');
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.redis.dsn'), 'the production build compiles with the placeholder origin');
-        self::assertSame('%env(KIWI_PUBLIC_URL)%', $container->getDefinition(ChallengeController::class)->getArgument('$publicBaseUrl'), 'the placeholder flows to the controller and resolves at runtime');
+        $origin = $container->getDefinition('kiwi_captcha.expected_origin');
+        self::assertSame(
+            [ExpectedOrigin::class, 'fromPublicBaseUrl'],
+            $origin->getFactory(),
+            'the env-managed origin is constructed through the runtime validation guard',
+        );
+        self::assertSame(['%env(KIWI_PUBLIC_URL)%'], $origin->getArguments(), 'the placeholder flows through the container parameter bag untouched');
+        self::assertEquals(
+            new Reference('kiwi_captcha.expected_origin'),
+            $container->getDefinition(ChallengeController::class)->getArgument('$expectedOrigin'),
+            'the controller receives the validated expected origin, never the raw string',
+        );
     }
 
     public function testEnvPlaceholderPublicBaseUrlInvalidLiteralIsStillRefusedInProduction(): void

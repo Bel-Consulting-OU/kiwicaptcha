@@ -337,9 +337,77 @@ jobs:
       - name: composer install
         run: composer install --no-interaction --prefer-dist
       - name: real-redis integration tests
+        # The lane owns the bundle real-Redis suites AND the protocol-v3
+        # upgrade walk (the walk class name does not match the RealRedis
+        # filter); KIWI_REQUIRE_REAL_REDIS_TESTS=1 makes the walk fail
+        # instead of skip when the Redis env is lost.
         env:
           KC_REDIS_URL: tcp://127.0.0.1:6379
-        run: vendor/bin/phpunit --filter RealRedis
+          TEST_REDIS_URL: tcp://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
+
+  php-core-real-redis:
+    # The real-Redis fault/topology/death coverage of the PHP core
+    # must actually RUN in CI: the default PHP core matrix lanes have
+    # no Redis service and no `KC_REDIS_URL`/`TEST_REDIS_URL`, so the
+    # four real-Redis suites they reach would silently skip. This
+    # dedicated required lane publishes the Redis env AND the
+    # KIWI_REQUIRE_REAL_REDIS_TESTS=1 flag: the suites fail instead of
+    # skipping when the Redis service, the redis-server/redis-cli
+    # binaries or the pcntl/posix extensions are missing, so a future
+    # change that breaks real failover boundary behavior,
+    # worker-death recovery, Sentinel/Cluster behavior or the
+    # two-phase protocol transition fails this required context
+    # instead of staying green on skipped tests.
+    name: PHP core real-Redis fault/topology
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: pcntl, posix, json, openssl, sodium
+          coverage: none
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: install local redis binaries (topology suites)
+        # The cluster and sentinel suites boot their own redis-server
+        # processes from the binaries on `PATH`, and the ubuntu-latest
+        # runner image does not ship them, so the lane installs the apt
+        # packages. The apt postinst starts a systemd redis on 6379,
+        # which would fight the docker service published on the same
+        # port: the service is stopped right away, leaving the binaries
+        # for the suites.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y redis-server redis-tools
+          sudo systemctl stop redis-server || true
+      - name: real-redis tooling preflight
+        # The suites fail on a missing piece only when the run reaches
+        # them; this preflight fails the lane loudly and immediately
+        # when redis-server/redis-cli or the pcntl/posix extensions are
+        # missing, so a broken runner image can never no-op the lane.
+        run: |
+          set -euo pipefail
+          command -v redis-server >/dev/null || { echo "::error::redis-server is missing on PATH" >&2; exit 1; }
+          command -v redis-cli >/dev/null || { echo "::error::redis-cli is missing on PATH" >&2; exit 1; }
+          php -r 'if (!extension_loaded("pcntl") || !extension_loaded("posix")) { fwrite(STDERR, "pcntl/posix missing\n"); exit(1); } echo "pcntl/posix OK\n";'
+      - name: real-Redis fault/topology/death suites
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          TEST_REDIS_URL: redis://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
 
   phpredis-siteverify:
     # The Siteverify idempotency store and the invalid-secret log gate
@@ -1131,8 +1199,11 @@ jobs:
     # Argon2id admission path (64 MiB, t=3), the risk-enabled
     # controller path, the real-Redis concurrent risk-enabled path
     # (forked workers through the DSN-built client, the --redis mode of
-    # perf-bench-risk.php) and the verified-WAIT round-trip fixture
-    # (perf-wait.php, non-gating by design). Every timing step is
+    # perf-bench-risk.php) and the verified-WAIT fixtures: the
+    # single-node round trip (perf-wait.php, the shortfall/fail-closed
+    # path) and the local primary+replica fixture (perf-wait-replica.php,
+    # the successful-acknowledgment path), both non-gating by design.
+    # Every timing step is
     # non-gating by design (a shared GitHub runner is too noisy for a
     # hard latency gate), so a timing regression surfaces loudly without
     # blocking the merge lane while a byte regression blocks it. The
@@ -1200,6 +1271,16 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: php packages/kiwicaptcha/tools/perf-wait.php
+      - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory)
+        # perf-wait-replica.php boots its own local master + replica on
+        # free ports, so it needs redis-server/redis-cli on the runner;
+        # when they are missing (or the gate Redis is unreachable) the
+        # script prints a loud note and exits 0. Advisory like every
+        # other timing step: the fixture has no ratchet.
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-wait-replica.php
 
   perf-latency-quiet:
     # Performance latency (quiet runner). The hard latency gate: the
@@ -1262,6 +1343,15 @@ jobs:
         env:
           KC_REDIS_URL: ${{ inputs.redis_url }}
         run: php packages/kiwicaptcha/tools/perf-wait.php
+      - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory-only)
+        # The replica fixture has no ratchet and spins its own local
+        # topology, so it stays advisory even on the quiet runner: it
+        # notes loudly and exits 0 when redis-server/redis-cli are
+        # missing, and its invariants gate only the barrier semantics.
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-wait-replica.php
 
   cross-language:
     name: Cross-language (both directions)

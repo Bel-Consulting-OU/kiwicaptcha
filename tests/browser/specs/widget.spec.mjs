@@ -62,12 +62,19 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(external).toEqual([]);
   });
 
-  test('a solve that exhausts its bounded search notifies the server once for the abandoned nonce', async ({ page }) => {
-    // The exhaustion path (the bounded search cap) abandons the challenge:
-    // the driver must inform the server (fire-and-forget, rate-limited) for
-    // the abandoned nonce only. The retry flow re-acquires fresh challenges
-    // and the per-widget cooldown keeps the notification bounded — never a
+  test('a solve that abandons at its deadline notifies the server once for the abandoned nonce', async ({ page }) => {
+    // The abandonment path (the bounded search exhaustion or the solve
+    // deadline) abandons the challenge: the driver must inform the
+    // server (fire-and-forget, rate-limited) for the abandoned nonce
+    // only. The retry flow re-acquires fresh challenges and the
+    // per-widget cooldown keeps the notification bounded — never a
     // spam, and never a cancel for a nonce this widget did not abandon.
+    // The abandonment is driven deterministically by the solve deadline:
+    // a schema-valid argon2id challenge at the maximum in-contract
+    // memory (mKib 65536 = 64 MiB, t 6) expires 500 ms into the solve —
+    // a single memory-hard hash cannot complete inside the deadline
+    // window on any current hardware, so every attempt abandons instead
+    // of ever solving.
     const cancelBodies = [];
     await page.route('**/challenge/cancel', async (route) => {
       cancelBodies.push(route.request().postDataJSON() ?? {});
@@ -76,9 +83,6 @@ test.describe('KiwiCaptcha browser solver', () => {
     let calls = 0;
     await page.route('**/challenge', async (route) => {
       calls++;
-      // An unsolvable challenge (targetBits 255: the 5M-hash bounded search
-      // can never find a match) — the solver exhausts and the widget fails
-      // after the bounded retry flow.
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -86,12 +90,12 @@ test.describe('KiwiCaptcha browser solver', () => {
           nonce: 'exhaust-nonce-' + calls,
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
-          targetBits: 255,
-          algorithm: 'sha256',
-          mKib: 0,
-          t: 1,
+          algorithm: 'argon2id',
+          targetBits: 10,
+          mKib: 65536,
+          t: 6,
           p: 1,
-          ttlSecs: 120,
+          ttlSecs: 1,
           minDurationMs: 0,
         }),
       });

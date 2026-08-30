@@ -5,20 +5,28 @@ verified mechanically. The security Redis (challenge storage, replay
 guards, admission leases, risk state) is a trusted control-plane
 component; the topology it runs on is part of its security posture.
 The claims below were exercised against real local topologies, not
-inferred: a three-master Redis Cluster, and a master plus replica plus
-sentinel failover. The suites that run them are
+inferred: a three-master Redis Cluster (the Cluster routing/atomicity
+compatibility fixture), and a master plus replica plus sentinel
+failover (the Sentinel HA fixture). The suites that run them are
 `packages/kiwicaptcha-php/tests/RedisClusterTopologyTest.php` and
 `packages/kiwicaptcha-php/tests/RedisSentinelFailoverTest.php`, gated
 on the shared real-Redis env (`KC_REDIS_URL` or `TEST_REDIS_URL`), the
 same gate every real-Redis suite uses.
 
-## Redis Cluster: the single-slot invariants
+## Redis Cluster: routing and atomicity compatibility
 
-A Redis Cluster routes every command by hash slot, and a multi-key Lua
-script is refused with a cross-slot error unless all of its keys share
-one slot. The storage layer is Cluster-safe by construction because of
-two deliberate invariants, both verified on a live three-master
-cluster (no replicas) with all 16384 slots assigned:
+This fixture is **Cluster routing/atomicity compatibility**, not
+"Cluster HA verification": it boots three masters with no replicas, so
+no failover, promotion or replica-side durability is exercised at all.
+Redis Cluster's high-availability behavior (automatic failover,
+replica promotion) is a separate deployment concern that this fixture
+deliberately does not claim to verify. What the fixture verifies is
+routing and per-record atomicity: a Redis Cluster routes every command
+by hash slot, and a multi-key Lua script is refused with a cross-slot
+error unless all of its keys share one slot. The storage layer is
+Cluster-safe by construction because of two deliberate invariants,
+both verified on a live three-master cluster (no replicas) with all
+16384 slots assigned:
 
 - Every storage transition is a single-key Lua script. The challenge
   record lives under one key; issuance (plain `SET`), the pending to
@@ -128,6 +136,52 @@ replication gating, or a consensus design). Pair this with
 margin, and with `maxmemory-policy noeviction` on the security Redis:
 an evicted or expired consumed-state guard re-enables replay.
 
+## Authority-change replay durability: the deployment posture
+
+The core contract, stated once and repeated by `kiwicaptcha:doctor`:
+
+> One-shot verification is atomic on the current Redis authority but
+> is not guaranteed across stale-replica promotion.
+
+The atomic pending-to-consumed transition holds per Redis authority.
+A promotion can move the authority to a replica that never received
+the consume, the commit or the terminal delete-if-pending deletion,
+and that stale view can re-enable replay. Whether the deployment
+accepts that boundary is an explicit posture decision; the doctor
+warns on every Redis HA wiring (a Predis Sentinel, master-slave or
+Cluster aggregate client) and on every Redis-backed storage with
+`waitReplicas` 0, naming the documented postures below.
+
+The three documented postures:
+
+- **fail_closed**: the deployment guarantees the one-shot contract
+  across an authority change, or refuses to serve when it cannot.
+  On a standalone authority this is the verified WAIT barrier
+  (`waitReplicas > 0` with the threshold covering every eligible
+  failover target, `ReplicaWaitException` on a shortfall), or a
+  consensus-capable store for the security state. On an HA aggregate
+  this posture additionally requires promotion gating, because the
+  barrier itself is refused on the aggregate (WAIT is
+  connection-affine; see the Sentinel section above).
+- **operator_managed**: the deployment accepts async replication but
+  contracts that a stale replica can never be elected. Promotion
+  eligibility is gated (`min-replicas-to-write` style replication
+  gating, a promotion-eligibility gate on the failover manager, or a
+  consensus design whose semantics are actually guaranteed), and the
+  window is sized against the challenge lifetime plus `ttl_margin_secs`
+  plus clock skew and failover margin.
+- **best_effort**: the deployment documents that a stale-replica
+  promotion can re-enable replay of a consumed or burned challenge,
+  and accepts the residual window (for example a low-value surface
+  with compensating controls elsewhere).
+
+The doctor's WARN on the exact wording above is the deployment
+posture prompt: it is not a failed check, and the deployment chooses
+and documents one of these three postures. A single-node direct
+connection without replicas passes the check with the
+authority-boundary contract noted; a failover topology without one of
+the postures is exactly the case the WARN names.
+
 ## Deployment guidance: which topology each guard assumes
 
 | Topology | Verified WAIT (`wait_replicas > 0`) | Single-slot Lua | Failure posture |
@@ -143,5 +197,7 @@ consistent store. Deployments that require acknowledged writes that
 can never vanish must back the security state with a consensus-capable
 store instead. The one-shot semantics (the atomic pending to consumed
 transition) hold per Redis authority on every topology above; they do
-not hold across an authority change unless the promotion contract is
-the hardened one.
+not hold across an authority change unless the deployment chooses and
+documents one of the [authority-change replay durability
+postures](#authority-change-replay-durability-the-deployment-posture)
+above.
