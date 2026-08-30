@@ -287,8 +287,21 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     // started and re-acquires after a state-only reset, so the test
     // holds under either lifecycle contract.
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
-    await page.evaluate((id) => window.KiwiCaptcha.reset(id), wid);
-    await expect(decoy, 'the reset must remove the rendered decoy input').toHaveCount(0);
+    await page.evaluate((id) => {
+      window.KiwiCaptcha.reset(id);
+      // The reset removes the decoy input SYNCHRONOUSLY (kiwiClearDecoy
+      // before the fresh initWidget starts its async re-acquisition).
+      // The fixture pins the decoy name, so the re-issued challenge
+      // re-renders a same-named input asynchronously; asserting inside
+      // this same evaluate observes the guaranteed-absent moment, never
+      // the re-render race.
+      const shape = /^[a-z]+_[a-z]+_[a-z]+$/;
+      const decoys = Array.from(document.querySelectorAll('input'))
+        .filter((el) => shape.test(el.name) && !/^kiwi_/.test(el.name));
+      if (decoys.length !== 0) {
+        throw new Error('the reset must remove the rendered decoy input synchronously: found ' + decoys.length);
+      }
+    }, wid);
     await page.evaluate(() => {
       const w = document.querySelector('[data-kiwi-widget]');
       if (!w.dataset.kiwiStarted) {
