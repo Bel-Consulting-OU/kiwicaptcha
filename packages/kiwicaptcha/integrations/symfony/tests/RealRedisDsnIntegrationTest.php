@@ -44,7 +44,8 @@ final class RealRedisDsnIntegrationTest extends TestCase
         // test maps the alias onto the contract shape before the kernel
         // validates it.
         if (str_starts_with($url, 'tcp://')) {
-            $url = 'redis://'.substr($url, strlen('tcp://'));
+            // The tcp:// scheme marker is exactly 6 characters.
+            $url = 'redis://'.substr($url, 6);
         }
 
         return $url;
