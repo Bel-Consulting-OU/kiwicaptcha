@@ -33,18 +33,13 @@ function assetPath(name) {
   throw new Error(`cannot locate ${name}; tried ${candidates.join(', ')}`);
 }
 
-const DECOY_POOL = [
-  'company_website',
-  'fax_number',
-  'secondary_phone',
-  'office_extension',
-  'alternate_email',
-  'home_address_line',
-  'middle_name',
-  'assistant_name',
-  'department_code',
-  'backup_phone',
-];
+// The armed decoy names come from the combinatorial grammar (three
+// underscore-joined vocabulary slots); a name is a grammar member when
+// it is three lowercase underscore-separated words within the
+// [A-Za-z0-9_-]{1,64} shape.
+function isGrammarDecoyName(name) {
+  return typeof name === 'string' && /^[a-z]+_[a-z]+_[a-z]+$/.test(name) && name.length <= 64;
+}
 
 function decodeToken(token) {
   return Buffer.from(token, 'base64').toString('latin1');
@@ -487,7 +482,7 @@ test.describe('KiwiCaptcha adversarial submission validation', () => {
     await page.goto('/?decoy=pool');
     await solve(page);
     const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
-    expect(DECOY_POOL, 'the armed name must come from the server-side pool').toContain(name);
+    expect(isGrammarDecoyName(name), 'the armed name must come from the combinatorial grammar').toBe(true);
     const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
@@ -723,7 +718,8 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
   test('a reset clears the rendered decoy input: stale honeypot fields never linger in the form', async ({ page }) => {
     await page.goto('/?decoy=1');
     await solve(page);
-    const decoy = page.locator('input[name^="decoy_"]');
+    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
     await decoy.evaluate((el) => {
       el.value = 'bot@example.com';
@@ -734,6 +730,8 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
     await expect(decoy, 'the reset must remove the rendered decoy input').toHaveCount(0);
     await page.locator('[data-kiwi-retry]').click();
     await solve(page);
-    await expect(page.locator('input[name^="decoy_"]'), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);
+    const freshName = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    await expect(page.locator(`input[name="${freshName}"]`), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);
+    await expect(page.locator(`input[name="${name}"]`)).toHaveCount(0);
   });
 });

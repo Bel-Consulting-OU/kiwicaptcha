@@ -2862,7 +2862,7 @@ final class ValidatorTest extends TestCase
             public ?string $captcha = null;
         };
         $dto2->captcha = $otherToken;
-        $wrongName = $other->decoyField === Issuer::DECOY_FIELD_POOL[0] ? Issuer::DECOY_FIELD_POOL[1] : Issuer::DECOY_FIELD_POOL[0];
+        $wrongName = $other->decoyField === 'secondary_contact_phone' ? 'billing_company_url' : 'secondary_contact_phone';
         [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$wrongName => 'filled'], operationId: 'op-retry');
         $meta3 = $engine3->getMetadataFor($dto2::class);
         $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));

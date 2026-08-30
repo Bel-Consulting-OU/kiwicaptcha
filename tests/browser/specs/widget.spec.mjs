@@ -120,4 +120,20 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect((await resp.json()).ok).toBe(true);
     expect(cancelHits).toBe(0); // a successful solve never abandons a challenge
   });
+
+  test('a fresh render stays under a bounded number of DOM nodes (< 40)', async ({ page }) => {
+    // The widget markup is deliberately small: the container, the hidden
+    // token input, the visible widget with its icon, track, timer and
+    // status announcer, plus at most the retry button and the decoy
+    // input the driver creates. A hard ceiling of 40 elements keeps the
+    // widget cheap to render and bounds the DOM a page must carry per
+    // captcha.
+    await page.goto('/');
+    await page.waitForSelector('#kiwicaptcha-root [data-kiwi-started="1"]');
+    const idleCount = await page.evaluate(() => document.querySelector('#kiwicaptcha-root').querySelectorAll('*').length);
+    expect(idleCount, `the freshly rendered widget must stay under 40 elements, got ${idleCount}`).toBeLessThan(40);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const doneCount = await page.evaluate(() => document.querySelector('#kiwicaptcha-root').querySelectorAll('*').length);
+    expect(doneCount, `the solved widget must stay under 40 elements, got ${doneCount}`).toBeLessThan(40);
+  });
 });

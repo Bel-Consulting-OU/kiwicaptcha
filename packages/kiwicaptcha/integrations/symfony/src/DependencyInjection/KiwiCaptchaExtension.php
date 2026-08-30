@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
@@ -73,6 +74,12 @@ use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
 use Symfony\Component\DependencyInjection\Reference;
 
+/**
+ * SECURITY-MAINTAINER material: the wiring invariants enforced in this
+ * extension are deep design rationale, intentionally not published at
+ * the integration layer. See docs/operations.md for the maintainer
+ * view and docs/security-hardening.md for the integration actions.
+ */
 final class KiwiCaptchaExtension extends Extension implements PrependExtensionInterface
 {
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
@@ -701,6 +708,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $issuanceCounterRef = null;
         $outstandingRef = null;
         $chainServiceRef = null;
+        $chainStoreRef = null;
         $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
             ? new Reference($riskConfig['request_binding_authority'])
             : null;
@@ -1537,6 +1545,26 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]))->addTag('twig.runtime'));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));
+
+        // Environment doctor (kiwicaptcha:doctor): validates the
+        // production wiring from the same effective configuration and
+        // the same services the extension just built, so a check can
+        // never drift from the wiring it audits. Redis references and
+        // the chain/siteverify stores are passed as resolved, exactly
+        // like every other consumer of this extension.
+        $container->setDefinition(KiwiCaptchaDoctorCommand::class, (new Definition(KiwiCaptchaDoctorCommand::class, [
+            $environment,
+            $config,
+            new Reference(StorageInterface::class),
+            new Reference('kiwi_captcha.config'),
+            new Reference(SecurityEpochMonitor::class),
+            $redisRef,
+            $riskRedis,
+            $chainStoreRef,
+            $idempotencyStoreRef,
+        ]))
+            ->addTag('console.command')
+            ->setPublic(true));
     }
 
     /**

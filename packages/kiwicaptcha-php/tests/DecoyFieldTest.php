@@ -27,8 +27,9 @@ use PHPUnit\Framework\TestCase;
  *  - armed: protocol v3, the decoy-capable canonical. The signing input
  *    gains exactly one segment, `|<decoy_field>`, appended after the
  *    kid, 19 segments with the decoy last; the stored record's
- *    protocol_version is 3. The name comes from the shared server-side
- *    pool.
+ *    protocol_version is 3. The name comes from the shared
+ *    combinatorial grammar, see {@see Issuer::composeDecoyName()},
+ *    a 27,840-name space.
  *  - unarmed: protocol v2, byte-identical to the pre-extension 18-field
  *    format, and neither JSON surface, client-facing challenge nor
  *    stored record, carries the `decoy_field` key; it is absent, not
@@ -98,14 +99,14 @@ final class DecoyFieldTest extends TestCase
 
     // ── (a) armed issuance: pool name, 19 segments, decoy last ──────
 
-    public function testArmedIssuanceSignsAPoolNameAsTheFinalCanonicalSegment(): void
+    public function testArmedIssuanceSignsAGrammarNameAsTheFinalCanonicalSegment(): void
     {
         $storage = new ArrayStorage();
         $challenge = $this->issuer($storage)->issueWithDecoyField('login', Vectors::CLIENT_IP);
 
         $decoy = $challenge->decoyField;
         self::assertNotNull($decoy, 'an armed issuance must carry a decoy field name');
-        self::assertContains($decoy, Issuer::DECOY_FIELD_POOL, "the decoy name must come from the server-side pool (got {$decoy})");
+        self::assertTrue(Issuer::isGrammarDecoyName($decoy), "the decoy name must come from the combinatorial grammar (got {$decoy})");
         self::assertTrue(Config::isValidDecoyFieldName($decoy));
 
         // The stored record carries the same armed name, under protocol
@@ -347,10 +348,10 @@ final class DecoyFieldTest extends TestCase
         );
         self::assertTrue($outcome->isOk(), sprintf('the armed record must verify as issued, got %s', $outcome->code()));
 
-        // Renamed to a different pool name.
-        $other = Issuer::DECOY_FIELD_POOL[0] === $armed->decoyField
-            ? Issuer::DECOY_FIELD_POOL[1]
-            : Issuer::DECOY_FIELD_POOL[0];
+        // Renamed to a different grammar name.
+        $other = $armed->decoyField === 'secondary_contact_phone'
+            ? 'billing_company_url'
+            : 'secondary_contact_phone';
         $renamed = $armedRecord->toArray();
         $renamed['decoy_field'] = $other;
         self::assertSame(VerifyError::BadSignature, $this->verifyWithMutatedRecord($renamed, $armed->nonce, $armedToken));
@@ -415,7 +416,7 @@ final class DecoyFieldTest extends TestCase
         $plainRecord = $storage->find($plain->nonce);
         self::assertNotNull($plainRecord);
         $spliced = $plainRecord->toArray();
-        $spliced['decoy_field'] = Issuer::DECOY_FIELD_POOL[0];
+        $spliced['decoy_field'] = 'secondary_contact_phone';
 
         try {
             ChallengeRecord::fromArray($spliced);
@@ -450,7 +451,7 @@ final class DecoyFieldTest extends TestCase
             issuer: $plainRecord->issuer,
             kid: $plainRecord->kid,
             hostname: $plainRecord->hostname,
-            decoyField: Issuer::DECOY_FIELD_POOL[0],
+            decoyField: 'secondary_contact_phone',
         );
         $freshStorage = new ArrayStorage();
         $freshStorage->store($bad);
@@ -817,5 +818,189 @@ final class DecoyFieldTest extends TestCase
             $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
             self::assertSame(VerifyError::MalformedRecord, $outcome->error, "protocol version {$version} must fail closed as MalformedRecord");
         }
+    }
+
+    // ── (g) combinatorial grammar: space, validity, collisions ────────
+
+    /**
+     * The deterministic name for a linear index into the 27,840-name
+     * grammar space (`SLOT1` * `SLOT2` * `SLOT3`).
+     */
+    private function grammarNameAt(int $idx): string
+    {
+        $slot2Size = \count(Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY);
+        $slot3Size = \count(Issuer::DECOY_GRAMMAR_SLOT3_FORM);
+        $s1 = intdiv($idx, $slot2Size * $slot3Size);
+        $s2 = intdiv($idx % ($slot2Size * $slot3Size), $slot3Size);
+        $s3 = $idx % $slot3Size;
+
+        return Issuer::composeDecoyName($s1, $s2, $s3);
+    }
+
+    public function testGrammarSpaceIsLargeAndEveryNameValid(): void
+    {
+        // The combinatorial space: `SLOT1` * `SLOT2` * `SLOT3` = 32 * 29 * 30 = 27,840 distinct names
+        // (each triple joins to a unique string), thousands+, and every
+        // member complies with the [A-Za-z0-9_-]{1,64} validation shape
+        // (the longest composed name is 30 bytes).
+        self::assertSame(27_840, Issuer::decoyGrammarSpaceSize());
+        $seen = [];
+        for ($i = 0; $i < Issuer::decoyGrammarSpaceSize(); $i++) {
+            $name = $this->grammarNameAt($i);
+            self::assertTrue(Config::isValidDecoyFieldName($name), "{$name} must comply with the validation shape");
+            self::assertLessThanOrEqual(64, \strlen($name), "{$name} must be at most 64 bytes");
+            self::assertTrue(Issuer::isGrammarDecoyName($name));
+            $seen[$name] = true;
+        }
+        self::assertCount(Issuer::decoyGrammarSpaceSize(), $seen, 'every triple must compose a unique name');
+
+        // A 20,000-draw sample (seeded, deterministic) must not collapse
+        // into a small distinct set: the effective space is the grammar
+        // space, not an accidentally tiny subset.
+        mt_srand(42);
+        $drawn = [];
+        for ($i = 0; $i < 20_000; $i++) {
+            $drawn[$this->grammarNameAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1))] = true;
+        }
+        self::assertGreaterThanOrEqual(1_000, \count($drawn), '20,000 draws must hit more than 1,000 distinct names (got '.\count($drawn).')');
+    }
+
+    public function testConsecutiveDrawCollisionsAreBoundedByTheSpace(): void
+    {
+        // Fixed-seed statistical test: 10,000 consecutive pairs drawn
+        // uniformly from the 27,840-name space. The expected number of
+        // equal consecutive pairs is ~10,000 / 27,840 ~ 0.36. The bound
+        // is < 2 collisions, i.e. a deterministic pass at the ~1/N
+        // collision probability per pair.
+        mt_srand(7);
+        $collisions = 0;
+        $previous = null;
+        for ($i = 0; $i < 10_000; $i++) {
+            $current = $this->grammarNameAt(mt_rand(0, Issuer::decoyGrammarSpaceSize() - 1));
+            if ($previous !== null && $previous === $current) {
+                $collisions++;
+            }
+            $previous = $current;
+        }
+        self::assertLessThan(2, $collisions, "10,000 consecutive pairs must collide < 2 times (got {$collisions})");
+    }
+
+    public function testGrammarVocabulariesArePinnedAndBounded(): void
+    {
+        // The vocabularies are position-specific, lowercase-only words of
+        // 2..=10 bytes, each vocabulary holding 25-35 words, and the
+        // pinned literals here are the exact arrays the Rust crate
+        // mirrors (the cross-language test in tests/cross_language.rs
+        // compares the live Rust arrays against these same constants).
+        $expectedSlot1 = [
+            'secondary', 'alternate', 'billing', 'office', 'personal', 'company',
+            'home', 'backup', 'department', 'business', 'primary', 'work',
+            'emergency', 'mobile', 'regional', 'corporate', 'team', 'project',
+            'default', 'temporary', 'external', 'internal', 'private', 'shared',
+            'general', 'local', 'main', 'national', 'seasonal', 'guest',
+            'middle', 'assistant',
+        ];
+        $expectedSlot2 = [
+            'contact', 'address', 'phone', 'email', 'website', 'fax', 'company',
+            'account', 'profile', 'order', 'invoice', 'support', 'service',
+            'sales', 'location', 'region', 'branch', 'division', 'directory',
+            'registry', 'record', 'file', 'entry', 'channel', 'portal',
+            'platform', 'list', 'archive', 'history',
+        ];
+        $expectedSlot3 = [
+            'phone', 'url', 'number', 'line', 'code', 'name', 'extension',
+            'email', 'address', 'link', 'id', 'key', 'value', 'info', 'details',
+            'notes', 'lookup', 'search', 'query', 'reference', 'alias', 'handle',
+            'username', 'label', 'tag', 'entry', 'record', 'index', 'field',
+            'form',
+        ];
+        self::assertSame($expectedSlot1, Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER);
+        self::assertSame($expectedSlot2, Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY);
+        self::assertSame($expectedSlot3, Issuer::DECOY_GRAMMAR_SLOT3_FORM);
+        foreach ([$expectedSlot1, $expectedSlot2, $expectedSlot3] as $vocab) {
+            self::assertGreaterThanOrEqual(25, \count($vocab));
+            self::assertLessThanOrEqual(35, \count($vocab));
+            foreach ($vocab as $word) {
+                self::assertMatchesRegularExpression('/^[a-z]{2,10}$/D', $word, "vocabulary words must be lowercase [a-z]{2,10} (got {$word})");
+            }
+        }
+        // The legacy 10-name pool words all remain generatable vocabulary
+        // entries (the words stay; only the enumerable selection is gone).
+        foreach (['company', 'website', 'fax', 'number', 'secondary', 'phone', 'office', 'extension', 'alternate', 'email', 'home', 'address', 'line', 'middle', 'name', 'assistant', 'department', 'code', 'backup'] as $legacy) {
+            self::assertTrue(
+                \in_array($legacy, Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
+                || \in_array($legacy, Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
+                || \in_array($legacy, Issuer::DECOY_GRAMMAR_SLOT3_FORM, true),
+                "the legacy pool word {$legacy} must remain a vocabulary entry"
+            );
+        }
+        self::assertTrue(Issuer::isGrammarDecoyName('secondary_contact_phone'));
+        self::assertTrue(Issuer::isGrammarDecoyName('billing_company_url'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact'));
+        self::assertFalse(Issuer::isGrammarDecoyName('secondary_contact_phone_extra'));
+        self::assertFalse(Issuer::isGrammarDecoyName('Secondary_Contact_Phone'));
+        self::assertFalse(Issuer::isGrammarDecoyName('company|website'));
+    }
+
+    public function testRedisCommandCountIsIdenticalForArmedAndUnarmed(): void
+    {
+        // The zero-extra-round-trip invariant: the decoy name is drawn
+        // in-process from the grammar (`random_int`, no storage), so an
+        // armed issuance and verification perform the same Redis command
+        // sequence and round trips as the unarmed path. Proven with the
+        // fake-client counters on both paths.
+        $issueArmed = new FakePredisClient();
+        $armedStorage = new RedisStorage($issueArmed);
+        $armedIssuer = new Issuer($this->shaConfig(), $armedStorage, now: static fn (): int => Vectors::NOW);
+        $armed = $armedIssuer->issueWithDecoyField('login', Vectors::CLIENT_IP);
+        self::assertNotNull($armed->decoyField);
+
+        $issuePlain = new FakePredisClient();
+        $plainStorage = new RedisStorage($issuePlain);
+        $plainIssuer = new Issuer($this->shaConfig(), $plainStorage, now: static fn (): int => Vectors::NOW);
+        $plain = $plainIssuer->issue('login', Vectors::CLIENT_IP);
+
+        self::assertSame(
+            \count($issuePlain->calls),
+            \count($issueArmed->calls),
+            'armed issuance must issue exactly the same number of Redis commands as unarmed issuance'
+        );
+        self::assertSame(
+            $issuePlain->gets,
+            $issueArmed->gets,
+            'armed issuance must issue the same number of GETs as unarmed issuance'
+        );
+
+        $counter = $this->solveCounter($armed);
+        $armedToken = SolutionToken::create($armed->nonce, $counter, 5000, [])->encode();
+        $verifyArmed = new FakePredisClient();
+        $verifyArmed->store = $issueArmed->store;
+        $armedVerifier = new Verifier(new RedisStorage($verifyArmed), now: static fn (): int => Vectors::NOW);
+        $armedOutcome = $armedVerifier->verify($armedToken, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $armed->minDurationMs + 1);
+        self::assertTrue($armedOutcome->isOk(), sprintf('the armed Redis verification must pass, got %s', $armedOutcome->code()));
+
+        $plainCounter = $this->solveCounter($plain);
+        $plainToken = SolutionToken::create($plain->nonce, $plainCounter, 5000, [])->encode();
+        $verifyPlain = new FakePredisClient();
+        $verifyPlain->store = $issuePlain->store;
+        $plainVerifier = new Verifier(new RedisStorage($verifyPlain), now: static fn (): int => Vectors::NOW);
+        $plainOutcome = $plainVerifier->verify($plainToken, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $plain->minDurationMs + 1);
+        self::assertTrue($plainOutcome->isOk(), sprintf('the unarmed Redis verification must pass, got %s', $plainOutcome->code()));
+
+        self::assertSame(
+            \count($verifyPlain->calls),
+            \count($verifyArmed->calls),
+            'armed verification must issue exactly the same number of Redis commands as unarmed verification'
+        );
+        self::assertSame(
+            $verifyPlain->gets,
+            $verifyArmed->gets,
+            'armed verification must issue the same number of GETs as unarmed verification'
+        );
+        self::assertSame(
+            \count($verifyPlain->evals),
+            \count($verifyArmed->evals),
+            'armed verification must issue the same number of Lua transitions as unarmed verification'
+        );
     }
 }

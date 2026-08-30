@@ -150,7 +150,7 @@ final class ProtocolV3EmissionGateTest extends TestCase
         [$status, $data] = $this->issue($stack['controller']);
         self::assertSame(200, $status);
         self::assertIsString($data['decoy_field'] ?? null, 'the armed issuance carries the authenticated decoy name');
-        self::assertContains($data['decoy_field'], Issuer::DECOY_FIELD_POOL);
+        self::assertTrue(Issuer::isGrammarDecoyName((string) $data['decoy_field']), 'the armed name must come from the combinatorial grammar');
 
         $record = $stack['storage']->find($data['nonce']);
         self::assertNotNull($record);

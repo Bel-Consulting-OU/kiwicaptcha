@@ -551,6 +551,76 @@ echo 'ok';
     );
 }
 
+/// The decoy grammar vocabularies must be byte-identical across the two
+/// cores: the PHP `Issuer::DECOY_GRAMMAR_SLOT*` constants and the Rust
+/// `DECOY_GRAMMAR_SLOT*` constants (same words, same order), so a name
+/// issued by one language has exactly the same plausible-name surface
+/// when the other core picks it. Skips when the PHP core's autoloader is
+/// unreachable from this crate.
+#[test]
+fn decoy_grammar_vocabularies_match_php() {
+    let php_autoload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../kiwicaptcha-php/vendor/autoload.php"
+    );
+    if !std::path::Path::new(php_autoload).exists() {
+        eprintln!("PHP core autoloader not found — decoy grammar parity test skipped");
+        return;
+    }
+    let php_bin = std::env::var("KC_PHP_BIN").unwrap_or_else(|_| "php".to_string());
+    let code = format!(
+        "require '{}'; echo json_encode([\\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER, \\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY, \\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT3_FORM]);",
+        php_autoload
+    );
+    let out = std::process::Command::new(&php_bin)
+        .args(["-r", &code])
+        .output();
+    let Ok(out) = out else {
+        eprintln!("php spawn failed — decoy grammar parity test skipped");
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        eprintln!("php failed — decoy grammar parity test skipped: {stdout}");
+        return;
+    }
+    let php_vocabs: Vec<Vec<String>> = serde_json::from_str(stdout.trim())
+        .expect("PHP must emit the three vocabulary arrays as JSON");
+    assert_eq!(
+        php_vocabs.len(),
+        3,
+        "PHP must expose exactly three grammar vocabularies"
+    );
+    let rust_vocabs = [
+        kiwicaptcha::DECOY_GRAMMAR_SLOT1_QUALIFIER,
+        kiwicaptcha::DECOY_GRAMMAR_SLOT2_CATEGORY,
+        kiwicaptcha::DECOY_GRAMMAR_SLOT3_FORM,
+    ];
+    for (i, php_vocab) in php_vocabs.iter().enumerate() {
+        let rust_vocab = rust_vocabs[i];
+        assert_eq!(
+            php_vocab.len(),
+            rust_vocab.len(),
+            "grammar slot {} must hold the same number of words in both languages",
+            i + 1
+        );
+        for (w, rust_w) in php_vocab.iter().zip(rust_vocab.iter()) {
+            assert_eq!(
+                w,
+                rust_w,
+                "grammar slot {} must be identical across PHP and Rust (same words, same order)",
+                i + 1
+            );
+        }
+    }
+    assert_eq!(
+        kiwicaptcha::decoy_grammar_space_size(),
+        27_840,
+        "the shared grammar space is 32 * 29 * 30"
+    );
+    println!("DECOY_GRAMMAR_PHP_PARITY: OK (3 vocabularies identical)");
+}
+
 /// Real-Redis protocol-v3 decoy interop: the decoy-armed issuance
 /// canonical (protocol v3, the `|decoy_field` segment appended after the
 /// kid) must verify across languages, and the v2-plus-decoy combination

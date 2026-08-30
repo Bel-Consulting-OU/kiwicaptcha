@@ -61,37 +61,56 @@ namespace KiwiCaptcha;
 final class Issuer
 {
     /**
-     * The server-side pool of decoy (honeypot) form-field names. When a
-     * deployment arms the decoy surface, see
-     * {@see self::issueWithDecoyField()}, the issuer picks one name
-     * uniformly at random (`CSPRNG`) per issuance. The names look like
-     * ordinary optional form fields a generic bot filler would populate,
-     * while a human never sees them: the widget driver renders the chosen
-     * name as a hidden, never-auto-filled text input.
+     * The combinatorial decoy-name grammar, the server-side naming space
+     * for decoy (honeypot) form fields. When a deployment arms the decoy
+     * surface, see {@see self::issueWithDecoyField()}, the issuer draws
+     * one lowercase word per slot with `random_int` (`CSPRNG`) and joins
+     * them with '_': {slot1}_{slot2}_{slot3}, e.g. `secondary_contact_phone`
+     * or `billing_company_url`. The three position-specific vocabularies
+     * below are shared verbatim with the Rust
+     * `DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` / `_SLOT3_FORM`
+     * (same words, same order). The pick itself is never coordinated
+     * between the languages: the issuing core signs whatever it picked,
+     * and verification validates alphabet plus canonical, never the name.
      *
-     * The pool alphabet is deliberately `[a-z_]`, a subset of the
-     * `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
-     * validation alphabet, see {@see Config::isValidDecoyFieldName()}.
-     * No pool name can ever smuggle the `|` canonical-payload separator
-     * or any other structurally meaningful character. PHP maintains the
-     * identical pool (same names, same order) as the Rust
-     * `DECOY_FIELD_POOL`. The picked name is signed into the canonical
-     * input of the armed issuance (protocol v3), so the two cores never
-     * need to agree on the pick, only on the pool's alphabet and the
-     * canonical-format extension documented on
-     * {@see self::canonicalPayload()}.
+     * Space size: len(`SLOT1`) * len(`SLOT2`) * len(`SLOT3`) = 32 * 29 *
+     * 30 = 27,840 distinct names. Each triple joins to a unique string,
+     * because '_' cannot occur inside a word. Every name is `[a-z_]+` of
+     * at most 30 bytes (the longest word is 10 bytes), a subset of the
+     * `[A-Za-z0-9_-]{1,64}` shape the widget driver and the validation
+     * accept, see {@see Config::isValidDecoyFieldName()}. No name can
+     * ever smuggle the `|` canonical-payload separator. The legacy
+     * 10-name pool words (company_website, fax_number, ...) all remain
+     * present as vocabulary entries. The `SELECTION` is combinatorial:
+     * a fixed 10-name pool is log2(10) ~ 3.32 bits of enumerable space.
+     * The grammar's space is log2(27,840) ~ 14.8 bits. The probability
+     * that two consecutive challenges share a name is ~1/N with
+     * N = 27,840, i.e. ~3.6e-5 per pair, negligible over realistic
+     * issuance.
      */
-    public const DECOY_FIELD_POOL = [
-        'company_website',
-        'fax_number',
-        'secondary_phone',
-        'office_extension',
-        'alternate_email',
-        'home_address_line',
-        'middle_name',
-        'assistant_name',
-        'department_code',
-        'backup_phone',
+    public const DECOY_GRAMMAR_SLOT1_QUALIFIER = [
+        'secondary', 'alternate', 'billing', 'office', 'personal', 'company',
+        'home', 'backup', 'department', 'business', 'primary', 'work',
+        'emergency', 'mobile', 'regional', 'corporate', 'team', 'project',
+        'default', 'temporary', 'external', 'internal', 'private', 'shared',
+        'general', 'local', 'main', 'national', 'seasonal', 'guest',
+        'middle', 'assistant',
+    ];
+
+    public const DECOY_GRAMMAR_SLOT2_CATEGORY = [
+        'contact', 'address', 'phone', 'email', 'website', 'fax', 'company',
+        'account', 'profile', 'order', 'invoice', 'support', 'service',
+        'sales', 'location', 'region', 'branch', 'division', 'directory',
+        'registry', 'record', 'file', 'entry', 'channel', 'portal',
+        'platform', 'list', 'archive', 'history',
+    ];
+
+    public const DECOY_GRAMMAR_SLOT3_FORM = [
+        'phone', 'url', 'number', 'line', 'code', 'name', 'extension',
+        'email', 'address', 'link', 'id', 'key', 'value', 'info', 'details',
+        'notes', 'lookup', 'search', 'query', 'reference', 'alias', 'handle',
+        'username', 'label', 'tag', 'entry', 'record', 'index', 'field',
+        'form',
     ];
 
     public function __construct(
@@ -169,9 +188,11 @@ final class Issuer
      * (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
      * {@see self::issue()} in every other respect: same wire format,
      * same signing, same storage. When `$armDecoyField` is true the
-     * issuer picks a random field name from the server-side
-     * {@see self::DECOY_FIELD_POOL}, `CSPRNG`, a fresh independent pick
-     * per issuance so two challenges never share a predictable decoy.
+     * issuer picks a fresh combinatorial name from the grammar, see
+     * {@see self::composeDecoyName()}, `CSPRNG`, a fresh independent
+     * draw per issuance. With the 27,840-name space the probability
+     * that two consecutive challenges share a name is ~1/N ~ 3.6e-5,
+     * negligible over realistic issuance.
      * The name is set on the client-facing
      * {@see Challenge::$decoyField}, the key the widget driver renders
      * the hidden input from, and on the stored record's authenticated
@@ -203,15 +224,70 @@ final class Issuer
     }
 
     /**
-     * Pick a random decoy field name from {@see self::DECOY_FIELD_POOL}
-     * with the `CSPRNG`, `random_int`, never a weak or insecure
-     * fallback. An RNG failure propagates to the caller as a
-     * Random\RandomException, exactly like the nonce/salt draws.
-     * Mirrors the Rust `pick_decoy_field`.
+     * Pick a random decoy field name from the combinatorial grammar with
+     * the `CSPRNG`, `random_int`, never a weak or insecure fallback. An
+     * RNG failure propagates to the caller as a Random\RandomException,
+     * exactly like the nonce/salt draws. Mirrors the Rust
+     * `pick_decoy_field`.
      */
     private static function pickDecoyField(): string
     {
-        return self::DECOY_FIELD_POOL[random_int(0, \count(self::DECOY_FIELD_POOL) - 1)];
+        return self::composeDecoyName(
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT1_QUALIFIER) - 1),
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT2_CATEGORY) - 1),
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT3_FORM) - 1),
+        );
+    }
+
+    /**
+     * The deterministic name for the given slot indices, {slot1}_{slot2}_{slot3}.
+     * Pure and public so tests can enumerate the space, pin the
+     * vocabularies, and run fixed-seed collision statistics without
+     * touching the `CSPRNG`.
+     *
+     * @throws \OutOfBoundsException when any index is outside its
+     *                               vocabulary
+     */
+    public static function composeDecoyName(int $slot1, int $slot2, int $slot3): string
+    {
+        $s1 = self::DECOY_GRAMMAR_SLOT1_QUALIFIER[$slot1] ?? null;
+        $s2 = self::DECOY_GRAMMAR_SLOT2_CATEGORY[$slot2] ?? null;
+        $s3 = self::DECOY_GRAMMAR_SLOT3_FORM[$slot3] ?? null;
+        if ($s1 === null || $s2 === null || $s3 === null) {
+            throw new \OutOfBoundsException('decoy grammar slot index out of range');
+        }
+
+        return $s1.'_'.$s2.'_'.$s3;
+    }
+
+    /**
+     * The combinatorial space size, len(SLOT1) * len(SLOT2) * len(SLOT3).
+     */
+    public static function decoyGrammarSpaceSize(): int
+    {
+        return \count(self::DECOY_GRAMMAR_SLOT1_QUALIFIER)
+            * \count(self::DECOY_GRAMMAR_SLOT2_CATEGORY)
+            * \count(self::DECOY_GRAMMAR_SLOT3_FORM);
+    }
+
+    /**
+     * Whether $name is a member of the combinatorial grammar space: three
+     * underscore-joined vocabulary words, each from its position-specific
+     * list, within the `[A-Za-z0-9_-]{1,64}` validation shape.
+     */
+    public static function isGrammarDecoyName(string $name): bool
+    {
+        if (!Config::isValidDecoyFieldName($name)) {
+            return false;
+        }
+        $parts = explode('_', $name);
+        if (\count($parts) !== 3) {
+            return false;
+        }
+
+        return \in_array($parts[0], self::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
+            && \in_array($parts[1], self::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
+            && \in_array($parts[2], self::DECOY_GRAMMAR_SLOT3_FORM, true);
     }
 
     /**
@@ -516,9 +592,10 @@ final class Issuer
      *   issuer|kid|decoy_field
      * ```
      *
-     * - `decoy_field` is the literal decoy name (e.g. `company_website`),
-     * drawn from {@see self::DECOY_FIELD_POOL}, so it can never contain
-     * the `|` separator (the pool alphabet is `[a-z_]`; validation
+     * - `decoy_field` is the literal decoy name (e.g. `secondary_contact_phone`),
+     * drawn from the combinatorial grammar, see
+     * {@see self::composeDecoyName()}, so it can never contain
+     * the `|` separator (the grammar alphabet is `[a-z_]`; validation
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
      * - The segment is appended only when a decoy is armed, and the
      * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy

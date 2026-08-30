@@ -95,7 +95,8 @@ namespace KiwiCaptcha;
  * client.
  *
  * `decoyField` is the server-issued decoy (honeypot) form-field name
- * armed for this challenge (see {@see Issuer::DECOY_FIELD_POOL}). Null =
+ * armed for this challenge, drawn from the combinatorial grammar (see
+ * {@see Issuer::composeDecoyName()}). Null =
  * no decoy armed (the default, and the shape every pre-decoy record
  * carries). The name is an authenticated canonical field: the final
  * segment `|<decoy_field>`, appended after the `kid` (see
@@ -179,7 +180,8 @@ final class ChallengeRecord
         // was issued for (Siteverify `hostname`); never signed, never sent.
         public readonly ?string $hostname = null,
         // The server-issued decoy (honeypot) form-field name armed for
-        // this challenge (see Issuer::DECOY_FIELD_POOL); null = no decoy
+        // this challenge, drawn from the combinatorial grammar (see
+        // Issuer::composeDecoyName()); null = no decoy
         // (the legacy shape). Signed as the final v3 canonical segment,
         // appended after the kid; the JSON key is omitted when null.
         public readonly ?string $decoyField = null,

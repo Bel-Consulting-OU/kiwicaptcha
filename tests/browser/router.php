@@ -1021,9 +1021,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $out = $challenge;
     // Risk-v2 fixture: ?decoy=1 makes the fixture emit the server-issued
     // decoy (honeypot) field name, mirroring the bundle's risk-enabled
-    // issuance response.
+    // issuance response. The name comes from the combinatorial grammar
+    // (deterministic per nonce, so a given challenge always renders the
+    // same strategy in the browser specs); ?decoyname=... overrides the
+    // emitted name with a fixed one, so specs can drive every rendering
+    // variant deterministically.
     if (($_GET['decoy'] ?? '') === '1') {
-        $out['decoy_field'] = 'decoy_'.substr(hash('sha256', $challenge['nonce']), 0, 8);
+        $override = (string) ($_GET['decoyname'] ?? '');
+        if ($override !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $override) === 1) {
+            $out['decoy_field'] = $override;
+        } else {
+            $h = hash('sha256', $challenge['nonce']);
+            $out['decoy_field'] = Issuer::composeDecoyName(
+                hexdec(substr($h, 0, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER),
+                hexdec(substr($h, 2, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY),
+                hexdec(substr($h, 4, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT3_FORM),
+            );
+        }
     }
     echo json_encode($out);
 
@@ -1467,6 +1481,7 @@ if ($path === '/' || $path === '/index.html') {
     $endpointQuery = [];
     $decoyParam = (string) ($_GET['decoy'] ?? '');
     if ($decoyParam === '1' || $decoyParam === 'pool') $endpointQuery[] = 'decoy='.$decoyParam;
+    if (($_GET['decoyname'] ?? '') !== '') $endpointQuery[] = 'decoyname='.rawurlencode((string) $_GET['decoyname']);
     if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);

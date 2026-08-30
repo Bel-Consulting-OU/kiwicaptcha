@@ -252,7 +252,8 @@ pub struct ChallengeRecord {
     #[serde(default)]
     pub hostname: Option<String>,
     /// The server-issued decoy (honeypot) form-field name armed for this
-    /// challenge (see [`DECOY_FIELD_POOL`]). `None` = no decoy armed (the
+    /// challenge, drawn from the combinatorial grammar (see
+    /// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
     /// an authenticated canonical field of protocol v3 — the final segment
     /// `|<decoy_field>`, appended after the `kid` (the canonical signing
@@ -553,10 +554,12 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid|decoy_field
 /// ```
 ///
-/// - `decoy_field` is the literal decoy name (e.g. `company_website`), drawn
-///   from [`DECOY_FIELD_POOL`], so it can never contain the `|` separator
-///   (the pool alphabet is `[a-z_]`; validation accepts `[A-Za-z0-9_-]`
-///   only, 1..=64 bytes).
+/// - `decoy_field` is the literal decoy name (e.g. `secondary_contact_phone`),
+///   drawn from the combinatorial grammar (see
+///   [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], [`DECOY_GRAMMAR_SLOT2_CATEGORY`]
+///   and [`DECOY_GRAMMAR_SLOT3_FORM`]), so it can never contain the `|`
+///   separator (the grammar alphabet is `[a-z_]`; validation accepts
+///   `[A-Za-z0-9_-]` only, 1..=64 bytes).
 /// - The segment is appended only when a decoy is armed, and an armed
 ///   record is issued as `protocol_version == 3`. `None` renders
 ///   nothing extra — the canonical string is byte-identical to the
@@ -862,33 +865,135 @@ pub const MAX_PARALLELISM: u32 = 4;
 /// Used to derive the per-challenge minimum solve duration.
 pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 
-/// The server-side pool of decoy (honeypot) form-field names. When a
-/// deployment arms the decoy surface ([`issue_challenge_with_decoy`]), the
-/// issuer picks one name uniformly at random (`CSPRNG`) per issuance: the
-/// names look like ordinary optional form fields a generic bot filler
-/// would populate, while a human never sees them (the widget driver
-/// renders the chosen name as a hidden, never-auto-filled text input).
+/// The combinatorial decoy-name grammar, the server-side naming space for
+/// decoy (honeypot) form fields. When a deployment arms the decoy surface
+/// ([`issue_challenge_with_decoy`]), the issuer draws one lowercase word
+/// per slot (`CSPRNG`) and joins them with '_': {slot1}_{slot2}_{slot3},
+/// e.g. `secondary_contact_phone` or `billing_company_url`. The three
+/// position-specific vocabularies below are shared verbatim with the PHP
+/// `Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` /
+/// `_SLOT3_FORM` (same words, same order). The pick itself is never
+/// coordinated between the languages: the issuing core signs whatever it
+/// picked, and verification validates alphabet plus canonical, never the
+/// name.
 ///
-/// The pool alphabet is deliberately `[a-z_]` — a subset of the
-/// `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
-/// validation alphabet here, so no pool name can ever smuggle the `|`
-/// canonical-payload separator or any other structurally meaningful
-/// character. PHP maintains the identical pool (same names, same order);
-/// the picked name is signed into the canonical input of the armed
-/// issuance (protocol v3), so the two cores never need to agree on the
-/// pick, only on the pool's alphabet and the canonical-format extension
-/// documented on [`canonical_signing_input_v2`].
-pub const DECOY_FIELD_POOL: &[&str] = &[
-    "company_website",
-    "fax_number",
-    "secondary_phone",
-    "office_extension",
-    "alternate_email",
-    "home_address_line",
-    "middle_name",
-    "assistant_name",
-    "department_code",
-    "backup_phone",
+/// Space size: `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len() = 32 * 29 * 30 =
+/// 27,840 distinct names. Each triple joins to a unique string because
+/// '_' cannot occur inside a word, and every name is `[a-z_]+` of at
+/// most 30 bytes (the longest word is 10 bytes), a subset of the
+/// `[A-Za-z0-9_-]{1,64}` shape the widget driver and the validation
+/// accept. No name can ever smuggle the `|` canonical-payload separator.
+/// The legacy 10-name pool words (company_website, fax_number, ...) all
+/// remain present as vocabulary entries, but the `SELECTION` is
+/// combinatorial: a fixed 10-name pool is log2(10) ~ 3.32 bits of
+/// enumerable space, the grammar's space is log2(27,840) ~ 14.8 bits,
+/// and the probability that two consecutive challenges share a name is
+/// ~1/N with N = 27,840, i.e. ~3.6e-5 per pair, negligible over
+/// realistic issuance.
+pub const DECOY_GRAMMAR_SLOT1_QUALIFIER: &[&str] = &[
+    "secondary",
+    "alternate",
+    "billing",
+    "office",
+    "personal",
+    "company",
+    "home",
+    "backup",
+    "department",
+    "business",
+    "primary",
+    "work",
+    "emergency",
+    "mobile",
+    "regional",
+    "corporate",
+    "team",
+    "project",
+    "default",
+    "temporary",
+    "external",
+    "internal",
+    "private",
+    "shared",
+    "general",
+    "local",
+    "main",
+    "national",
+    "seasonal",
+    "guest",
+    "middle",
+    "assistant",
+];
+
+/// The slot-2 vocabulary (the category slot) of the decoy-name grammar,
+/// see [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]. The word `company` appears in
+/// both slot 1 and slot 2 on purpose: `billing_company_url` and
+/// `company_billing_url` are both plausible optional field names.
+pub const DECOY_GRAMMAR_SLOT2_CATEGORY: &[&str] = &[
+    "contact",
+    "address",
+    "phone",
+    "email",
+    "website",
+    "fax",
+    "company",
+    "account",
+    "profile",
+    "order",
+    "invoice",
+    "support",
+    "service",
+    "sales",
+    "location",
+    "region",
+    "branch",
+    "division",
+    "directory",
+    "registry",
+    "record",
+    "file",
+    "entry",
+    "channel",
+    "portal",
+    "platform",
+    "list",
+    "archive",
+    "history",
+];
+
+/// The slot-3 vocabulary (the form slot) of the decoy-name grammar, see
+/// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`].
+pub const DECOY_GRAMMAR_SLOT3_FORM: &[&str] = &[
+    "phone",
+    "url",
+    "number",
+    "line",
+    "code",
+    "name",
+    "extension",
+    "email",
+    "address",
+    "link",
+    "id",
+    "key",
+    "value",
+    "info",
+    "details",
+    "notes",
+    "lookup",
+    "search",
+    "query",
+    "reference",
+    "alias",
+    "handle",
+    "username",
+    "label",
+    "tag",
+    "entry",
+    "record",
+    "index",
+    "field",
+    "form",
 ];
 
 /// Whether `s` is a conforming decoy (honeypot) field name: 1..=64 bytes of
@@ -902,12 +1007,57 @@ pub(crate) fn valid_decoy_field_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Pick a random decoy field name from [`DECOY_FIELD_POOL`] with the
+/// The combinatorial space size, `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len().
+pub const fn decoy_grammar_space_size() -> usize {
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.len()
+        * DECOY_GRAMMAR_SLOT2_CATEGORY.len()
+        * DECOY_GRAMMAR_SLOT3_FORM.len()
+}
+
+/// Whether `name` is a member of the combinatorial grammar space: three
+/// underscore-joined vocabulary words, each from its position-specific
+/// list, within the `[A-Za-z0-9_-]{1,64}` validation shape.
+pub fn is_grammar_decoy_name(name: &str) -> bool {
+    if !valid_decoy_field_name(name) {
+        return false;
+    }
+    let mut parts = name.split('_');
+    let (Some(s1), Some(s2), Some(s3), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&s1)
+        && DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&s2)
+        && DECOY_GRAMMAR_SLOT3_FORM.contains(&s3)
+}
+
+/// Pick a random decoy field name from the combinatorial grammar with the
 /// `CSPRNG` (never a weak/insecure fallback — an RNG failure propagates to
 /// the caller as [`SignError::Rng`], exactly like the nonce/salt draws).
-fn pick_decoy_field() -> Result<&'static str, SignError> {
-    let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
-    Ok(DECOY_FIELD_POOL[byte as usize % DECOY_FIELD_POOL.len()])
+/// Each slot draws an unbiased index via rejection sampling; the three
+/// words are then joined with '_'.
+fn pick_decoy_field() -> Result<String, SignError> {
+    Ok(format!(
+        "{}_{}_{}",
+        pick_decoy_slot(DECOY_GRAMMAR_SLOT1_QUALIFIER)?,
+        pick_decoy_slot(DECOY_GRAMMAR_SLOT2_CATEGORY)?,
+        pick_decoy_slot(DECOY_GRAMMAR_SLOT3_FORM)?,
+    ))
+}
+
+/// One unbiased vocabulary draw: rejection sampling over a single `CSPRNG`
+/// byte, so every word in the vocabulary has exactly equal probability
+/// (a plain modulo of a byte would bias vocabularies whose length does
+/// not divide 256).
+fn pick_decoy_slot(vocab: &'static [&'static str]) -> Result<&'static str, SignError> {
+    let limit = 256 - (256 % vocab.len());
+    loop {
+        let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
+        if (byte as usize) < limit {
+            return Ok(vocab[byte as usize % vocab.len()]);
+        }
+    }
 }
 
 /// Expected hashes per second for the Argon2id wasm solver at moderate memory
@@ -1069,9 +1219,11 @@ pub fn issue_challenge(
 /// (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
 /// [`issue_challenge`] in every other respect (same wire format, same
 /// signing, same storage); when `arm_decoy_field` is true the issuer picks
-/// a random field name from the server-side [`DECOY_FIELD_POOL`] (`CSPRNG`;
-/// a fresh independent pick per issuance, so two challenges never share a
-/// predictable decoy), sets it on the client-facing
+/// a fresh combinatorial name from the decoy grammar (see
+/// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], `CSPRNG`; a fresh independent pick
+/// per issuance — with the 26,880-name space the probability that two
+/// consecutive challenges share a name is ~1/N ~ 3.7e-5, negligible over
+/// realistic issuance), sets it on the client-facing
 /// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
 /// input from that key) AND on the stored record's authenticated
 /// `decoy_field`, signed into the canonical input as the final
@@ -1238,7 +1390,7 @@ fn issue_challenge_inner(
     // (the final `|<decoy_field>` segment), signed like every other, and
     // the record is issued as protocol v3.
     let decoy_field: Option<String> = if arm_decoy_field {
-        Some(pick_decoy_field()?.to_string())
+        Some(pick_decoy_field()?)
     } else {
         None
     };
@@ -1435,6 +1587,8 @@ mod hex {
 mod tests {
     use super::*;
     use crate::verify::RequestBindingExpectation;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     // Test "now_ns" values are epoch microseconds (1_700_000_000_000_000 µs
     // ≈ 2023-11-14 UTC) — the unit the crate shares with PHP, see
@@ -2123,8 +2277,8 @@ mod tests {
         .unwrap();
         let decoy = issued.challenge.decoy_field.clone().expect("decoy armed");
         assert!(
-            DECOY_FIELD_POOL.contains(&decoy.as_str()),
-            "the decoy name must come from the server-side pool (got {decoy})"
+            is_grammar_decoy_name(&decoy),
+            "the decoy name must come from the combinatorial grammar (got {decoy})"
         );
         assert!(valid_decoy_field_name(&decoy));
         assert_eq!(issued.record.decoy_field.as_deref(), Some(decoy.as_str()));
@@ -2181,6 +2335,162 @@ mod tests {
             seen.len() >= 2,
             "per-issuance decoy picks must vary across challenges"
         );
+    }
+
+    #[test]
+    fn decoy_grammar_space_is_large_and_every_name_valid() {
+        // The combinatorial space: `SLOT1` * `SLOT2` * `SLOT3` = 32 * 29 * 30 =
+        // 27,840 distinct names (each triple joins to a unique string),
+        // thousands+, and every member complies with the
+        // `[A-Za-z0-9_-]{1,64}` validation shape the widget driver and
+        // the stored-record validator accept (the longest composed name
+        // is 30 bytes).
+        let space = decoy_grammar_space_size();
+        assert_eq!(space, 27_840);
+        assert!(
+            space > 1_000,
+            "the grammar space must be thousands+ (got {space})"
+        );
+        let mut all: Vec<String> = Vec::with_capacity(space);
+        for (i, s1) in DECOY_GRAMMAR_SLOT1_QUALIFIER.iter().enumerate() {
+            for (j, s2) in DECOY_GRAMMAR_SLOT2_CATEGORY.iter().enumerate() {
+                for (k, s3) in DECOY_GRAMMAR_SLOT3_FORM.iter().enumerate() {
+                    let name = format!("{s1}_{s2}_{s3}");
+                    assert!(
+                        valid_decoy_field_name(&name),
+                        "{name} must comply with the validation alphabet"
+                    );
+                    assert!(
+                        name.len() <= 64,
+                        "{name} must be at most 64 bytes (got {})",
+                        name.len()
+                    );
+                    assert!(is_grammar_decoy_name(&name));
+                    all.push(name);
+                    let _ = (i, j, k);
+                }
+            }
+        }
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), space, "every triple must compose a unique name");
+
+        // A 20,000-draw sample (seeded, deterministic) must not collapse
+        // into a small distinct set — the effective space is the grammar
+        // space, not an accidentally tiny subset.
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut drawn = std::collections::HashSet::new();
+        for _ in 0..20_000 {
+            let idx = rng.gen_range(0..space);
+            let s1 = idx / (29 * 30);
+            let s2 = (idx % (29 * 30)) / 30;
+            let s3 = idx % 30;
+            drawn.insert(format!(
+                "{}_{}_{}",
+                DECOY_GRAMMAR_SLOT1_QUALIFIER[s1],
+                DECOY_GRAMMAR_SLOT2_CATEGORY[s2],
+                DECOY_GRAMMAR_SLOT3_FORM[s3]
+            ));
+        }
+        assert!(
+            drawn.len() > 1_000,
+            "20,000 draws must hit more than 1,000 distinct names (got {})",
+            drawn.len()
+        );
+    }
+
+    #[test]
+    fn decoy_grammar_consecutive_draw_collisions_are_bounded() {
+        // Fixed-seed statistical test: 10,000 consecutive pairs drawn
+        // uniformly from the 27,840-name space. The expected number of
+        // equal consecutive pairs is ~10,000 / 27,840 ~ 0.36. The bound
+        // is set at < 2 collisions, i.e. a deterministic pass at the
+        // ~1/N collision probability per pair.
+        let space = decoy_grammar_space_size();
+        let mut rng = StdRng::seed_from_u64(7);
+        let name_at = |idx: usize| {
+            let s1 = idx / (29 * 30);
+            let s2 = (idx % (29 * 30)) / 30;
+            let s3 = idx % 30;
+            format!(
+                "{}_{}_{}",
+                DECOY_GRAMMAR_SLOT1_QUALIFIER[s1],
+                DECOY_GRAMMAR_SLOT2_CATEGORY[s2],
+                DECOY_GRAMMAR_SLOT3_FORM[s3]
+            )
+        };
+        let mut collisions = 0u32;
+        let mut previous: Option<String> = None;
+        for _ in 0..10_000 {
+            let current = name_at(rng.gen_range(0..space));
+            if previous.as_deref() == Some(current.as_str()) {
+                collisions += 1;
+            }
+            previous = Some(current);
+        }
+        assert!(
+            collisions < 2,
+            "10,000 consecutive pairs must collide < 2 times (got {collisions})"
+        );
+    }
+
+    #[test]
+    fn decoy_grammar_vocabularies_are_pinned_and_bounded() {
+        // The vocabularies are position-specific, lowercase-only words of
+        // 2..=10 bytes, and the longest composed name stays well under
+        // the 64-byte validation bound.
+        for (vocab, lo, hi) in [
+            (DECOY_GRAMMAR_SLOT1_QUALIFIER, 25, 35),
+            (DECOY_GRAMMAR_SLOT2_CATEGORY, 25, 35),
+            (DECOY_GRAMMAR_SLOT3_FORM, 25, 35),
+        ] {
+            assert!(
+                vocab.len() >= lo && vocab.len() <= hi,
+                "each vocabulary must hold 25-35 words (got {})",
+                vocab.len()
+            );
+            for w in vocab {
+                assert!(
+                    (2..=10).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_lowercase()),
+                    "vocabulary words must be lowercase [a-z]{{2,10}} (got {w})"
+                );
+            }
+        }
+        // The legacy 10-name pool words all remain generatable vocabulary
+        // entries (the words stay; only the enumerable `SELECTION` is gone).
+        for legacy in [
+            "company",
+            "fax",
+            "number",
+            "secondary",
+            "phone",
+            "office",
+            "extension",
+            "alternate",
+            "email",
+            "home",
+            "address",
+            "line",
+            "middle",
+            "name",
+            "assistant",
+            "department",
+            "code",
+            "backup",
+            "website",
+        ] {
+            assert!(
+                DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&legacy)
+                    || DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&legacy)
+                    || DECOY_GRAMMAR_SLOT3_FORM.contains(&legacy),
+                "the legacy pool word {legacy} must remain a vocabulary entry"
+            );
+        }
+        assert!(is_grammar_decoy_name("secondary_contact_phone"));
+        assert!(is_grammar_decoy_name("billing_company_url"));
+        assert!(!is_grammar_decoy_name("secondary_contact"));
+        assert!(!is_grammar_decoy_name("secondary_contact_phone_extra"));
+        assert!(!is_grammar_decoy_name("Secondary_Contact_Phone"));
     }
 
     #[test]
@@ -2299,14 +2609,14 @@ mod tests {
         let secret = "test-key-16-bytes!";
         assert!(verify_signature_v2(&armed.record, sig, secret).unwrap());
 
-        // Renamed.
+        // Renamed to a different grammar name (same shape, different pick).
         let mut renamed = armed.record.clone();
-        let other = DECOY_FIELD_POOL
-            .iter()
-            .find(|n| Some(n.to_string()) != renamed.decoy_field)
-            .unwrap()
-            .to_string();
-        renamed.decoy_field = Some(other);
+        let renamed_name = if renamed.decoy_field.as_deref() == Some("secondary_contact_phone") {
+            "billing_company_url"
+        } else {
+            "secondary_contact_phone"
+        };
+        renamed.decoy_field = Some(renamed_name.to_string());
         assert!(!verify_signature_v2(&renamed, sig, secret).unwrap());
 
         // Stripped (the client-cannot-remove-it property).
@@ -2327,7 +2637,7 @@ mod tests {
         .unwrap();
         let plain_sig = crate::verify::signature_from_challenge(&plain.record);
         let mut spliced = plain.record.clone();
-        spliced.decoy_field = Some(DECOY_FIELD_POOL[0].to_string());
+        spliced.decoy_field = Some("secondary_contact_phone".to_string());
         assert!(!verify_signature_v2(&spliced, plain_sig, secret).unwrap());
     }
 

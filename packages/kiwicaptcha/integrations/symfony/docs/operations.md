@@ -1,5 +1,16 @@
 # Operations
 
+> **SECURITY-MAINTAINER material.** This page is the deep deployment and
+> hardening rationale (rate-limit internals, admission math, failover
+> replay safety, protocol rollouts, transport guidance). It is written
+> for security maintainers of this product, not for application
+> integrators. The integration layer lives in
+> [security-hardening.md](security-hardening.md) and
+> [getting-started.md](getting-started.md). Strategic silence on the
+> adaptive parameters is deliberate: the deep rationale exists here, and
+> publication of every heuristic detail would buy attackers adaptation
+> time. Silence is not a security guarantee.
+
 Deployment guidance for running the bundle in production: rate limiting, admission gates, health endpoints, client-IP policy, scaling, shutdown, and the security Redis operational contract.
 
 ## Rate limiting
@@ -68,7 +79,7 @@ Two gate backends:
   The acquire script additionally carries the bounded saturation-pressure counter (`argon2_saturation_pressure_cap`, default 64; the deprecated `argon2_max_waiters` name still works) and the per-scope concentration cap (`argon2_max_per_tenant`, unset by default and derived as `max(1, global cap - 1)`).
   Nothing queues or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
   The per-scope cap is a concentration cap, not a guaranteed share: it prevents one busy scope from monopolizing the shared capacity, and explicit values must be strictly below the global cap.
-  See [security-hardening.md](security-hardening.md#argon2-admission-wait-queue-bound).
+  See the integration-layer view in [security-hardening.md](security-hardening.md#argon-admission-saturation-pressure-bound).
   For the cap to be an absolute operational invariant, the maximum verification request runtime must stay below the lease lifetime (`argon2_lease_ms`, default 45000 ms).
   The lease-expiry-before-hash-termination invariant is an SLO, enforced at container compile time: `argon2_max_verification_runtime_ms` (default 30000) declares the wall-clock a single verification derivation may take in this deployment.
   The container refuses to compile unless `argon2_lease_ms` exceeds the declared runtime by the 5000 ms safety margin, so the defaults give 45000 > 30000 + 5000 = 35000 and compile.

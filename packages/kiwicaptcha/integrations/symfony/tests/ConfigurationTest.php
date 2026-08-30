@@ -893,4 +893,191 @@ final class ConfigurationTest extends TestCase
         self::assertTrue($this->process(['risk' => ['decoy_v3_enabled' => true]])['risk']['decoy_v3_enabled']);
         self::assertFalse($this->process(['risk' => ['decoy_v3_enabled' => false]])['risk']['decoy_v3_enabled']);
     }
+
+// ── protection profiles ───────────────────────────────────────────────────
+
+    public function testProtectionProfileDefaultsToNull(): void
+    {
+        $processed = $this->process();
+
+        self::assertNull($processed['protection_profile'], 'protection_profile defaults to null = every knob at its individual default');
+    }
+
+    public function testProtectionProfileRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['protection_profile' => 'bogus']);
+    }
+
+    public function testNullProfileIsByteIdenticalToNoProfile(): void
+    {
+        $plain = $this->process();
+        $nullProfile = $this->process(['protection_profile' => null]);
+        unset($plain['protection_profile'], $nullProfile['protection_profile']);
+
+        // Key order follows the raw config order (the profile pass
+        // injects absent keys), which is not semantically meaningful, so
+        // the comparison is canonicalized recursively.
+        self::assertSame(self::canonicalize($plain), self::canonicalize($nullProfile), 'a null protection_profile must leave every knob byte-identical to the profile-less config');
+    }
+
+    public function testBalancedProfileEqualsTheCurrentDefaults(): void
+    {
+        $plain = $this->process();
+        $balanced = $this->process(['protection_profile' => 'balanced']);
+        unset($plain['protection_profile'], $balanced['protection_profile']);
+
+        self::assertSame(self::canonicalize($plain), self::canonicalize($balanced), 'balanced = the current defaults, explicitly documented as such: the derived values equal the tree defaults, so behavior is byte-identical to no profile');
+    }
+
+    /**
+     * Recursively sort an array by key so two arrays with identical
+     * values but different insertion order compare equal.
+     *
+     * @return array<mixed>
+     */
+    private static function canonicalize(array $array): array
+    {
+        foreach ($array as $key => $value) {
+            if (\is_array($value)) {
+                $array[$key] = self::canonicalize($value);
+            }
+        }
+        \ksort($array);
+
+        return $array;
+    }
+
+    public function testHighAbuseProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'high_abuse']);
+
+        // Stricter per-source issuance limits.
+        self::assertSame(5, $processed['rate_limit']);
+        self::assertSame(10, $processed['risk']['max_outstanding_challenges']);
+        // Wider aggregate issuance bounds, raised together (the hard
+        // limiter and the resource-capacity denominator must scale in
+        // lockstep, per the configuration docs).
+        self::assertSame(2000, $processed['rate_limit_global']);
+        self::assertSame(2000, $processed['resource_capacity']['issuance_per_second']);
+        self::assertSame(250000, $processed['risk']['max_outstanding_challenges_global']);
+        // Risk enabled with raised abuse-evidence weights + decoy surface.
+        self::assertTrue($processed['risk']['enabled']);
+        self::assertTrue($processed['risk']['decoy_v3_enabled']);
+        self::assertSame(320, $processed['risk']['weights']['bad_proof']);
+        self::assertSame(340, $processed['risk']['weights']['malformed']);
+        self::assertSame(380, $processed['risk']['weights']['replay']);
+        self::assertSame(160, $processed['risk']['weights']['action_failure']);
+        // The remaining weights stay at the contract defaults.
+        self::assertSame(\KiwiCaptcha\Risk\RiskWeights::DEFAULT_SOURCE_FAST, $processed['risk']['weights']['source_fast']);
+        // Cheaper per-process emergency shield.
+        self::assertSame(5000, $processed['risk']['hard_limits']['process_per_second']);
+        // Chaining stays off without a binding authority (the tree would
+        // refuse it anyway).
+        self::assertFalse($processed['risk']['chaining']['enabled']);
+    }
+
+    public function testHighAbuseEngagesChainingWhenAnAuthorityIsWired(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => ['request_binding_authority' => 'app.binding_authority'],
+        ]);
+
+        self::assertTrue($processed['risk']['chaining']['enabled'], 'high_abuse engages chained step-up when the authoritative binding resolver is wired in the same config');
+    }
+
+    public function testHighAbuseKeepsAnExplicitlyDisabledRiskLayerOff(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => ['enabled' => false],
+        ]);
+
+        self::assertFalse($processed['risk']['enabled'], 'an explicitly configured risk.enabled=false wins over the profile');
+        // The profile still fills the other risk defaults.
+        self::assertTrue($processed['risk']['decoy_v3_enabled']);
+    }
+
+    public function testPrivacyStrictProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'privacy_strict']);
+
+        self::assertSame('strict', $processed['privacy_mode']);
+        self::assertSame('off', $processed['telemetry']);
+        self::assertFalse($processed['enforce_telemetry']);
+        self::assertFalse($processed['risk']['client_context']);
+        self::assertSame(0, $processed['min_duration_ms'], 'the server-side solve-timing heuristic is off');
+        self::assertSame('none', $processed['binding_mode'], 'no IP-derived binding tag at all — the strongest first-party posture');
+        self::assertFalse($processed['risk']['enabled']);
+        self::assertFalse($processed['risk']['decoy_v3_enabled']);
+    }
+
+    public function testCompatibilityProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'compatibility']);
+
+        self::assertSame('sha256', $processed['algorithm']);
+        self::assertSame(300, $processed['challenge_ttl_secs'], 'conservative TTL, Turnstile token-lifetime parity');
+        self::assertSame('none', $processed['binding_mode'], 'binding off for IP churn behind NAT/mobile');
+        self::assertFalse($processed['risk']['enabled']);
+        self::assertFalse($processed['risk']['decoy_v3_enabled'], 'protocol v2 emission');
+        self::assertFalse($processed['risk']['client_context']);
+    }
+
+    public function testProfileNeverOverridesAnExplicitlyConfiguredKnob(): void
+    {
+        // One explicit knob per profile: the explicit value must win.
+        $highAbuse = $this->process([
+            'protection_profile' => 'high_abuse',
+            'challenge_ttl_secs' => 30,
+            'rate_limit' => 100,
+        ]);
+        self::assertSame(30, $highAbuse['challenge_ttl_secs']);
+        self::assertSame(100, $highAbuse['rate_limit']);
+
+        $privacyStrict = $this->process([
+            'protection_profile' => 'privacy_strict',
+            'binding_mode' => 'nonce_ip_hmac',
+            'min_duration_ms' => 500,
+        ]);
+        self::assertSame('nonce_ip_hmac', $privacyStrict['binding_mode']);
+        self::assertSame(500, $privacyStrict['min_duration_ms']);
+
+        $compatibility = $this->process([
+            'protection_profile' => 'compatibility',
+            'challenge_ttl_secs' => 60,
+        ]);
+        self::assertSame(60, $compatibility['challenge_ttl_secs']);
+    }
+
+    public function testProfileFillsRiskDefaultsButNeverAnExplicitRiskSubtreeKey(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => [
+                'decoy_v3_enabled' => false,
+                'weights' => ['replay' => 900],
+            ],
+        ]);
+
+        self::assertFalse($processed['risk']['decoy_v3_enabled'], 'an explicitly configured decoy_v3_enabled=false wins over the profile');
+        self::assertSame(900, $processed['risk']['weights']['replay'], 'an explicitly configured weight wins');
+        self::assertSame(320, $processed['risk']['weights']['bad_proof'], 'the profile still fills the weights the operator did not set');
+        self::assertTrue($processed['risk']['enabled'], 'the profile still fills the absent risk.enabled');
+    }
+
+    public function testBalancedProfileFillsArgonDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'balanced']);
+
+        self::assertSame('sha256', $processed['algorithm']);
+        self::assertSame(18, $processed['difficulty_bits']);
+        self::assertSame(8, $processed['argon2_difficulty_bits']);
+        self::assertSame(0, $processed['argon_m_kib']);
+        self::assertSame(3, $processed['argon_t']);
+        self::assertSame(1, $processed['argon_p']);
+        self::assertSame(120, $processed['challenge_ttl_secs']);
+        self::assertSame('nonce_ip_hmac', $processed['binding_mode']);
+    }
 }

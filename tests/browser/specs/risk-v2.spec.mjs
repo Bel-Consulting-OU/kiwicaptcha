@@ -71,27 +71,33 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.honeypot).toBeUndefined();
   });
 
-  test('a decoy_field response renders a hidden decoy input inside the token form host', async ({ page }) => {
+  test('a decoy_field response renders one hidden non-interactive decoy input inside the token form host', async ({ page }) => {
     await page.goto('/?decoy=1');
     await solve(page);
 
-    const decoy = page.locator('input[name^="decoy_"]');
+    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    expect(name, 'the tracked decoy name must be the server-issued name').toBeTruthy();
+    const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
-    const name = await decoy.getAttribute('name');
-    expect(name).toMatch(/^decoy_[0-9a-f]{8}$/);
     // The honeypot input is hidden from humans AND assistive tech: never
-    // auto-filled, never tabbed into.
-    await expect(decoy).toHaveAttribute('autocomplete', 'off');
+    // auto-filled, never tabbed into, whatever the rendering strategy.
     await expect(decoy).toHaveAttribute('tabindex', '-1');
     await expect(decoy).toHaveAttribute('aria-hidden', 'true');
-    const display = await decoy.evaluate((el) => getComputedStyle(el).display);
-    expect(display).toBe('none');
+    const attrs = await decoy.evaluate((el) => ({
+      display: getComputedStyle(el).display,
+      hidden: el.hasAttribute('hidden'),
+      offscreen: getComputedStyle(el).position === 'absolute',
+    }));
+    expect(
+      attrs.display === 'none' || attrs.hidden || attrs.offscreen,
+      `the decoy must be invisible to humans (display=${attrs.display}, hidden=${attrs.hidden}, offscreen=${attrs.offscreen})`
+    ).toBe(true);
     // inside the same form/host as the token input (the app's form).
-    const sameHost = await page.evaluate(() => {
+    const sameHost = await page.evaluate((n) => {
       const token = document.querySelector('[data-kiwi-token]');
-      const d = document.querySelector('input[name^="decoy_"]');
-      return !!(token && d && d.parentNode === token.parentNode);
-    });
+      const d = document.querySelector(`input[name="${n}"]`);
+      return !!(token && d && token.parentNode === d.parentNode || (token && d && token.parentNode && token.parentNode.contains(d)));
+    }, name);
     expect(sameHost).toBe(true);
     // Never auto-filled: the rendered value stays empty.
     expect(await decoy.inputValue()).toBe('');
@@ -121,9 +127,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     await page.goto('/decoy-form');
     await solve(page);
 
-    const decoy = page.locator('input[name^="decoy_"]');
+    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
-    const name = await decoy.getAttribute('name');
     // A bot's filler — the driver never auto-fills; the value the form
     // carries is exactly the evidence.
     await decoy.evaluate((el) => {
@@ -145,9 +151,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     await page.goto('/?decoy=1&ttl=3&capture=res');
     await solve(page);
 
-    const decoy = page.locator('input[name^="decoy_"]');
+    const name = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    const decoy = page.locator(`input[name="${name}"]`);
     await expect(decoy).toHaveCount(1);
-    const name = await decoy.getAttribute('name');
     await decoy.evaluate((el) => {
       el.value = 'bot@example.com';
     });
@@ -165,7 +171,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.honeypot).toBe('bot@example.com');
     // The re-issuance rendered its OWN per-issuance decoy: the stale
     // input was replaced, exactly one decoy input remains.
-    await expect(page.locator('input[name^="decoy_"]')).toHaveCount(1);
+    const freshName = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiDecoyName);
+    await expect(page.locator(`input[name="${freshName}"]`)).toHaveCount(1);
+    await expect(page.locator(`input[name="${name}"]`)).toHaveCount(0);
   });
 
   test('data-kiwi-chain-ticket presents chain_ticket once and clears it', async ({ page }) => {

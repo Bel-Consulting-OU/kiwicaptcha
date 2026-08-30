@@ -99,7 +99,7 @@ final class RiskV2IntegrationTest extends TestCase
         // the issuer's per-issuance pool pick (armed issuance, protocol
         // v3) — never a decoy_<hash> nonce-hash reconstruction.
         self::assertIsString($data['decoy_field'] ?? null);
-        self::assertContains($data['decoy_field'], Issuer::DECOY_FIELD_POOL, 'the issuance response carries the issuer\'s authenticated pool name');
+        self::assertTrue(Issuer::isGrammarDecoyName((string) $data['decoy_field']), 'the issuance response carries the issuer\'s combinatorial grammar name');
         self::assertNotSame(
             'decoy_'.substr(hash('sha256', (string) $data['nonce']), 0, 8),
             $data['decoy_field'],

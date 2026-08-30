@@ -5,7 +5,79 @@ The bundle is configured under the `kiwi_captcha` key in
 default and validation. Options are validated at container-compile time where
 possible; the same bounds are enforced by the core package at runtime.
 
-## Base configuration
+## Protection profiles
+
+Ordinary deployments operate at the policy level: set one
+`protection_profile` and let the bundle derive the safety-relevant knobs
+you do not set. The profile fills **safe derived defaults** for the knobs
+it governs; an explicitly configured knob always wins over the profile.
+With `protection_profile: null` (the default) every knob keeps its
+individual default and behavior is byte-identical to the pre-profile
+configuration.
+
+```yaml
+kiwi_captcha:
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+```
+
+| Knob | balanced | privacy_strict | high_abuse | compatibility |
+|------|----------|----------------|------------|---------------|
+| `algorithm` | sha256 | sha256 | sha256 | sha256 |
+| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
+| `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
+| `challenge_ttl_secs` | 120 | 120 | 120 | 300 |
+| `rate_limit` | 10 | 10 | 5 | 10 |
+| `rate_limit_global` | 500 | 500 | 2000 | 500 |
+| `resource_capacity.issuance_per_second` | 500 | 500 | 2000 | 500 |
+| `privacy_mode` / `telemetry` | strict / off | strict / off | strict / off | strict / off |
+| `enforce_telemetry` | false | false | false | false |
+| `min_duration_ms` | derived | 0 | derived | derived |
+| `binding_mode` | nonce_ip_hmac | none | nonce_ip_hmac | none |
+| `risk.enabled` | false | false | true | false |
+| `risk.decoy_v3_enabled` | false | false | true | false |
+| `risk.client_context` | false | false | false | false |
+| `risk.max_outstanding_challenges` | 20 | 20 | 10 | 20 |
+| `risk.max_outstanding_challenges_global` | 100000 | 100000 | 250000 | 100000 |
+| `risk.hard_limits.process_per_second` | 10000 | 10000 | 5000 | 10000 |
+| `risk.weights.bad_proof / malformed / replay / action_failure` | contract | contract | 320 / 340 / 380 / 160 | contract |
+
+Profile rationale:
+
+- balanced is the current default configuration, documented as such.
+  Picking it changes nothing: the derived values equal the tree defaults,
+  so behavior is byte-identical to no profile.
+- privacy_strict is the strongest first-party privacy posture. The
+  binding tag is dropped (`binding_mode: none`), so no IP-derived state
+  exists anywhere. Every behavioral evidence surface stays off and the
+  server-side solve-timing heuristic is disabled (`min_duration_ms: 0`).
+  Trade-off: relay protection is off, as documented on `binding_mode`.
+- high_abuse is for public signup/login surfaces under attack. Risk
+  is enabled, so it requires a Predis client and the extension fails
+  fast without one. The abuse-evidence weights rise, so proven abuse
+  outvotes trust signals sooner. Per-source limits tighten and the
+  aggregate issuance bounds widen in lockstep. The decoy surface arms
+  with protocol-v3 emission, which only engages once the central
+  `min_protocol_version` floor confirms. Chained-challenge step-up
+  engages automatically when `risk.request_binding_authority` is wired
+  in the same configuration file.
+- compatibility maximizes integration compatibility: sha256, a
+  conservative 300 s TTL (Turnstile token-lifetime parity), binding off
+  (IP churn behind NAT/mobile), risk and the decoy surface off
+  (protocol-v2 emission), no behavioral coupling.
+
+The profiles never override an explicitly configured knob: the fill
+happens at configuration-normalization time and only for keys that are
+absent from your configuration. `protection_profile: null` and any value
+outside the four names are refused.
+
+## Advanced configuration
+
+The per-knob reference below is the advanced layer. Most deployments set
+only a `protection_profile`, `secret_key`, `public_base_url` and a shared
+storage, and never touch these knobs. Every option stays available and
+documented; a knob set explicitly always wins over the profile.
+
+### Base configuration
 
 ```yaml
 kiwi_captcha:
@@ -45,7 +117,7 @@ Validation notes:
   client-supplied `algorithm` field in the challenge POST is accepted only
   for forward-compatibility and never changes the issued algorithm.
 
-## Privacy posture
+### Privacy posture
 
 ```yaml
     # ── Privacy posture ──────────────────────────────────────────────────
@@ -82,7 +154,7 @@ The privacy modes themselves (strict vs standard, and why `binding_mode`
 is never forced) are the privacy contract; see
 [privacy.md](privacy.md#privacy-modes).
 
-## Production hardening
+### Production hardening
 
 ```yaml
     # ── Production hardening ──────────────────────────────────────────────
@@ -264,7 +336,7 @@ is never forced) are the privacy contract; see
     #                                       # a retry re-claims it)
 ```
 
-## Risk configuration
+### Risk configuration
 
 The adaptive risk engine is opt-in and off by default. Enabling it adds a
 first-party continuity cookie; see [privacy.md](privacy.md#continuity-cookie)
@@ -535,7 +607,7 @@ kiwi_captcha:
         #         # http_only: true
 ```
 
-## Scope identity
+### Scope identity
 
 Scope ids are part of the Redis state identity. The `id` (or the
 crc32-derived default) must stay stable once deployed. Renaming a scope or
@@ -554,7 +626,7 @@ quota runs.
 - `reject`: true rejection, HTTP 429 `RISK_DENIED`, no challenge.
 - `minimum`: a synthetic policy (base_risk 100, min/degraded sha20) applies.
 
-## Transaction binding
+### Transaction binding
 
 A challenge can be bound to one application transaction. The issuing side
 signs a `request_binding` (1..128 chars of `[A-Za-z0-9._:-]`)
@@ -629,7 +701,7 @@ Two binding modes:
   `KiwiCaptchaValidator::verifiedRequestBinding()`
   (`VerifyOutcome::requestBinding()`).
 
-## Identifier validation rules
+### Identifier validation rules
 
 Scope/tenant identifiers and request bindings are restricted to the
 `[A-Za-z0-9._:-]+` alphabet with a 128-char ceiling. The static
@@ -640,7 +712,7 @@ under a valid identifier can never be redeemed under a different one. See
 [Identifier validation](security-hardening.md#identifier-validation) for
 the endpoint-level enforcement.
 
-## Signing-key rotation and abuse-identity secrets
+### Signing-key rotation and abuse-identity secrets
 
 The deployment keeps two secret families with different lifetimes:
 
@@ -676,7 +748,7 @@ pseudonym. The extension logs an advisory note at container build time
 when rotation is configured (`kid` above 1 or a non-empty
 `secrets_by_kid`) without dedicated root keys; the note never throws.
 
-## Related documentation
+### Related documentation
 
 - [privacy.md](privacy.md): what the privacy keys mean (modes, telemetry,
   binding).

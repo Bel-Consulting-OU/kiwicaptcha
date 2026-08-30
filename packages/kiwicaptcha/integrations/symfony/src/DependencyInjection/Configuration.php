@@ -11,9 +11,161 @@ use KiwiCaptcha\Risk\RiskWeights;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
+/**
+ * SECURITY-MAINTAINER material: the cross-field invariants enforced in
+ * this tree are deep design rationale, intentionally not published at
+ * the integration layer. See docs/operations.md for the maintainer
+ * view and docs/security-hardening.md for the integration actions.
+ */
 final class Configuration implements ConfigurationInterface
 {
     private const RISK_ACTIONS = ['allow', 'sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'step_up', 'deny'];
+
+    /**
+     * The protection-profile matrices. Each profile governs a bounded
+     * set of safety-relevant knobs and carries safe derived defaults
+     * for the knobs the operator did NOT set explicitly. The
+     * beforeNormalization below fills only absent keys, so an
+     * explicitly configured knob always wins over the profile. Every
+     * choice is documented in docs/configuration.md "Protection
+     * profiles".
+     *
+     * Profile rationale:
+     *  - balanced: the current defaults, explicitly documented as such.
+     *    Picking it changes nothing: the derived values equal the tree
+     *    defaults, so behavior is byte-identical to no profile.
+     *  - privacy_strict: the strongest first-party privacy posture.
+     *    binding_mode none drops even the nonce-bound IP tag, so no
+     *    IP-derived state exists anywhere; every behavioral evidence
+     *    surface stays off and the timing heuristic is disabled.
+     *  - high_abuse: stronger abuse posture for public signup/login
+     *    surfaces. Risk is enabled, requiring a Predis client and
+     *    failing fast otherwise. The abuse-evidence weights rise,
+     *    per-source limits tighten, aggregate issuance bounds widen,
+     *    the decoy surface arms (v3 emission behind the central floor),
+     *    and chaining engages when the operator wired a binding
+     *    authority.
+     *  - compatibility: maximal integration compatibility. Algorithm
+     *    sha256, a conservative TTL (300 s, Turnstile parity), binding
+     *    off (IP churn behind NAT/mobile), risk and the decoy surface
+     *    off (protocol v2 emission), no behavioral coupling.
+     *
+     * @var array<string, array{root: array<string, mixed>, risk: array<string, mixed>}>
+     */
+    private const PROTECTION_PROFILES = [
+        'balanced' => [
+            'root' => [
+                'algorithm' => 'sha256',
+                'difficulty_bits' => 18,
+                'argon2_difficulty_bits' => 8,
+                'argon_m_kib' => 0,
+                'argon_t' => 3,
+                'argon_p' => 1,
+                'challenge_ttl_secs' => 120,
+                'rate_limit' => 10,
+                'rate_limit_global' => 500,
+                'privacy_mode' => 'strict',
+                'telemetry' => 'off',
+                'enforce_telemetry' => false,
+                'binding_mode' => 'nonce_ip_hmac',
+            ],
+            'risk' => [
+                'enabled' => false,
+                'decoy_v3_enabled' => false,
+                'client_context' => false,
+                'hard_limits' => ['process_per_second' => 10000],
+                'max_outstanding_challenges' => 20,
+                'max_outstanding_challenges_global' => 100000,
+            ],
+        ],
+        'privacy_strict' => [
+            'root' => [
+                'algorithm' => 'sha256',
+                'difficulty_bits' => 18,
+                'argon2_difficulty_bits' => 8,
+                'argon_m_kib' => 0,
+                'argon_t' => 3,
+                'argon_p' => 1,
+                'challenge_ttl_secs' => 120,
+                'rate_limit' => 10,
+                'rate_limit_global' => 500,
+                'privacy_mode' => 'strict',
+                'telemetry' => 'off',
+                'enforce_telemetry' => false,
+                'min_duration_ms' => 0,
+                'binding_mode' => 'none',
+            ],
+            'risk' => [
+                'enabled' => false,
+                'decoy_v3_enabled' => false,
+                'client_context' => false,
+                'hard_limits' => ['process_per_second' => 10000],
+                'max_outstanding_challenges' => 20,
+                'max_outstanding_challenges_global' => 100000,
+            ],
+        ],
+        'high_abuse' => [
+            'root' => [
+                'algorithm' => 'sha256',
+                'difficulty_bits' => 18,
+                'argon2_difficulty_bits' => 8,
+                'argon_m_kib' => 0,
+                'argon_t' => 3,
+                'argon_p' => 1,
+                'challenge_ttl_secs' => 120,
+                'rate_limit' => 5,
+                'rate_limit_global' => 2000,
+                'privacy_mode' => 'strict',
+                'telemetry' => 'off',
+                'enforce_telemetry' => false,
+                'binding_mode' => 'nonce_ip_hmac',
+                'resource_capacity' => ['issuance_per_second' => 2000],
+            ],
+            'risk' => [
+                'enabled' => true,
+                'decoy_v3_enabled' => true,
+                'client_context' => false,
+                'hard_limits' => ['process_per_second' => 5000],
+                'max_outstanding_challenges' => 10,
+                'max_outstanding_challenges_global' => 250000,
+                'weights' => [
+                    // The abuse-evidence weights rise so proven abuse
+                    // outvotes trust signals sooner; the remaining ten
+                    // weights stay at the contract defaults.
+                    'bad_proof' => 320,
+                    'malformed' => 340,
+                    'replay' => 380,
+                    'action_failure' => 160,
+                ],
+            ],
+        ],
+        'compatibility' => [
+            'root' => [
+                'algorithm' => 'sha256',
+                'difficulty_bits' => 18,
+                'argon2_difficulty_bits' => 8,
+                'argon_m_kib' => 0,
+                'argon_t' => 3,
+                'argon_p' => 1,
+                'challenge_ttl_secs' => 300,
+                'rate_limit' => 10,
+                'rate_limit_global' => 500,
+                'privacy_mode' => 'strict',
+                'telemetry' => 'off',
+                'enforce_telemetry' => false,
+                'binding_mode' => 'none',
+            ],
+            'risk' => [
+                'enabled' => false,
+                'decoy_v3_enabled' => false,
+                'client_context' => false,
+                'hard_limits' => ['process_per_second' => 10000],
+                'max_outstanding_challenges' => 20,
+                'max_outstanding_challenges_global' => 100000,
+            ],
+        ],
+    ];
+
     public function getConfigTreeBuilder(): TreeBuilder
     {
         $treeBuilder = new TreeBuilder('kiwi_captcha');
@@ -21,6 +173,14 @@ final class Configuration implements ConfigurationInterface
 
         $root
             ->children()
+                ->scalarNode('protection_profile')
+                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile fills SAFE DERIVED DEFAULTS for the safety-relevant knobs you did NOT set explicitly; an explicitly configured knob always wins. Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a binding authority is wired — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission). See docs/configuration.md "Protection profiles" for the full matrix.')
+                    ->defaultNull()
+                    ->validate()
+                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'compatibility'], true))
+                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "compatibility" (or null = no profile)')
+                    ->end()
+                ->end()
                 ->scalarNode('secret_key')
                     ->info('HMAC secret key for signing/verifying challenges (min 16 bytes).')
                     ->isRequired()
@@ -884,6 +1044,66 @@ final class Configuration implements ConfigurationInterface
                     && $v['argon2_max_per_tenant'] >= $v['argon2_max_concurrent_verifications'])
                 ->thenInvalid('kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap')
             ->end();
+
+        // Protection-profile defaulting. The beforeNormalization runs on
+        // each raw config array before the tree fills its own defaults,
+        // so "the knob was set explicitly" means the key is present in
+        // that raw array. The profile fills only absent keys: an
+        // explicitly configured knob always wins, and a null profile
+        // leaves the array untouched (byte-identical current behavior).
+        // The risk sub-tree is merged key-by-key (a boolean risk value
+        // from canBeEnabled is expanded first); chaining engages only
+        // for high_abuse AND when a request_binding_authority service id
+        // is present in the same config array, since the tree refuses
+        // chaining without the authoritative binding anchor.
+        $root->beforeNormalization()
+            ->ifTrue(static fn (array $v): bool => \is_array($v) && ($v['protection_profile'] ?? null) !== null)
+            ->then(static function (array $v): array {
+                // An unknown profile string is left untouched here; the
+                // enum node's own validation refuses it during finalize
+                // with a proper configuration error.
+                if (!isset(self::PROTECTION_PROFILES[$v['protection_profile']])) {
+                    return $v;
+                }
+                $profile = self::PROTECTION_PROFILES[$v['protection_profile']];
+                foreach ($profile['root'] as $key => $value) {
+                    if (!\array_key_exists($key, $v)) {
+                        $v[$key] = $value;
+                    }
+                }
+                $risk = $v['risk'] ?? [];
+                if (\is_bool($risk)) {
+                    $risk = ['enabled' => $risk];
+                } elseif (!\is_array($risk)) {
+                    $risk = [];
+                }
+                foreach ($profile['risk'] as $key => $value) {
+                    if (!\array_key_exists($key, $risk)) {
+                        $risk[$key] = $value;
+                    } elseif (\is_array($value) && \is_array($risk[$key])) {
+                        // A partial user array (e.g. weights with only one
+                        // weight set) still receives the profile's other
+                        // sub-keys: the fill stays absent-key-only.
+                        foreach ($value as $subKey => $subValue) {
+                            if (!\array_key_exists($subKey, $risk[$key])) {
+                                $risk[$key][$subKey] = $subValue;
+                            }
+                        }
+                    }
+                }
+                if ($v['protection_profile'] === 'high_abuse'
+                    && ($risk['request_binding_authority'] ?? null) !== null
+                ) {
+                    $chaining = $risk['chaining'] ?? [];
+                    if (\is_array($chaining) && !\array_key_exists('enabled', $chaining)) {
+                        $chaining['enabled'] = true;
+                        $risk['chaining'] = $chaining;
+                    }
+                }
+                $v['risk'] = $risk;
+
+                return $v;
+            });
 
         return $treeBuilder;
     }

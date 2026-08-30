@@ -1363,12 +1363,73 @@
     // Server-issued decoy (honeypot) field: after a successful challenge
     // response, the server may name a decoy field (bounded
     // [A-Za-z0-9_-]{1,64} — validated before trusting; a malformed name is
-    // ignored). The driver renders a hidden text input with that name next
-    // to the token input, INSIDE the same form/host, so the protected form
-    // submission carries it. The driver NEVER auto-fills it: a human never
-    // types into it — a bot's filler is exactly the evidence. The rendered
-    // name is tracked on the widget element and cleared when the widget
-    // resets, so a re-solve never echoes a stale decoy.
+    // ignored). The driver renders ONE hidden text input with that name
+    // inside the same form/host as the token input, so the protected form
+    // submission carries it. The presentation is POLYMORPHIC: a bounded
+    // set of rendering strategies (see kiwiDecoyVariantFor) is chosen per
+    // challenge as a pure function of the authenticated name, so the same
+    // name always renders the same way and the server never needs to know
+    // which strategy is in use. Every strategy keeps the input invisible
+    // to humans, non-interactive (tabindex=-1, aria-hidden, no focus) and
+    // off the browser's autofill candidate surface (autocomplete off or
+    // new-password, never a labelled visible field). The driver NEVER
+    // auto-fills it: a human never types into it — a bot's filler is
+    // exactly the evidence. The rendered name is tracked on the widget
+    // element and cleared when the widget resets, so a re-solve never
+    // echoes a stale decoy.
+    // The six strategies: 0 = bare input, display:none, after the token;
+    // 1 = the same input inside a wrapper span; 2 = bare input with the
+    // hidden attribute, before the token; 3 = bare offscreen input after
+    // the token; 4 = wrapped input with the hidden attribute, before the
+    // token; 5 = the strategy-0 look, but created only once the first
+    // solve completes (deferred creation timing).
+    var KIWI_DECOY_VARIANT_COUNT = 6;
+    function kiwiDecoyVariantFor(name) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < name.length; i++) {
+        h ^= name.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      return h % KIWI_DECOY_VARIANT_COUNT;
+    }
+    function kiwiInsertDecoyInput(host, decoyName, variant) {
+      var input = document.createElement("input");
+      input.type = "text";
+      input.name = decoyName;
+      input.value = "";
+      input.setAttribute("tabindex", "-1");
+      input.setAttribute("aria-hidden", "true");
+      var before = variant === 2 || variant === 4;
+      var el = input;
+      if (variant === 1 || variant === 4) {
+        var wrap = document.createElement("span");
+        wrap.className = "kiwi-form-aux";
+        wrap.appendChild(input);
+        el = wrap;
+      }
+      host.insertBefore(el, before ? tokenEl : tokenEl.nextSibling);
+      if (variant === 0 || variant === 1 || variant === 5) {
+        input.style.display = "none";
+        input.setAttribute("autocomplete", "off");
+      } else if (variant === 2 || variant === 4) {
+        input.setAttribute("hidden", "");
+        input.setAttribute("autocomplete", "off");
+      } else {
+        input.setAttribute("autocomplete", "new-password");
+        input.setAttribute("aria-label", "off-screen field");
+        input.style.position = "absolute";
+        input.style.left = "-9999px";
+        input.style.width = "1px";
+        input.style.height = "1px";
+        input.style.margin = "-1px";
+        input.style.padding = "0";
+        input.style.border = "0";
+        input.style.overflow = "hidden";
+        input.style.whiteSpace = "nowrap";
+        input.style.clip = "rect(0 0 0 0)";
+        input.style.clipPath = "inset(50%)";
+      }
+    }
     function kiwiRenderDecoy(data) {
       var decoyName = data && typeof data.decoy_field === "string" ? data.decoy_field : null;
       if (decoyName === null || !/^[A-Za-z0-9_-]{1,64}$/.test(decoyName)) return;
@@ -1380,22 +1441,36 @@
       // accumulates stale honeypot fields.
       var previous = W.dataset.kiwiDecoyName || null;
       if (previous && previous !== decoyName) {
-        var oldInput = host.querySelector('input[name="' + previous + '"]');
-        if (oldInput && oldInput.parentNode) oldInput.parentNode.removeChild(oldInput);
+        kiwiRemoveDecoyInput(host, previous);
       }
       W.dataset.kiwiDecoyName = decoyName;
-      var input = host.querySelector('input[name="' + decoyName + '"]');
-      if (!input) {
-        input = document.createElement("input");
-        input.type = "text";
-        input.name = decoyName;
-        input.value = "";
-        input.setAttribute("autocomplete", "off");
-        input.setAttribute("tabindex", "-1");
-        input.setAttribute("aria-hidden", "true");
-        input.style.display = "none";
-        host.insertBefore(input, tokenEl.nextSibling);
+      // A same-name reissue (the ~1/27,840 collision) finds the rendered
+      // input already in the host: the variant is a pure function of the
+      // name, so the existing input is already correct — never duplicate.
+      if (host.querySelector('input[name="' + decoyName + '"]')) {
+        delete W.dataset.kiwiDecoyDeferred;
+        return;
       }
+      var variant = kiwiDecoyVariantFor(decoyName);
+      if (variant === 5) {
+        // The deferred strategy records the name now and creates the
+        // input when the first solve completes (kiwiFlushDecoy), so the
+        // decoy surface appears only after a real solve attempt.
+        W.dataset.kiwiDecoyDeferred = "1";
+        return;
+      }
+      delete W.dataset.kiwiDecoyDeferred;
+      kiwiInsertDecoyInput(host, decoyName, variant);
+    }
+    function kiwiFlushDecoy() {
+      if (!W || !W.dataset || !tokenEl) return;
+      if (!W.dataset.kiwiDecoyDeferred) return;
+      delete W.dataset.kiwiDecoyDeferred;
+      var decoyName = W.dataset.kiwiDecoyName || null;
+      if (!decoyName) return;
+      var host = tokenEl.parentNode;
+      if (!host) return;
+      kiwiInsertDecoyInput(host, decoyName, 5);
     }
     function kiwiClearDecoy() {
       kiwiClearDecoyFor(W);
@@ -1719,6 +1794,9 @@
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
         setBinding(requestBinding || "");
+        // The deferred decoy strategy creates its input after the first
+        // solve completes (see kiwiRenderDecoy / kiwiFlushDecoy).
+        kiwiFlushDecoy();
         // CHAIN TICKET LIFECYCLE: the solve completed — the presented chain
         // ticket was consumed by the server at issuance, so the attribute /
         // option is cleared and a re-solve never re-presents it.
@@ -1774,10 +1852,22 @@
   // re-solve must still see a filled decoy as evidence), and cleared by the
   // shared helper below on every reset path (BFCache restore, the public
   // reset API, destroy teardown).
+  function kiwiRemoveDecoyInput(host, decoyName) {
+    if (!host || typeof host.querySelector !== "function") return;
+    var input = host.querySelector('input[name="' + decoyName + '"]');
+    if (!input || !input.parentNode) return;
+    var wrap = input.parentNode;
+    if (wrap !== host && wrap.nodeType === 1 && wrap.className === "kiwi-form-aux") {
+      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+    } else if (input.parentNode) {
+      input.parentNode.removeChild(input);
+    }
+  }
   function kiwiClearDecoyFor(W) {
     if (!W || !W.dataset) return;
     var decoyName = W.dataset.kiwiDecoyName || null;
     delete W.dataset.kiwiDecoyName;
+    delete W.dataset.kiwiDecoyDeferred;
     if (!decoyName) return;
     // The token input lives next to the widget node, in the same
     // container (the standard renderer layout), so the decoy input is
@@ -1787,8 +1877,7 @@
     var t = (W.querySelector ? W.querySelector("[data-kiwi-token]") : null)
       || (container && container.querySelector ? container.querySelector("[data-kiwi-token]") : null);
     var host = t ? t.parentNode : null;
-    var input = host ? host.querySelector('input[name="' + decoyName + '"]') : null;
-    if (input && input.parentNode) input.parentNode.removeChild(input);
+    kiwiRemoveDecoyInput(host, decoyName);
   }
   // destroy(element|selector) needs to reverse EVERYTHING initWidget
   // attached: listeners (registered in a per-element registry so they can

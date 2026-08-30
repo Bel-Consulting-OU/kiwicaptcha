@@ -159,6 +159,42 @@ jobs:
       - name: phpunit
         run: vendor/bin/phpunit
 
+  php-matrix:
+    # Stable aggregator over the PHP core version matrix (8.1..8.5): the
+    # protected-main ruleset requires ONE stable context ("PHP core
+    # supported-matrix") instead of the per-version cells, so a future
+    # matrix expansion cannot silently change the externally visible
+    # required-check names. The gate reads the matrix aggregate result,
+    # which GitHub computes from the per-cell results with the worst
+    # first ordering: failure, then cancelled, then skipped, then
+    # success. A skipped cell (a future path filter) therefore surfaces
+    # as a skipped aggregate and must not fail the gate; the success or
+    # skipped whitelist below passes exactly when every required cell
+    # succeeded or was skipped, and fails exactly when any cell failed
+    # or was cancelled. The job runs even when a cell failed, via the
+    # `if: always()`. The 8.6 nightly lane is deliberately NOT in
+    # `needs`: it is non-gating by design and must stay outside the
+    # required evidence.
+    name: PHP core supported-matrix
+    needs: [php]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: every required PHP core cell succeeded or was skipped
+        run: |
+          set -euo pipefail
+          case '${{ needs.php.result }}' in
+            success|skipped)
+              echo "PHP core supported-matrix OK: every required cell succeeded or was skipped"
+              ;;
+            *)
+              echo "::error::PHP core supported-matrix: a required matrix cell failed or was cancelled"
+              exit 1
+              ;;
+          esac
+
   symfony:
     name: Symfony bundle (container + KernelBrowser)
     runs-on: ubuntu-latest
@@ -227,6 +263,40 @@ jobs:
         run: composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
       - name: phpunit (container compilation + KernelBrowser + router)
         run: vendor/bin/phpunit
+
+  symfony-matrix:
+    # Stable aggregator over the Symfony bundle matrix (6.4/8.2,
+    # 7.x/8.2, 8.x/8.4, 8.x/8.5): the protected-main ruleset requires
+    # ONE stable context ("Symfony supported-matrix") instead of the
+    # per-cell names, so a future matrix expansion cannot silently
+    # change the externally visible required-check names. The gate
+    # reads the matrix aggregate result, which GitHub computes from the
+    # per-cell results with the worst first ordering: failure, then
+    # cancelled, then skipped, then success. A skipped cell (a future
+    # path filter) therefore surfaces as a skipped aggregate and must
+    # not fail the gate; the success or skipped whitelist below passes
+    # exactly when every required cell succeeded or was skipped, and
+    # fails exactly when any cell failed or was cancelled. The job runs
+    # even when a cell failed, via the `if: always()`.
+    name: Symfony supported-matrix
+    needs: [symfony]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: every required Symfony matrix cell succeeded or was skipped
+        run: |
+          set -euo pipefail
+          case '${{ needs.symfony.result }}' in
+            success|skipped)
+              echo "Symfony supported-matrix OK: every required cell succeeded or was skipped"
+              ;;
+            *)
+              echo "::error::Symfony supported-matrix: a required matrix cell failed or was cancelled"
+              exit 1
+              ;;
+          esac
 
   redis:
     name: Real-Redis concurrency (consumed transitions, leases, rate limits)
@@ -1033,6 +1103,36 @@ jobs:
         run: |
           cargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check
 
+  perf-budget:
+    # Deterministic performance budgets. The hard byte limits run first
+    # and are gating: the three widget-driver copies and the
+    # challenge-response JSON must stay under their caps or this job
+    # fails. The synthetic-load benchmark step then measures issuance
+    # and verification p50/p95 under a fixed workload; its timing step
+    # is non-gating by design (a shared GitHub runner is too noisy for a
+    # hard latency gate), so a timing regression surfaces loudly without
+    # blocking the merge lane while a byte regression blocks it. The
+    # benchmark's relative ratchet is documented as noisy-runner-tolerant
+    # in tools/perf-bench.php.
+    name: Performance budgets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: install PHP core (the challenge-response measure issues real challenges)
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: hard byte budgets (widget-driver copies + challenge response)
+        run: bash packages/kiwicaptcha/tools/perf-budget.sh
+      - name: synthetic-load benchmark (p50/p95, non-gating timing)
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench.php
 
   cross-language:
     name: Cross-language (both directions)

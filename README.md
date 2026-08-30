@@ -1,6 +1,6 @@
 # KiwiCaptcha
 
-Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal.
+Authenticated one-shot proof-of-work anti-abuse protection with an adaptive anti-abuse layer: risk assessment, resource controls, authenticated challenge-bound decoys, replay-resistant state, transaction and IP binding, chained challenges, security epochs, key rotation and revocation, SiteVerify and migration compatibility, and first-party privacy.
 Hybrid Rust (WASM) + optimized JS solving, no external services.
 No third-party tracking.
 No third-party requests.
@@ -10,13 +10,42 @@ Developed by Bel Consulting OÜ (MIT license).
 ## What KiwiCaptcha is
 
 KiwiCaptcha is anti-abuse protection.
-A human does not solve the challenge: their CPU does, and a bot's CPU can do the same work.
 The core value is economic: every signup, login, password-reset, or scraping attempt carries a real, tunable computational cost, which makes mass abuse uneconomical at scale.
+A human does not solve the challenge: their CPU does, and an automated client's CPU can do the same work.
+The security property is the proof-of-work cost; everything else is defense-in-depth.
+
+The anti-abuse layer adapts per source without storing identities: only keyed ephemeral pseudonyms (HMAC-derived, epoch-rotating, never a raw IP or a stable identifier), plus aggregate, identity-free statistics.
+It can arm an authenticated decoy, bound to the specific challenge it was issued with, that generic automation may fill.
+Decoys are probabilistic automation evidence, never a sole security boundary.
+An attacker who knows the entire architecture gains no advantage.
+The exact decoy vocabulary, scoring weights, escalation thresholds, classifiers, and other adaptation-sensitive parameters are intentionally not published.
+Strategic silence buys adaptation time; it is not a security guarantee.
+The guarantees and non-guarantees are stated in [the security document](SECURITY.md).
 
 Browser behavioral telemetry is a supplementary signal, not the security boundary.
 It is client-controlled and forgeable.
-The security property is the proof-of-work cost; everything else is defense-in-depth.
-The guarantees and non-guarantees are stated in [the security document](SECURITY.md).
+
+## Privacy properties
+
+Privacy is a product property, not an option.
+The default posture is strict: telemetry off, no fingerprinting (no canvas, audio, font, or GPU signals exist anywhere in the product), no raw IPs in any stored state, and no stable identifiers.
+The risk memory and the rate-limit memory are keyed pseudonyms that rotate on epochs, so old snapshots cannot correlate one source across time.
+Strict mode also refuses the coarse client-context opt-in; operators must deliberately enable it under the standard mode.
+The full privacy contract, including the strict-mode consequences, is in the [Symfony privacy document](packages/kiwicaptcha/integrations/symfony/docs/privacy.md).
+
+## Accessibility guarantees
+
+The widget is keyboard-operable and screen-reader safe.
+WCAG 2.2 AA evidence, scope and limitations are in the [Symfony accessibility statement](packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md) and the [WASM accessibility statement](packages/kiwicaptcha-wasm/ACCESSIBILITY.md).
+
+## The lifecycle
+
+Issuance signs a challenge record, stores it, and hands the browser a solver-friendly challenge.
+The verifier runs cheap structural checks first, then an atomic pending-to-consumed transition, and derives the proof exactly once.
+The consumed record is retained with its deterministic result, and a replay reproduces that outcome instead of re-deriving.
+The security epoch, the keyring (current key id plus historical secrets and revoked keys), the deployment issuer, and the region are enforced at verification, so rotation and emergency revocation are configuration actions, not redeploys.
+Chained challenges extend the lifecycle: a post-solve reassessment can demand a strictly stronger proof, gated by a signed one-shot ticket.
+These invariants are pinned by cross-language tests; see [the claims registry](packages/kiwicaptcha/integrations/symfony/docs/claims-registry.md).
 
 ## Features
 
@@ -33,8 +62,11 @@ The guarantees and non-guarantees are stated in [the security document](SECURITY
   Deployments must additionally rate-limit challenge issuance and cap aggregate Argon2id verification concurrency; the Symfony bundle ships both.
 - Widget: a modern, responsive browser widget with native dark mode and no external dependencies (no external JS, no iframes, no third-party hosts), with optional CSP nonce support.
 - First-party behavioral telemetry, off by default: the widget collects no hardware-capability, device-memory, or screen signals unless the operator explicitly enables the coarse client-context opt-in.
-  `minimal` mode reports only aggregate widget interaction counts and `full` adds `navigator.webdriver` and at most 20 coarse 250 ms timing samples.
-- Auto-tuning difficulty: SHA-256 target bits scale with solver load; Argon2id difficulty is static (each hash is expensive).
+  `minimal` and `full` modes are client-controlled and forgeable; they are supplements, never the boundary.
+- Key rotation and revocation: the verifier resolves a challenge by its key id against a ring of historical secrets, and a revoked key id is refused immediately.
+- Security epochs: a bumped policy epoch invalidates every outstanding challenge; the central policy hash revokes without a redeploy.
+- Adaptive risk engine: self-hosted, privacy-first scoring that adapts the challenge or denies issuance per source, with post-solve reassessment and optional chained step-up.
+- Provider-compatible migration: a `/siteverify` surface and an `api.js` compat loader for reCAPTCHA, hCaptcha, and Turnstile pages.
 
 The full per-feature documentation (protocol v2 signing, clock policy, attempt accounting, key rotation, revocation) is in [the Rust core documentation](packages/kiwicaptcha/README.md).
 
@@ -86,20 +118,31 @@ composer require bel-consulting/kiwicaptcha-symfony
 ```
 
 ```php
-// config/bundles.php
+// config/bundles.php (Flex registers the bundle automatically)
 BelConsulting\KiwiCaptchaBundle\KiwiCaptchaBundle::class => ['all' => true],
 ```
 
 ```yaml
 # config/packages/kiwi_captcha.yaml
 kiwi_captcha:
-    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 16 bytes
-    algorithm: sha256                       # sha256 | argon2id
-    difficulty_bits: 20
-    route_prefix: /kiwi-captcha
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    secret_key: '%env(KIWI_SECRET_KEY)%'
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
 ```
 
-The step-by-step walkthrough (form type, Twig widget, challenge endpoint, and the jti / `(jti, action)` idempotency contract) is the bundle's [documentation](packages/kiwicaptcha/integrations/symfony/README.md), starting at [docs/getting-started.md](packages/kiwicaptcha/integrations/symfony/docs/getting-started.md).
+Set `KIWI_SECRET_KEY` (generate with `openssl rand -hex 32`) and
+`KIWI_PUBLIC_URL` (the canonical https origin) in `.env`, then validate
+the environment:
+
+```bash
+bin/console kiwicaptcha:doctor
+```
+
+The step-by-step walkthrough (environment placeholders, protection
+profiles, form type, Twig widget, challenge endpoint, and the jti /
+`(jti, action)` idempotency contract) is the bundle's
+[documentation](packages/kiwicaptcha/integrations/symfony/README.md),
+starting at [docs/getting-started.md](packages/kiwicaptcha/integrations/symfony/docs/getting-started.md).
 
 ## One minimal example (Rust)
 
@@ -195,6 +238,12 @@ The covered surface, the intentional differences (v3 scores are not emulated; th
 The core verifier enforces IP binding itself (not left to the route layer), counts attempts intrinsically on every verification call, verifies the HMAC in constant time, rejects secrets under 16 bytes, and bounds token/nonce/scope shapes.
 The WASM solver uses a layout-matched allocator.
 The authoritative hardening and operational contracts (Redis requirements, proxy/IP-binding assumptions, release governance, supported versions) are in [the security document](SECURITY.md).
+The Symfony bundle ships `kiwicaptcha:doctor`, which validates a
+production environment against the actual wiring. It covers storage
+atomicity, Redis reachability, keyring state, the canonical origin,
+the client-IP policy, the central protocol floor, the Argon envelope
+and concurrency invariants, SiteVerify and chained-challenge wiring,
+and the installed versions.
 
 ## Test status
 
@@ -228,7 +277,7 @@ The complete threat-model statement (including proof-of-work outsourcing, IP-rot
 
 - [The security document](SECURITY.md) is the authoritative security reference.
 - [The Rust core documentation](packages/kiwicaptcha/README.md) covers protocol, API reference, WASM regeneration, and Lua script versioning.
-- [The Symfony bundle documentation](packages/kiwicaptcha/integrations/symfony/README.md) and its [docs directory](packages/kiwicaptcha/integrations/symfony/docs/) cover getting started, configuration, risk engine, chained challenges, siteverify, migration, privacy, operations, security hardening, troubleshooting, glossary, and the claims registry.
+- [The Symfony bundle documentation](packages/kiwicaptcha/integrations/symfony/README.md) and its [docs directory](packages/kiwicaptcha/integrations/symfony/docs/) cover getting started, configuration, protection profiles, risk engine, chained challenges, siteverify, migration, privacy, security hardening, operations, troubleshooting, glossary, and the claims registry.
 - Accessibility (WCAG 2.2 AA evidence, scope and limitations): the [Symfony accessibility statement](packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md) and the [WASM accessibility statement](packages/kiwicaptcha-wasm/ACCESSIBILITY.md).
 - Protocol material: the [risk-v1 protocol documentation](protocol/risk-v1/README.md), the canonical risk-v1 state protocol.
 
