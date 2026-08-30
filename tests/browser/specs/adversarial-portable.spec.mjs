@@ -289,7 +289,7 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
     await page.evaluate((id) => {
       window.KiwiCaptcha.reset(id);
-      // The reset removes the decoy input SYNCHRONOUSLY (kiwiClearDecoy
+      // The reset removes the decoy input synchronously (kiwiClearDecoy
       // before the fresh initWidget starts its async re-acquisition).
       // The fixture pins the decoy name, so the re-issued challenge
       // re-renders a same-named input asynchronously; asserting inside
