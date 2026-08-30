@@ -134,10 +134,12 @@ See [operations.md](operations.md) for the deployment requirements
 
 > **Verified minimal configuration.** The quick start in
 > [configuration.md](configuration.md#quick-start-verified-flow) is the
-> verified flow (smoke-tested end to end): `public_base_url` and
-> `redis_dsn` are literals in the config file, because this bundle
-> version validates both shapes at container build time, before
-> `%env()` placeholders resolve; `secret_key` stays env-managed.
+> verified flow (smoke-tested end to end): `secret_key`,
+> `public_base_url` and `redis_dsn` all accept Symfony `%env()%`
+> placeholders. A literal value is shape-validated at container build
+> time; an env-resolved value is validated when the client is
+> constructed, and a malformed resolved DSN fails closed with a typed
+> error naming the option.
 
 ### 4. Include the widget
 
