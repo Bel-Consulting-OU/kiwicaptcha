@@ -53,21 +53,11 @@ declare(strict_types=1);
  * does not raise ReplicaWaitException proves the barrier was silently
  * downgraded and fails the run.
  *
- * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac, single-node
- * Redis at redis://127.0.0.1:6399, 100 iterations per phase):
- *  - pre-issue reference: p50 0.048 ms p95 0.084 ms.
- *  - baseline consume p50 0.066 ms p95 0.126 ms; commit p50 0.057 ms
- *    p95 0.097 ms.
- *  - barrier consume p50 101.046 ms p95 202.042 ms; commit p50
- *    101.053 ms p95 202.074 ms. Every write raised ReplicaWaitException.
- *  - raw WAIT 0 p50 0.031 ms p95 0.085 ms; WAIT 1 p50 101.036 ms p95
- *    201.693 ms, reply 0 on the single node.
- *  - p95 delta: consume +201.916 ms, commit +201.977 ms. The server's
- *    WAIT check granularity can land an unsatisfied WAIT at up to twice
- *    the configured timeout, so the single-authority delta is the
- *    configured timeout plus up to one granularity period. A real
- *    replica that acks answers in milliseconds, so this delta is the
- *    upper bound of the production fixture.
+ * The recorded values live in tools/perf-baselines.json, the single
+ * machine-readable record for the performance-analysis document.
+ * After a deliberate change, run with
+ * --baseline-out tools/perf-baselines.json on a clean local machine to
+ * merge the fresh measurements into the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -76,6 +66,7 @@ if (!is_file($autoload)) {
     exit(1);
 }
 require $autoload;
+require __DIR__.'/perf-baseline-emit.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -237,7 +228,7 @@ function runConsumeCommit(RedisStorage $storage, array $nonces, string $expect):
  * Measure the bare WAIT command round trip. WAIT 0 returns immediately;
  * WAIT 1 on a replica-less node blocks the full timeout and replies 0.
  *
- * @return array{ok: bool, detail: string}
+ * @return array{ok: bool, detail: string, p50: float, p95: float, n: int}
  */
 function runRawWait(\Predis\Client $client, int $count, int $replicas): array
 {
@@ -254,13 +245,17 @@ function runRawWait(\Predis\Client $client, int $count, int $replicas): array
     $p95 = percentile($measured, 95);
     printf("perf-wait: raw WAIT %d p50 %.3f ms p95 %.3f ms (n=%d; reply %s)\n", $replicas, $p50, $p95, count($measured), var_export($lastReply, true));
 
-    return ['ok' => $replicas === 0 || (string) $lastReply === '0', 'detail' => 'raw WAIT '.$replicas.' reply '.var_export($lastReply, true)];
+    return ['ok' => $replicas === 0 || (string) $lastReply === '0', 'detail' => 'raw WAIT '.$replicas.' reply '.var_export($lastReply, true), 'p50' => $p50, 'p95' => $p95, 'n' => count($measured)];
 }
 
 $iterations = ITERATIONS;
+$baselineOut = null;
 foreach ($argv as $i => $arg) {
     if ($arg === '--iterations' && isset($argv[$i + 1])) {
         $iterations = max(1, (int) $argv[$i + 1]);
+    }
+    if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
+        $baselineOut = $argv[$i + 1];
     }
 }
 
@@ -323,5 +318,23 @@ foreach (['consume', 'commit'] as $op) {
     $deltas[$op] = $wp95 - $bp95;
 }
 printf("perf-wait: p95 delta consume %+.3f ms, commit %+.3f ms (single authority; a real replica topology is the full production fixture)\n", $deltas['consume'], $deltas['commit']);
+
+if ($baselineOut !== null) {
+    $fmtSamples = static fn (array $samples): array => ['p50_ms' => percentile($samples, 50), 'p95_ms' => percentile($samples, 95), 'n' => count($samples)];
+    try {
+        perf_baseline_emit($baselineOut, ['wait'], [
+            'pre_issue' => $fmtSamples($preIssue['samples']),
+            'baseline' => ['consume' => $fmtSamples($base['samples']['consume']), 'commit' => $fmtSamples($base['samples']['commit'])],
+            'barrier' => ['consume' => $fmtSamples($barr['samples']['consume']), 'commit' => $fmtSamples($barr['samples']['commit'])],
+            'raw' => ['wait0' => ['p50_ms' => $raw0['p50'], 'p95_ms' => $raw0['p95'], 'n' => $raw0['n']], 'wait1' => ['p50_ms' => $raw1['p50'], 'p95_ms' => $raw1['p95'], 'n' => $raw1['n']]],
+            'p95_delta_ms' => ['consume' => round($deltas['consume'], 3), 'commit' => round($deltas['commit'], 3)],
+            'wait_timeout_ms' => WAIT_TIMEOUT_MS,
+        ]);
+        printf("perf-wait: baseline record updated in %s\n", $baselineOut);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'perf-wait: cannot write the baseline record: '.$e->getMessage()."\n");
+        exit(1);
+    }
+}
 
 echo "perf-wait: OK (barrier invariants held; timing is advisory, non-gating)\n";

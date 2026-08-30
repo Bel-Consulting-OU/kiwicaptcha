@@ -66,8 +66,9 @@ opens that PR itself. The steps:
    is the skeleton that install proves.
 4. Mention in the PR description that the package is
    `type: symfony-bundle` with the PSR-4 namespace
-   `BelConsulting\KiwiCaptchaBundle\`, and that `predis/predis` is
-   required for the `redis_dsn` starter config.
+   `BelConsulting\KiwiCaptchaBundle\`, and that `predis/predis` is a
+   direct dependency of the package (the `redis_dsn` starter config
+   works out of the box).
 5. Keep the version directory in sync with package releases: a new
    recipe version is only needed when the files or the env keys change.
 
@@ -115,7 +116,8 @@ What remains manual:
   environment values at the deployment's real Redis endpoint and
   canonical origin. Credentials and endpoints stay out of source
   control; a literal override in the config file is still possible.
-- Install `predis/predis` (`composer require predis/predis`).
+- Predis is a direct dependency of the bundle; the DSN path needs no
+  separate install.
 - Import the recipe routes manually if the app configures
   `framework.router` itself (the recipe copies the import file; the
   extension also auto-prepends the routes on a fresh app).
@@ -129,8 +131,9 @@ What remains manual:
 Without the recipe, the steps are the same as
 [docs/getting-started.md](getting-started.md):
 
-1. `composer require bel-consulting/kiwicaptcha-symfony predis/predis`
-   (adds the bundle; Flex registers it via the auto-generated recipe).
+1. `composer require bel-consulting/kiwicaptcha-symfony`
+   (adds the bundle and its direct Predis dependency; Flex registers
+   it via the auto-generated recipe).
 2. Add `KIWI_SECRET_KEY` to your `.env` and set a real random value
    (`openssl rand -hex 32`), then add `KIWI_REDIS_DSN` (your Redis
    connection) and `KIWI_PUBLIC_URL` (your canonical https origin).

@@ -185,40 +185,57 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
-     * The authority-change replay contract. Redis failover topologies
-     * (Predis Sentinel or master-slave replication aggregates and
-     * Redis Cluster aggregates) route commands through promotion
-     * machinery, and the verified-WAIT barrier is refused on them at
-     * construction, so waitReplicas stays 0 and the deployment has no
-     * cross-authority replay guarantee. A Redis-backed storage with
-     * waitReplicas 0 is the same posture on any topology: the
-     * promotion boundary applies, and replay-safe promotion is an
-     * operator contract, not an automatic property. The documented
-     * postures are fail_closed (the verified WAIT on a standalone
-     * authority, or no failover at all), operator_managed (promotion
-     * eligibility gated so a stale replica can never be elected) and
-     * best_effort (documented acceptance of the boundary); see
-     * docs/redis-topologies.md.
+     * The authority-change replay contract, posture-aware. Redis
+     * failover topologies (Predis Sentinel or master-slave replication
+     * aggregates and Redis Cluster aggregates) route commands through
+     * promotion machinery, and the verified-WAIT barrier is refused on
+     * them at construction, so waitReplicas stays 0 and the deployment
+     * has no cross-authority replay guarantee. The deployment declares
+     * its posture in replay_durability. best_effort (the default)
+     * accepts the documented stale-promotion boundary and keeps the
+     * replication-topology warn. operator_managed passes: the operator
+     * owns promotion eligibility (replication gating, catch-up rules, a
+     * promotion-eligibility gate on the failover manager) and
+     * acknowledges the invariant. fail_closed is refused at container
+     * build time when an HA aggregate client is wired, so a doctor that
+     * observes that combination is itself a broken wiring. A
+     * Redis-backed storage with waitReplicas 0 is the same boundary on
+     * a single-node direct connection. The warn is the best_effort
+     * acknowledgment; the other postures pass with the operator
+     * contract noted. See docs/redis-topologies.md and
+     * docs/ha-authority.md.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkReplicationTopology(): array
     {
+        $posture = (string) ($this->config['replay_durability'] ?? 'best_effort');
         $aggregate = $this->predisAggregateLabel($this->redis, 'storage/limiter Redis')
             ?? $this->predisAggregateLabel($this->riskRedis, 'risk Redis');
         if ($aggregate !== null) {
-            return ['WARN', sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
+            if ($posture === 'operator_managed') {
+                return ['PASS', sprintf('%s — replay_durability "operator_managed": the operator owns promotion eligibility (replication gating / catch-up rules) and acknowledges the stale-promotion boundary (see docs/ha-authority.md).', $aggregate)];
+            }
+            if ($posture === 'fail_closed') {
+                return ['FAIL', sprintf('%s — replay_durability "fail_closed" must never reach the doctor: the extension refuses this combination at container build time (a LogicException naming the posture and the remediation). A doctor that observes it means the wiring is broken.', $aggregate)];
+            }
+
+            return ['WARN', sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
         }
         if ($this->storage instanceof \KiwiCaptcha\Storage\RedisStorage) {
             $waitReplicas = (int) ($this->config['risk']['redis']['wait_replicas'] ?? 0);
             if ($waitReplicas <= 0) {
-                return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', \get_class($this->storage))];
+                if ($posture === 'operator_managed' || $posture === 'fail_closed') {
+                    return ['PASS', sprintf('Redis-backed storage (%s) with waitReplicas 0 under replay_durability "%s": single-node direct client, %s', \get_class($this->storage), $posture, $posture === 'operator_managed' ? 'the operator owns the authority-change contract (promotion eligibility gated; see docs/ha-authority.md)' : 'the deployment keeps automatic failover out of the security-Redis contract (see docs/redis-topologies.md)')];
+                }
+
+                return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
             }
 
             return ['PASS', sprintf('Redis-backed storage (%s) with the verified-WAIT barrier (waitReplicas %d): acked writes reach every configured replica before success', \get_class($this->storage), $waitReplicas)];
         }
 
-        return ['PASS', 'no Redis-backed storage and no aggregate client: one-shot atomicity is per-authority and no promotion boundary applies'];
+        return ['PASS', sprintf('no Redis-backed storage and no aggregate client: one-shot atomicity is per-authority and no promotion boundary applies (replay_durability "%s")', $posture)];
     }
 
     /**
@@ -383,13 +400,31 @@ final class KiwiCaptchaDoctorCommand extends Command
      */
     private function checkV3Writer(): array
     {
-        if (!($this->config['risk']['decoy_v3_enabled'] ?? false)) {
+        // The effective (processed) values: the profile is the
+        // lowest-precedence layer, so an explicit override in any
+        // config file, including a null-cleared profile, is already
+        // reflected here.
+        $profile = $this->config['protection_profile'] ?? null;
+        $decoyEnabled = (bool) ($this->config['risk']['decoy_v3_enabled'] ?? false);
+        if ($profile === 'high_abuse' && !$decoyEnabled) {
+            // Under high_abuse the profile-derived default is true, so
+            // an effective false can only be an explicit deferral: the
+            // operator chose the profile and consciously deferred v3
+            // emission, which the check records as a warning, never a
+            // fail (the two-phase rollout stays safe and the deploy
+            // gate stays green for an explicit, documented choice).
+            return ['WARN', 'high_abuse promises the decoy surface, but risk.decoy_v3_enabled is explicitly false: protocol v3 emission is deferred while the profile stays active'];
+        }
+        if (!$decoyEnabled) {
             return ['PASS', 'protocol v2 emission (decoy surface off)'];
         }
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minProtocolVersion();
         if ($floor !== null && $floor >= 3) {
             return ['PASS', 'decoy surface armed and the central floor confirms protocol v3 emission'];
+        }
+        if ($profile === 'high_abuse') {
+            return ['FAIL', 'high_abuse requires authenticated decoy emission, but the fleet protocol floor has not been confirmed at v3. Confirm every serving binary supports protocol v3 and raise the central security-policy min_protocol_version to 3 (the two-phase rollout, see operations.md), or explicitly set risk.decoy_v3_enabled: false to defer v3 emission while the profile stays active.'];
         }
 
         return ['WARN', 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];

@@ -58,24 +58,11 @@ declare(strict_types=1);
  * runs the same teardown on every exit path and prints the proof
  * line.
  *
- * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac, Redis 8.10,
- * primary + replica on loopback free ports, 100 iterations per
- * phase). The recorded values are the conservative of three runs:
- *  - baseline issuance p50 0.065 ms p95 0.090 ms; consume p50 0.078
- *    ms p95 0.105 ms; commit p50 0.069 ms p95 0.087 ms.
- *  - ack issuance p50 0.070 ms p95 0.151 ms (acked 100/100); consume
- *    p50 0.126 ms p95 0.245 ms; commit p50 0.110 ms p95 0.228 ms.
- *  - p95 delta (ack over baseline): issuance +0.061 ms, consume
- *    +0.152 ms, commit +0.145 ms.
- *  - lag: raw WAIT 1 after a fence write p50 0.039 ms p95 0.117 ms;
- *    master-write to replica-visible delta p50 0.060 ms p95 0.158 ms.
- *  - shortfall (replica stopped): raw WAIT 1 reply 0; consume p50
- *    101.043 ms p95 202.074 ms; commit p50 101.044 ms p95 202.071
- *    ms; every write raised ReplicaWaitException. The single-authority
- *    perf-wait.php delta and this shortfall delta agree, as both are
- *    the same unsatisfied-WAIT path. The ack-phase numbers above are
- *    the production replication topology the single-node fixture
- *    cannot produce.
+ * The recorded values live in tools/perf-baselines.json, the single
+ * machine-readable record for the performance-analysis document.
+ * After a deliberate change, run with
+ * --baseline-out tools/perf-baselines.json on a clean local machine to
+ * merge the fresh measurements into the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -84,6 +71,7 @@ if (!is_file($autoload)) {
     exit(1);
 }
 require $autoload;
+require __DIR__.'/perf-baseline-emit.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -415,9 +403,13 @@ function teardown(array &$procs, string &$tmpDir, int $masterPid, int $replicaPi
 }
 
 $iterations = ITERATIONS;
+$baselineOut = null;
 foreach ($argv as $i => $arg) {
     if ($arg === '--iterations' && isset($argv[$i + 1])) {
         $iterations = max(1, (int) $argv[$i + 1]);
+    }
+    if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
+        $baselineOut = $argv[$i + 1];
     }
 }
 
@@ -644,5 +636,34 @@ $shortP50 = percentile($shortfallOps['samples']['commit'], 50);
 $shortP95 = percentile($shortfallOps['samples']['commit'], 95);
 printf("perf-wait-replica: shortfall commit p50 %.3f ms p95 %.3f ms (n=%d; every write raised ReplicaWaitException)\n", $shortP50, $shortP95, count($shortfallOps['samples']['commit']));
 printf("perf-wait-replica: shortfall issuance raised ReplicaWaitException after the replica was stopped\n");
+
+if ($baselineOut !== null) {
+    $fmtSamples = static fn (array $samples): array => ['p50_ms' => percentile($samples, 50), 'p95_ms' => percentile($samples, 95), 'n' => count($samples)];
+    try {
+        perf_baseline_emit($baselineOut, ['wait_replica'], [
+            'baseline' => [
+                'issuance' => $fmtSamples($baseIssue['samples']),
+                'consume' => $fmtSamples($baseOps['samples']['consume']),
+                'commit' => $fmtSamples($baseOps['samples']['commit']),
+            ],
+            'ack' => [
+                'issuance' => $fmtSamples($ackIssue['samples']),
+                'consume' => $fmtSamples($ackOps['samples']['consume']),
+                'commit' => $fmtSamples($ackOps['samples']['commit']),
+            ],
+            'p95_delta_ms' => ['issuance' => round($issueDelta, 3), 'consume' => round($consumeDelta, 3), 'commit' => round($commitDelta, 3)],
+            'lag' => ['wait_ack' => $fmtSamples($waitAckSamples), 'replica_visible' => $fmtSamples($visibleSamples)],
+            'shortfall' => [
+                'consume' => $fmtSamples($shortfallOps['samples']['consume']),
+                'commit' => $fmtSamples($shortfallOps['samples']['commit']),
+            ],
+            'wait_timeout_ms' => WAIT_TIMEOUT_MS,
+        ]);
+        printf("perf-wait-replica: baseline record updated in %s\n", $baselineOut);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'perf-wait-replica: cannot write the baseline record: '.$e->getMessage()."\n");
+        exit(1);
+    }
+}
 
 echo "perf-wait-replica: OK (ack and shortfall invariants held; timing is advisory, non-gating)\n";

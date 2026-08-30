@@ -40,15 +40,13 @@ declare(strict_types=1);
  * count budgets live in perf-budget.sh, which gates deterministically;
  * this timing signal is loud but never a hard merge gate by itself.
  *
- * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac):
- *  - SHA array: issuance p50 0.010 ms p95 0.026 ms; verification p50
- *    0.011 ms p95 0.037 ms.
- *  - Redis (local redis://127.0.0.1:6399): issuance p50 0.063 ms p95
- *    0.107 ms; verification p50 0.240 ms p95 0.408 ms.
- *  - Argon admission (64 MiB, t=3): issuance p50 0.032 ms p95 0.043 ms;
- *    verification p50 79.077 ms p95 83.331 ms.
- * Run with --update-baseline to print fresh values after a deliberate
- * change.
+ * The recorded baseline values live in tools/perf-baselines.json, the
+ * single machine-readable record for the performance-analysis
+ * document. After a deliberate change, run each mode with
+ * --baseline-out tools/perf-baselines.json on a clean local machine to
+ * merge the fresh measurements into the record (the ratchet constants
+ * below are the values the run-time gate reads). --update-baseline
+ * prints the fresh values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -57,6 +55,7 @@ if (!is_file($autoload)) {
     exit(1);
 }
 require $autoload;
+require __DIR__.'/perf-baseline-emit.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -244,8 +243,16 @@ $modeArray = !in_array('--redis', $argv, true) && !in_array('--argon', $argv, tr
 $modeRedis = in_array('--redis', $argv, true) || in_array('--all', $argv, true);
 $modeArgon = in_array('--argon', $argv, true) || in_array('--all', $argv, true);
 $update = in_array(UPDATE_BASELINE, $argv, true);
+$baselineOut = null;
+foreach ($argv as $i => $arg) {
+    if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
+        $baselineOut = $argv[$i + 1];
+    }
+}
 
 $allOk = true;
+$record = [];
+$phaseFmt = static fn (array $p): array => ['p50_ms' => $p['p50'], 'p95_ms' => $p['p95'], 'n' => $p['n']];
 
 if ($modeArray) {
     $storage = new ArrayStorage();
@@ -259,6 +266,7 @@ if ($modeArray) {
         ITERATIONS,
     );
     $allOk = report('SHA-256 array', $r, BASELINE_ISSUE_P50, BASELINE_ISSUE_P95, BASELINE_VERIFY_P50, BASELINE_VERIFY_P95) && $allOk;
+    $record['sha_array'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
 }
 
 if ($modeRedis) {
@@ -290,6 +298,7 @@ if ($modeRedis) {
             ITERATIONS,
         );
         $allOk = report('SHA-256 redis', $r, BASELINE_REDIS_ISSUE_P50, BASELINE_REDIS_ISSUE_P95, BASELINE_REDIS_VERIFY_P50, BASELINE_REDIS_VERIFY_P95) && $allOk;
+        $record['sha_redis'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
     }
 }
 
@@ -307,6 +316,21 @@ if ($modeArgon) {
         ARGON_ITERATIONS,
     );
     $allOk = report('Argon2id admission', $r, BASELINE_ARGON_ISSUE_P50, BASELINE_ARGON_ISSUE_P95, BASELINE_ARGON_VERIFY_P50, BASELINE_ARGON_VERIFY_P95) && $allOk;
+    $record['argon'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
+}
+
+if ($baselineOut !== null) {
+    if ($record === []) {
+        fwrite(STDERR, "perf-bench: --baseline-out given but no mode measured anything; the record was not updated\n");
+    } else {
+        try {
+            perf_baseline_emit($baselineOut, ['bench'], $record);
+            printf("perf-bench: baseline record updated in %s\n", $baselineOut);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, 'perf-bench: cannot write the baseline record: '.$e->getMessage()."\n");
+            exit(1);
+        }
+    }
 }
 
 if ($update) {

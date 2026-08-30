@@ -62,16 +62,13 @@ declare(strict_types=1);
  * deterministically; this timing signal is loud but never a hard merge
  * gate by itself.
  *
- * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac, quiet machine,
- * Redis 8.10 at redis://127.0.0.1:6399), 8 workers x 100, the
- * conservative of two consecutive runs:
- *  - issue: p50 0.097 ms p95 0.177 ms; throughput 10303 ops/s.
- *  - verify: p50 0.544 ms p95 0.880 ms; throughput 6463 ops/s.
- *  - mixed issue: p50 0.127 ms p95 0.307 ms.
- *  - mixed verify: p50 0.458 ms p95 0.944 ms; throughput 4433 ops/s
- *    across both phases.
- * Run with --update-baseline to print fresh values after a deliberate
- * change.
+ * The recorded baseline values live in tools/perf-baselines.json, the
+ * single machine-readable record for the performance-analysis
+ * document. After a deliberate change, run each phase with
+ * --baseline-out tools/perf-baselines.json on a clean local machine to
+ * merge the fresh measurements into the record (the ratchet constants
+ * below are the values the run-time gate reads). --update-baseline
+ * prints the fresh values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -80,6 +77,7 @@ if (!is_file($autoload)) {
     exit(1);
 }
 require $autoload;
+require __DIR__.'/perf-baseline-emit.php';
 
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -440,18 +438,18 @@ function report(string $label, array $samples, float $windowMs, float $baselineP
     if ($baselineP95 <= 0.0) {
         fwrite(STDERR, "perf-load NOTE: $label has no recorded baseline; run with --update-baseline after a quiet-machine measurement\n");
 
-        return ['p50' => $p50, 'p95' => $p95];
+        return ['p50' => $p50, 'p95' => $p95, 'n' => $n, 'throughput' => $ops];
     }
     if ($p95 > $baselineP95 * RATCHET) {
         fwrite(STDERR, sprintf("perf-load FAILED: %s p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $label, $p95, $baselineP95 * RATCHET, $baselineP95));
     }
 
-    return ['p50' => $p50, 'p95' => $p95];
+    return ['p50' => $p50, 'p95' => $p95, 'n' => $n, 'throughput' => $ops];
 }
 
 function usage(): void
 {
-    fwrite(STDERR, "usage: php perf-load.php [--issue] [--verify] [--mixed] [--risk] [--all] [--workers N] [--per-worker N] [--url redis://host:port] [--update-baseline]\n");
+    fwrite(STDERR, "usage: php perf-load.php [--issue] [--verify] [--mixed] [--risk] [--all] [--workers N] [--per-worker N] [--url redis://host:port] [--update-baseline] [--baseline-out file]\n");
     exit(1);
 }
 
@@ -506,9 +504,10 @@ foreach ($argv as $i => $arg) {
             $update = true;
             break;
         case '--url':
+        case '--baseline-out':
             break;
         default:
-            if ($i > 0 && !in_array($argv[$i - 1], ['--url', '--workers', '--per-worker'], true)) {
+            if ($i > 0 && !in_array($argv[$i - 1], ['--url', '--workers', '--per-worker', '--baseline-out'], true)) {
                 usage();
             }
     }
@@ -521,6 +520,13 @@ if ($modeAll) {
 }
 if ($workers < 1 || $perWorker < 1) {
     usage();
+}
+
+$baselineOut = null;
+foreach ($argv as $i => $arg) {
+    if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
+        $baselineOut = $argv[$i + 1];
+    }
 }
 
 $url = redisUrlFromArgs($argv);
@@ -608,6 +614,29 @@ if ($modeRisk) {
             $allOk = false;
         } else {
             $measured['risk-issue'] = report('risk-enabled concurrent issue ('.($workers * $perWorker).' challenges)', $r['samples']['risk-issue'] ?? [], $r['windowMs'], BASELINE_RISK_ISSUE_P95);
+        }
+    }
+}
+
+if ($baselineOut !== null) {
+    if ($measured === []) {
+        fwrite(STDERR, "perf-load: --baseline-out given but no phase measured anything; the record was not updated\n");
+    } else {
+        $record = [];
+        foreach ($measured as $key => $values) {
+            $record[$key] = [
+                'p50_ms' => $values['p50'],
+                'p95_ms' => $values['p95'],
+                'n' => $values['n'],
+                'throughput_ops_per_second' => $values['throughput'],
+            ];
+        }
+        try {
+            perf_baseline_emit($baselineOut, ['load'], $record);
+            printf("perf-load: baseline record updated in %s\n", $baselineOut);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, 'perf-load: cannot write the baseline record: '.$e->getMessage()."\n");
+            exit(1);
         }
     }
 }

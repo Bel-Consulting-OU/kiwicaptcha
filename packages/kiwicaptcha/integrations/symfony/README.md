@@ -60,6 +60,13 @@ AA evidence, scope and limitations in
 
 ## Quick start
 
+> **Package installation status.** This package has not yet been published on
+> Packagist, and the Flex recipe PR #2038 in recipes-contrib has not yet
+> been merged. The one-command install stays the target; until both
+> land, use the manual path in
+> [docs/getting-started.md](docs/getting-started.md): require the bundle
+> from this repository, then configure it by hand.
+
 Install, register, and configure in five minutes:
 **[docs/getting-started.md](docs/getting-started.md)** (profile-first:
 `protection_profile` + secret + public URL + Redis, then

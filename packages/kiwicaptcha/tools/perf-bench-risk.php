@@ -56,13 +56,13 @@ declare(strict_types=1);
  * count budgets in perf-budget.sh remain the gating gate and this
  * timing signal is loud but never a hard merge gate by itself.
  *
- * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac):
- *  - in-memory risk-enabled controller issuance p50 0.047 ms p95 0.065 ms.
- *  - real-Redis concurrent risk-enabled issuance (8 workers x 100,
- *    redis://127.0.0.1:6399): p50 1.185 ms p95 1.855 ms; throughput
- *    3700 req/s, the conservative of two consecutive runs.
- * Run with --update-baseline to print fresh values after a deliberate
- * change.
+ * The recorded baseline values live in tools/perf-baselines.json, the
+ * single machine-readable record for the performance-analysis
+ * document. After a deliberate change, run each mode with
+ * --baseline-out tools/perf-baselines.json on a clean local machine to
+ * merge the fresh measurements into the record (the ratchet constants
+ * below are the values the run-time gate reads). --update-baseline
+ * prints the fresh values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -71,6 +71,7 @@ if (!is_file($autoload)) {
     exit(1);
 }
 require $autoload;
+require __DIR__.'/perf-baseline-emit.php';
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
@@ -352,6 +353,12 @@ if ($workerIndex !== false) {
 
 $redisMode = in_array('--redis', $argv, true);
 $redisUpdate = $redisMode && in_array('--update-baseline', $argv, true);
+$baselineOut = null;
+foreach ($argv as $i => $arg) {
+    if ($arg === '--baseline-out' && isset($argv[$i + 1])) {
+        $baselineOut = $argv[$i + 1];
+    }
+}
 $workers = REDIS_WORKERS;
 $perWorker = REDIS_PER_WORKER;
 foreach ($argv as $i => $arg) {
@@ -388,6 +395,22 @@ if ($redisMode) {
     $p95 = percentile($r['samples'], 95);
     $ops = $r['windowMs'] > 0 ? (int) round($r['n'] / ($r['windowMs'] / 1000.0)) : 0;
     printf("perf-bench-risk: real-Redis concurrent risk-enabled issuance p50 %.3f ms p95 %.3f ms (n=%d); throughput %d req/s\n", $p50, $p95, $r['n'], $ops);
+    if ($baselineOut !== null) {
+        try {
+            perf_baseline_emit($baselineOut, ['bench_risk', 'redis_concurrent'], [
+                'p50_ms' => $p50,
+                'p95_ms' => $p95,
+                'n' => $r['n'],
+                'workers' => $workers,
+                'per_worker' => $perWorker,
+                'throughput_requests_per_second' => $ops,
+            ]);
+            printf("perf-bench-risk: baseline record updated in %s\n", $baselineOut);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, 'perf-bench-risk: cannot write the baseline record: '.$e->getMessage()."\n");
+            exit(1);
+        }
+    }
     if ($redisUpdate) {
         printf("perf-bench-risk: update the constants: p50 %.3f p95 %.3f\n", $p50, $p95);
         exit(0);
@@ -449,6 +472,20 @@ for ($i = 0; $i < WARMUP + ITERATIONS; $i++) {
 $p50 = percentile($samples, 50);
 $p95 = percentile($samples, 95);
 printf("perf-bench-risk: risk-enabled controller issuance p50 %.3f ms p95 %.3f ms (n=%d)\n", $p50, $p95, count($samples));
+
+if ($baselineOut !== null) {
+    try {
+        perf_baseline_emit($baselineOut, ['bench_risk', 'in_memory'], [
+            'p50_ms' => $p50,
+            'p95_ms' => $p95,
+            'n' => count($samples),
+        ]);
+        printf("perf-bench-risk: baseline record updated in %s\n", $baselineOut);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, 'perf-bench-risk: cannot write the baseline record: '.$e->getMessage()."\n");
+        exit(1);
+    }
+}
 
 if (in_array('--update-baseline', $argv, true)) {
     printf("perf-bench-risk: update the constants: p50 %.3f p95 %.3f\n", $p50, $p95);

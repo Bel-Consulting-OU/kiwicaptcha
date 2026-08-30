@@ -1102,4 +1102,25 @@ final class ConfigurationTest extends TestCase
         self::assertSame(120, $processed['challenge_ttl_secs']);
         self::assertSame('nonce_ip_hmac', $processed['binding_mode']);
     }
+
+    public function testReplayDurabilityDefaultsToBestEffort(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame('best_effort', $processed['replay_durability'], 'the default posture is best_effort: the current single-authority boundary with the stale-promotion window accepted as the documented deployment boundary');
+    }
+
+    public function testReplayDurabilityAcceptsEveryPostureValue(): void
+    {
+        self::assertSame('best_effort', $this->process(['replay_durability' => 'best_effort'])['replay_durability']);
+        self::assertSame('operator_managed', $this->process(['replay_durability' => 'operator_managed'])['replay_durability']);
+        self::assertSame('fail_closed', $this->process(['replay_durability' => 'fail_closed'])['replay_durability']);
+    }
+
+    public function testReplayDurabilityRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['replay_durability' => 'automatic']);
+    }
 }

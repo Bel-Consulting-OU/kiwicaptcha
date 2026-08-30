@@ -5,8 +5,8 @@
 # The three widget-driver copies (the canonical WASM asset, the core
 # crate's embedded resources copy and the Symfony bundle's public copy)
 # must each stay under the widget-driver cap. The measured baseline of
-# every copy is 138,327 bytes (the committed bytes at e86ad5c, recorded
-# 2026-08-30); the cap is 160,000 bytes, a 13.5% headroom, so a
+# every copy is 144,735 bytes (the committed bytes at b3ddc978, recorded
+# 2026-08-30); the cap is 160,000 bytes, a 9.5% headroom, so a
 # legitimate addition lands inside the cap and an accidental bloating
 # regression trips it.
 #
@@ -14,8 +14,8 @@
 # and a brotli cap, so a regression that bloats the wire bytes the
 # browser actually downloads (gzip on the wire, brotli when the server
 # offers it) is caught even when the raw cap still has headroom. The
-# measured baselines (2026-08-30, every copy identical): gzip 37,973
-# bytes, brotli -q 11 32,145 bytes. The caps are 50,000 and 45,000
+# measured baselines (2026-08-30, every copy identical): gzip 39,854
+# bytes, brotli -q 11 33,677 bytes. The caps are 50,000 and 45,000
 # bytes, sized to the raw cap's full allowance (a 160,000-byte driver
 # at the measured compression ratios lands near 43,900 / 37,200) plus a
 # margin for the in-flight rendering-strategy work. Brotli is enforced
@@ -26,11 +26,12 @@
 # The challenge-response JSON is measured by issuing real challenges
 # through the PHP core (sha256 and argon2id, decoy armed) and encoding
 # the wire shape of the bundle's /challenge response. The measured
-# baseline is 957-968 bytes (the argon2id decoy-armed issuance is the
-# largest variant; the grammar-composed name length varies the size,
-# recorded 2026-08-30); the bound is 4096 bytes, a generous margin for
-# future optional fields. The php-core vendor must be installed before
-# this script runs (the CI job installs it).
+# baseline is 1,014-1,047 bytes for sha256 and 1,025-1,057 bytes for
+# argon2id (the decoy-armed issuance is the largest variant; the
+# grammar-composed name length varies the size, recorded 2026-08-30);
+# the bound is 4096 bytes, a generous margin for future optional
+# fields. The php-core vendor must be installed before this script
+# runs (the CI job installs it).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 

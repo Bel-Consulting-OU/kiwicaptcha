@@ -111,6 +111,14 @@ The risk engines (Rust and PHP) are byte-identical in the state protocol; both e
 
 ## Five-minute installation (Symfony)
 
+> **Installation status.** The bundle `bel-consulting/kiwicaptcha-symfony`
+> has not yet been published on Packagist, and the Flex recipe for it
+> (recipes-contrib PR #2038) has not yet been merged. The one-command
+> install below is the intended target state; it becomes consumable once
+> both land. Until then, install manually: require the bundle from this
+> repository, and configure it by following the bundle's
+> [getting-started guide](packages/kiwicaptcha/integrations/symfony/docs/getting-started.md).
+
 The single Symfony integration is the standalone bundle `bel-consulting/kiwicaptcha-symfony` (in `packages/kiwicaptcha/integrations/symfony`), which depends on the framework-neutral PHP core via Composer:
 
 ```bash

@@ -39,7 +39,8 @@ kiwi_captcha:
   no credentials, no path, no query, no fragment.
   An invalid resolved origin fails closed with an error naming
   `kiwi_captcha.public_base_url`.
-- Install the client library: `composer require predis/predis`.
+- Predis is a direct dependency of the bundle, so the DSN path works
+  out of the box; no separate client install is needed.
 - The Flex recipe ships this exact file; see
   [flex-recipe.md](flex-recipe.md).
 
@@ -244,8 +245,8 @@ What the DSN builds:
   the production storage guard passes), the distributed issuance rate
   limiter, the Argon2id admission semaphore and, when risk is enabled,
   the risk state store. All of them run over one `Predis\Client` built
-  from the DSN, so install `predis/predis` first
-  (`composer require predis/predis`).
+  from the DSN; Predis is a direct dependency of the bundle, so the DSN
+  path works out of the box.
 - The DSN shape is `redis://host:port/db?password=...&prefix=...` (or
   `rediss://` for TLS). The DSN is handed to `Predis\Client` verbatim,
   and the same fail-closed shape validation runs on both lanes. A

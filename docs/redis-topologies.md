@@ -152,6 +152,17 @@ warns on every Redis HA wiring (a Predis Sentinel, master-slave or
 Cluster aggregate client) and on every Redis-backed storage with
 `waitReplicas` 0, naming the documented postures below.
 
+The posture is now a first-class configuration switch, not just a
+documented choice: the `replay_durability` option (`fail_closed`,
+`operator_managed` or `best_effort`, default `best_effort`) declares
+it, and the extension and the doctor enforce the declared posture.
+The doctor's "Replication topology" check is posture-aware: an HA
+aggregate under `best_effort` keeps the WARN; under
+`operator_managed` it reports PASS with the operator contract noted;
+under `fail_closed` the doctor is unreachable, because the extension
+refuses the container build. The design record for the replay-safe
+authority abstraction lives in docs/ha-authority.md.
+
 The three documented postures:
 
 - **fail_closed**: the deployment guarantees the one-shot contract
@@ -160,20 +171,27 @@ The three documented postures:
   (`waitReplicas > 0` with the threshold covering every eligible
   failover target, `ReplicaWaitException` on a shortfall), or a
   consensus-capable store for the security state. On an HA aggregate
-  this posture additionally requires promotion gating, because the
-  barrier itself is refused on the aggregate (WAIT is
-  connection-affine; see the Sentinel section above).
+  the bundle refuses to run at all: the extension refuses the
+  container build with a LogicException naming the posture and the
+  remediation (provide a pinned-primary/topology adapter, or choose
+  `operator_managed` / `best_effort`), because the barrier itself is
+  refused on the aggregate (WAIT is connection-affine; see the
+  Sentinel section above). Single-node direct clients are fine under
+  this posture.
 - **operator_managed**: the deployment accepts async replication but
   contracts that a stale replica can never be elected. Promotion
   eligibility is gated (`min-replicas-to-write` style replication
   gating, a promotion-eligibility gate on the failover manager, or a
   consensus design whose semantics are actually guaranteed), and the
   window is sized against the challenge lifetime plus `ttl_margin_secs`
-  plus clock skew and failover margin.
+  plus clock skew and failover margin. The doctor reports PASS and
+  keeps the operator contract noted.
 - **best_effort**: the deployment documents that a stale-replica
   promotion can re-enable replay of a consumed or burned challenge,
   and accepts the residual window (for example a low-value surface
-  with compensating controls elsewhere).
+  with compensating controls elsewhere). This is the default posture,
+  and the doctor's WARN is the acknowledgment that the boundary is
+  accepted.
 
 The doctor's WARN on the exact wording above is the deployment
 posture prompt: it is not a failed check, and the deployment chooses
@@ -189,6 +207,14 @@ the postures is exactly the case the WARN names.
 | Standalone Redis | Supported (phpredis direct, or standalone Predis with command retries disabled) | Trivially single-node | Typed errors on outage; WAIT barrier raises `ReplicaWaitException` on a shortfall |
 | Redis Cluster | Refused at construction; keep 0 | Every transition is one key; semaphore keys co-slotted | Typed errors on node outage; per-key atomicity preserved across slot owners |
 | Sentinel / master-slave | Refused at construction; keep 0 | Trivially single-node | Fail closed on primary outage; promotion boundary documented above |
+
+Each posture's requirements under the `replay_durability` switch:
+
+| Posture | Topology requirements | Doctor result |
+|---------|----------------------|---------------|
+| `best_effort` (default) | The current boundary: single-authority atomicity; the stale-promotion window documented and accepted by the deployment | HA aggregate: WARN with the posture named; single-node direct: PASS |
+| `operator_managed` | The operator owns promotion eligibility: replication gating, catch-up rules, or a promotion-eligibility gate on the failover manager; the window sized against challenge lifetime plus `ttl_margin_secs` plus clock skew and failover margin | HA aggregate: PASS with the operator contract noted; single-node direct: PASS |
+| `fail_closed` | No automatic failover reliance: the extension refuses the container build when a Predis Sentinel/Cluster aggregate client is wired (LogicException naming the posture and the remediation); standalone authorities may use the verified WAIT barrier; single-node direct clients are always accepted | HA aggregate: unreachable (the build is refused); single-node direct: PASS |
 
 The verified WAIT is durability hardening, not consensus: even an
 acknowledged write can be lost under some failover and persistence

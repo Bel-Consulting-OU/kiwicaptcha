@@ -4,15 +4,13 @@ This page walks through installing the bundle, configuring it with a
 protection profile, issuing your first challenge, and using the verified
 result. The full configuration reference is [configuration.md](configuration.md).
 
-> Status: this guide is the current manual-equivalent walkthrough. A
-> recipe-first rewrite is planned (install through `composer require
-> bel-consulting/kiwicaptcha-symfony` plus Flex, and a five-minute
-> quick start driven by the recipe's generated config and env
-> declarations). It lands after the bundle is published on Packagist
-> and the recipes-contrib PR is merged; see
-> [flex-recipe.md](flex-recipe.md) for the exact external steps. The
-> rewrite stays pending until then, and this guide is not silently
-> claimed as the rewritten form.
+> Status: this guide is the current manual-equivalent walkthrough. The
+> bundle has not yet been published on Packagist, and the recipe PR
+> #2038 is not yet merged, so the one-command install below stays the
+> target rather than today's path. Until both land, install the bundle
+> from this repository and follow the manual steps in this guide. A
+> recipe-first rewrite is planned once both land; see
+> [flex-recipe.md](flex-recipe.md) for the exact external steps.
 
 ## Installation
 
@@ -85,12 +83,9 @@ DSN is set, the bundle constructs the challenge storage
 (`KiwiCaptcha\Storage\RedisStorage` — the atomic backend production
 requires), the distributed issuance rate limiter, the Argon2id admission
 semaphore and (when risk is enabled) the risk state store. All of them
-run over one `Predis\Client` built from the DSN. Install the client
-library once:
-
-```bash
-composer require predis/predis
-```
+run over one `Predis\Client` built from the DSN, which the bundle
+requires directly; the DSN path works out of the box with no extra
+install step.
 
 Without `redis_dsn` the bundle fails fast with a `LogicException` if
 `ArrayStorage` is configured outside the test/dev environment

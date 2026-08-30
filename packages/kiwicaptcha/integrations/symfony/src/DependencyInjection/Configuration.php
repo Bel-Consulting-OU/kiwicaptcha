@@ -849,6 +849,11 @@ final class Configuration implements ConfigurationInterface
                         ->thenInvalid('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority — the chain is a server-side transaction obligation anchored on the AUTHORITATIVE binding, never on an unexamined client string')
                     ->end()
                 ->end()
+                ->enumNode('replay_durability')
+                    ->info('THE AUTHORITY-CHANGE REPLAY POSTURE SWITCH (default best_effort): how the deployment treats the boundary between per-authority atomic replay safety and promotion of a stale replica. best_effort = the current boundary: single-authority atomicity with the documented stale-promotion window accepted as the deployment boundary (the doctor keeps the "Replication topology" WARN). operator_managed = the operator owns promotion eligibility (replication gating, catch-up rules, a promotion-eligibility gate on the failover manager) and acknowledges the invariant; the doctor reports PASS with the operator contract noted. fail_closed = the deployment refuses to rely on automatic failover: the bundle MUST NOT run with a Predis Sentinel/Cluster aggregate client under this posture, and the extension refuses the container build (LogicException naming the posture and the remediation) whenever the storage/limiter/risk client is a replication or cluster aggregate. Single-node direct clients are fine under every posture. See docs/redis-topologies.md and docs/ha-authority.md.')
+                    ->values(['fail_closed', 'operator_managed', 'best_effort'])
+                    ->defaultValue('best_effort')
+                ->end()
             ->end()
             // Cross-field rotation invariants over the signing key
             // identity (kid, secret_key, secrets_by_kid, revoked_kids),

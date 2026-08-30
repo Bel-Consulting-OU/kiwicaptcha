@@ -150,6 +150,16 @@ final class NewIntegratorSmokeTest extends TestCase
             $storeClient = (new \ReflectionProperty($riskStore, 'client'))->getValue($riskStore);
             self::assertSame($container->get('kiwi_captcha.redis.dsn'), $storeClient, 'the risk state store runs on the DSN client');
 
+            // high_abuse promises the decoy surface, so the doctor FAILs
+            // the protocol-v3 writer check until the two-phase rollout
+            // confirms the fleet floor (see operations.md). Complete step
+            // 2 of the rollout (raise the central floor) before the
+            // doctor run: a high_abuse deployment with a confirmed v3
+            // floor must pass every check.
+            $dsnClient = $container->get('kiwi_captcha.redis.dsn');
+            $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+            $dsnClient->hset($monitor->policyKey(), 'min_protocol_version', 3);
+
             $tester = new CommandTester($container->get(KiwiCaptchaDoctorCommand::class));
             $tester->execute([]);
 
@@ -157,6 +167,7 @@ final class NewIntegratorSmokeTest extends TestCase
             $display = $tester->getDisplay();
             self::assertStringContainsString('[PASS] Risk Redis', $display, 'the risk Redis (the DSN client) answers PING');
             self::assertStringContainsString('[PASS] Storage atomicity', $display);
+            self::assertStringContainsString('[PASS] Protocol-v3 writer', $display, 'the confirmed v3 floor satisfies the high_abuse decoy contract');
             self::assertStringNotContainsString('[FAIL]', $display, 'the high_abuse config on the DSN must not FAIL any check');
 
             // The live risk engine must not break issuance: an ordinary

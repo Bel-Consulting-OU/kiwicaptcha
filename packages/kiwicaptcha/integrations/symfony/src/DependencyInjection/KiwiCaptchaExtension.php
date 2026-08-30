@@ -126,6 +126,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      */
     public function prepend(ContainerBuilder $container): void
     {
+        // The fail_closed posture refusal runs here, on the real
+        // container, because the extension load() compiles against a
+        // temporary container where application-defined client services
+        // are invisible. The raw config layers are inspected, so only
+        // an explicit replay_durability "fail_closed" engages.
+        $this->refuseFailClosedAggregateWiring($container);
         if (!$container->hasExtension('framework')) {
             return;
         }
@@ -140,6 +146,106 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->prependExtensionConfig('framework', [
             'router' => ['resource' => __DIR__.'/../Resources/config/routes.php'],
         ]);
+    }
+
+    /**
+     * The fail_closed aggregate refusal for the kernel build flow. The
+     * extension load() runs inside a temporary container (Symfony
+     * compiles every extension in isolation and merges the result), so
+     * application-defined client services are invisible at load time.
+     * The prepend hook runs on the real container before that, where
+     * every definition is visible, so the classification reaches the
+     * actual client wiring. The raw config layers carry the posture.
+     * An explicit replay_durability "fail_closed" in any layer engages
+     * the refusal for the client services the effective merge would
+     * wire (redis_service, risk.redis_service, and a RedisStorage
+     * storage definition's own client), with later layers winning like
+     * the merge. An env-resolved posture cannot be classified at build
+     * time and skips this lane, exactly like the load-time lane.
+     */
+    private function refuseFailClosedAggregateWiring(ContainerBuilder $container): void
+    {
+        $layers = $container->getExtensionConfig('kiwi_captcha');
+        $posture = null;
+        $redisService = null;
+        $riskRedisService = null;
+        $storage = null;
+        foreach ($layers as $layer) {
+            if (!\is_array($layer)) {
+                continue;
+            }
+            if (\array_key_exists('replay_durability', $layer)) {
+                $posture = $layer['replay_durability'];
+            }
+            if (\array_key_exists('redis_service', $layer)) {
+                $redisService = $layer['redis_service'];
+            }
+            if (isset($layer['risk']) && \is_array($layer['risk']) && \array_key_exists('redis_service', $layer['risk'])) {
+                $riskRedisService = $layer['risk']['redis_service'];
+            }
+            if (\array_key_exists('storage', $layer)) {
+                $storage = $layer['storage'];
+            }
+        }
+        if ($posture !== 'fail_closed') {
+            return;
+        }
+        foreach ([$redisService, $riskRedisService] as $clientId) {
+            if (!\is_string($clientId) || $clientId === '') {
+                continue;
+            }
+            $aggregate = $this->predisAggregateLabel(new Reference($clientId), $container, sprintf('the "%s" Redis client', $clientId));
+            if ($aggregate !== null) {
+                throw new \LogicException(self::failClosedRefusalMessage($aggregate));
+            }
+        }
+        if (!\is_string($storage) || $storage === '') {
+            return;
+        }
+        $id = $this->resolveParameterizedServiceId($storage, $container);
+        $seenAliases = [];
+        while ($id !== null && $container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                $id = null;
+                break;
+            }
+            $seenAliases[$id] = true;
+            $resolved = $this->resolveParameterizedServiceId((string) $container->getAlias($id), $container);
+            if ($resolved === null) {
+                $id = null;
+                break;
+            }
+            $id = $resolved;
+        }
+        if ($id === null || !$container->hasDefinition($id)) {
+            return;
+        }
+        $definition = $container->getDefinition($id);
+        $class = $this->resolveParameterizedClass($definition->getClass(), $container);
+        if ($class === null || !is_a($class, RedisStorage::class, true)) {
+            return;
+        }
+        $client = $definition->getArgument(0);
+        if (!$client instanceof Reference) {
+            return;
+        }
+        $aggregate = $this->predisAggregateLabel($client, $container, sprintf('the storage client of "%s"', $storage));
+        if ($aggregate !== null) {
+            throw new \LogicException(self::failClosedRefusalMessage($aggregate));
+        }
+    }
+
+    /**
+     * The shared fail_closed refusal message: names the posture, the
+     * aggregate, and the remediation options (a pinned-primary or
+     * topology adapter, or the weaker postures).
+     */
+    private static function failClosedRefusalMessage(string $aggregate): string
+    {
+        return sprintf(
+            'kiwi_captcha.replay_durability is "fail_closed", but %s — the fail_closed posture refuses to rely on automatic failover, because a stale-replica promotion can re-enable replay of a consumed or burned challenge. Provide a pinned-primary/topology adapter (a standalone connection with retries disabled, or a client the deployment can prove never changes authority), or choose operator_managed (the operator owns promotion eligibility) or best_effort (the documented stale-promotion boundary accepted).',
+            $aggregate,
+        );
     }
 
     public function load(array $configs, ContainerBuilder $container): void
@@ -1128,6 +1234,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$bindingAuthority', $bindingAuthorityRef)
                     ->setPublic(true));
                 $chainServiceRef = new Reference(ChainedChallengeTicketService::class);
+            }
+        }
+        // The replay_durability posture is the explicit authority-change
+        // contract (docs/redis-topologies.md, docs/ha-authority.md). Under
+        // fail_closed the deployment refuses to rely on automatic failover:
+        // a Predis Sentinel or Cluster aggregate client routes commands
+        // through promotion machinery, so the bundle refuses the container
+        // build here, with the posture named and the remediation options.
+        // Single-node direct clients are fine under every posture.
+        if ($config['replay_durability'] === 'fail_closed') {
+            $aggregate = $this->predisAggregateLabel($redisRef, $container, 'the storage/limiter Redis client')
+                ?? $this->predisAggregateLabel($riskRedis, $container, 'the risk Redis client');
+            if ($aggregate !== null) {
+                throw new \LogicException(self::failClosedRefusalMessage($aggregate));
             }
         }
         // Trusted client-IP policy, wired unconditionally (not gated on
@@ -2311,6 +2431,108 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 return null;
             }
             $id = $definition->getParent();
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether a wired Redis client is a Predis replication or cluster
+     * aggregate, judged from the definition the build can inspect.
+     * The classification mirrors the runtime VerifiedWaitGuard and the
+     * doctor command. A Predis\Client whose constructor options carry
+     * the "replication" (Sentinel or master-slave) or "cluster" option
+     * builds a ReplicationInterface or ClusterInterface connection at
+     * runtime, so the same topology boundary applies at build time.
+     * Returns the aggregate label, null when the client is a single-node
+     * direct connection (phpredis, a standalone Predis DSN, a plain tcp
+     * parameters array) or when the definition is opaque to the build.
+     * An uninspectable client cannot be proven an aggregate and stays
+     * allowed, exactly like the runtime guard only refuses what the
+     * connection object proves.
+     */
+    private function predisAggregateLabel(?Reference $ref, ContainerBuilder $container, string $label): ?string
+    {
+        if ($ref === null) {
+            return null;
+        }
+        $id = $this->resolveParameterizedServiceId((string) $ref, $container);
+        if ($id === null) {
+            return null;
+        }
+        $seenAliases = [];
+        while ($container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                return null;
+            }
+            $seenAliases[$id] = true;
+            $resolved = $this->resolveParameterizedServiceId((string) $container->getAlias($id), $container);
+            if ($resolved === null) {
+                return null;
+            }
+            $id = $resolved;
+        }
+        $seen = [];
+        while ($container->hasDefinition($id) && !isset($seen[$id])) {
+            $seen[$id] = true;
+            $definition = $container->getDefinition($id);
+            $class = $this->resolveParameterizedClass($definition->getClass(), $container);
+            if ($class !== null && !is_a($class, \Predis\Client::class, true)) {
+                // phpredis and every non-Predis client: the runtime
+                // guard classifies only Predis aggregates, so the same
+                // boundary applies here.
+                return null;
+            }
+            $aggregateOptions = $this->predisAggregateOptions($definition, $container);
+            if ($aggregateOptions !== null) {
+                if (isset($aggregateOptions['replication'])) {
+                    return sprintf('%s is a Predis replication aggregate (Sentinel or master-slave)', $label);
+                }
+                if (isset($aggregateOptions['cluster'])) {
+                    return sprintf('%s is a Predis Redis Cluster aggregate', $label);
+                }
+            }
+            if (!$definition instanceof ChildDefinition) {
+                return null;
+            }
+            $id = $definition->getParent();
+        }
+
+        return null;
+    }
+
+    /**
+     * The constructor-options array of a Predis\Client definition that
+     * proves an aggregate topology (a "replication" or "cluster" option
+     * key), or null when no argument carries one. Both argument
+     * positions are inspected, since the aggregate shape is
+     * conventionally options in the second position. %param% values are
+     * resolved through the parameter bag. An argument that stays opaque
+     * (a Reference, an unresolved parameter) is skipped, never treated
+     * as an aggregate.
+     */
+    private function predisAggregateOptions(Definition $definition, ContainerBuilder $container): ?array
+    {
+        foreach ($definition->getArguments() as $argument) {
+            if (!\is_array($argument)) {
+                continue;
+            }
+            try {
+                $resolved = $container->getParameterBag()->resolveValue($argument);
+            } catch (\Throwable) {
+                continue;
+            }
+            if (!\is_array($resolved)) {
+                continue;
+            }
+            if (\array_key_exists('replication', $resolved) || \array_key_exists('cluster', $resolved)) {
+                return $resolved;
+            }
+            foreach ($resolved as $entry) {
+                if (\is_array($entry) && (\array_key_exists('replication', $entry) || \array_key_exists('cluster', $entry))) {
+                    return $entry;
+                }
+            }
         }
 
         return null;
