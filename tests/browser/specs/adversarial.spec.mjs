@@ -203,9 +203,15 @@ test.describe('KiwiCaptcha adversarial client-side protocol', () => {
       post(big);
     });
     const tokenInput = page.locator('[data-kiwi-token]');
-    const stateAfter = await page.locator('[data-kiwi-widget]').getAttribute('data-state');
-    if (stateAfter !== 'done') {
-      expect(await tokenInput.inputValue(), 'a forged done must not resolve the solve').toBe('');
+    // One atomic read: the genuine solve can land between two separate
+    // round trips (state read then token read), which would turn the
+    // forged-done check into a false positive on a fast machine.
+    const snap = await page.evaluate(() => ({
+      state: document.querySelector('[data-kiwi-widget]').getAttribute('data-state'),
+      token: document.querySelector('[data-kiwi-token]').value,
+    }));
+    if (snap.state !== 'done') {
+      expect(snap.token, 'a forged done must not resolve the solve').toBe('');
     }
     await solve(page);
     const token = await tokenInput.inputValue();
