@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       redis_url:
-        description: Redis URL the latency gate benchmarks against (the quiet runner's own Redis)
+        description: Redis URL the manual hard-ratchet benchmark runs against (defaults to the local instance)
         required: false
         default: redis://127.0.0.1:6399
 
@@ -1219,8 +1219,8 @@ jobs:
     # blocking the merge lane while a byte regression blocks it. The
     # benchmark's relative ratchets are documented as
     # noisy-runner-tolerant in tools/perf-bench.php, tools/perf-bench-risk.php
-    # and tools/perf-load.php. The hard latency gate for a quiet
-    # machine lives in the separate "Performance latency (quiet runner)"
+    # and tools/perf-load.php. The manually dispatched hard-ratchet benchmark lives in the
+    # separate "Performance latency (manual hard-ratchet benchmark)"
     # job, which is workflow_dispatch-only and runs these same timing
     # steps without continue-on-error.
     name: Performance budgets
@@ -1293,20 +1293,19 @@ jobs:
         run: php packages/kiwicaptcha/tools/perf-wait-replica.php
 
   perf-latency-quiet:
-    # Performance latency (quiet runner). The hard latency gate: the
-    # same timing benchmarks as the "Performance budgets" job, but
-    # without continue-on-error, so a quiet machine can gate merges on
-    # the 3x-p95 ratchets. The job is workflow_dispatch-only: it never
-    # runs on push or pull_request (a shared GitHub runner is too noisy
-    # to gate on), so the default push workflow is untouched. Dispatch
-    # it on a dedicated quiet runner (self-hosted, idle) that provides
-    # its own Redis: the redis_url input defaults to the local
-    # redis://127.0.0.1:6399, and the preflight step fails the job
-    # loudly when that Redis is unreachable, because a silently skipped
-    # benchmark would defeat the gate. The byte budgets are not part of
-    # this job; they stay gating in "Performance budgets" on every push.
+    # Manually dispatched hard-ratchet benchmark on a GitHub-hosted
+    # runner. The same timing benchmarks as the "Performance budgets"
+    # job, but without continue-on-error, so a failure inside a manual
+    # run is visible. This job is NOT a merge gate: it is skipped on
+    # every push and pull_request, it is not a protected-main required
+    # context, and the release workflow does not consult it. A shared
+    # GitHub runner is too noisy to gate on, so the hard ratchets here
+    # only certify a quiet, dedicated machine; until such a runner
+    # exists, treat the 3x-p95 failures as signals, not blockers. The
+    # byte budgets are not part of this job; they stay gating in
+    # "Performance budgets" on every push.
     if: github.event_name == 'workflow_dispatch'
-    name: Performance latency (quiet runner)
+    name: Performance latency (manual hard-ratchet benchmark)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1323,7 +1322,7 @@ jobs:
       - name: install Symfony bundle (risk-enabled controller benchmark)
         working-directory: packages/kiwicaptcha/integrations/symfony
         run: composer install --no-interaction --no-scripts --prefer-dist
-      - name: quiet-runner Redis preflight (the latency gate requires a reachable Redis)
+      - name: manual-benchmark Redis preflight (the hard-ratchet run requires a reachable Redis)
         env:
           KC_REDIS_URL: ${{ inputs.redis_url }}
         run: |
@@ -1333,7 +1332,7 @@ jobs:
             $url = getenv("KC_REDIS_URL") ?: "redis://127.0.0.1:6399";
             $client = new Predis\Client($url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
             $client->ping();
-            echo "quiet-runner preflight: Redis answers at $url\n";
+            echo "manual-benchmark preflight: Redis answers at $url\n";
           '
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, hard ratchet gate)
         run: php packages/kiwicaptcha/tools/perf-bench.php
@@ -1355,7 +1354,7 @@ jobs:
         run: php packages/kiwicaptcha/tools/perf-wait.php
       - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory-only)
         # The replica fixture has no ratchet and spins its own local
-        # topology, so it stays advisory even on the quiet runner: it
+        # topology, so it stays advisory even in the manual benchmark: it
         # notes loudly and exits 0 when redis-server/redis-cli are
         # missing, and its invariants gate only the barrier semantics.
         continue-on-error: true
