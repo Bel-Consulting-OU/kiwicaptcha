@@ -1011,7 +1011,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(ChainReservationResult::Busy, $service->reserveStage2($requirement->chainId, 'owner-b'), 'reserve by another owner with a live lease is busy');
 
         // A non-owner can neither issue nor release the reservation.
-        self::assertSame(ChainIssuedResult::NotOwner, $service->markIssued($requirement->chainId, 'owner-b', 'n2'), 'a non-owner markIssued is an atomic no-op');
+        self::assertSame(ChainIssuedResult::NotOwner, $service->markIssued($requirement->chainId, 'owner-b', $this->stageNonce('foreign-mint')), 'a non-owner markIssued is an atomic no-op');
         $service->release($requirement->chainId, 'owner-b');
         self::assertSame('reserved', $service->requirementFor($requirement->chainId)?->state, 'a non-owner release does not free the reservation');
         self::assertSame('owner-a', $service->requirementFor($requirement->chainId)?->owner);

@@ -3,6 +3,12 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      redis_url:
+        description: Redis URL the latency gate benchmarks against (the quiet runner's own Redis)
+        required: false
+        default: redis://127.0.0.1:6399
 
 permissions:
   contents: read
@@ -1122,13 +1128,20 @@ jobs:
     # issuance and verification p50/p95 under fixed workloads — the
     # ArrayStorage SHA baseline, the real-Redis SHA path (a redis
     # service on 6399, the KC_REDIS_URL contract of perf-bench.php), the
-    # Argon2id admission path (64 MiB, t=3) and the risk-enabled
-    # controller path. Every timing step is non-gating by design (a
-    # shared GitHub runner is too noisy for a hard latency gate), so a
-    # timing regression surfaces loudly without blocking the merge lane
-    # while a byte regression blocks it. The benchmark's relative
-    # ratchets are documented as noisy-runner-tolerant in
-    # tools/perf-bench.php and tools/perf-bench-risk.php.
+    # Argon2id admission path (64 MiB, t=3), the risk-enabled
+    # controller path, the real-Redis concurrent risk-enabled path
+    # (forked workers through the DSN-built client, the --redis mode of
+    # perf-bench-risk.php) and the verified-WAIT round-trip fixture
+    # (perf-wait.php, non-gating by design). Every timing step is
+    # non-gating by design (a shared GitHub runner is too noisy for a
+    # hard latency gate), so a timing regression surfaces loudly without
+    # blocking the merge lane while a byte regression blocks it. The
+    # benchmark's relative ratchets are documented as
+    # noisy-runner-tolerant in tools/perf-bench.php, tools/perf-bench-risk.php
+    # and tools/perf-load.php. The hard latency gate for a quiet
+    # machine lives in the separate "Performance latency (quiet runner)"
+    # job, which is workflow_dispatch-only and runs these same timing
+    # steps without continue-on-error.
     name: Performance budgets
     runs-on: ubuntu-latest
     permissions:
@@ -1177,6 +1190,78 @@ jobs:
       - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, non-gating timing)
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench-risk.php
+      - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, non-gating timing)
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+      - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1 on the single-node service, advisory timings)
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-wait.php
+
+  perf-latency-quiet:
+    # Performance latency (quiet runner). The hard latency gate: the
+    # same timing benchmarks as the "Performance budgets" job, but
+    # without continue-on-error, so a quiet machine can gate merges on
+    # the 3x-p95 ratchets. The job is workflow_dispatch-only: it never
+    # runs on push or pull_request (a shared GitHub runner is too noisy
+    # to gate on), so the default push workflow is untouched. Dispatch
+    # it on a dedicated quiet runner (self-hosted, idle) that provides
+    # its own Redis: the redis_url input defaults to the local
+    # redis://127.0.0.1:6399, and the preflight step fails the job
+    # loudly when that Redis is unreachable, because a silently skipped
+    # benchmark would defeat the gate. The byte budgets are not part of
+    # this job; they stay gating in "Performance budgets" on every push.
+    if: github.event_name == 'workflow_dispatch'
+    name: Performance latency (quiet runner)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: install PHP core (the benchmarks issue real challenges)
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: install Symfony bundle (risk-enabled controller benchmark)
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: composer install --no-interaction --no-scripts --prefer-dist
+      - name: quiet-runner Redis preflight (the latency gate requires a reachable Redis)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: |
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '
+            require "packages/kiwicaptcha-php/vendor/autoload.php";
+            $url = getenv("KC_REDIS_URL") ?: "redis://127.0.0.1:6399";
+            $client = new Predis\Client($url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
+            $client->ping();
+            echo "quiet-runner preflight: Redis answers at $url\n";
+          '
+      - name: synthetic-load benchmark (SHA-256 array, p50/p95, hard ratchet gate)
+        run: php packages/kiwicaptcha/tools/perf-bench.php
+      - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, hard ratchet gate)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-bench.php --redis
+      - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, hard ratchet gate)
+        run: php packages/kiwicaptcha/tools/perf-bench.php --argon
+      - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, hard ratchet gate)
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php
+      - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, hard ratchet gate)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+      - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1, barrier invariants gate; timings advisory)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-wait.php
 
   cross-language:
     name: Cross-language (both directions)

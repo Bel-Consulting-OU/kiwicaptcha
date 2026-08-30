@@ -73,9 +73,9 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * obligation (same TTL). The obligation exists -> return the existing
      * chain id, raising the requiredRank/requiredAction when the new
      * reassessment is stronger, never lowering. The obligation points at
-     * a missing/corrupt chain -> compare-delete the stale mapping and
-     * create the chain fresh (a stale mapping can never block a
-     * transaction). The pointed-at chain is a declared key (KEYS[3]),
+     * a missing/corrupt/past-expiry chain -> compare-delete the stale
+     * mapping and create the chain fresh (a stale mapping can never block
+     * a transaction). The pointed-at chain is a declared key (KEYS[3]),
      * resolved by the caller from a plain read and re-verified inside
      * the script, so no key name is constructed from stored data. A
      * mapping that moved between the read and the script answers
@@ -95,6 +95,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
 -- equals the caller's read answers 'moved' and the caller retries), so no
 -- key name is ever constructed from stored data — the EVAL contract holds
 -- on sharded/proxied/Redis Cloud topologies too.
+local now = tonumber(redis.call('TIME')[1])
 local mapped = redis.call('GET', KEYS[2])
 if mapped then
   if mapped ~= ARGV[11] then
@@ -103,7 +104,10 @@ if mapped then
   local chained = redis.call('GET', KEYS[3])
   if chained then
     local ok, rec = pcall(cjson.decode, chained)
-    if ok and isValidChainRecord(rec) then
+    -- A past-expiry pointed-at record is stale exactly like a missing
+    -- or corrupt one: the create-or-get heals the mapping with a fresh
+    -- chain, the mirror of the Array store's expiresAt-vs-clock check.
+    if ok and isValidChainRecord(rec) and not chainRecordExpired(rec, now) then
       local newRank = tonumber(ARGV[6])
       if newRank > tonumber(rec['requiredRank']) then
         rec['requiredRank'] = newRank
@@ -154,8 +158,9 @@ LUA;
      * Issued/verified/completed -> 'issued'/'verified'/'completed'. The
      * terminal step_up_required / denied states answer
      * 'step_up_required'/'denied' (the obligation stays bound, never
-     * issue). A record without an expiry is corrupted state -> 'missing'
-     * (never manufacture a lifetime).
+     * issue). A record without a key lifetime or with a passed signed
+     * expiry is stale -> 'missing' (never manufacture a lifetime, never
+     * reserve a past-expiry record).
      */
     private const RESERVE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
@@ -173,6 +178,11 @@ end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
   return 'corrupt'
+end
+-- A past-expiry but still-live record is stale: fail closed like the
+-- Array mirror's liveRecord() sweep (never reserve an expired ticket).
+if chainRecordExpired(rec, now) then
+  return 'missing'
 end
 if rec['state'] == 'issued' then
   return 'issued'
@@ -225,7 +235,9 @@ LUA;
      * 'verified_same', any other nonce on an issued/completed chain, or
      * any nonce on a terminal step_up_required/denied chain -> 'conflict',
      * a non-owner (or an unreserved chain) -> 'not_owner', absent ->
-     * 'missing'.
+     * 'missing'. A record without a key lifetime or with a passed signed
+     * expiry is stale -> 'missing' (the same fail-closed guards as the
+     * reservation).
      */
     private const MARK_ISSUED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain issuance: reserved(owner) -> issued(stage2Nonce), idempotent.
@@ -233,9 +245,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
   return 'corrupt'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 if rec['state'] == 'reserved' then
   if rec['owner'] ~= ARGV[1] then
@@ -271,7 +293,9 @@ LUA;
      * the terminal record kept until its TTL, atomically deleting the
      * obligation mapping (KEYS[2]) only if it still points at this
      * chainId. Same nonce again -> 'verified_same'; a different nonce or
-     * a non-issuable state -> 'conflict'; absent -> 'missing'.
+     * a non-issuable state -> 'conflict'; absent -> 'missing'. A record
+     * without a key lifetime or with a passed signed expiry is stale ->
+     * 'missing' (a past-expiry chain can never verify).
      */
     private const MARK_VERIFIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain verification: issued(stage2Nonce) -> verified(stage2Nonce), TERMINAL,
@@ -280,9 +304,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
   return 'corrupt'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 if rec['state'] == 'verified' then
   if rec['stage2Nonce'] == ARGV[1] then
@@ -308,7 +342,8 @@ LUA;
      * later challenge request for the same transaction re-encounters the
      * terminal state (never a new stage-1). Same nonce again ->
      * 'step_up_required_same'; a different nonce or a non-issuable state
-     * -> 'conflict'; absent -> 'missing'.
+     * -> 'conflict'; absent -> 'missing'. A record without a key lifetime
+     * or with a passed signed expiry is stale -> 'missing'.
      */
     private const MARK_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain step-up: issued(stage2Nonce) -> step_up_required(stage2Nonce), TERMINAL,
@@ -317,9 +352,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
   return 'corrupt'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 if rec['state'] == 'step_up_required' then
   if rec['stage2Nonce'] == ARGV[1] then
@@ -342,7 +387,8 @@ LUA;
      * challenge request for the same transaction re-encounters the
      * terminal state (never a new stage-1). Same nonce again ->
      * 'denied_same'; a different nonce or a non-issuable state ->
-     * 'conflict'; absent -> 'missing'.
+     * 'conflict'; absent -> 'missing'. A record without a key lifetime
+     * or with a passed signed expiry is stale -> 'missing'.
      */
     private const MARK_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain denial: issued(stage2Nonce) -> denied(stage2Nonce), TERMINAL,
@@ -351,9 +397,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
   return 'corrupt'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 if rec['state'] == 'denied' then
   if rec['stage2Nonce'] == ARGV[1] then
@@ -408,9 +464,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
 if mapped == false then
@@ -479,9 +545,19 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return 'missing'
+end
 local rec = cjson.decode(existing)
 if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
 if mapped == false then
@@ -512,7 +588,9 @@ LUA;
     /**
      * Atomic rearm: issued(expectedStage2Nonce) -> available, the
      * reservation fields + stage2Nonce cleared, KEEPTTL. A different
-     * nonce or any other state is an atomic no-op (false).
+     * nonce or any other state is an atomic no-op (false). A record
+     * without a key lifetime or with a passed signed expiry is stale
+     * (false), the same fail-closed guards as every other mutation.
      */
     private const REARM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain rearm: issued(expectedNonce) -> available (a fresh stage-2 mint).
@@ -520,8 +598,18 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return false
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
+  return false
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return false
 end
 if (rec['state'] ~= 'issued' and rec['state'] ~= 'completed') or rec['stage2Nonce'] ~= ARGV[1] then
@@ -539,8 +627,10 @@ LUA;
      * Owner-gated release: reserved(me) -> available, the reservation
      * holder's retry path: a refused or failed issuance must not burn
      * the ticket. A non-owner release is an atomic no-op: a failing
-     * request can never free another owner's live reservation. The chain
-     * TTL is preserved (KEEPTTL, Redis 6.0+).
+     * request can never free another owner's live reservation. A record
+     * without a key lifetime or with a passed signed expiry is stale and
+     * never released (false), the same fail-closed guards as every other
+     * mutation. The chain TTL is preserved (KEEPTTL, Redis 6.0+).
      */
     private const RELEASE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain release: reserved(owner) -> available, owner-gated.
@@ -548,8 +638,18 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return false
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
+  return false
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return false
 end
 if rec['state'] ~= 'reserved' then
@@ -570,7 +670,9 @@ LUA;
      * stage2Nonce), the historical name of the terminal-with-nonce
      * state, semantically identical to markIssued() -> issued. The
      * reservation fields are cleared (the completed record keeps its TTL
-     * so a retry recovers the issued challenge).
+     * so a retry recovers the issued challenge). A record without a key
+     * lifetime or with a passed signed expiry is stale (false, the
+     * fail-closed guards shared with every mutation).
      */
     private const COMPLETE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain completion (DEPRECATED legacy): reserved(owner) -> completed(stage2Nonce).
@@ -578,8 +680,18 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and every
+-- mutating transition fails closed like the reservation does.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return false
+end
 local rec = cjson.decode(existing)
 if not isValidChainRecord(rec) then
+  return false
+end
+-- The signed-expiry guard: an expired-but-live record is stale, never
+-- transitioned (the Array mirror sweeps it at the same boundary).
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return false
 end
 if rec['state'] ~= 'reserved' then
@@ -611,6 +723,44 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
   return 1
 end
 return 0
+LUA;
+
+    /**
+     * The live read, one round trip: the record must exist, carry a key
+     * lifetime, strictly decode and hold a not-yet-passed signed expiry.
+     * Missing or stale (a TTL-less key, an expired-but-live record) ->
+     * false (the caller answers null). Corrupt -> 'corrupt' (the caller
+     * throws the strict decode exception). Live -> the raw JSON, which
+     * the caller re-decodes through the strict PHP validator as the
+     * second gate. This is the fail-closed mirror of the Array store's
+     * liveRecord(): the read refuses an expired-but-live record and the
+     * assertLiveRecord() pre-guard of every transition never lets a
+     * stale record reach a mutation.
+     */
+    private const READ_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+-- Chain live read: existence + key lifetime + strict decode + signed expiry.
+local existing = redis.call('GET', KEYS[1])
+if not existing or existing == '' then
+  return false
+end
+-- The key-lifetime guard: a TTL-less chain is corrupted state and fails
+-- closed at the read like everywhere else.
+if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+  return false
+end
+local ok, rec = pcall(cjson.decode, existing)
+if not ok then
+  return 'corrupt'
+end
+if not isValidChainRecord(rec) then
+  return 'corrupt'
+end
+-- The signed-expiry guard: an expired-but-live record reads as absent,
+-- the mirror of the Array store's liveRecord() sweep.
+if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
+  return false
+end
+return existing
 LUA;
 
     /**
@@ -808,9 +958,24 @@ LUA;
         return $chainId;
     }
 
+    /**
+     * The live read of a chain record. Absent or stale records answer
+     * null: a key without a lifetime, or a record whose signed expiry
+     * lapsed while the key is still live. A corrupt record throws the
+     * strict v2 decode (fail closed: a corrupt server record can never
+     * be transitioned into valid state). The checks run atomically in
+     * one Lua script against the Redis clock, the mirror of the Array
+     * store's liveRecord().
+     */
     public function read(string $chainId): ?array
     {
-        $raw = $this->redis->get($this->key($chainId));
+        $raw = $this->evalScript(self::READ_LUA, [$this->key($chainId)], []);
+        if ($raw === false || $raw === null) {
+            return null;
+        }
+        if ($raw === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the read boundary');
+        }
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
@@ -844,6 +1009,15 @@ LUA;
     public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
     {
         $this->assertLiveRecord($chainId);
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape (the same pattern the strict decode enforces on
+        // stored records, and the same discipline as the obligation-id
+        // pattern check): a malformed nonce is refused deterministically
+        // instead of being pinned into the record and bricking it on
+        // every later read.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
+        }
         $result = $this->evalScript(self::MARK_ISSUED_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the issuance boundary');
@@ -1041,6 +1215,12 @@ LUA;
         if ($record === null || $record['state'] !== 'reserved') {
             return null;
         }
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape like markIssued(): a malformed nonce is refused
+        // deterministically instead of being pinned into the record.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
+        }
         $raw = $this->evalScript(self::COMPLETE_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
         if (!\is_string($raw) || $raw === '') {
             return null;
@@ -1191,9 +1371,11 @@ LUA;
 
     /**
      * Fail-closed guard before every state transition: the record must
-     * exist and strictly decode (a corrupt server record is a server
-     * anomaly — throw, never transition corrupted state into valid
-     * state).
+     * exist, carry a key lifetime and a not-yet-passed signed expiry,
+     * and strictly decode. A corrupt server record is a server anomaly
+     * and throws, so corrupted state is never transitioned into valid
+     * state; a stale record reads as absent and the transition scripts
+     * answer missing/false.
      *
      * @throws MalformedChainedChallengeStateException
      */

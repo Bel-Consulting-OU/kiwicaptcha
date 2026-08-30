@@ -15,15 +15,20 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
  * the profile defaults are prepended as the first array of the stack.
  * A later layer carrying only `protection_profile` can never inject
  * profile values that override explicit settings from an earlier layer;
- * an explicit value in any layer always wins. The previous design
- * expanded the profile inside the tree's per-array beforeNormalization,
- * which made a later profile-only layer override earlier explicit
- * settings (e.g. a base `rate_limit: 1` followed by a prod
- * `protection_profile: high_abuse` silently became rate_limit 5).
+ *  an explicit value in any layer always wins. The previous design
+ *  expanded the profile inside the tree's per-array beforeNormalization,
+ *  which made a later profile-only layer override earlier explicit
+ *  settings (e.g. a base `rate_limit: 1` followed by a prod
+ *  `protection_profile: high_abuse` silently became rate_limit 5).
  *
- * `balanced` is the current default configuration, so its defaults are
- * empty: processing a balanced profile is a pure pass-through (the
- * derived values equal the tree defaults byte-identically).
+ *  Presence semantics govern the selection: the last layer containing
+ *  the `protection_profile` key wins, so an explicit null in a later
+ *  layer clears the profile (no derived defaults are prepended) and the
+ *  visible field reports null in lockstep.
+ *
+ *  `balanced` is the current default configuration, so its defaults are
+ *  empty: processing a balanced profile is a pure pass-through (the
+ *  derived values equal the tree defaults byte-identically).
  */
 final class ProtectionProfileDefaults
 {
@@ -181,23 +186,28 @@ final class ProtectionProfileDefaults
 
     /**
      * The final selected profile across the raw configuration stack:
-     * the last layer whose `protection_profile` is set (later layers
-     * override earlier ones). An explicitly null value is a no-op
-     * (isset semantics), matching the historical behavior where a null
-     * profile left every knob untouched.
+     * the last layer containing the `protection_profile` key wins
+     * (presence semantics, array_key_exists), so an explicit null is a
+     * real selection. A later `protection_profile: null`, for example
+     * a prod overlay clearing a dev compatibility profile, resets the
+     * profile to none: the derived defaults of any earlier profile are
+     * dropped. The invariant holds: the final visible
+     * protection_profile field and the effective derived behavior
+     * always correspond.
      *
      * @param array<int, array<string, mixed>> $configs
      */
     public static function selectedProfile(array $configs): ?string
     {
-        $profile = null;
+        $selected = null;
         foreach ($configs as $layer) {
-            if (\is_array($layer) && isset($layer['protection_profile'])) {
-                $profile = (string) $layer['protection_profile'];
+            if (\is_array($layer) && \array_key_exists('protection_profile', $layer)) {
+                $profile = $layer['protection_profile'];
+                $selected = $profile === null ? null : (string) $profile;
             }
         }
 
-        return $profile;
+        return $selected;
     }
 
     /**

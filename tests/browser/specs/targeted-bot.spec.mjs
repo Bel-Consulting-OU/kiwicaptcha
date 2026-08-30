@@ -31,12 +31,12 @@ import { test, expect } from '@playwright/test';
 // name of the verified record reports the hit, additively, and any
 // other name is ignored.
 //
-// The decoy name is response-known; the DOM carries the internal
-// ownership marker (data-kiwi-owner), never a name-tracking attribute.
-// The assertions below use the response names plus the same DOM
-// signatures a targeted classifier would use, so the spec is portable
-// across Chromium, Firefox and WebKit with no engine-specific API and
-// no timing dependence: every wait is state-driven.
+// The decoy name is response-known; the DOM carries no ownership
+// marker and no name-tracking attribute. The assertions below use the
+// response names plus the same DOM signatures a targeted classifier
+// would use, so the spec is portable across Chromium, Firefox and
+// WebKit with no engine-specific API and no timing dependence: every
+// wait is state-driven.
 
 const PINNED_NAME = 'secondary_contact_number_a3f9c21d8e5b7401';
 
@@ -79,8 +79,8 @@ function learnChallenge(page) {
 
 // The rendered decoy facts read in one browser round trip, using the
 // same signatures a targeted DOM classifier would use: the
-// accessibility union, the visibility mechanism, the wrapper, the
-// placement relative to the token input and the ownership marker.
+// accessibility union, the visibility mechanism, the wrapper and the
+// placement relative to the token input.
 async function decoyFacts(page, name) {
   return page.evaluate(([n, wrapClasses]) => {
     const token = document.querySelector('[data-kiwi-token]');
@@ -99,10 +99,9 @@ async function decoyFacts(page, name) {
       hiddenAttr: input.hasAttribute('hidden'),
       display: cs.display,
       offscreen: cs.position === 'absolute' && cs.left === '-9999px',
-      wrapped: !!(host && wrap !== host && (wrapClasses.indexOf(wrap.className) !== -1 || wrap.getAttribute('data-kiwi-owner') === 'decoy')),
+      wrapped: !!(host && wrap !== host && wrapClasses.indexOf(wrap.className) !== -1),
       beforeToken: !!(host && els.indexOf(self) < els.indexOf(token)),
       inHost: !!(host && host.contains(input)),
-      owner: input.getAttribute('data-kiwi-owner'),
       sameNameCount: host ? host.querySelectorAll(`input[name="${n}"]`).length : 0,
       unionCount: document.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]').length,
       unionName: (document.querySelector('input[aria-hidden="true"][tabindex="-1"]') || {}).name ?? null,
@@ -129,7 +128,6 @@ async function assertInvariantSurface(page, name) {
   expect(facts.sameNameCount).toBe(1);
   expect(facts.tabIndex).toBe(-1);
   expect(facts.ariaHidden).toBe('true');
-  expect(facts.owner, 'every Kiwi-created decoy node carries the ownership marker').toBe('decoy');
   expect(facts.inHost, 'the decoy must live inside the token form host').toBe(true);
   expect(['off', 'new-password'], 'the decoy stays off the autofill candidate surface').toContain(facts.autocomplete);
   const invisible = facts.display === 'none' || facts.hiddenAttr || facts.offscreen;

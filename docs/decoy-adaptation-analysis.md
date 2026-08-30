@@ -26,10 +26,9 @@ Every rendering variant carries the same union of signatures. A
 classifier needs any one of them, not all of them.
 
 1. The node itself: an `input[type=text]` whose `name` is a grammar
-   prefix plus a fresh 16-lowercase-hex suffix, whose value starts
-   empty, and which is owned by the driver (the `data-kiwi-owner`
-   marker is on the input and, for the wrapped variants, on the wrapper
-   too).
+   prefix plus a fresh 16-lowercase-hex suffix and whose value starts
+   empty. There is no ownership attribute in the DOM: ownership lives
+   only in the driver's private per-widget state.
 2. `aria-hidden=true` on the input, every variant.
 3. `tabindex=-1` on the input, every variant.
 4. Exactly one invisibility mechanism, never two: `display:none`
@@ -55,9 +54,9 @@ classifier needs any one of them, not all of them.
 
 In order of power, all exact:
 
-- The ownership marker alone: `input[data-kiwi-owner="decoy"]` is a
-  one-selector identification with no ambiguity. The marker is
-  internal and never submitted, but it lives in the DOM.
+- The network: reading `decoy_field` from the challenge response
+  identifies the name before rendering, which makes every DOM-only
+  method redundant for a bot that can read the wire.
 - The accessibility union: `input[aria-hidden="true"][tabindex="-1"]`
   selects exactly the decoy on a protected page, because no real
   application field combines both attributes.
@@ -65,9 +64,11 @@ In order of power, all exact:
   token input. This needs no Kiwi-specific knowledge at all.
 - The name shape: the grammar-prefix plus 16-hex-suffix regex
   identifies the field without any attribute knowledge.
-- The network: reading `decoy_field` from the challenge response
-  identifies the name before rendering, which makes every DOM-only
-  method redundant for a bot that can read the wire.
+
+The former ownership marker is gone: the driver no longer writes
+`data-kiwi-owner` into the DOM, so there is no one-selector ownership
+attribute to key on. The remaining classifiers are the response's
+`decoy_field` and the accessibility union.
 
 The honest summary: a classifier that is allowed to read the response
 or the DOM union identifies the decoy with certainty. That is
@@ -75,7 +76,9 @@ structural, not a defect. The decoy must be a real serialized form
 field with the authenticated name, so it cannot be hidden from a reader
 that the form itself trusts. What the polymorphism can do is bound the
 value of cheaper heuristics and force the targeted classifier to use
-the union or the wire.
+the union or the wire. This is acceptable because the decoy is
+additive evidence only: a correct classifier changes nothing about the
+security boundary, which is the signed record and the proof.
 
 ## What the polymorphism hides, quantified
 
@@ -166,15 +169,18 @@ vocabulary is already a bounded set of four. The union signatures are
 unchanged, so a targeted classifier is unaffected. Verdict: marginal
 and cheap to add later inside a driver change, not adopted now.
 
-### The ownership marker itself
+### The ownership marker (removed)
 
-The marker is the strongest single-line selector, stronger than the
-accessibility union. Its removal from the DOM would cost a driver
-change and a spec update (the polymorphism specs pin the marker), and
-cleanup would then rely on the private owned set alone, which is
-already the authoritative half of the removal contract. It is a
-reasonable future driver change, out of scope here: the fixture and
-the drivers are untouched by this round.
+The marker was the strongest single-line selector, stronger than the
+accessibility union. It has been removed from the DOM: the drivers no
+longer write it on the input or on the wrapper span, so no
+one-selector ownership attribute exists for a classifier to key on.
+Cleanup now relies on the private owned set alone, which was already
+the authoritative half of the removal contract: a node is removed only
+when it is in the driver's private per-widget node set, never by name
+match. The cost was the driver change and the spec updates (the
+polymorphism and targeted-bot specs now classify through the response
+name and the accessibility union).
 
 ## The boundary and what this round adds
 
@@ -186,5 +192,9 @@ outcome. This round adds the targeted-bot spec that pins that claim
 (the bot learns the name and the strategy, watches the strategy vary
 across fresh challenges, submits a correct solve with the decoy ignored
 or filled, and receives deterministic answers on the documented evasion
-surfaces), plus the analysis here. No driver file, no fixture file and
-no existing file is modified.
+surfaces), plus the analysis here. The ownership-marker removal is
+included in the same change: the drivers no longer emit
+`data-kiwi-owner`, the cleanup contract rests on the private owned set
+alone, and the targeted-bot and polymorphism specs classify through
+the response name and the accessibility union. The fixture is
+untouched.

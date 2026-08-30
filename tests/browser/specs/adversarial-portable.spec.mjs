@@ -306,13 +306,13 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     await page.evaluate((id) => {
       window.KiwiCaptcha.reset(id);
       // The reset removes the owned decoy synchronously (the private
-      // owned set + the data-kiwi-owner marker, before the fresh
-      // initWidget starts its async re-acquisition). The fixture pins
+      // owned set, before the fresh initWidget starts its async
+      // re-acquisition). The fixture pins
       // the decoy name, so the re-issued challenge re-renders a
       // same-named input asynchronously; asserting inside this same
       // evaluate observes the guaranteed-absent moment, never the
       // re-render race.
-      const decoys = Array.from(document.querySelectorAll('input[data-kiwi-owner="decoy"]'));
+      const decoys = Array.from(document.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]'));
       if (decoys.length !== 0) {
         throw new Error('the reset must remove the rendered decoy synchronously: found ' + decoys.length);
       }
@@ -328,7 +328,7 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     const name2 = await name2P;
     expect(name2).toMatch(DECOY_NAME_SHAPE);
     await expect(page.locator(`input[name="${name2}"]`), 'exactly one fresh decoy input after the re-solve').toHaveCount(1);
-    const remaining = await page.evaluate(() => document.querySelectorAll('input[data-kiwi-owner="decoy"]').length);
+    const remaining = await page.evaluate(() => document.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]').length);
     expect(remaining, 'the form never accumulates decoy inputs').toBe(1);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     const result = await verifyToken(page, origin, token);
@@ -362,7 +362,7 @@ test.describe('KiwiCaptcha portable adversarial lifecycle', () => {
     expect(await name2P).toBe('alternate_contact_phone');
     await expect(page.locator('input[name="company_website_url"]'), 'the stale input must leave the form').toHaveCount(0);
     await expect(page.locator('input[name="alternate_contact_phone"]')).toHaveCount(1);
-    const remaining = await page.evaluate(() => document.querySelectorAll('input[data-kiwi-owner="decoy"]').length);
+    const remaining = await page.evaluate(() => document.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]').length);
     expect(remaining, 'the form must never accumulate stale honeypot fields').toBe(1);
   });
 
@@ -446,8 +446,8 @@ ${WIDGET_MARKUP}
     expect(resultB.body.ok).toBe(true);
 
     const state = await page.evaluate((shape) => {
-      const nameA = document.querySelector('#ca input[data-kiwi-owner="decoy"]')?.name ?? null;
-      const nameB = document.querySelector('#cb input[data-kiwi-owner="decoy"]')?.name ?? null;
+      const nameA = document.querySelector('#ca input[aria-hidden="true"][tabindex="-1"]')?.name ?? null;
+      const nameB = document.querySelector('#cb input[aria-hidden="true"][tabindex="-1"]')?.name ?? null;
       const inputA = document.querySelector(`#ca input[name="${nameA}"]`);
       const inputB = document.querySelector(`#cb input[name="${nameB}"]`);
       const tokenHostA = document.querySelector('#ca [data-kiwi-token]').parentNode;
@@ -758,9 +758,11 @@ ${WIDGET_MARKUP}
     // The Kiwi decoy renders its OWN node next to the same-named app
     // field: exactly one owned node, and the app field keeps its value.
     const state = await page.evaluate((n) => {
-      const owned = document.querySelectorAll('input[data-kiwi-owner="decoy"]');
+      // The accessibility union selects exactly the Kiwi decoy: the app
+      // field is a visible labelled control, never aria-hidden.
+      const owned = document.querySelectorAll('#f input[aria-hidden="true"][tabindex="-1"]');
       const app = document.querySelector(`#app-field`);
-      const decoyInput = document.querySelector(`input[data-kiwi-owner="decoy"]`);
+      const decoyInput = document.querySelector(`#f input[aria-hidden="true"][tabindex="-1"]`);
       return {
         ownedCount: owned.length,
         totalSameName: document.querySelectorAll(`input[name="${n}"]`).length,
@@ -779,14 +781,14 @@ ${WIDGET_MARKUP}
     const wid = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
     const afterReset = await page.evaluate(({ id, n }) => {
       // The reset removes the owned decoy synchronously (the private
-      // owned set + the data-kiwi-owner marker, before the fresh
-      // initWidget starts its async re-acquisition). The fixture pins
+      // owned set, before the fresh initWidget starts its async
+      // re-acquisition). The fixture pins
       // the decoy name, so the re-issued challenge re-renders a
       // same-named input asynchronously; asserting inside this same
       // evaluate observes the guaranteed-absent moment, never the
       // re-render race.
       window.KiwiCaptcha.reset(id);
-      const owned = document.querySelectorAll('input[data-kiwi-owner="decoy"]');
+      const owned = document.querySelectorAll('#f input[aria-hidden="true"][tabindex="-1"]');
       const app = document.querySelector('#app-field');
       return {
         ownedCount: owned.length,

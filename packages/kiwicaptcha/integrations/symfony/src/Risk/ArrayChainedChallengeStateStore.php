@@ -274,6 +274,14 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record === null) {
             return 'missing';
         }
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape (the same pattern the strict decode enforces on
+        // stored records): a malformed nonce is refused deterministically
+        // instead of being pinned into the record and bricking it, the
+        // lockstep mirror of the Redis store.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
+        }
         if ($record['state'] === 'reserved') {
             if ($record['owner'] !== $ownerToken) {
                 return 'not_owner';
@@ -509,6 +517,12 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         }
         if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
             return null;
+        }
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape like markIssued(): a malformed nonce is refused
+        // deterministically instead of being pinned into the record.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
         $this->records[$chainId]['state'] = 'completed';
         $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;

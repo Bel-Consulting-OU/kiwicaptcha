@@ -1645,10 +1645,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * (public_base_url), never the request's own scheme+host, otherwise a
      * forged Host header defines the security boundary. Fail closed at
      * boot: prod + same-origin enforcement + missing/invalid
-     * public_base_url is a configuration error.
+     * public_base_url is a configuration error. A Symfony %env(...)%
+     * placeholder is accepted here: the container resolves it at
+     * compile/runtime, so the literal-shape checks are skipped and the
+     * resolved value is consumed (and reported) by the controller and
+     * the doctor command.
      */
     private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, bool $sameOriginOnly, string $environment): void
     {
+        if (self::isEnvPlaceholder($publicBaseUrl)) {
+            return;
+        }
         if (!\is_string($publicBaseUrl) || $publicBaseUrl === '') {
             throw new \LogicException(sprintf(
                 'KiwiCaptcha: production (environment "%s") with same-origin enforcement (or Siteverify configured) REQUIRES public_base_url — the expected origin must come from server config, never the request Host header. Set e.g. public_base_url: "https://captcha.example.com".',
@@ -1806,12 +1813,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * challenge storage, the distributed rate limiter, the Argon
      * admission and the risk state store).
      *
-     * Fail-closed shape validation: the DSN must be a redis:// or
-     * rediss:// URL with a host, refused at container build time with an
-     * actionable message instead of failing the first request. A
-     * reachable-but-absent server is a runtime error on the first
-     * command (Predis connects lazily), exactly like every other wired
-     * client.
+     * Two validation lanes, both fail-closed. A literal DSN is
+     * shape-validated at container build time: it must be a redis://
+     * or rediss:// URL with a host, refused with an actionable message
+     * instead of failing the first request. A Symfony %env(...)%
+     * placeholder skips the load-time shape check, because the value
+     * is resolved by the container's parameter bag at compile/runtime.
+     * The client is then constructed through the runtime guard
+     * {@see self::createDsnClient()}, which runs the same shape
+     * validation on the resolved DSN before Predis sees it. Predis
+     * alone is not clear enough: a scheme-less string silently
+     * defaults to tcp://127.0.0.1, so the guard turns a malformed
+     * env-resolved DSN into the typed LogicException naming the
+     * option instead of a confusing connection to the wrong host. A
+     * reachable-but-absent server stays a runtime error on the
+     * first command (Predis connects lazily), exactly like every
+     * other wired client.
      */
     private function buildDsnRedisClient(string $dsn, ContainerBuilder $container): Reference
     {
@@ -1820,15 +1837,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'kiwi_captcha.redis_dsn requires predis/predis (composer require predis/predis): the DSN-backed Redis client is built as a Predis\Client so the same connection drives the challenge storage, the distributed rate limiter, the Argon admission semaphore and the risk state store (the risk engine is typed Predis\Client).'
             );
         }
-        $parts = parse_url($dsn);
-        $scheme = $parts['scheme'] ?? null;
-        $host = $parts['host'] ?? null;
-        if (!\is_string($scheme) || !\in_array($scheme, ['redis', 'rediss'], true)
-            || !\is_string($host) || $host === ''
-        ) {
+        if (self::isEnvPlaceholder($dsn)) {
+            if (!$container->hasDefinition(self::DSN_REDIS_CLIENT_ID)) {
+                $container->setDefinition(self::DSN_REDIS_CLIENT_ID, (new Definition(\Predis\Client::class))
+                    ->setFactory([self::class, 'createDsnClient'])
+                    ->setArguments([$dsn])
+                    ->setPublic(true));
+            }
+
+            return new Reference(self::DSN_REDIS_CLIENT_ID);
+        }
+        $violation = self::dsnShapeViolation($dsn);
+        if ($violation !== null) {
             throw new \LogicException(sprintf(
-                'kiwi_captcha.redis_dsn must be a redis:// or rediss:// URL with a host (got "%s") — the DSN is handed to Predis\Client verbatim, so a malformed DSN fails closed at container build time instead of failing the first request.',
-                $dsn,
+                'kiwi_captcha.redis_dsn %s — the DSN is handed to Predis\Client verbatim, so a malformed DSN fails closed at container build time instead of failing the first request.',
+                $violation,
             ));
         }
         if (!$container->hasDefinition(self::DSN_REDIS_CLIENT_ID)) {
@@ -1836,6 +1859,76 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return new Reference(self::DSN_REDIS_CLIENT_ID);
+    }
+
+    /**
+     * Runtime construction guard for the env-managed DSN client. The
+     * container resolves the %env(...)% placeholder to the real DSN
+     * before invoking this factory, so the fail-closed shape validation
+     * runs on the resolved value (unseen by the load-time lane). The
+     * typed LogicException names the option and the accepted shape; the
+     * literal lane enforces the identical contract at build time.
+     */
+    public static function createDsnClient(string $dsn): \Predis\Client
+    {
+        $violation = self::dsnShapeViolation($dsn);
+        if ($violation !== null) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.redis_dsn %s — the value was resolved from the environment at runtime, so the malformed DSN fails closed when the client is constructed instead of connecting to the wrong host.',
+                $violation,
+            ));
+        }
+
+        return new \Predis\Client($dsn);
+    }
+
+    /**
+     * The fail-closed DSN shape contract shared by the build-time and
+     * runtime lanes: a redis:// or rediss:// URL with a host. Returns a
+     * description of the violation, or null when the DSN shape is
+     * acceptable.
+     */
+    private static function dsnShapeViolation(mixed $dsn): ?string
+    {
+        if (!\is_string($dsn)) {
+            return 'must be a redis:// or rediss:// URL with a host';
+        }
+        $parts = parse_url($dsn);
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        if (!\is_string($scheme) || !\in_array($scheme, ['redis', 'rediss'], true)
+            || !\is_string($host) || $host === ''
+        ) {
+            return sprintf('must be a redis:// or rediss:// URL with a host (got "%s")', $dsn);
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the value is an env-managed form of a Symfony %env(...)%
+     * placeholder. Two shapes reach the extension:
+     *  - the raw placeholder '%env(KIWI_REDIS_DSN)%' (plain
+     *    ContainerBuilder usage, e.g. unit tests);
+     *  - Symfony's env marker (env_<16 hex>_<name>_<32 hex>), the form
+     *    MergeExtensionConfigurationPass resolves the placeholder into
+     *    before the extension load() runs in a kernel container; the
+     *    dumped container resolves the same marker back to the env
+     *    value at runtime.
+     * Both are opaque at extension time, so the load-time shape
+     * validations skip them; the resolved value is validated where it
+     * is consumed.
+     */
+    private static function isEnvPlaceholder(mixed $value): bool
+    {
+        if (!\is_string($value)) {
+            return false;
+        }
+        if (preg_match('/^%env\([^%]+\)%$/D', $value) === 1) {
+            return true;
+        }
+
+        return preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $value) === 1;
     }
 
     /**

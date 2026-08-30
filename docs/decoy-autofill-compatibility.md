@@ -26,13 +26,15 @@ the 64 random bits is a 2^-64 event per issuance, cryptographically
 negligible. The prefix alone is never the name, so a common form field
 name such as `email` or `password` cannot collide with a decoy.
 
-The widget never removes same-named application fields. Cleanup is
-ownership-marked: the driver tracks the input it created per widget and
-removes exactly that input (and, for the wrapped variants, the
-driver-owned auxiliary element it created), never a field the
-application rendered under the same name. A same-named application
-field is left untouched by every lifecycle path: reissue, reset and
-teardown.
+The widget never removes same-named application fields. Ownership is
+tracked by private node references: the driver keeps the nodes it
+created per widget in its private decoy state and removes exactly
+those nodes (the input and, for the wrapped variants, the driver-owned
+auxiliary element it created), never a field the application rendered
+under the same name. The DOM carries no ownership marker: there is no
+attribute a classifier or a cleanup path could key on. A same-named
+application field is left untouched by every lifecycle path: reissue,
+reset and teardown.
 
 The name is authenticated: it is signed into the challenge record
 (protocol v3), and verification checks the submitted name against the
@@ -231,6 +233,70 @@ server response for `honeypot_hit`. The AppleScript alternative needs
 the automation permission for the controlling app granted in System
 Settings (Privacy and Security, Automation) plus the "Allow JavaScript
 from Apple Events" toggle.
+
+### 2026-08-30, real Google Chrome qualification run
+
+Same environment: macOS 26.5.2 (arm64), PHP 8.5.4, Redis 7 on
+127.0.0.1:6399, Playwright 1.62.1. Browser under test: the installed
+Google Chrome binary at /Applications/Google Chrome.app, driven through
+the Playwright `chrome` channel by the config override
+`tests/browser/playwright.real-chrome.config.mjs`. This is a REAL
+browser row: the binary is the machine's installed browser, not the
+Playwright-bundled engine (the bundled engine is Chromium
+151.0.7922.34). The installed binary identifies itself as Chrome for
+Testing 147.0.7727.15 (the only Chrome build on this machine), and
+`channel: 'chrome'` resolved to it directly, so no `connectOverCDP`
+fallback was needed.
+
+The recorded identity, read from a page launched through the channel:
+
+- `browser.version()`: 147.0.7727.15
+- `navigator.userAgent`: `Mozilla/5.0 (Macintosh; Intel Mac OS X
+  10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)
+  HeadlessChrome/147.0.0.0 Safari/537.36`
+- Date: 2026-08-30.
+
+Real-browser automation evidence (headless, local run through the
+channel; the decoy suites of the a11y spec set):
+
+| Suite | Real Google Chrome 147 |
+|---|---|
+| autofill-evidence (engine form-assistance simulations) | PASS |
+| decoy-polymorphism (six strategies, axe-clean, lifecycle) | PASS |
+| targeted-bot (learned-name adaptation, additive evidence) | PASS |
+
+The three suites ran 21 tests against the installed binary with
+retries disabled and every test passed, so the invariant surface (the
+decoy stays empty, real-field fills never trip the evidence, evidence
+stays additive) holds on the installed Chrome build. Real Safari
+remains blocked by the documented safaridriver gate (see the blocked
+attempt above).
+
+### Real Firefox: PENDING MANUAL QUALIFICATION
+
+Firefox is not installed on this machine, so no real-browser Firefox
+row exists yet. Install and run steps:
+
+1. Install Firefox for macOS (release channel): download from
+   https://www.mozilla.org/firefox/ or `brew install --cask firefox`,
+   then launch it once so the profile initializes.
+2. Start the fixture server: `php -d opcache.jit=off -S
+   127.0.0.1:8088 router.php` in `tests/browser`.
+3. Register an address profile in Firefox (Settings, Privacy and
+   Security, Autofill) and save a login for the fixture origin in the
+   Firefox password manager.
+4. Drive the real browser through the Playwright `firefox` channel: a
+   config override that mirrors
+   `tests/browser/playwright.real-chrome.config.mjs` with
+   `channel: 'firefox'`, `browserName: 'firefox'` and a distinct port
+   (for example 8089), then run the same three suites:
+   `npx playwright test --config=playwright.real-firefox.config.mjs
+   --retries=0`.
+5. Record the row here with the `navigator.userAgent` version and the
+   date. The expected behavior is the invariant surface: the decoy
+   stays empty, real-field fills produce no honeypot evidence, and an
+   exact-name fill reports the hit additively with the proof verdict
+   intact.
 
 ### External password managers: PENDING MANUAL QUALIFICATION
 

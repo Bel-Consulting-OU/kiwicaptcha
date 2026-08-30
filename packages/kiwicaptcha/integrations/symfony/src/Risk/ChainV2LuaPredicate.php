@@ -35,11 +35,17 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * only that representation.
  *
  * The predicate is prepended to each transition script (the const
- * concatenation with the script body's heredoc).
+ * concatenation with the script body's heredoc). It also carries the
+ * two lifetime guards every transition shares: the key-lifetime guard
+ * (a chain key whose TTL was stripped is corrupted state; a lifetime
+ * can never be manufactured from the configured TTL) and the
+ * signed-expiry guard. A past-expiry record whose key is still live is
+ * stale and fails closed, the mirror of the Array store's liveRecord()
+ * sweep.
  */
 final class ChainV2LuaPredicate
 {
-    /** @var string the Lua function `isValidChainRecord(rec) -> boolean` */
+    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)` and `chainRecordExpired(rec, now)` */
     public const LUA = <<<'LUA'
 local function isKiwiInteger(x)
   return type(x) == 'number' and x == math.floor(x)
@@ -140,6 +146,20 @@ local function isValidChainRecord(rec)
     return false
   end
   return true
+end
+-- The key-lifetime guard shared by every mutating transition: a chain
+-- key WITHOUT a TTL is corrupted state (the signed-ticket lifetime was
+-- stripped); a transition must never manufacture a lifetime from the
+-- configured TTL, it fails closed like the reservation does.
+local function chainKeyLifetimeMissing(ttl)
+  return ttl <= 0
+end
+-- The signed-expiry guard: an expired-but-live record (the key still
+-- exists while the record's own expiresAt lapsed) is stale, the same
+-- fail-closed semantics as the Array mirror's liveRecord() sweep. Call
+-- after isValidChainRecord, so expiresAt is a known integer.
+local function chainRecordExpired(rec, now)
+  return rec['expiresAt'] <= now
 end
 LUA;
 }

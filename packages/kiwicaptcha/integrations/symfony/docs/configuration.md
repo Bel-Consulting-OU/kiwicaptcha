@@ -16,16 +16,21 @@ environment, and the DSN builds every Redis-backed service:
 kiwi_captcha:
     protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
     secret_key: '%env(KIWI_SECRET_KEY)%'
-    public_base_url: 'https://captcha.example.com'
-    redis_dsn: 'redis://127.0.0.1:6379/0'
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
 ```
 
-- `.env`: `KIWI_SECRET_KEY`, generated with `openssl rand -hex 32`.
-- `public_base_url` and `redis_dsn` are literals in the config file. This
-  bundle version validates both shapes at container build time, before
-  `%env()` placeholders resolve, so a placeholder there fails the boot.
-  The secret stays env-managed because the bundle validates it at
-  runtime, not at build time.
+- `.env`: `KIWI_SECRET_KEY` (generated), `KIWI_REDIS_DSN` and
+  `KIWI_PUBLIC_URL` (localhost defaults), all written by the Flex
+  recipe; see [flex-recipe.md](flex-recipe.md).
+- `redis_dsn` and `public_base_url` are env-managed (twelve-factor):
+  credentials, private hosts, TLS endpoints and database selection
+  belong in your environment or secrets manager, never in
+  source-controlled config files. The container resolves the
+  placeholders; the bundle validates the resolved DSN (redis:// or
+  rediss:// with a host, fail-closed) when the client is constructed.
+  A literal override in
+  this file is still possible and keeps the same validation.
 - Install the client library: `composer require predis/predis`.
 - The Flex recipe ships this exact file; see
   [flex-recipe.md](flex-recipe.md).
@@ -80,10 +85,26 @@ kiwi_captcha:
     protection_profile: compatibility   # the LAST profile wins
 ```
 
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: compatibility   # dev compatibility posture
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: null            # explicit null CLEARS the profile
+```
+
 The layering semantics:
 
-- The **final profile** is the last config layer whose
-  `protection_profile` is set; later layers override earlier ones.
+- The **final profile** is the last config layer containing the
+  `protection_profile` key; later layers override earlier ones. An
+  explicit `null` is a real selection: it clears the profile, its
+  derived defaults are dropped, and the visible `protection_profile`
+  field reports null in lockstep — the effective behavior always
+  corresponds to the visible field. A prod overlay can therefore
+  neutralize a dev compatibility profile with `protection_profile:
+  null`.
 - The profile fills its derived defaults only where no layer set the
   knob explicitly. The profile defaults are the first array of the
   merge, so a later layer that carries only `protection_profile` can
@@ -154,7 +175,8 @@ Profile rationale:
 The profiles never override an explicitly configured knob: the profile
 defaults are merged as the lowest-precedence layer, so they apply only
 where the key is absent from your configuration. `protection_profile:
-null` and any value outside the four names are refused.
+null` (the default) selects no profile, and any value outside the four
+names is refused.
 
 ## Advanced configuration
 
@@ -197,6 +219,13 @@ kiwi_captcha:
 one DSN and the bundle builds every Redis-backed service from it:
 
 ```yaml
+# Twelve-factor form (recommended): the DSN lives in the environment.
+kiwi_captcha:
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+```
+
+```yaml
+# Literal form: the shape is validated at container build time.
 kiwi_captcha:
     redis_dsn: 'redis://user:pass@redis.example.com:6379/0?prefix=kiwi'
 ```
@@ -210,10 +239,21 @@ What the DSN builds:
   from the DSN, so install `predis/predis` first
   (`composer require predis/predis`).
 - The DSN shape is `redis://host:port/db?password=...&prefix=...` (or
-  `rediss://` for TLS). The DSN is handed to `Predis\Client` verbatim;
-  a malformed DSN (wrong scheme, no host) fails closed at container
-  build time, and an unreachable server is a runtime error on the first
-  command, like any wired client.
+  `rediss://` for TLS). The DSN is handed to `Predis\Client` verbatim,
+  and the same fail-closed shape validation runs on both lanes. A
+  literal DSN is validated at container build time. An env-resolved
+  DSN is validated by the runtime guard when the client is constructed,
+  since the value flows through the container's parameter bag and the
+  load-time validation cannot see it. A malformed value
+  is refused with a clear error naming the option, and an unreachable
+  server is a runtime error on the first command, like any wired
+  client.
+- Env-managed DSNs follow twelve-factor practice: credentials, private
+  hosts, TLS endpoints and database selection belong in the
+  environment or a secrets manager, never in source-controlled config
+  files. The manifest-declared `.env` default is
+  `redis://127.0.0.1:6379/0`, and the bundle contract stays `redis://`
+  or `rediss://`.
 - An explicit service id wins over the DSN wherever both are set:
   `storage` (your own `StorageInterface` service), `redis_service`
   (your own client for the limiter/semaphore) and

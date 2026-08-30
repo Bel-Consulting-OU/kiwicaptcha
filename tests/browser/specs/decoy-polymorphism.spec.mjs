@@ -89,7 +89,6 @@ async function decoyFacts(page, name) {
       position: cs.position,
       left: cs.left,
       hiddenAttr: input.hasAttribute('hidden'),
-      owner: input.getAttribute('data-kiwi-owner'),
       wrapped: !!(host && wrap !== host && wrapClasses.indexOf(wrap.className) !== -1),
       inHost: !!(host && host.contains(input)),
       // beforeToken: true when the decoy (or its wrapper) precedes the
@@ -125,7 +124,6 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
       expect(facts.tabIndex).toBe(-1);
       expect(facts.ariaHidden).toBe('true');
       expect(facts.value).toBe('');
-      expect(facts.owner, 'every Kiwi-created decoy node carries the ownership marker').toBe('decoy');
       expect(facts.inHost, 'the decoy must live inside the token form host').toBe(true);
 
       // Invisible to humans under every strategy.
@@ -266,19 +264,20 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
     await solve(page);
     await expect(page.locator(`input[name="${name}"]`), 'the deferred decoy appears after the solve').toHaveCount(1);
     await expect(page.locator(`input[name="${name}"]`)).toHaveAttribute('tabindex', '-1');
-    await expect(page.locator(`input[name="${name}"]`)).toHaveAttribute('data-kiwi-owner', 'decoy');
+    await expect(page.locator(`input[name="${name}"]`)).toHaveAttribute('aria-hidden', 'true');
   });
 
   test('unarmed issuance renders no decoy input and carries no name', async ({ page }) => {
     await page.goto('/');
     await solve(page);
     const state = await page.evaluate(() => {
-      // Decoy inputs are Kiwi-owned nodes carrying the ownership marker;
-      // the kiwi_* inputs (token, request binding) are driver-owned
-      // fields, never decoys.
+      // A decoy is the input the accessibility union selects inside the
+      // token host: aria-hidden with tabindex -1. The kiwi_* inputs
+      // (token, request binding) are driver-owned fields, never decoys.
+      const host = document.querySelector('[data-kiwi-token]').parentNode;
       return {
-        owned: Array.from(document.querySelectorAll('input[data-kiwi-owner="decoy"]')).length,
-        decoys: Array.from(document.querySelectorAll('input')).filter((el) => el.getAttribute('data-kiwi-owner') === 'decoy').length,
+        owned: host.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]').length,
+        decoys: Array.from(document.querySelectorAll('input')).filter((el) => el.getAttribute('aria-hidden') === 'true' && el.getAttribute('tabindex') === '-1').length,
       };
     });
     expect(state.owned).toBe(0);
@@ -324,7 +323,7 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
     await expect(page.locator(`input[name="${oldName}"]`), 'the stale decoy must never linger').toHaveCount(0);
     const totalDecoys = await page.evaluate(() => {
       const host = document.querySelector('[data-kiwi-token]').parentNode;
-      return Array.from(host.querySelectorAll('input')).filter((el) => el.getAttribute('data-kiwi-owner') === 'decoy').length;
+      return host.querySelectorAll('input[aria-hidden="true"][tabindex="-1"]').length;
     });
     expect(totalDecoys, 'exactly one decoy input after the reissue').toBe(1);
   });

@@ -8,20 +8,47 @@ declare(strict_types=1);
  * The bundle-level issuance path with the adaptive risk engine wired:
  * each request runs the real ChallengeController, resolves the scope,
  * runs the risk pre-issue assessment (identity keying, signal vector,
- * score, decision), issues the challenge and builds the JSON response. The workload is 400 controller invocations at
- * 40 warmup iterations against an in-memory risk state store. The
- * storage is ArrayStorage and the risk engine sees a zero signal
- * vector, so the measurement is the pure bundle-path cost of a
- * risk-enabled issuance (the engine, the gateway, the controller
- * mapping), not Redis or solver time.
+ * score, decision), issues the challenge and builds the JSON response.
+ * The default workload is 400 controller invocations at 40 warmup
+ * iterations against an in-memory risk state store. The storage is
+ * ArrayStorage and the risk engine sees a zero signal vector, so the
+ * measurement is the pure bundle-path cost of a risk-enabled issuance
+ * (the engine, the gateway, the controller mapping), not Redis or
+ * solver time.
  *
- * The state store is an in-memory implementation inside this harness
- * (the RiskStateStoreInterface contract: observe returns a zero
+ * The default state store is an in-memory implementation inside this
+ * harness (the RiskStateStoreInterface contract: observe returns a zero
  * vector, outcome registration is a no-op). The benchmark must not
- * depend on the bundle's test fixtures, and a real Redis would turn
- * this into a network benchmark. The policy is permissive
+ * depend on the bundle's test fixtures, and the policy is permissive
  * (base_risk 100, minimum allow), so every request ends in a 200
  * challenge response; a denied or escalated response fails the run.
+ *
+ * Real-Redis mode (--redis): the same risk-enabled controller path, but
+ * with the risk state store and the challenge storage both backed by a
+ * real Redis through the DSN-built Predis client, exactly the bundle's
+ * redis_dsn wiring. The mode is concurrent: 8 worker processes (--workers
+ * N and --per-worker M overrides) are forked with proc_open. Each
+ * worker opens its own Predis connection, builds its own controller and
+ * issues requests through it, so the load is genuinely concurrent at
+ * the Redis wire level. Every worker samples each request with hrtime
+ * and writes the samples to a per-worker file. The parent aggregates
+ * every sample into one distribution and reports p50, p95 and the
+ * aggregate throughput in requests per second over the window in which
+ * every worker is live. The Redis URL comes from --url, or
+ * KC_REDIS_URL, or the local default redis://127.0.0.1:6399. Without a
+ * reachable server the mode prints a loud note and exits 0, because the
+ * timing signal is non-gating by design, exactly like perf-load.php.
+ * The risk keys carry a per-run namespace and the challenge keys a
+ * per-run prefix, so repeated runs share no state. Two harness knobs
+ * keep the engine's own protections from polluting the latency
+ * distribution. The requests rotate through 250 source addresses; a
+ * real request stream sees many clients, and the hard sourceFast deny
+ * threshold would otherwise trip on a single hot source. The risk
+ * store's saturation constants are scaled by 100 so the burst of 800
+ * observations stays inside the normal band. Both change only the
+ * counters the Lua normalizes, never the script's work or the
+ * per-request pipeline; the policy still floors every decision to
+ * allow.
  *
  * The percentiles gate on the same generous relative ratchet as the
  * other benchmarks: the run fails only when p95 exceeds 3x its
@@ -29,9 +56,13 @@ declare(strict_types=1);
  * count budgets in perf-budget.sh remain the gating gate and this
  * timing signal is loud but never a hard merge gate by itself.
  *
- * Baseline recorded 2026-08-30 on PHP 8.5 (local Mac): risk-enabled
- * controller issuance p50 0.047 ms p95 0.065 ms. Run with
- * --update-baseline to print fresh values after a deliberate change.
+ * Baselines recorded 2026-08-30 on PHP 8.5 (local Mac):
+ *  - in-memory risk-enabled controller issuance p50 0.047 ms p95 0.065 ms.
+ *  - real-Redis concurrent risk-enabled issuance (8 workers x 100,
+ *    redis://127.0.0.1:6399): p50 1.185 ms p95 1.855 ms; throughput
+ *    3700 req/s, the conservative of two consecutive runs.
+ * Run with --update-baseline to print fresh values after a deliberate
+ * change.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -56,8 +87,10 @@ use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
+use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Storage\RedisStorage;
 use Symfony\Component\HttpFoundation\Request;
 
 const WARMUP = 40;
@@ -65,6 +98,11 @@ const ITERATIONS = 400;
 const RATCHET = 3.0;
 const BASELINE_P50 = 0.047;
 const BASELINE_P95 = 0.065;
+const REDIS_WARMUP = 10;
+const REDIS_WORKERS = 8;
+const REDIS_PER_WORKER = 100;
+const BASELINE_REDIS_P50 = 1.185;
+const BASELINE_REDIS_P95 = 1.855;
 
 /** In-memory risk state store: zero signal vectors, outcome no-ops. */
 final class BenchRiskStateStore implements RiskStateStoreInterface
@@ -96,6 +134,274 @@ function percentile(array $samples, float $q): float
     $index = (int) ceil($q / 100.0 * count($samples)) - 1;
 
     return $samples[max(0, $index)];
+}
+
+function redisUrlFromArgs(array $argv): string
+{
+    foreach ($argv as $i => $arg) {
+        if ($arg === '--url' && isset($argv[$i + 1])) {
+            return $argv[$i + 1];
+        }
+    }
+    $url = getenv('KC_REDIS_URL');
+    if (is_string($url) && $url !== '') {
+        return $url;
+    }
+
+    return 'redis://127.0.0.1:6399';
+}
+
+/** @return \Predis\Client|null null when no Redis answers */
+function redisClientOrNull(string $url): ?\Predis\Client
+{
+    if (!class_exists(\Predis\Client::class)) {
+        return null;
+    }
+    try {
+        $client = new \Predis\Client($url, ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+        $client->ping();
+
+        return $client;
+    } catch (\Throwable) {
+        return null;
+    }
+}
+
+/**
+ * Build the real-Redis risk-enabled controller path: one DSN-built
+ * Predis client drives the challenge storage (RedisStorage) and the
+ * risk state store (RedisRiskStateStore), mirroring the bundle's
+ * redis_dsn wiring, with the same engine, gateway and controller
+ * assembly as the in-memory harness. The store's saturation constants
+ * are scaled by 100 so the burst workload stays inside the normal band
+ * (see the header).
+ *
+ * @return list{ChallengeController}
+ */
+function buildRedisRiskController(string $url, string $prefix, string $namespace): array
+{
+    $client = new \Predis\Client($url, ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+    $client->ping();
+    $storage = new RedisStorage($client, $prefix);
+    $issuer = new Issuer(new Config(
+        secretKey: '0123456789abcdef0123456789abcdef',
+        algorithm: PoWAlgorithm::Sha256,
+        targetBits: 8,
+        ttlSecs: 120,
+    ), $storage);
+    $keys = RiskKeys::fromMaster('0123456789abcdef0123456789abcdef');
+    $classifier = new CidrNetworkClassifier([]);
+    $policy = RiskPolicy::fromConfig([
+        'version' => RiskPolicy::CONTRACT_VERSION,
+        'weights' => [],
+        'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+    ]);
+    $saturations = array_map(static fn (int $value): int => $value * 100, RedisRiskStateStore::DEFAULT_SATURATIONS);
+    $store = new RedisRiskStateStore($client, $namespace, saturations: $saturations);
+    $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+    $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], emergencyCap: new ProcessEmergencyCap(10000));
+    $controller = new ChallengeController($issuer, risk: $gateway, sameOriginOnly: false, storage: $storage);
+
+    return [$controller];
+}
+
+/**
+ * The real-Redis worker entry point: connects its own Predis client,
+ * builds the risk-enabled controller, runs the issuance workload,
+ * appends sample lines to the out file and exits 0. A failure writes
+ * one error line to stdout and exits 1.
+ *
+ * @param resource $out
+ */
+function workerMode(array $argv, $out): int
+{
+    $id = (int) ($argv[0] ?? 0);
+    $outFile = (string) ($argv[1] ?? '');
+    $prefix = (string) ($argv[2] ?? '');
+    $namespace = (string) ($argv[3] ?? '');
+    $perWorker = (int) ($argv[4] ?? REDIS_PER_WORKER);
+    $url = (string) ($argv[5] ?? '');
+
+    try {
+        [$controller] = buildRedisRiskController($url, $prefix, $namespace);
+    } catch (\Throwable $e) {
+        fwrite($out, "error\t".str_replace(["\n", "\t"], ' ', $e->getMessage())."\n");
+        exit(1);
+    }
+
+    $samples = [];
+    for ($i = 0; $i < REDIS_WARMUP + $perWorker; $i++) {
+        $clientIp = '198.51.100.'.((($id * $perWorker) + $i) % 250 + 1);
+        $request = Request::create(
+            '/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => $clientIp],
+            '{"scope":"login"}',
+        );
+        $t0 = hrtime(true);
+        $response = $controller->challenge($request);
+        $t1 = hrtime(true);
+        if ($response->getStatusCode() !== 200) {
+            fwrite($out, "error\tworker $id: a risk-enabled issuance did not answer 200 (status ".$response->getStatusCode().")\n");
+            exit(1);
+        }
+        if ($i >= REDIS_WARMUP) {
+            $samples[] = ($t1 - $t0) / 1e6;
+        }
+    }
+
+    $fh = fopen($outFile, 'ab');
+    if ($fh === false) {
+        fwrite(STDERR, "perf-bench-risk worker $id: cannot write $outFile\n");
+        exit(1);
+    }
+    foreach ($samples as $ms) {
+        fwrite($fh, "sample\t".sprintf('%.4f', $ms)."\n");
+    }
+    fclose($fh);
+
+    return 0;
+}
+
+/**
+ * Spawn the worker processes, aggregate every sample into one flat
+ * distribution and return the errors, the sample count and the window
+ * in which every worker was live (spawn end to the last worker exit).
+ *
+ * @return array{samples: list<float>, errors: list<string>, n: int, windowMs: float}
+ */
+function runRedisPhase(int $workers, int $perWorker, string $prefix, string $namespace, string $url, string $workDir): array
+{
+    $outFiles = [];
+    $procs = [];
+    $t0 = hrtime(true);
+    for ($id = 0; $id < $workers; $id++) {
+        $outFile = "$workDir/risk-$id.out";
+        $outFiles[] = $outFile;
+        $cmd = [PHP_BINARY, __FILE__, '--worker', (string) $id, $outFile, $prefix, $namespace, (string) $perWorker, $url];
+        $pipes = [];
+        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        if (!is_resource($proc)) {
+            fwrite(STDERR, "perf-bench-risk: cannot spawn worker $id\n");
+            exit(1);
+        }
+        fclose($pipes[0]);
+        $procs[] = ['proc' => $proc, 'pipes' => $pipes];
+    }
+    $spawnEnd = hrtime(true);
+    $stderrAll = '';
+    $exitCodes = [];
+    foreach ($procs as $entry) {
+        $stderr = stream_get_contents($entry['pipes'][2]);
+        $stdout = stream_get_contents($entry['pipes'][1]);
+        if (is_string($stderr) && $stderr !== '') {
+            $stderrAll .= $stderr;
+        }
+        if (is_string($stdout) && $stdout !== '') {
+            $stderrAll .= $stdout;
+        }
+        fclose($entry['pipes'][1]);
+        fclose($entry['pipes'][2]);
+        $exitCodes[] = proc_close($entry['proc']);
+    }
+    $t1 = hrtime(true);
+    $windowMs = ($t1 - $spawnEnd) / 1e6;
+
+    $samples = [];
+    $errors = [];
+    foreach ($outFiles as $i => $outFile) {
+        $hadErrorLine = false;
+        if (is_file($outFile)) {
+            foreach (file($outFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+                $parts = explode("\t", $line);
+                if (count($parts) >= 2 && $parts[0] === 'error') {
+                    $errors[] = $parts[1];
+                    $hadErrorLine = true;
+                    continue;
+                }
+                if (count($parts) !== 2 || $parts[0] !== 'sample') {
+                    $errors[] = "unparsable worker line: $line";
+                    continue;
+                }
+                $samples[] = (float) $parts[1];
+            }
+        } else {
+            $errors[] = "worker output missing: $outFile";
+        }
+        if (($exitCodes[$i] ?? 0) !== 0 && !$hadErrorLine && !isset($errors[array_key_last($errors)])) {
+            $errors[] = "worker $i exited with code ".($exitCodes[$i] ?? '?');
+        }
+    }
+    if ($stderrAll !== '') {
+        $errors[] = trim($stderrAll);
+    }
+
+    return ['samples' => $samples, 'errors' => $errors, 'n' => count($samples), 'windowMs' => $windowMs];
+}
+
+$workerIndex = array_search('--worker', $argv, true);
+if ($workerIndex !== false) {
+    $rest = array_values(array_slice($argv, $workerIndex + 1));
+    $fh = fopen('php://stdout', 'w');
+
+    return exit(workerMode($rest, $fh));
+}
+
+$redisMode = in_array('--redis', $argv, true);
+$redisUpdate = $redisMode && in_array('--update-baseline', $argv, true);
+$workers = REDIS_WORKERS;
+$perWorker = REDIS_PER_WORKER;
+foreach ($argv as $i => $arg) {
+    if ($arg === '--workers' && isset($argv[$i + 1])) {
+        $workers = max(1, (int) $argv[$i + 1]);
+    }
+    if ($arg === '--per-worker' && isset($argv[$i + 1])) {
+        $perWorker = max(1, (int) $argv[$i + 1]);
+    }
+}
+
+if ($redisMode) {
+    $url = redisUrlFromArgs($argv);
+    $probe = redisClientOrNull($url);
+    if ($probe === null) {
+        fwrite(STDERR, sprintf("perf-bench-risk NOTE: no Redis answers at %s; the real-Redis mode is skipped — the timing signal is non-gating\n", $url));
+        exit(0);
+    }
+    $prefix = 'perf-bench-risk-'.bin2hex(random_bytes(6)).'-';
+    $namespace = 'b'.bin2hex(random_bytes(4));
+    $workDir = sys_get_temp_dir().'/perf-bench-risk-'.getmypid();
+    if (!mkdir($workDir) && !is_dir($workDir)) {
+        fwrite(STDERR, "perf-bench-risk: cannot create $workDir\n");
+        exit(1);
+    }
+    $r = runRedisPhase($workers, $perWorker, $prefix, $namespace, $url, $workDir);
+    if ($r['errors'] !== []) {
+        foreach ($r['errors'] as $error) {
+            fwrite(STDERR, "perf-bench-risk: redis phase error: $error\n");
+        }
+        exit(1);
+    }
+    $p50 = percentile($r['samples'], 50);
+    $p95 = percentile($r['samples'], 95);
+    $ops = $r['windowMs'] > 0 ? (int) round($r['n'] / ($r['windowMs'] / 1000.0)) : 0;
+    printf("perf-bench-risk: real-Redis concurrent risk-enabled issuance p50 %.3f ms p95 %.3f ms (n=%d); throughput %d req/s\n", $p50, $p95, $r['n'], $ops);
+    if ($redisUpdate) {
+        printf("perf-bench-risk: update the constants: p50 %.3f p95 %.3f\n", $p50, $p95);
+        exit(0);
+    }
+    if (BASELINE_REDIS_P95 <= 0.0) {
+        fwrite(STDERR, "perf-bench-risk NOTE: no recorded real-Redis baseline; run with --update-baseline after a quiet-machine measurement\n");
+        exit(0);
+    }
+    if ($p95 > BASELINE_REDIS_P95 * RATCHET) {
+        fwrite(STDERR, sprintf("perf-bench-risk FAILED: real-Redis risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, BASELINE_REDIS_P95 * RATCHET, BASELINE_REDIS_P95));
+        exit(1);
+    }
+    echo "perf-bench-risk: OK (real-Redis p95 within the 3x noisy-runner-tolerant ratchet)\n";
+    exit(0);
 }
 
 $secret = '0123456789abcdef0123456789abcdef';

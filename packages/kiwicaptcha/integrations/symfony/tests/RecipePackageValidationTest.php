@@ -69,9 +69,10 @@ final class RecipePackageValidationTest extends TestCase
 
     /**
      * The recipe's config/packages/kiwicaptcha.yaml with every %env()%
-     * placeholder resolved to a test value (the container resolves the
-     * same placeholders at compile time; the values here stand in for
-     * the .env the manifest generates).
+     * placeholder resolved to the manifest-declared value. The
+     * container resolves the same placeholders at compile time; Flex
+     * writes the manifest defaults into .env, with the generated
+     * secret replaced by a test value.
      *
      * @return array<string, mixed>
      */
@@ -82,14 +83,11 @@ final class RecipePackageValidationTest extends TestCase
         $config = $raw['kiwi_captcha'] ?? null;
         self::assertIsArray($config, 'the recipe config must carry the kiwi_captcha root key');
         $manifest = $this->manifest();
-        $envValues = [
-            'KIWI_SECRET_KEY' => self::SECRET,
-        ];
-        foreach (array_keys($manifest['env'] ?? []) as $key) {
-            if (!isset($envValues[$key])) {
-                $envValues[$key] = 'recipe-test-value-'.$key;
-            }
+        $envValues = [];
+        foreach ($manifest['env'] ?? [] as $key => $default) {
+            $envValues[$key] = \is_string($default) ? $default : 'recipe-test-value-'.$key;
         }
+        $envValues['KIWI_SECRET_KEY'] = self::SECRET;
         foreach ($config as $k => $v) {
             if (\is_string($v)) {
                 $config[$k] = preg_replace_callback('/%env\(([A-Z0-9_]+)\)%/', static function (array $m) use ($envValues): string {
@@ -127,7 +125,13 @@ final class RecipePackageValidationTest extends TestCase
             'the manifest must register the bundle for every environment',
         );
         self::assertSame(['config/' => '%CONFIG_DIR%/'], $manifest['copy-from-recipe'], 'the manifest copies the config directory');
-        self::assertSame(['KIWI_SECRET_KEY'], array_keys($manifest['env']), 'the manifest declares exactly the env key the config references');
+        self::assertSame(
+            ['KIWI_SECRET_KEY', 'KIWI_REDIS_DSN', 'KIWI_PUBLIC_URL'],
+            array_keys($manifest['env']),
+            'the manifest declares the secret, the Redis DSN and the public origin the config references',
+        );
+        self::assertSame('redis://127.0.0.1:6379/0', $manifest['env']['KIWI_REDIS_DSN'], 'the manifest ships a localhost DSN default');
+        self::assertSame('https://captcha.example.com', $manifest['env']['KIWI_PUBLIC_URL'], 'the manifest ships a placeholder origin default');
     }
 
     public function testEveryConfigEnvPlaceholderIsDeclaredInTheManifest(): void
@@ -136,7 +140,11 @@ final class RecipePackageValidationTest extends TestCase
         preg_match_all('/%env\(([A-Z0-9_]+)\)%/', $yaml, $matches);
         $used = array_values(array_unique($matches[1]));
 
-        self::assertSame(['KIWI_SECRET_KEY'], $used, 'the recipe config references exactly the manifest-declared env key');
+        self::assertSame(
+            ['KIWI_SECRET_KEY', 'KIWI_PUBLIC_URL', 'KIWI_REDIS_DSN'],
+            $used,
+            'the recipe config references exactly the manifest-declared env keys',
+        );
     }
 
     public function testRecipeConfigProcessesCleanlyThroughTheBundleConfiguration(): void
@@ -145,8 +153,8 @@ final class RecipePackageValidationTest extends TestCase
 
         self::assertSame('balanced', $processed['protection_profile']);
         self::assertSame(self::SECRET, $processed['secret_key'], 'the %env()% secret placeholder resolves into the processed config');
-        self::assertSame('https://captcha.example.com', $processed['public_base_url'], 'the literal public origin processes cleanly');
-        self::assertSame('redis://127.0.0.1:6379/0', $processed['redis_dsn'], 'the literal DSN processes cleanly');
+        self::assertSame('https://captcha.example.com', $processed['public_base_url'], 'the manifest-declared public origin processes cleanly');
+        self::assertSame('redis://127.0.0.1:6379/0', $processed['redis_dsn'], 'the manifest-declared DSN processes cleanly');
         self::assertSame(18, $processed['difficulty_bits'], 'the balanced profile defaults apply');
         self::assertFalse($processed['risk']['enabled'], 'balanced keeps risk off');
     }
@@ -192,10 +200,13 @@ final class RecipePackageValidationTest extends TestCase
             self::markTestSkipped('TEST_REDIS_URL / KC_REDIS_URL not set — the recipe-shaped boot test needs a real Redis');
         }
 
-        // The manifest generates the secret into .env; the real container
-        // resolves the %env()% placeholder from the process environment.
+        // The manifest generates the secret and declares the DSN and
+        // origin defaults into .env; the real container resolves the
+        // %env()% placeholders from the process environment.
         putenv(RecipeConfigTestKernel::SECRET_ENV.'='.self::SECRET);
-        $kernel = new RecipeConfigTestKernel('test', true, $url);
+        putenv(RecipeConfigTestKernel::REDIS_DSN_ENV.'='.$url);
+        putenv(RecipeConfigTestKernel::PUBLIC_URL_ENV.'=https://captcha.example.com');
+        $kernel = new RecipeConfigTestKernel('test', true);
         $kernel->boot();
         $container = $kernel->getContainer()->get('test.service_container');
 
@@ -206,12 +217,18 @@ final class RecipePackageValidationTest extends TestCase
             $config = $container->get('kiwi_captcha.config');
             self::assertSame(self::SECRET, $config->secretKey, 'the recipe %env()% secret resolves into the wired core config');
 
-            $storage = $container->get(StorageInterface::class);
-            self::assertInstanceOf(RedisStorage::class, $storage, 'the recipe DSN builds the atomic challenge storage');
-
+            // The %env()% DSN resolved end to end: the runtime guard
+            // validated the resolved shape and the client is a real
+            // Predis client over the environment-managed connection.
             $client = $container->get('kiwi_captcha.redis.dsn');
             self::assertInstanceOf(\Predis\Client::class, $client);
+            $params = $client->getConnection()->getParameters()->toArray();
+            self::assertSame((string) parse_url($url, PHP_URL_HOST), $params['host'], 'the env-resolved DSN drives the connection host');
+            self::assertSame((int) (parse_url($url, PHP_URL_PORT) ?? 6379), $params['port'], 'the env-resolved DSN drives the connection port');
             $client->flushdb();
+
+            $storage = $container->get(StorageInterface::class);
+            self::assertInstanceOf(RedisStorage::class, $storage, 'the recipe DSN builds the atomic challenge storage');
 
             $tester = new CommandTester($container->get(KiwiCaptchaDoctorCommand::class));
             $tester->execute([]);
@@ -237,29 +254,65 @@ final class RecipePackageValidationTest extends TestCase
         } finally {
             $kernel->shutdown();
             putenv(RecipeConfigTestKernel::SECRET_ENV);
+            putenv(RecipeConfigTestKernel::REDIS_DSN_ENV);
+            putenv(RecipeConfigTestKernel::PUBLIC_URL_ENV);
         }
     }
 
     /**
-     * The bundle contract that shaped the recipe: this version validates
-     * the DSN shape at container build time, before %env()% placeholders
-     * resolve, so the recipe ships a literal DSN. The day the extension
-     * resolves placeholders before validating, this refusal disappears
-     * and the recipe can return to the %env()% form.
+     * The bundle contract that shaped the recipe: the %env()% DSN form
+     * is accepted at container build time, since the value flows
+     * through the container's parameter bag and the runtime guard
+     * validates the resolved shape when the client is constructed. The
+     * recipe therefore ships the env-managed DSN and origin.
      */
-    public function testEnvPlaceholderDsnIsRefusedAtContainerBuildTime(): void
+    public function testEnvPlaceholderDsnIsAcceptedAtContainerBuild(): void
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'dev');
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => self::SECRET,
+            'redis_dsn' => '%env(KIWI_REDIS_DSN)%',
+        ]], $container);
+
+        // The build succeeds with the placeholder; the env-managed
+        // client is constructed through the runtime validation guard.
+        $client = $container->getDefinition('kiwi_captcha.redis.dsn');
+        self::assertSame(\Predis\Client::class, $client->getClass(), 'the env-managed client stays typed Predis\Client');
+        self::assertSame(
+            [KiwiCaptchaExtension::class, 'createDsnClient'],
+            $client->getFactory(),
+            'the env-managed client is constructed through the runtime validation guard',
+        );
+        self::assertSame(['%env(KIWI_REDIS_DSN)%'], $client->getArguments(), 'the placeholder flows through the container parameter bag untouched');
+        self::assertTrue($container->hasDefinition('kiwi_captcha.storage.redis_dsn'), 'the env DSN still builds the challenge storage');
+    }
+
+    /**
+     * An env placeholder whose variable is never set must fail at
+     * runtime (when the client is constructed), never at container
+     * build time: the boot succeeds and the failure names the missing
+     * environment variable.
+     */
+    public function testUnresolvedEnvDsnFailsAtRuntimeNotAtContainerBuild(): void
+    {
+        putenv(RecipeConfigTestKernel::PUBLIC_URL_ENV.'=https://captcha.example.com');
+        putenv(RecipeConfigTestKernel::REDIS_DSN_ENV);
+        $kernel = new RecipeConfigTestKernel('test', true);
+        $kernel->boot();
+        $container = $kernel->getContainer()->get('test.service_container');
+
         try {
-            (new KiwiCaptchaExtension())->load([[
-                'secret_key' => self::SECRET,
-                'redis_dsn' => '%env(KIWI_REDIS_DSN)%',
-            ]], $container);
-            self::fail('an unresolved %env()% DSN must fail closed at container build time');
-        } catch (\LogicException $e) {
-            self::assertStringContainsString('redis_dsn', $e->getMessage(), 'the refusal names the offending option');
-            self::assertStringContainsString('redis://', $e->getMessage(), 'the refusal states the accepted shape');
+            try {
+                $container->get('kiwi_captcha.redis.dsn');
+                self::fail('an unset env DSN must fail when the client is constructed, not at container build time');
+            } catch (\Symfony\Component\DependencyInjection\Exception\EnvNotFoundException $e) {
+                self::assertStringContainsString('KIWI_REDIS_DSN', $e->getMessage(), 'the runtime failure names the missing environment variable');
+            }
+        } finally {
+            $kernel->shutdown();
+            putenv(RecipeConfigTestKernel::PUBLIC_URL_ENV);
+            putenv(RecipeConfigTestKernel::REDIS_DSN_ENV);
         }
     }
 

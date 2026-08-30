@@ -14,11 +14,13 @@ import { defineConfig } from '@playwright/test';
 // composition and delayed commits, Chromium-style silent previews, the
 // offscreen variant under every fill, and the AT-snapshot exclusion of
 // the decoy), and the portable targeted-bot adaptation suite (a bot
-// that learned the six rendering strategies and the decoy-name grammar
-// gains nothing: every strategy's DOM signature is asserted non-trivial
-// to classify, and the server-side evidence surface stays identical).
-// The engine-specific torture cases stay on the
-// chromium-only default config.
+// that learned the six rendering strategies and the decoy-name grammar:
+// a targeted classifier that knows the response and the DOM signatures
+// can identify the decoy, yet successful classification never bypasses
+// the real Kiwi security boundary, because the proof and the state
+// machinery still gate; the suite pins that claim and the server-side
+// evidence surface stays identical). The engine-specific torture cases
+// stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
   testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot)\.spec\.mjs/,

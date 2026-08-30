@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
@@ -27,6 +28,14 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
  * real config/packages + config/packages/prod layering and run through
  * the extension's load() with explicit multi-array stacks — the
  * single-array helper cannot see this class of bug.
+ *
+ * Profile selection uses presence semantics: the last layer
+ * containing the `protection_profile` key wins, null included. An
+ * explicit `protection_profile: null` in a later layer is a real
+ * selection, for example a prod overlay clearing a dev compatibility
+ * profile. The profile is cleared, its derived defaults are dropped,
+ * and the visible field reports null in lockstep: the visible profile
+ * and the effective derived behavior always correspond.
  */
 final class ProtectionProfileLayeringTest extends TestCase
 {
@@ -43,6 +52,36 @@ final class ProtectionProfileLayeringTest extends TestCase
         (new KiwiCaptchaExtension())->load($layers, $container);
 
         return $container;
+    }
+
+    /**
+     * The final processed protection_profile (the visible field): the
+     * doctor command receives the same processed config array the
+     * extension consumed, so its definition argument is the exact view
+     * the app and kiwicaptcha:doctor report.
+     */
+    private function visibleProfile(ContainerBuilder $container): ?string
+    {
+        $config = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArgument(1);
+        self::assertIsArray($config, 'the doctor command carries the processed config array');
+
+        return $config['protection_profile'] ?? null;
+    }
+
+    /**
+     * The full null/none posture after a clearing layer: every derived
+     * knob of the earlier profile must be back at its tree default, in
+     * lockstep with the visible null field.
+     */
+    private function assertNonePosture(ContainerBuilder $container, string $context): void
+    {
+        self::assertNull($this->visibleProfile($container), $context.': the visible protection_profile is null after the clearing layer');
+        self::assertSame(10, $container->getParameter('kiwi_captcha.rate_limit'), $context.': rate_limit returns to the tree default 10');
+        self::assertSame(500, $container->getParameter('kiwi_captcha.rate_limit_global'), $context.': rate_limit_global returns to the tree default 500');
+        self::assertFalse($container->hasDefinition(RiskGateway::class), $context.': the risk engine stays off');
+        self::assertFalse($container->getDefinition(ChallengeController::class)->getArgument('$decoyV3Enabled'), $context.': the decoy surface stays off');
+        self::assertSame(120, $container->getDefinition('kiwi_captcha.config')->getArgument(7), $context.': the TTL returns to the tree default 120');
+        self::assertSame(BindingMode::Bound, $container->getDefinition('kiwi_captcha.config')->getArgument('$bindingMode'), $context.': binding returns to the tree default nonce_ip_hmac');
     }
 
     public function testExplicitBaseSettingsSurviveALaterProfileOnlyOverlay(): void
@@ -176,5 +215,87 @@ final class ProtectionProfileLayeringTest extends TestCase
         ]);
 
         self::assertFalse($container->hasDefinition(ChainedChallengeTicketService::class), 'an explicit chaining.enabled=false wins over the profile conditional');
+    }
+
+    public function testExplicitNullClearsTheHighAbuseProfile(): void
+    {
+        // The presence-semantics regression: a base high_abuse profile
+        // followed by a later `protection_profile: null` overlay. The
+        // null is a real selection: high_abuse's derived behavior
+        // (rate_limit 5, risk on, decoy on, wider global bounds) must
+        // be gone and the visible field must report null in lockstep.
+        $container = $this->load([
+            ['secret_key' => self::SECRET, 'protection_profile' => 'high_abuse'],
+            ['protection_profile' => null],
+        ]);
+
+        $this->assertNonePosture($container, 'high_abuse -> null');
+    }
+
+    public function testExplicitNullClearsTheCompatibilityProfile(): void
+    {
+        // compatibility's conservative 300 s TTL and binding-off posture
+        // must NOT survive a clearing null layer: TTL 120 and
+        // nonce_ip_hmac binding (the tree defaults) apply instead.
+        $container = $this->load([
+            ['secret_key' => self::SECRET, 'protection_profile' => 'compatibility'],
+            ['protection_profile' => null],
+        ]);
+
+        $this->assertNonePosture($container, 'compatibility -> null');
+    }
+
+    public function testExplicitNullClearsThePrivacyStrictProfile(): void
+    {
+        // privacy_strict drops the binding tag (binding_mode none): after
+        // the clearing null layer the tree default nonce_ip_hmac binding
+        // must be back, with the visible field null.
+        $container = $this->load([
+            ['secret_key' => self::SECRET, 'protection_profile' => 'privacy_strict'],
+            ['protection_profile' => null],
+        ]);
+
+        $this->assertNonePosture($container, 'privacy_strict -> null');
+    }
+
+    public function testNullBetweenTwoProfilesKeepsTheLastProfileWinner(): void
+    {
+        // high_abuse -> null -> compatibility: the null clears high_abuse
+        // (presence semantics), and the later compatibility selection
+        // wins. None of high_abuse's defaults may leak through the null
+        // layer, and the final profile's defaults apply where no layer
+        // set the knob.
+        $container = $this->load([
+            ['secret_key' => self::SECRET, 'protection_profile' => 'high_abuse'],
+            ['protection_profile' => null],
+            ['protection_profile' => 'compatibility'],
+        ]);
+
+        self::assertSame('compatibility', $this->visibleProfile($container), 'the LAST profile selection (compatibility) is the visible field');
+        self::assertSame(10, $container->getParameter('kiwi_captcha.rate_limit'), 'compatibility rate_limit (10), not high_abuse (5): the null layer dropped high_abuse entirely');
+        self::assertSame(500, $container->getParameter('kiwi_captcha.rate_limit_global'), 'compatibility rate_limit_global (500), not high_abuse (2000)');
+        self::assertFalse($container->hasDefinition(RiskGateway::class), 'risk stays off: high_abuse risk.enabled=true does not leak through the null layer');
+        self::assertFalse($container->getDefinition(ChallengeController::class)->getArgument('$decoyV3Enabled'), 'the decoy surface stays off: high_abuse decoy=true does not leak');
+        self::assertSame(300, $container->getDefinition('kiwi_captcha.config')->getArgument(7), 'the compatibility TTL (300 s) applies');
+        self::assertSame(BindingMode::None, $container->getDefinition('kiwi_captcha.config')->getArgument('$bindingMode'), 'compatibility binding off');
+    }
+
+    public function testNullBetweenProfileAndSameProfileStillAppliesTheFinalSelection(): void
+    {
+        // Reverse sanity: profile -> null -> profile. The middle null is a
+        // real selection at its position, but the final profile selection
+        // wins again — an intermediate clearing layer can never make a
+        // later profile selection ineffective.
+        $container = $this->load([
+            ['secret_key' => self::SECRET, 'redis_service' => 'fake_redis', 'protection_profile' => 'high_abuse'],
+            ['protection_profile' => null],
+            ['protection_profile' => 'high_abuse'],
+        ]);
+
+        self::assertSame('high_abuse', $this->visibleProfile($container), 'the final high_abuse selection is the visible field');
+        self::assertSame(5, $container->getParameter('kiwi_captcha.rate_limit'), 'the final high_abuse derived rate_limit applies');
+        self::assertSame(2000, $container->getParameter('kiwi_captcha.rate_limit_global'), 'the final high_abuse derived global bound applies');
+        self::assertTrue($container->hasDefinition(RiskGateway::class), 'the final high_abuse re-enables the risk engine');
+        self::assertTrue($container->getDefinition(ChallengeController::class)->getArgument('$decoyV3Enabled'), 'the final high_abuse arms the decoy surface');
     }
 }

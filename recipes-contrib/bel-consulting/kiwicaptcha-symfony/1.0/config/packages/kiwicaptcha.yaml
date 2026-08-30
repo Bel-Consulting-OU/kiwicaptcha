@@ -2,8 +2,10 @@ kiwi_captcha:
     # Policy-level posture preset: balanced | privacy_strict | high_abuse |
     # compatibility. The profile is the LOWEST-precedence configuration
     # layer: it fills safe derived defaults for the safety-relevant knobs,
-    # and an explicit value in ANY config file always wins. See
-    # docs/configuration.md "Protection profiles".
+    # and an explicit value in ANY config file always wins. An explicit
+    # `protection_profile: null` in a later layer (e.g. a prod overlay)
+    # clears the profile again. See docs/configuration.md "Protection
+    # profiles".
     protection_profile: balanced
 
     # Required, min 16 bytes. The manifest writes the generated value
@@ -12,10 +14,11 @@ kiwi_captcha:
 
     # Canonical public origin (required in production; the same-origin
     # check compares against this value, never the Host header). The
-    # bundle validates the origin shape at container build time, before
-    # %env()% placeholders resolve, so this is a literal: replace it with
-    # your real origin (a clean https URL, no path, no credentials).
-    public_base_url: 'https://captcha.example.com'
+    # manifest declares the KIWI_PUBLIC_URL default in .env; credentials
+    # and environment-specific origins belong in your environment, never
+    # in source-controlled YAML. A literal override in this file is still
+    # possible (a clean https URL, no path, no credentials).
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
 
     # High-level Redis connection setting: when set, the bundle
     # constructs the Redis-backed services itself from this DSN — the
@@ -24,12 +27,14 @@ kiwi_captcha:
     # enabled) the risk state store. The client is built as a
     # Predis\Client, so predis/predis must be installed:
     #   composer require predis/predis
-    # The DSN may carry a database and query parameters, e.g.
-    # redis://user:pass@host:port/0?prefix=kiwi. The bundle validates the
-    # DSN shape at container build time, before %env()% placeholders
-    # resolve, so this is a literal: replace the localhost default with
-    # your real DSN (redis:// or rediss://).
-    redis_dsn: 'redis://127.0.0.1:6379/0'
+    # Twelve-factor form: the DSN (credentials, private hosts, TLS, db
+    # selection) belongs in the environment — the manifest declares the
+    # KIWI_REDIS_DSN localhost default in .env. The bundle validates the
+    # resolved value when the client is constructed (redis:// or
+    # rediss:// with a host, fail-closed). A literal override in this
+    # file is still possible, e.g.
+    # redis://user:pass@host:port/0?prefix=kiwi.
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
 
     # Advanced escape hatch: an explicit service id always wins over the
     # DSN for its knob. Define the service in config/services.yaml and

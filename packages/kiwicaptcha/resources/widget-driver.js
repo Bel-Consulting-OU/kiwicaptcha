@@ -1437,17 +1437,15 @@
       }
       return null;
     }
-    // Remove the owned decoy nodes: ONLY nodes that are both in the
-    // widget's private owned set and carry the data-kiwi-owner="decoy"
-    // marker. A node is never identified or removed by name match, so an
-    // application field with the same name is never touched.
+    // Remove the owned decoy nodes: ONLY the nodes in the widget's
+    // private owned set. A node is never identified or removed by name
+    // match, so an application field with the same name is never touched.
     function kiwiRemoveOwnedDecoys(state) {
       var nodes = state.nodes || [];
       state.nodes = [];
       for (var i = 0; i < nodes.length; i++) {
         var node = nodes[i];
         if (!node || !node.parentNode) continue;
-        if (!node.getAttribute || node.getAttribute("data-kiwi-owner") !== "decoy") continue;
         try { node.parentNode.removeChild(node); } catch (e) {}
       }
     }
@@ -1458,18 +1456,12 @@
       input.value = "";
       input.setAttribute("tabindex", "-1");
       input.setAttribute("aria-hidden", "true");
-      // The ownership marker: every Kiwi-created decoy node carries this
-      // internal attribute. It is never relied on by the server and never
-      // submitted with the form; cleanup removes a node only when it is
-      // both in the private owned set AND carries the marker.
-      input.setAttribute("data-kiwi-owner", "decoy");
       var before = variant === 2 || variant === 4;
       var el = input;
       if (variant === 1 || variant === 4) {
         var wrap = document.createElement("span");
         if (!state.className) state.className = KIWI_DECOY_WRAP_CLASSES[kiwiCspUint32() % KIWI_DECOY_WRAP_CLASSES.length];
         wrap.className = state.className;
-        wrap.setAttribute("data-kiwi-owner", "decoy");
         wrap.appendChild(input);
         el = wrap;
       }
@@ -1923,10 +1915,8 @@
   // the authoritative set of created nodes lives in the PRIVATE decoy
   // state on the widget record (carried across re-inits — an
   // expiry-triggered re-solve must still see a filled decoy as evidence),
-  // every Kiwi-created node also carries the internal
-  // data-kiwi-owner="decoy" marker, and every reset path (BFCache
-  // restore, the public reset API, destroy teardown) removes ONLY nodes
-  // that are both in the owned set and carry the marker — never a node
+  // and every reset path (BFCache restore, the public reset API, destroy
+  // teardown) removes ONLY the nodes in that owned set — never a node
   // identified by name match, so an application field with the same name
   // is never touched.
   function kiwiClearDecoyState(state) {
@@ -1936,7 +1926,6 @@
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
       if (!node || !node.parentNode) continue;
-      if (!node.getAttribute || node.getAttribute("data-kiwi-owner") !== "decoy") continue;
       try { node.parentNode.removeChild(node); } catch (e) {}
     }
     state.name = null;
