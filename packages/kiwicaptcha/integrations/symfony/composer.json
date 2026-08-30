@@ -50,6 +50,9 @@
         "symfony/property-info": "^6.0|^7.0|^8.0",
         "symfony/error-handler": "^6.0|^7.0|^8.0"
     },
+    "suggest": {
+        "predis/predis": "Enables the redis_dsn high-level connection setting (challenge storage, rate limiting, Argon admission and risk Redis are then built automatically from one DSN)."
+    },
     "repositories": [
         {
             "type": "path",

@@ -4,6 +4,16 @@ This page walks through installing the bundle, configuring it with a
 protection profile, issuing your first challenge, and using the verified
 result. The full configuration reference is [configuration.md](configuration.md).
 
+> Status: this guide is the current manual-equivalent walkthrough. A
+> recipe-first rewrite is planned (install through `composer require
+> bel-consulting/kiwicaptcha-symfony` plus Flex, and a five-minute
+> quick start driven by the recipe's generated config and env
+> declarations). It lands after the bundle is published on Packagist
+> and the recipes-contrib PR is merged; see
+> [flex-recipe.md](flex-recipe.md) for the exact external steps. The
+> rewrite stays pending until then, and this guide is not silently
+> claimed as the rewritten form.
+
 ## Installation
 
 ### 1. Require the bundle

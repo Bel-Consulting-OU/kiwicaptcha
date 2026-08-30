@@ -1,5 +1,16 @@
 # Flex recipe (PR-ready package)
 
+## Current status
+
+A pull request carrying this env-form recipe is open in
+`symfony/recipes-contrib` (PR #2038). Its merge is blocked on Packagist
+publication of `bel-consulting/kiwicaptcha-symfony`: the recipes-contrib
+validation installs a published package, so the recipe can only land
+after the bundle exists on Packagist. Publication on Packagist is an
+external maintainer action (packagist.org, outside this repository); the
+PR is not silently claimed done — until both land, the manual equivalent
+below applies.
+
 This repository carries the Symfony Flex recipe for
 `bel-consulting/kiwicaptcha-symfony` in the exact
 `symfony/recipes-contrib` layout under
