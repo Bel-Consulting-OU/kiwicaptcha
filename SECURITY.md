@@ -82,7 +82,7 @@ Operational requirements:
 
 - Serve the assets from **immutable, versioned URLs** — never a mutable `latest.js` alias.
 - Pin every `<script>`-loaded asset with **SRI** (`integrity` sha384 + `crossorigin`) — see `packages/kiwicaptcha-wasm/SECURITY.md` for the hash tooling and the exact patterns.
-  A `new Worker(url)` has no `integrity=` facility, so the standalone worker (`kiwi-worker.js`) is protected by the immutable versioned URL + the content-addressed release hash + the worker's protocol-id handshake (the driver refuses a mismatched worker).
+  A `new Worker(url)` has no `integrity=` facility, so the worker and runtime are protected differently: the driver cryptographically preflights the fetched bytes (hashed and compared against the page-issued digest), and the versioned URLs are immutable and content-addressed. The worker's protocol-id handshake refuses a mismatched worker.
   A mixed-version set (cached worker from an old release next to a new driver) must never reach a page; the mismatch state is the controlled failure, not a silent fallback.
 - Recompute the SRI hashes on every rebuild; the attached `SHA256SUMS`/`SRI.txt` release manifests are the authoritative record (the release notes reference them).
 
@@ -92,11 +92,17 @@ The memory-hard solver runs off the main thread in a Web Worker; the
 worker directive depends on the asset delivery tier:
 
 - Files mode (the default `asset_mode`): the driver lazily fetches the
-  versioned `worker.<hash>.js` asset (immutable URL + SRI), SRI-verifies it,
-  and constructs a **same-origin Worker** from the fetched source — no Blob
-  URL is ever created. The worker then loads its WASM glue from the verified
-  runtime asset. This tier needs `worker-src 'self'` and never allows
-  `blob:`.
+  versioned `worker.<hash>.js` asset and the WASM runtime, hashes the
+  fetched bytes with `crypto.subtle`, and compares them against the
+  page-issued digest (a cryptographic preflight in the SRI digest
+  format). Only then does it hand the content-addressed same-origin URL
+  to the browser APIs: `new Worker(url)` for the worker asset, and the
+  worker's own `importScripts` for the runtime. The executed bytes are
+  the preflight-verified bytes because the URLs are content-addressed
+  and immutable (an unknown hash is a 404). This is not literal
+  executed-byte SRI, which `new Worker(url)` cannot express. No Blob
+  URL is ever created. This tier needs `worker-src 'self'` and never
+  allows `blob:`.
 - Inline compatibility tier (`asset_mode: inline`): the driver builds the
   worker from a Blob URL of locally embedded code (`URL.createObjectURL`).
   A CSP with `worker-src 'self'` and no `blob:` allowance blocks it; this

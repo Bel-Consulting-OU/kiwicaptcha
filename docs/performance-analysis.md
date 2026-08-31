@@ -91,9 +91,9 @@ recording machine changes.
   the replica is stopped.
 
 The browser-side lab is separate: `tools/client-perf/` drives the
-browser fixture over the real SHA-256 and Argon2id ladders (the Argon
-rung measured at the real adaptive-risk envelope, m=16384 KiB, target
-8) across the inline/files and cold/warm matrix, with per-cell
+browser fixture over the real SHA-256 and Argon2id ladders, with the
+Argon rung measured at the real adaptive-risk envelope (m=16384 KiB,
+target 8). The matrix spans inline/files and cold/warm, with per-cell
 transferred bytes, cache-hit loads, lazy runtime fetch and repeat
 navigation. Its tiers are desktop CPU-throttled emulation: the
 recorded numbers are desktop-emulation evidence, never a low-end
@@ -101,6 +101,24 @@ mobile claim, and the physical-device procedure in that lab's README
 is the release boundary. The two labs are deliberately separate: this
 document measures the server paths, the client lab measures the
 browser paths.
+
+The client lab's methodology controls host-state contamination: every
+configured cell executes in a seeded random order, and each tier runs
+in a fresh Chromium process. Every repetition records fixed-work
+throughput (SHA hashes/sec on the page main thread, Argon2id
+derivations/sec at the real envelope in a harness worker) as a
+solver-speed and drift probe. A completion marker is written only on a
+clean full run, and baseline promotion refuses any results file
+without it. The lab README documents the full procedure.
+
+The honest current status of the client lab: no clean controlled
+full-matrix run has completed on this machine. The real Argon ladder
+costs tens of seconds per solve even unthrottled, and a full run is a
+multi-hour job that has crashed before finishing. The committed
+`tools/client-perf/results/baseline.json` is therefore still the
+legacy-labelled recording, replaced only when a completed run is
+promoted. The physical-device tiers remain the release boundary for
+the widget and the difficulty ladder.
 
 ## Measured baselines
 

@@ -164,8 +164,12 @@ write-once (`SET ... NX`):
   servers, because one scalar run_id cannot describe two authorities.
   When only one Redis is used, the storage entry covers the shared
   authority, and an authority without an entry falls back to the pin
-  key. When set, the guard compares the serving authority against it
-  instead of the pin key: the configuration IS the pin, and an
+  key. A shared physical authority must have exactly one expected
+  identity: when storage and risk resolve to the SAME Redis client,
+  the map form supplying DIFFERENT identities for them is rejected at
+  configuration time (the same identity may be repeated for both). When
+  set, the guard compares the serving authority against it instead of
+  the pin key: the configuration IS the pin, and an
   immutable-identity deployment can skip the Redis pin entirely. The
   pin key may still exist (the initialize command writes it to match),
   but the comparison target is the operator-provisioned value.
@@ -211,6 +215,28 @@ RedisStorage's `EVALSHA` writes by the script body it recorded at
 commit and resume-claim transitions), and an `EVALSHA` whose script
 was never seen is security-final too.
 
+The verified-WAIT barrier composes with the fence (the durability
+session): the core RedisStorage brackets its causal replication fence
+write and the WAIT in one durability session. The fence write is a
+fresh random-token write on the accepting connection immediately
+before the WAIT — replication is ordered, so a replica that
+acknowledges the fence has advanced through the preceding primary
+stream — and the WAIT path of every durability-critical transition
+establishes it (the public `establishReplicationFence` entry of the
+failed-barrier replay guard is the same barrier). Inside the session
+every barrier command forces the zero-stale guard lane AND the
+connection-generation equality: the guard's cached entry must match
+the connection object that is about to execute the command. A
+reconnect to a changed authority between the security-final mutation
+and the WAIT is therefore observed by the barrier's own verification
+(the `INFO` round trip re-establishes the connection and reads the
+new authority) and refused BEFORE the fence write or the WAIT
+executes: the WAIT runs only on the still-pinned connection, and the
+ordinary lane keeps its short cache for every other command. A `WAIT`
+`executeRaw` outside an explicit session (other stores) rides the
+same lane, and the post-dispatch connection-generation check refuses
+the barrier result if the connection changed during the dispatch.
+
 ### The pinned-primary adapter: wiring
 
 Under `ha_authority: pinned_primary` the extension:
@@ -228,10 +254,13 @@ Under `ha_authority: pinned_primary` the extension:
    operations never pass through a guarded wrapper (no recursion);
 3. decorates the storage/limiter/risk checked client with
    `AuthorityGuardedPredisClient`, which consults the guard before
-   every command, including the verified-WAIT `executeRaw`, the
-   core storage's `EVALSHA` writes and the seam's declared
-   security-final lanes, so a durability-critical transition can
-   never execute on a changed authority;
+   every command, including the verified-WAIT `executeRaw` (the
+   durability session forces the zero-stale lane and the
+   connection-generation equality before the fence write and the
+   WAIT, never the ordinary window), the core storage's `EVALSHA`
+   writes and the seam's declared security-final lanes, so a
+   durability-critical transition can never execute on a changed
+   authority;
 4. passes the guards to the doctor, whose "HA authority" check audits
    every distinct authority and fails the deploy gate on a changed
    authority, an uninitialized deployment, or an unarmed guard;
@@ -276,7 +305,10 @@ observes a changed authority carries the exact remediation.
   guard and one pin per distinct Redis authority), zero-stale
   security-final transitions (every consume/commit/chain/
   idempotency-finalize re-verifies the authority before the write,
-  never inside the verification window), connection-generation cache
+  never inside the verification window), the verified-WAIT durability
+  session (the causal fence write and the WAIT run under the same
+  authority epoch as the mutation, with the connection-generation
+  equality before every barrier command), connection-generation cache
   invalidation (a reconnect that replaces the connection object
   re-verifies), and the operator-initialized bootstrap (the runtime
   never auto-pins; `kiwicaptcha:ha-initialize` records the pin).
@@ -292,6 +324,34 @@ observes a changed authority carries the exact remediation.
 - protection_profile "ha_safe" with an explicit `ha_authority: none`
   override: `FAIL` — the profile's mechanical promise cannot silently
   weaken.
+
+### The readiness contract
+
+`/health/ready` gains a first-class authority-eligibility leg under
+`ha_authority: pinned_primary` (and the `ha_safe` profile): every
+wired authority guard must pass a FRESH check. The check calls the
+guard with the security-final lane, so it bypasses the ordinary
+verification window — a readiness probe never serves on a cached
+verification from before an authority change. A pod whose pin is
+uninitialized or whose authority changed (a restarted primary with a
+new run_id, a re-pointed endpoint) answers 503 with the
+machine-readable reason:
+
+- `ha_authority_uninitialized`: no pin and no `ha_authority_expected`
+  identity — the deployment never bootstrapped the authority (the
+  production runtime never auto-pins);
+- `ha_authority_changed`: the pinned/expected identity and the serving
+  identity differ (the response also carries the failing authority
+  label, `"authority": "storage"` / `"risk"`);
+- `ha_authority_unreachable`: the serving identity could not be read
+  at all (an unverifiable authority is treated as stale, never a
+  pass);
+- `ha_authority_ok`: every wired authority passed the fresh check.
+
+When `ha_authority` is none (no guards wired) the leg passes
+silently and the other readiness legs decide. The fresh check costs
+one `INFO` round trip per wired authority per probe, the price of
+never routing to a security-ineligible instance.
 
 ## The deployment posture switch
 
@@ -396,10 +456,18 @@ What is real now:
   `RedisSecurityCommandExecutor` seam), wired under
   `ha_authority: pinned_primary` with per-authority pin stores in the
   security Redis namespace, the reverify window keyed on the
-  connection object, the zero-stale security-final lane, the explicit
-  operator bootstrap (`kiwicaptcha:ha-initialize`, never an auto-pin)
-  and the `ha_authority_expected` operator-provisioned identity
-  (scalar shorthand or the per-authority map).
+  connection object, the zero-stale security-final lane, the
+  verified-WAIT durability session (the causal fence write and the
+  WAIT under the same authority epoch as the mutation, with the
+  connection-generation equality before every barrier command), the
+  readiness authority-eligibility leg (`/health/ready` forces a fresh
+  guard check per wired authority and answers 503 with the
+  machine-readable reasons above), the explicit operator bootstrap
+  (`kiwicaptcha:ha-initialize`, never an auto-pin) and the
+  `ha_authority_expected` operator-provisioned identity (scalar
+  shorthand or the per-authority map; a shared physical authority
+  must have exactly one expected identity, so conflicting entries for
+  storage and risk on one Redis are rejected at configuration time).
 - the `ha_safe` protection profile deriving the
   operator_managed + pinned_primary combination.
 - the doctor's "HA authority" check auditing every distinct authority

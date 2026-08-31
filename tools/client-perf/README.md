@@ -18,6 +18,16 @@ results are desktop-emulation evidence only. They make no low-end
 mobile claim. The physical-device procedure in the release section is
 the only evidence that can support a mobile claim.
 
+Host-state controls keep host drift out of the comparison. Every
+configured cell (tier x difficulty x cache x assets) executes in a
+seeded random order, so no cell class runs first or last by design.
+Every tier runs in a fresh Chromium process, so long-running browser
+degradation cannot bleed across tiers. Every repetition records
+fixed-work throughput (hashes/sec, Argon derivations/sec) as a
+per-cell drift probe. The results file carries a completion marker
+only on a clean full run, and baseline promotion refuses anything
+else. Each control is described in detail below.
+
 ## What is measured (per page load, per tier, per difficulty, per asset mode)
 
 | Metric | Source |
@@ -38,6 +48,8 @@ the only evidence that can support a mobile claim.
 | `longTaskCount` / `longTaskTotalMs` | Long Task API: main-thread blocks > 50 ms |
 | `peakHeapMb` / `finalHeapMb` | `performance.memory.usedJSHeapSize` sampled every 50 ms plus the final sample |
 | `domContentLoadedMs` / `loadMs` | Navigation Timing |
+| `shaHashesPerSec` / `shaFixedWorkMs` | fixed-work SHA-256 loop on the page main thread under the tier's throttle: 500 hashes of the real input shape (prefix + decimal counter + salt), using the wasm chunk export the inline solver uses or the pure-JS implementation for files-mode cells (see the fixed-work section) |
+| `argonDerivationsPerSec` / `argonFixedWorkMs` | fixed-work Argon2id loop inside a harness-owned worker built from the exact served runtime bytes: 3 derivations at the real envelope (m=16384 KiB, t=3, p=1), the raw solver export (see the fixed-work section) |
 | `repeatNavigation` | warm cells only: one more navigation after the reps, everything cached, page-to-verified plus bytes and cache hits |
 
 Every repetition is aggregated with p50/p95/p99/min/max/mean in the
@@ -99,6 +111,84 @@ Raising to 100 narrows that. The physical procedure below matters more
 than any sample-size tweak: emulation noise is bounded, real-device
 noise is not.
 
+## Methodology: cell order, process isolation, cooldowns
+
+The matrix is executed as ONE seeded random pass over every configured
+cell (tier x difficulty x cache x assets). No cell class runs
+monotonically first or last, so host drift (thermal state, memory
+pressure, scheduler behavior) is not systematically attached to any
+cell class. A nominally faster tier can no longer be measured
+consistently earlier or later than a slower one. The seed defaults to
+the wall clock and is recorded in the results file; `--seed N` makes
+any order reproducible. The harness prints the full execution order
+before the first cell and records it in the payload's methodology
+section.
+
+Every tier runs in a fresh Chromium process, launched for the tier and
+closed when the tier's cells are done. The multi-widget scenario gets
+its own fresh process too. A long-lived browser process degrades
+(memory growth, renderer state, scheduler affinity), and that
+degradation must not bleed from one tier into the next. Cold cells use
+a fresh context per load; warm cells use one context per cell, which
+the warm-cache semantics require (the context is closed with the
+cell).
+
+Between serious calibration runs, give the host a cooldown: a few idle
+minutes with no browser and no background load before the next matrix,
+and run the matrix only on an otherwise idle machine. Thermal and
+memory state are exactly the contamination this section exists to
+dilute, and the fixed-work metrics below are the drift probe that
+makes residual drift visible in the results file instead of hiding
+inside latency percentiles.
+
+## Fixed-work throughput metrics
+
+Solve latency is stochastic (nonce-search luck) and host-state
+sensitive. The harness therefore records, on every repetition of every
+cell, two fixed-work throughput probes that separate solver
+implementation speed from luck and from host state:
+
+| probe | what it measures |
+|---|---|
+| `shaHashesPerSec` | a fixed-N SHA-256 loop (default 500 hashes, `--sha-fixed-work`) on the page main thread under the tier's CPU throttle. The input shape mirrors a real challenge: prefix bytes, the decimal counter, then the salt. The loop uses the wasm chunk export (`solve_sha256_chunk`, the primitive the inline solver uses) when the glue is present on the page, and the pure-JS implementation (byte-identical to the solver's fallback) for files-mode cells, because files-mode SHA solving is pure JS by design. The chosen path is recorded per repetition as `shaFixedWorkPath`. |
+| `argonDerivationsPerSec` | a fixed-N Argon2id derivation loop (default 3, `--argon-fixed-work`) at the exact adaptive-risk envelope (m=16384 KiB, t=3, p=1), measured inside a harness-owned worker built from the exact served runtime bytes (the inline DOM script, or the versioned files-mode runtime asset). The worker runs no product code; it calls the raw solver export. Recorded per repetition as `argonDerivationsPerSec` with `argonFixedWorkPath`. |
+
+Both probes run per repetition, per cell, and are aggregated per cell
+like every other metric. Because the work is fixed, the probes double
+as a host-state drift probe. A cell whose hashes/sec or
+derivations/sec drift from their neighbors was measured under a
+different host state, and the drift is visible in the results file
+instead of hiding inside latency percentiles. The harness's own
+measurement traffic is marked (`kcp_fixed_work`) and excluded from the
+page's transferred-bytes, cache-hit and resource accounting, so the
+probes never tax the widget's page cost.
+
+## The incomplete-run guard and baseline promotion
+
+The results file carries a completion marker only when the run
+traversed every configured cell without an error or an interrupt
+(`completion.status` is `"completed"` with the marker
+`kiwicaptcha.client-perf.completed.v1`). A crashed or interrupted run
+writes its partial results to
+`results/results-<date>-partial-<time>.json` without the marker, and
+the harness exits non-zero. The partial file is evidence, never a
+baseline: its own payload says it is incomplete.
+
+Baseline promotion is an explicit, guarded step:
+
+```sh
+node tools/client-perf/client-perf.mjs --promote-baseline FILE
+```
+
+The loader refuses, with the reasons, any results file that lacks the
+completion marker or that does not cover the full default matrix (all
+seven tiers, all four difficulties, cold and warm, inline and files).
+It also refuses runs recorded below the default sample sizes (50 SHA
+and 20 Argon repetitions) or with a non-real argon ladder (m=16384
+KiB, target 8). Only a clean full run can replace
+`results/baseline.json`, so the committed baseline is never
+overwritten by an interrupted or partial run.
+
 ## Running
 
 ```sh
@@ -121,6 +211,17 @@ node tools/client-perf/client-perf.mjs \
 
 # Raise both sample sizes at once:
 node tools/client-perf/client-perf.mjs --samples 100
+
+# Fix the randomized cell order for a reproducible run:
+node tools/client-perf/client-perf.mjs --seed 20260831
+
+# Fixed-work probe sizes (defaults: 500 SHA hashes, 3 Argon derivations):
+node tools/client-perf/client-perf.mjs --sha-fixed-work 1000 --argon-fixed-work 5
+
+# Promote a completed full-matrix run to the committed baseline
+# (refuses anything without the completion marker or with partial
+# coverage):
+node tools/client-perf/client-perf.mjs --promote-baseline results/results-2026-09-01.json
 ```
 
 The harness boots its own fixture on port 8091 by default (php `-S`
@@ -150,38 +251,59 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    the Android tiers. A mid-session CPU governor drop changes the
    percentiles more than any code change, and the harness cannot see
    it.
-3. Run longer sequential blocks, not a burst: the first Argon solve on
+3. Let the host cool down between runs: a few idle minutes with the
+   device idle and no background load. A warm device measures a
+   different machine, and the fixed-work metrics in the results file
+   are the trace that shows it.
+4. Run longer sequential blocks, not a burst: the first Argon solve on
    a cold device is less interesting than the tenth, because the first
    is dominated by wasm compile and cold caches. The tenth reflects
    the steady state a real user hits on a warmed phone. Thermal
    saturation is a state to measure in, not a reason to stop: report
    both the early and the saturated windows.
-4. The release boundary is met when the physical-device p95 solve
+5. The release boundary is met when the physical-device p95 solve
    times stay within the documented budget for every tier the
    deployment targets, and no tier shows a failure rate above the
    widget's documented exhaustion bounds. If the highest Argon rung is
    too expensive for legitimate mobile users, adjust the server-selected
    ladder globally or transition earlier to StepUp, never weaken the
    rung based on client-reported device capabilities (bots lie).
-5. Record the physical-device rows in the results file (or an attached
+6. Record the physical-device rows in the results file (or an attached
    run notes section) with the device/browser/OS and date. The
    emulation numbers alone do not constitute a release qualification.
 
 ## Results store
 
-- `results/results-<date>.json` — every run (machine-readable, schema
-  `kiwicaptcha.client-perf/2`, environment + methodology + tiers +
-  options + per-cell aggregates and per-repetition samples). The
-  payload records the served client assets (driver, glue, worker) with
-  their sizes and sha256 prefixes, so a run is attributable to the
-  exact bytes measured.
-- `results/baseline.json` — the committed baseline (a results file
-  from a recorded run, kept under version control so regressions have
-  a point of comparison).
+- `results/results-<date>.json` is a completed run (machine-readable,
+  schema `kiwicaptcha.client-perf/3`, environment + methodology +
+  completion marker + tiers + options + per-cell aggregates and
+  per-repetition samples). The payload records the served client
+  assets (driver, glue, worker) with their sizes and sha256 prefixes,
+  so a run is attributable to the exact bytes measured.
+- `results/results-<date>-partial-<time>.json` is a crashed or
+  interrupted run, written without the completion marker. It is
+  evidence only and can never be promoted to baseline.
+- `results/baseline.json` is the committed baseline, replaced only
+  through `--promote-baseline` from a completed full-matrix run. The
+  current file is the legacy-labelled pre-matrix recording (see the
+  honest-status section below).
 
 Compare a run against the baseline by diffing the aggregated cells
 (`solveMs.p95`, `transferredBytes.p50`, `pageToVerifiedMs.p95`, ...).
 The harness itself never gates anything.
+
+## Honest status of the committed baseline
+
+The committed `results/baseline.json` is still the legacy pre-matrix
+recording (schema 1, labelled legacy in the file itself). No clean
+controlled full-matrix run has completed on this machine: the real
+ladder costs tens of seconds per Argon solve even unthrottled, the
+throttled tiers cost more, and a full run is a multi-hour job that has
+crashed before finishing. The baseline stays legacy-labelled until a
+clean full run completes and is promoted with the loader above. The
+physical-device procedure remains the release boundary: emulation
+numbers, with or without a fresh full run, are calibration signals,
+never mobile claims.
 
 ## Notes and caveats
 
@@ -208,3 +330,11 @@ The harness itself never gates anything.
   and the documented run procedure exist because of that, and the
   percentile read-outs must be read as distributions, never as single
   points.
+- The fixed-work SHA probe measures whichever primitive the asset
+  mode's main-thread solver actually uses (wasm in inline mode, pure
+  JS in files mode), so its hashes/sec reflects the solver
+  implementation, and the path is recorded per repetition.
+- The fixed-work Argon probe uses a harness-owned worker. A production
+  page whose CSP forbids Blob workers cannot host the probe; the lab
+  fixture page has no CSP, and the probe is a lab measurement, not
+  part of the widget.
