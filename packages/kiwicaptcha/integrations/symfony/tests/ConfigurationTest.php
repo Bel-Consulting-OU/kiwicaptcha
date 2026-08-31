@@ -1160,6 +1160,38 @@ final class ConfigurationTest extends TestCase
         }
     }
 
+    public function testHaAuthorityExpectedPerAuthorityMapForm(): void
+    {
+        $storage = 'master|'.str_repeat('a', 40);
+        $risk = 'master|'.str_repeat('b', 40);
+        $map = ['storage' => $storage, 'risk' => $risk];
+        self::assertSame($map, $this->process(['ha_authority_expected' => $map])['ha_authority_expected'], 'the per-authority map form passes through unchanged');
+
+        // A partial map (one authority) is legal: the authority without
+        // an entry falls back to the pin key.
+        self::assertSame(
+            ['storage' => $storage],
+            $this->process(['ha_authority_expected' => ['storage' => $storage]])['ha_authority_expected'],
+        );
+
+        // The map form is validated like the scalar form: an unknown
+        // authority name is refused.
+        try {
+            $this->process(['ha_authority_expected' => ['limiter' => $storage]]);
+            self::fail('a map naming an unknown authority must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('storage/risk', $e->getMessage());
+        }
+
+        // A map entry without the identity shape is refused too.
+        try {
+            $this->process(['ha_authority_expected' => ['storage' => 'not-an-identity']]);
+            self::fail('a map entry without the role|run_id shape must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('role|run_id', $e->getMessage());
+        }
+    }
+
     public function testProtocolRolloutDefaultsToNormal(): void
     {
         $processed = $this->process();

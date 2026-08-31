@@ -172,13 +172,22 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh on the recording day): every widget-driver copy is
-139,959 bytes raw, 39,816 bytes gzip and 33,634 bytes brotli, against
-caps of 160,000 / 50,000 / 45,000 bytes; the challenge-response JSON
+142,140 bytes raw, 40,395 bytes gzip and 34,119 bytes brotli, against
+caps of 160,000 / 50,000 / 45,000 bytes; the same budgets section also
+records the measured raw bytes of the other three widget assets (the
+Argon worker at 19,491 bytes, the wasm glue runtime at 92,340 bytes
+and the widget stylesheet at 13,863 bytes, each byte-identical across
+the three copies); the challenge-response JSON
 (decoy armed, the wire shape of the bundle's /challenge response) is
 1,014-1,045 bytes for sha256 and 1,025-1,046 bytes for argon2id (the
 grammar-composed name length varies the size between issuances),
-against the 4,096-byte cap. The caps are read by the shell from the
-record at run time; the record is the single hard-budget authority.
+against the 4,096-byte cap. The byte fields of the budgets section
+were re-recorded on 2026-08-31 against the current widget assets
+(the eager-import removal), and perf-budget.sh verifies the
+recorded raw_bytes EQUAL the current measured bytes (an equality gate,
+not just cap compliance), so a drifted record fails the budget job.
+The caps are read by the shell from the record at run time; the record
+is the single hard-budget authority.
 
 ## Ordinary-bootstrap target
 
@@ -307,8 +316,8 @@ cap are byte measurements with zero runner noise; a regression there is
 a fact, not a statistic. The caps are defined once, in the `budgets`
 section of packages/kiwicaptcha/tools/perf-baselines.json, and the
 shell script reads them from that record at run time, so there is no
-second authority that could drift. The recorded sizes (139,959 / 39,816
-/ 33,634 bytes and a 1,014-1,046-byte challenge response) leave 12-33%
+second authority that could drift. The recorded sizes (142,140 / 40,395
+/ 34,119 bytes and a 1,014-1,046-byte challenge response) leave 11-24%
 headroom under the caps, so a legitimate addition lands inside them and
 an accidental bloating regression trips them.
 

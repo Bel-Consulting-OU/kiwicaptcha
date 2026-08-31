@@ -185,6 +185,35 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect((await resp.json()).ok).toBe(true);
   });
 
+  test('the worker never probes a non-versioned runtime URL (no eager relative import, zero failed/extra requests)', async ({ page }) => {
+    // The historical eager importScripts("kiwicaptcha-wasm.js") resolved
+    // against the worker's own URL — in files mode that is a NON-versioned
+    // URL next to worker.<hash>.js, a 404 probe against the versioned
+    // asset route (and, on an app serving a stale unversioned file, a
+    // runtime that could initialize before the SRI-verified one arrives).
+    // The worker must boot with no runtime and the driver must direct it:
+    // every request the page makes for the assets must be a versioned
+    // content-addressed URL — zero requests to any non-versioned asset
+    // name, failed or not.
+    const requests = [];
+    page.on('request', (req) => requests.push(req.url()));
+    page.on('requestfailed', (req) => requests.push(req.url()));
+    await page.goto('/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+
+    const unversioned = requests.filter(
+      (u) => u.includes('/kiwi-captcha/assets/') && !/\.([0-9a-f]{12})\.(js|css)$/.test(u),
+    );
+    expect(
+      unversioned,
+      'no non-versioned asset URL may ever be requested (the eager relative import is gone)',
+    ).toEqual([]);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+  });
+
   test('the worker runs as a same-origin Worker constructed from the fetched asset (no Blob URL, no blob: worker)', async ({ page }) => {
     // The files-mode worker asset is fetched + SRI-verified by the driver
     // and then constructed via new Worker(workerUrl): a same-origin

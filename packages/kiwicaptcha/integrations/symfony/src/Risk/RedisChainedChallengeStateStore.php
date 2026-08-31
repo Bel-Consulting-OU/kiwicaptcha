@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Storage\ReplicaWaitException;
 
@@ -46,12 +47,25 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * master-slave), a Predis cluster aggregate and a retry-enabled
  * standalone Predis client are refused at construction with
  * waitReplicas > 0.
+ *
+ * Authority lane: every Lua transition executes through the guarded
+ * {@see \BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor}
+ * seam (docs/ha-authority.md). The reservation, the obligation
+ * create-or-get, the stage-2 issuance, the terminal verified / step-up
+ * / denial / transaction-terminal transitions, the rearm, the release,
+ * the completion and the obligation compare-delete are all declared
+ * security-final at the call site. The pinned-primary guard therefore
+ * re-verifies the authority immediately before each of those writes
+ * (zero stale, never inside the verification window). Only the live
+ * read rides the ordinary lane.
  */
 final class RedisChainedChallengeStateStore implements TransactionalChainedChallengeStateStore
 {
     private const PREFIX = 'chain:';
 
     private const OBLIGATION_PREFIX = 'chain-obligation:';
+
+    private readonly RedisSecurityCommandExecutor $lua;
 
     /** The Kiwi challenge nonce shape: base64 of 32 random bytes. */
     private const NONCE_PATTERN = '/^[A-Za-z0-9+\/]{43}=$/D';
@@ -815,6 +829,7 @@ LUA;
         private readonly int $waitTimeoutMs = 100,
     ) {
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
+        $this->lua = new RedisSecurityCommandExecutor($redis);
     }
 
     public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
@@ -913,7 +928,7 @@ LUA;
         // silently wrong chain must never be returned).
         for ($attempt = 0; $attempt < 3; ++$attempt) {
             $existing = $this->obligationChainId($obligationId);
-            $reply = $this->evalScript(self::CREATE_OR_GET_OBLIGATION_LUA, [
+            $reply = $this->lua->executeSecurityFinal(self::CREATE_OR_GET_OBLIGATION_LUA, [
                 $chainKey,
                 $obligationKey,
                 $this->key($existing ?? $chainId),
@@ -980,7 +995,7 @@ LUA;
      */
     public function read(string $chainId): ?array
     {
-        $raw = $this->evalScript(self::READ_LUA, [$this->key($chainId)], []);
+        $raw = $this->lua->executeRead(self::READ_LUA, [$this->key($chainId)], []);
         if ($raw === false || $raw === null) {
             return null;
         }
@@ -997,7 +1012,7 @@ LUA;
     public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
     {
         $this->assertLiveRecord($chainId);
-        $status = $this->evalScript(self::RESERVE_LUA, [$this->key($chainId)], [$ownerToken, (string) max(1, $leaseSecs)]);
+        $status = $this->lua->executeSecurityFinal(self::RESERVE_LUA, [$this->key($chainId)], [$ownerToken, (string) max(1, $leaseSecs)]);
 
         if ($status === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the reservation boundary');
@@ -1014,7 +1029,7 @@ LUA;
         if ($record === null || $record['state'] !== 'reserved') {
             return;
         }
-        $this->evalScript(self::RELEASE_LUA, [$this->key($chainId)], [$ownerToken]);
+        $this->lua->executeSecurityFinal(self::RELEASE_LUA, [$this->key($chainId)], [$ownerToken]);
     }
 
     public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
@@ -1029,7 +1044,7 @@ LUA;
         if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
             throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
-        $result = $this->evalScript(self::MARK_ISSUED_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
+        $result = $this->lua->executeSecurityFinal(self::MARK_ISSUED_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the issuance boundary');
         }
@@ -1055,7 +1070,7 @@ LUA;
         if ($record === null) {
             return 'missing';
         }
-        $result = $this->evalScript(self::MARK_VERIFIED_LUA, [
+        $result = $this->lua->executeSecurityFinal(self::MARK_VERIFIED_LUA, [
             $this->key($chainId),
             $this->obligationKey((string) $record['obligationId']),
         ], [$stage2Nonce, $chainId]);
@@ -1082,7 +1097,7 @@ LUA;
     public function markStepUpRequired(string $chainId, string $stage2Nonce): string
     {
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+        $result = $this->lua->executeSecurityFinal(self::MARK_STEP_UP_REQUIRED_LUA, [$this->key($chainId)], [$stage2Nonce]);
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the step-up boundary');
         }
@@ -1106,7 +1121,7 @@ LUA;
     public function markDenied(string $chainId, string $stage2Nonce): string
     {
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_DENIED_LUA, [$this->key($chainId)], [$stage2Nonce]);
+        $result = $this->lua->executeSecurityFinal(self::MARK_DENIED_LUA, [$this->key($chainId)], [$stage2Nonce]);
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the denial boundary');
         }
@@ -1133,7 +1148,7 @@ LUA;
             throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
         }
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_TRANSACTION_DENIED_LUA, [
+        $result = $this->lua->executeSecurityFinal(self::MARK_TRANSACTION_DENIED_LUA, [
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
@@ -1163,7 +1178,7 @@ LUA;
             throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
         }
         $this->assertLiveRecord($chainId);
-        $result = $this->evalScript(self::MARK_TRANSACTION_STEP_UP_REQUIRED_LUA, [
+        $result = $this->lua->executeSecurityFinal(self::MARK_TRANSACTION_STEP_UP_REQUIRED_LUA, [
             $this->key($chainId),
             $this->obligationKey($obligationId),
         ], [$chainId, $obligationId]);
@@ -1190,7 +1205,7 @@ LUA;
     public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
     {
         $this->assertLiveRecord($chainId);
-        $rearmed = $this->evalScript(self::REARM_LUA, [$this->key($chainId)], [$expectedStage2Nonce]);
+        $rearmed = $this->lua->executeSecurityFinal(self::REARM_LUA, [$this->key($chainId)], [$expectedStage2Nonce]);
         $success = $rearmed === true || $rearmed === 1;
 
         // Durability barrier: the fresh issued -> available rearm must
@@ -1207,7 +1222,7 @@ LUA;
 
     public function deleteObligation(string $chainId, string $obligationId): void
     {
-        $deleted = $this->evalScript(self::DELETE_OBLIGATION_LUA, [$this->obligationKey($obligationId)], [$chainId]);
+        $deleted = $this->lua->executeSecurityFinal(self::DELETE_OBLIGATION_LUA, [$this->obligationKey($obligationId)], [$chainId]);
 
         // Durability barrier: the fresh obligation deletion must reach
         // the configured replica count before the caller treats the
@@ -1232,7 +1247,7 @@ LUA;
         if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
             throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
-        $raw = $this->evalScript(self::COMPLETE_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
+        $raw = $this->lua->executeSecurityFinal(self::COMPLETE_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
@@ -1438,23 +1453,6 @@ LUA;
             return;
         }
         $this->redis->set($key, $value, 'EX', max(1, $ttlSecs));
-    }
-
-    /**
-     * Run a Lua script against whichever client implementation is in use.
-     *
-     * @param list<string> $keys
-     * @param list<string> $args
-     */
-    private function evalScript(string $script, array $keys, array $args): mixed
-    {
-        if ($this->redis instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->redis->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
     }
 
     /**

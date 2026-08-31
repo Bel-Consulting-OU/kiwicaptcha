@@ -20,21 +20,24 @@ use Predis\Command\CommandInterface;
  * wrapper), so its own `INFO` reads and pin-key operations cannot
  * recurse into the check.
  *
- * Zero-stale security-final lane: the wrapper classifies every
- * `EVALSHA` write by the script body it recorded at `SCRIPT LOAD`
- * time. A mutating security-final script (the storage consume,
- * delete-if-pending, cancel, commit and resume-claim transitions, the
- * chain obligation/reservation/issuance/verification/step-up/denial/
- * transaction-terminal/rearm/release/completion transitions, the
- * post-solve disposition claim and finalize, and the siteverify
- * idempotency finalize) is preceded by
- * `assertServeEligible($inner, securityFinal: true)`. That lane
- * bypasses the verification window and re-verifies the authority
+ * Zero-stale security-final lane: the wrapper forces the security-final
+ * guard lane for every `EVALSHA` whose recorded script body carries a
+ * mutating security-final marker, and for every unrecorded sha (fail
+ * closed, an unseen script can never be proven non-final). A plain
+ * `EVAL` executed without the typed seam is an unknown mutating
+ * script: it is security-final by default, so it is re-validated
+ * immediately, never served inside the window (fail closed).
+ *
+ * The bundle's own stores never rely on this default. They execute
+ * their Lua through the typed `RedisSecurityCommandExecutor` seam,
+ * which declares the lane for every script. The seam's explicit lanes
+ * override the default for both `EVAL` and `EVALSHA`: the
+ * security-final lane forces revalidation regardless of command
+ * shape, and the ordinary lane serves within the window. The forced
+ * lane bypasses the verification window and re-verifies the authority
  * before every such write, so a security-final transition can never
  * execute on a changed authority inside a stale window: the window
- * applies to ordinary reads and non-final writes only. An `EVALSHA`
- * whose script was never seen (an unrecorded sha) is treated as
- * security-final too (fail closed, never a silent window pass).
+ * applies to ordinary reads and non-final writes only.
  *
  * The guard caches its verification for a short window per connection
  * object (spl_object_id), so the wrapper costs one `INFO` probe per
@@ -50,12 +53,21 @@ use Predis\Command\CommandInterface;
  */
 final class AuthorityGuardedPredisClient extends \Predis\Client
 {
+    /** The seam's ordinary lane: serve within the verification window. */
+    public const LANE_ORDINARY = 'ordinary';
+
+    /** The seam's zero-stale lane: re-verify before the write. */
+    public const LANE_SECURITY_FINAL = 'security-final';
+
     /**
      * The distinctive body markers of the mutating security-final Lua
-     * scripts the bundle components load. A script whose body carries
-     * one of these markers is preceded by the zero-stale
-     * security-final guard lane. The markers mirror the components'
-     * script header comments (docs/ha-authority.md).
+     * scripts the core RedisStorage loads (`EVALSHA` only — the bundle's
+     * own stores execute through the typed
+     * {@see RedisSecurityCommandExecutor} seam and never need these
+     * markers). A script whose body carries one of these markers is
+     * preceded by the zero-stale security-final guard lane. The markers
+     * mirror the components' script header comments
+     * (docs/ha-authority.md).
      */
     private const SECURITY_FINAL_MARKERS = [
         '-- kiwicaptcha consume transition',
@@ -93,6 +105,16 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
      */
     private array $scriptBodiesBySha = [];
 
+    /**
+     * The lane stack of the executing {@see RedisSecurityCommandExecutor}
+     * calls: `withLane()` pushes the seam's declared lane for the
+     * duration of the closure, so the wrapper can force (or relax) the
+     * guard lane for a specific command regardless of its shape.
+     *
+     * @var list<string>
+     */
+    private array $laneStack = [];
+
     public function __construct(
         private readonly AuthorityTransitionGuard $guard,
         private readonly \Predis\Client $inner,
@@ -100,9 +122,26 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
         parent::__construct();
     }
 
+    /**
+     * Run an operation inside the seam's declared lane. The operation's
+     * commands bypass the wrapper's shape-based classification and use
+     * exactly the lane the seam declared: the security-final lane
+     * forces the zero-stale revalidation for every command shape, and
+     * the ordinary lane serves within the window.
+     */
+    public function withLane(string $lane, callable $operation): mixed
+    {
+        $this->laneStack[] = $lane;
+        try {
+            return $operation();
+        } finally {
+            array_pop($this->laneStack);
+        }
+    }
+
     public function executeCommand(CommandInterface $command): mixed
     {
-        $this->guard->assertServeEligible($this->inner, $this->isSecurityFinalCommand($command));
+        $this->guard->assertServeEligible($this->inner, $this->isForcedSecurityFinalCommand($command));
 
         return $this->inner->executeCommand($command);
     }
@@ -112,7 +151,7 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
         if (strtoupper((string) $commandID) === 'SCRIPT') {
             $this->recordScriptLoad($arguments);
         }
-        $this->guard->assertServeEligible($this->inner, $this->isSecurityFinalCall($commandID, $arguments));
+        $this->guard->assertServeEligible($this->inner, $this->isForcedSecurityFinalCall($commandID, $arguments));
 
         return $this->inner->__call($commandID, $arguments);
     }
@@ -245,21 +284,54 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
     }
 
     /**
-     * Whether the command about to execute is a mutating security-final
-     * transition that must bypass the verification window.
+     * Whether the command about to execute must ride the zero-stale
+     * security-final lane. The seam's declared lane always wins; a
+     * bare command falls back to the shape classification (an unknown
+     * mutating `EVAL` and an unrecorded `EVALSHA` are security-final
+     * by default, fail closed).
      */
-    private function isSecurityFinalCommand(CommandInterface $command): bool
+    private function isForcedSecurityFinalCommand(CommandInterface $command): bool
     {
-        return $this->isSecurityFinalCall($command->getId(), $command->getArguments());
+        return $this->isForcedSecurityFinalCall($command->getId(), $command->getArguments());
     }
 
     /**
      * @param mixed $commandID
      * @param list<mixed> $arguments
      */
+    private function isForcedSecurityFinalCall(mixed $commandID, array $arguments): bool
+    {
+        if ($this->laneStack !== []) {
+            // The RedisSecurityCommandExecutor seam declared the lane
+            // for this execution: the declaration wins over the shape
+            // heuristic for both `EVAL` and `EVALSHA`.
+            return $this->laneStack[\count($this->laneStack) - 1] === self::LANE_SECURITY_FINAL;
+        }
+
+        return $this->isSecurityFinalCall($commandID, $arguments);
+    }
+
+    /**
+     * The shape-based fallback classification for commands executed
+     * without the seam's lane declaration. An unknown mutating `EVAL`
+     * and an unrecorded `EVALSHA` are security-final by default (fail
+     * closed).
+     *
+     * @param mixed $commandID
+     * @param list<mixed> $arguments
+     */
     private function isSecurityFinalCall(mixed $commandID, array $arguments): bool
     {
-        if (strtoupper((string) $commandID) !== 'EVALSHA') {
+        $id = strtoupper((string) $commandID);
+        if ($id === 'EVAL') {
+            // A plain EVAL carries its script body inline; the wrapper
+            // cannot prove a body non-final without a marker heuristic
+            // (which the stores deliberately abandoned for the typed
+            // seam). Unknown mutating EVAL = security-final: default to
+            // immediate revalidation, never a window pass.
+            return true;
+        }
+        if ($id !== 'EVALSHA') {
             return false;
         }
         $sha = $arguments[0] ?? null;

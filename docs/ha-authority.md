@@ -155,12 +155,20 @@ write-once (`SET ... NX`):
 
 - **Expected identity replaces the pin.** The optional
   `ha_authority_expected` configuration carries an operator-provisioned
-  identity ("role|run_id", the same shape as the pin value). When set,
-  the guard compares the serving authority against it instead of the
-  pin key: the configuration IS the pin, and an immutable-identity
-  deployment can skip the Redis pin entirely. The pin key may still
-  exist (the initialize command writes it to match), but the
-  comparison target is the operator-provisioned value.
+  identity ("role|run_id", the same shape as the pin value). Two forms
+  are accepted. The scalar string form applies one identity to every
+  authority. The per-authority map form applies a different identity
+  to each authority
+  (`{"storage": "master|...", "risk": "master|..."}`) — the contract
+  for a deployment whose storage Redis and risk Redis are different
+  servers, because one scalar run_id cannot describe two authorities.
+  When only one Redis is used, the storage entry covers the shared
+  authority, and an authority without an entry falls back to the pin
+  key. When set, the guard compares the serving authority against it
+  instead of the pin key: the configuration IS the pin, and an
+  immutable-identity deployment can skip the Redis pin entirely. The
+  pin key may still exist (the initialize command writes it to match),
+  but the comparison target is the operator-provisioned value.
 
 - **Missing-pin semantics: refusal after establishment, never a
   re-pin.** Once the guard has established or observed the pin
@@ -181,20 +189,27 @@ window per process per connection, not one per operation. A smaller
 window detects an authority change sooner; a larger window costs less
 `INFO` traffic.
 
-Zero-stale security-final: the guarded client wrapper classifies every
-`EVALSHA` write by the script body it recorded at `SCRIPT LOAD` time.
-A mutating security-final script (the storage consume,
-delete-if-pending, cancel, commit and resume-claim transitions, the
-chain obligation/reservation/issuance/verification/step-up/denial/
-transaction-terminal/rearm/release/completion transitions, the
-post-solve disposition claim and finalize, and the siteverify
-idempotency finalize) is preceded by the guard with `securityFinal:
-true`, which bypasses the verification window and re-verifies the
-authority before EVERY such write. A security-final transition can
-therefore never execute on a changed authority inside a stale window:
-the window applies to ordinary reads and non-final writes only. An
-`EVALSHA` whose script was never seen is treated as security-final too
-(fail closed).
+Zero-stale security-final: the bundle components execute their Lua
+through the typed `RedisSecurityCommandExecutor` seam, which declares
+one of three lanes for every script: `executeRead` (read-only),
+`executeMutation` (a non-final write, e.g. a claim or a lease
+renewal) and `executeSecurityFinal` (the security-final transition).
+The store declares the lane at the call site; no comment-marker
+heuristic is involved. The security-final lane forces the
+pinned-primary guard to re-verify the authority immediately before
+the write, bypassing the verification window regardless of the
+command shape. A security-final transition can therefore never
+execute on a changed authority inside a stale window. The window
+applies to ordinary reads and non-final writes only. The guarded
+client wrapper routes the seam's declared lane through every command
+it intercepts (both `EVAL` and `EVALSHA`). A plain `EVAL` executed
+without the seam is an unknown mutating script: security-final by
+default, so it is re-validated immediately, never served inside the
+window (fail closed). The wrapper still classifies the core
+RedisStorage's `EVALSHA` writes by the script body it recorded at
+`SCRIPT LOAD` time (the storage consume, delete-if-pending, cancel,
+commit and resume-claim transitions), and an `EVALSHA` whose script
+was never seen is security-final too.
 
 ### The pinned-primary adapter: wiring
 
@@ -213,10 +228,10 @@ Under `ha_authority: pinned_primary` the extension:
    operations never pass through a guarded wrapper (no recursion);
 3. decorates the storage/limiter/risk checked client with
    `AuthorityGuardedPredisClient`, which consults the guard before
-   every command, including the verified-WAIT `executeRaw` and the
-   zero-stale security-final `EVALSHA` writes, so a
-   durability-critical transition can never execute on a changed
-   authority;
+   every command, including the verified-WAIT `executeRaw`, the
+   core storage's `EVALSHA` writes and the seam's declared
+   security-final lanes, so a durability-critical transition can
+   never execute on a changed authority;
 4. passes the guards to the doctor, whose "HA authority" check audits
    every distinct authority and fails the deploy gate on a changed
    authority, an uninitialized deployment, or an unarmed guard;
@@ -377,12 +392,14 @@ What is real now:
   refusal surface (aggregates, retry-enabled connections and
   uninspectable clients);
 - the pinned-primary adapter (`PinnedPrimaryAuthorityGuard` +
-  `AuthorityGuardedPredisClient`), wired under
+  `AuthorityGuardedPredisClient` + the typed
+  `RedisSecurityCommandExecutor` seam), wired under
   `ha_authority: pinned_primary` with per-authority pin stores in the
   security Redis namespace, the reverify window keyed on the
   connection object, the zero-stale security-final lane, the explicit
   operator bootstrap (`kiwicaptcha:ha-initialize`, never an auto-pin)
-  and the `ha_authority_expected` operator-provisioned identity.
+  and the `ha_authority_expected` operator-provisioned identity
+  (scalar shorthand or the per-authority map).
 - the `ha_safe` protection profile deriving the
   operator_managed + pinned_primary combination.
 - the doctor's "HA authority" check auditing every distinct authority

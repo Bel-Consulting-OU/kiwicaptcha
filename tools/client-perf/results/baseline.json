@@ -17811,5 +17811,7 @@
       }
     }
   },
-  "baseline_of": "tools/client-perf/results/results-2026-08-31.json (initial baseline: emulation tiers on this machine; physical-device tiers are the release boundary)"
+  "baseline_of": "tools/client-perf/results/results-2026-08-31.json (initial baseline: emulation tiers on this machine; physical-device tiers are the release boundary)",
+  "legacy_note": "LEGACY PRE-ROUND-105 RECORDING - recorded before the new harness matrix (16 MiB / target-8 Argon ladder, 50/20 samples, inline/files x cold/warm). The new-matrix evidence run requires a dedicated machine: the real-ladder Argon solves exceed the emulated-throttle solve timeout, and the browser contexts exceed this machine's memory budget under a full run. Replaced when the dedicated-machine run lands (see tools/client-perf/README.md).",
+  "_legacy": true
 }

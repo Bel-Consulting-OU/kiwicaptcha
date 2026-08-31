@@ -1,24 +1,29 @@
 /* KiwiCaptcha worker solver — standalone same-origin asset.
  *
  * Served by the bundle's versioned asset route as worker.<hash>.js and
- * loaded three ways: (1) inline mode builds a Blob worker from the copy of
+ * loaded two ways: (1) inline mode builds a Blob worker from the copy of
  * this source that the wasm glue carries (window.__kiwiCaptchaWasm.workerSource,
- * prepended with the glue), so no network request is made; (2) files mode
- * constructs a SAME-ORIGIN Worker from the versioned asset URL the driver
- * fetched and SRI-verified, and the driver hands the verified runtime URL
- * to this worker via a { type: "glue" } message so it importScripts the
- * glue itself; (3) the legacy explicit data-kiwi-worker-src path imports
- * "kiwicaptcha-wasm.js" relative to its own URL.
+ * prepended with the glue), so no network request is made; (2) a
+ * SAME-ORIGIN Worker constructed by the driver from a worker URL (files
+ * mode: the versioned worker.<hash>.js asset the driver fetched and
+ * SRI-verified; the legacy explicit data-kiwi-worker-src path: the
+ * configured static URL). This worker NEVER imports a runtime itself: it
+ * boots with no runtime and the driver ALWAYS supplies the runtime URL
+ * via a { type: "glue" } message (files mode: the SRI-verified versioned
+ * runtime asset; legacy path: the runtime URL the driver derives from the
+ * worker's own URL), so the worker importScripts exactly the
+ * driver-directed bytes and no unversioned relative URL is ever probed.
  *
  * Message protocol (worker <-> driver):
  *   in : { type: "solve", algorithm, prefix, prefixLen, salt, saltLen,
  *          targetBits, mKib, t, p, startCounter, maxHashes }
  *        prefix/salt are base64 strings (the driver passes the decoded byte
  *        lengths alongside); the worker decodes them itself.
- *   in : { type: "glue", runtimeSrc }  (files mode only) — the driver
- *        supplies the SRI-verified same-origin runtime asset URL; the
- *        worker importScripts it, verifies the wasm protocol version and
- *        only then announces ready.
+ *   in : { type: "glue", runtimeSrc } (every URL-constructed worker) —
+ *        the driver supplies the runtime asset URL (same-origin; SRI-
+ *        verified by the driver in files mode, derived from the worker's
+ *        own URL on the legacy path); the worker importScripts it,
+ *        verifies the wasm protocol version and only then announces ready.
  *   out: { type: "ready", buildId } on startup (solver protocol id)
  *        { type: "progress", counter } every 1000 hashes
  *        { type: "done", counter, buildId }  |  { type: "failed", reason }
@@ -51,16 +56,27 @@
   }
 
   var loader = null;
-  try { importScripts("kiwicaptcha-wasm.js"); } catch (e) {}
+  // The worker NEVER eagerly imports the runtime: it boots with no loader
+  // and the driver supplies the runtime URL AFTER construction via the
+  // { type: "glue" } message (see below) — no relative importScripts, so
+  // no unversioned URL is ever probed and no stale app-served runtime can
+  // race the SRI-verified one. Inline mode's prepended glue has already
+  // run by the time this source executes, so its window.__kiwiCaptchaWasm
+  // export is picked up here; a URL-constructed worker (files mode or the
+  // legacy data-kiwi-worker-src path) has no glue until the driver's glue
+  // handshake arrives.
   if (typeof self !== "undefined" && self.__kiwiCaptchaWasm) {
     loader = self.__kiwiCaptchaWasm;
   }
 
-  // Files mode: the driver constructs this worker from the versioned
-  // worker asset and supplies the SRI-verified runtime (wasm glue) asset
-  // URL AFTER construction via a { type: "glue" } message — the runtime
-  // URL is content-addressed and immutable, so the importScripts below
-  // serves exactly the bytes the driver verified on the main thread.
+  // The driver constructs this worker from a worker URL (files mode: the
+  // versioned worker asset; legacy path: the configured static URL) and
+  // supplies the runtime (wasm glue) URL AFTER construction via a
+  // { type: "glue" } message — files mode passes the SRI-verified versioned
+  // runtime URL, the legacy path the runtime URL derived from the worker's
+  // own URL. The runtime URL is content-addressed and immutable in files
+  // mode, so the importScripts below serves exactly the bytes the driver
+  // verified on the main thread.
   // The glue load is cached per worker, and every Argon solve awaits it,
   // so a glue that fails to load or fails the protocol check fails the
   // solve closed (no_wasm / protocol-mismatch) — never a wasm-less Argon.
@@ -344,9 +360,10 @@
     var m = ev.data;
     if (!m || typeof m !== "object" || m.v !== 1) return;
     if (m.type === "glue") {
-      // Files mode: the driver supplies the SRI-verified same-origin
-      // runtime asset URL after construction. The URL must stay on this
-      // origin — a foreign runtime would be a supply-chain break.
+      // The driver supplies the runtime asset URL after construction
+      // (files mode: SRI-verified; legacy static-worker path: derived).
+      // The URL must stay on this origin — a foreign runtime would be a
+      // supply-chain break.
       if (typeof m.runtimeSrc !== "string" || m.runtimeSrc === "") return;
       var url = null;
       try { url = new URL(m.runtimeSrc, self.location.href).href; } catch (e) {}
@@ -387,8 +404,9 @@
   // exported solver_protocol_version() against this constant (driver +
   // worker + wasm must speak the same protocol generation) and only then
   // announce ready — a mismatched pair fails closed instead of solving.
-  // A worker started WITHOUT a loader (files mode: the driver supplies
-  // the wasm glue via { type: "glue" } AFTER construction) defers the
+  // A worker started WITHOUT a loader (the URL-constructed paths: files
+  // mode and the legacy static worker, where the driver supplies the wasm
+  // glue via { type: "glue" } AFTER construction) defers the
   // verification to the glue handshake and announces ready so the driver
   // can proceed; the Argon solve still fails closed (no_wasm) until the
   // glue actually verifies, so a deferred ready is never a silent pass.

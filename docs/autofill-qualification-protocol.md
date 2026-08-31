@@ -55,12 +55,18 @@ A row that fails any criterion is recorded `FAIL` with the exact
 observed behavior, the surface version, and the date. A row whose
 setup could not be completed (no device, no manager, no OS) is
 recorded `BLOCKED` with the exact blocker and the steps that would
-unblock it.
+unblock it. A row backed only by automated real-engine simulation
+evidence is recorded `AUTOMATED PASS / MANUAL PENDING`: the automated
+runs drive the installed engine binary and the page surface, but they
+cannot exercise a NATIVE-autofill interaction (a saved profile filling
+the form through the browser's own autofill/prompt), so they cannot
+make a native-autofill row `PASS` — only the manual qualification can.
 
 ## The qualification matrix
 
 Every row carries the surface version, the test date, the result
-(`PASS`, `FAIL` or `BLOCKED`) and notes. The page to use is the standard
+(`PASS`, `FAIL`, `BLOCKED` or `AUTOMATED PASS / MANUAL PENDING`) and
+notes. The page to use is the standard
 autofill test page from the browser suite: a form with real
 autocomplete-semantic fields (email, username, current-password),
 the widget container, and the hidden token input, served over the
@@ -71,8 +77,8 @@ endpoint, exactly as the automated suites do.
 
 | Surface | Required steps | Version | Date | Result | Notes |
 |---------|----------------|---------|------|--------|-------|
-| Chrome stable, native address + password autofill | Save a profile with email, name and a password for the test page; reload; click the form and accept the native autofill; submit; check the decoy stays empty, real fields carry values, the honeypot-check reports no hit, and the proof verifies | 1xx stable | 2026-08-30 | PASS | Automated real-Chrome evidence logged in the real-chrome lane (the machine-installed Chrome binary); the manual confirmation is pending |
-| Firefox stable, native autofill | Save a login and a form profile in Firefox; reload the page; accept the autofill prompts on the real fields; submit; check the decoy stays empty, the honeypot-check reports no hit, and the proof verifies | 154.0.1 | 2026-08-30 | PASS | Real-Firefox automated evidence logged (autofill-evidence, decoy-polymorphism and targeted-bot suites, 21 tests, all green); native-prompt manual confirmation pending |
+| Chrome stable, native address + password autofill | Save a profile with email, name and a password for the test page; reload; click the form and accept the native autofill; submit; check the decoy stays empty, real fields carry values, the honeypot-check reports no hit, and the proof verifies | 1xx stable | 2026-08-30 | AUTOMATED PASS / MANUAL PENDING | Automated real-Chrome evidence logged in the real-chrome lane (the machine-installed Chrome binary); the native-autofill manual confirmation is pending |
+| Firefox stable, native autofill | Save a login and a form profile in Firefox; reload the page; accept the autofill prompts on the real fields; submit; check the decoy stays empty, the honeypot-check reports no hit, and the proof verifies | 154.0.1 | 2026-08-30 | AUTOMATED PASS / MANUAL PENDING | Real-Firefox automated evidence logged (autofill-evidence, decoy-polymorphism and targeted-bot suites, 21 tests, all green); the native-autofill prompt manual confirmation is pending |
 | Safari current, Autofill + iCloud Keychain | Save a login in iCloud Keychain; enable Safari autofill; reload the page; accept the Keychain fill on the real fields; submit; check the decoy stays empty and the honeypot-check reports no hit | TBD | | PENDING | Requires a physical macOS host with iCloud Keychain; follow the steps in this row |
 | Edge (Chromium engine), native autofill + password manager | Save a login and an address profile in Edge; reload; accept the fills; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Follow the steps in this row |
 | Bitwarden | Install the Bitwarden browser extension; unlock with a test vault; use the inline autofill menu on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Follow the steps in this row |
@@ -93,7 +99,7 @@ result and the notes, nothing more:
 Surface: <the surface name>
 Version: <exact surface version>
 Date: <ISO date>
-Result: <PASS | FAIL | BLOCKED>
+Result: <PASS | FAIL | BLOCKED | AUTOMATED PASS / MANUAL PENDING>
 Notes: <the exact observed behavior; for FAIL, the criterion that
 broke; for BLOCKED, the blocker and the unblocking steps>
 ```

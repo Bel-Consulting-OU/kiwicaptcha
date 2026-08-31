@@ -29,7 +29,12 @@ use KiwiCaptcha\AuthoritySafetyClassifier;
  * pin key. The configuration is the pin, and a deployment whose
  * identity is immutable can skip the Redis pin entirely. The pin key
  * may still exist (initialize writes it to match), but the comparison
- * target is the operator-provisioned value.
+ * target is the operator-provisioned value. The extension accepts the
+ * scalar shorthand (one identity for every authority) and the
+ * per-authority map (`{"storage": ..., "risk": ...}`). This guard is
+ * constructed with the resolved identity of its own authority only,
+ * so a distinct storage and risk authority never share one expected
+ * run_id.
  *
  * Pin store: one Redis key in the same security-Redis namespace,
  * holding "role|run_id". The pin is write-once (`SET ... NX`). The

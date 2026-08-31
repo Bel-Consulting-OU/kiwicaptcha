@@ -296,7 +296,14 @@
   //    the glue rides the worker's own importScripts of the verified
   //    runtime asset (the { type: "glue" } handshake below);
   //  - the legacy explicit data-kiwi-worker-src URL (without an integrity
-  //    digest) keeps its historical direct-construction path.
+  //    digest) keeps its historical direct-construction path, and the
+  //    driver derives the runtime URL from the worker's own URL and hands
+  //    it over through the SAME { type: "glue" } handshake — the worker
+  //    never eagerly imports a relative runtime on its own.
+  // The worker NEVER probes an unversioned runtime at startup in any
+  // path: it boots with no runtime and the driver always supplies the
+  // runtime URL explicitly (files mode: the SRI-verified versioned
+  // runtime asset; legacy path: the derived URL).
   // If the worker cannot be created or the solve fails inside it, the
   // widget enters the controlled kiwi:worker-unavailable state. There is
   // NO main-thread Argon2 fallback and no weaker-profile retry — the
@@ -430,16 +437,33 @@
     // compat loader's fetched glue (/api.js), or the lazy runtime fetch of
     // files mode (data-kiwi-runtime-src).
     var glue = workerSrc ? null : (kiwiFindGlueSource() || kiwiCompatGlue);
+    // The runtime URL handed to the worker through the { type: "glue" }
+    // handshake. The driver ALWAYS directs the worker's runtime: files
+    // mode passes the page-issued versioned runtime asset (SRI-verified by
+    // the driver's fetch below); the legacy static-worker path derives the
+    // runtime URL from the worker's own URL — the exact resolution the
+    // worker's historical relative importScripts used, now supplied
+    // explicitly so the worker never probes an unversioned URL on its own.
+    var glueRuntimeSrc = null;
+    if (lazyWorkerAsset) {
+      glueRuntimeSrc = runtimeSrc;
+    } else if (workerSrc) {
+      try {
+        glueRuntimeSrc = new URL("kiwicaptcha-wasm.js", new URL(workerSrc, window.location.href).href).href;
+      } catch (e) {}
+    }
     var glueReady;
     if (workerSrc) {
-      // Files mode: the same-origin worker loads the glue itself
-      // (importScripts of the verified runtime URL). The driver STILL
+      // URL-constructed worker: the same-origin worker loads the glue
+      // itself (importScripts of the runtime URL the driver supplies via
+      // the { type: "glue" } message). For files mode the driver STILL
       // fetches + SRI-verifies the runtime glue: the immutable
       // content-addressed URL then serves the identical bytes to the
       // worker's importScripts from the HTTP cache, so the runtime is
       // downloaded exactly once per page across widgets. The legacy
-      // static worker path (no integrity attribute) loads its glue
-      // relatively and needs no driver-side runtime fetch.
+      // static-worker path (no integrity attribute) needs no driver-side
+      // runtime fetch — the worker importScripts the derived URL — but the
+      // driver still supplies that URL explicitly.
       glueReady = lazyWorkerAsset && runtimeSrc
         ? kiwiFetchRuntimeGlue(runtimeSrc, runtimeIntegrity)
         : Promise.resolve({ src: null });
@@ -610,13 +634,17 @@
         var prefixBytes = encoder.encode(data.prefix);
         var saltBytes = b64decode(data.salt);
         try {
-          // Files mode: hand the SRI-verified runtime URL to the worker
-          // BEFORE the solve — the worker importScripts it, verifies the
-          // wasm protocol version and only then solves; the solve message
-          // (posted right after) is queued behind the glue handshake. The
+          // Hand the runtime URL to the worker BEFORE the solve — the
+          // worker importScripts it, verifies the wasm protocol version
+          // and only then solves; the solve message (posted right after)
+          // is queued behind the glue handshake. The driver ALWAYS
+          // supplies the runtime URL explicitly (files mode: the
+          // SRI-verified versioned runtime asset; legacy static-worker
+          // path: the URL derived from the worker's own URL), so the
+          // worker never probes an unversioned runtime on its own. The
           // worker only ever accepts a same-origin runtime URL.
-          if (lazyWorkerAsset && runtimeSrc) {
-            worker.postMessage({ v: 1, type: "glue", runtimeSrc: runtimeSrc });
+          if (glueRuntimeSrc) {
+            worker.postMessage({ v: 1, type: "glue", runtimeSrc: glueRuntimeSrc });
           }
           worker.postMessage({
             v: 1,

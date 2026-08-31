@@ -207,7 +207,7 @@ names is refused.
     # replay_durability: best_effort    # best_effort | operator_managed | fail_closed
     # ha_authority: none                # none | pinned_primary
     # ha_authority_reverify_secs: 5     # the guard's verification cache window
-    # ha_authority_expected: null       # the operator-provisioned "role|run_id" identity (optional)
+    # ha_authority_expected: null       # "role|run_id", or a per-authority map (optional)
 ```
 
 `replay_durability` declares the authority-change contract (see
@@ -241,14 +241,27 @@ How the pinned-primary guard behaves:
   "role|run_id" identity. When set, the guard compares the serving
   authority against it instead of the pin key: the configuration IS
   the pin, and an immutable-identity deployment can skip the Redis pin
-  entirely.
+  entirely. Two forms are accepted:
+  - the scalar string form applies the one identity to every authority
+    (`ha_authority_expected: "master|<run_id>"`);
+  - the per-authority map form applies a different identity to each
+    authority: `{"storage": "master|<run_id>", "risk":
+    "master|<run_id>"}`. This is the correct form for a deployment
+    whose storage Redis and risk Redis are different servers (one
+    scalar run_id cannot describe two authorities). When only one
+    Redis is used, the storage entry covers the shared authority; an
+    authority without an entry falls back to the pin key (it must be
+    initialized).
 - The verification result is cached in-process per connection object
   for `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
   probe costs one round trip per window per process per connection,
   not one per operation. A reconnect that replaces the connection
-  object invalidates the cache. A mutating security-final transition
-  (consume, commit, chain, idempotency finalize) bypasses the window
-  and re-verifies before every write (zero stale).
+  object invalidates the cache. The components execute their Lua
+  through the typed RedisSecurityCommandExecutor seam
+  (docs/ha-authority.md). The seam's security-final lane (the
+  siteverify finalize, the chain transitions, the post-solve final
+  disposition) bypasses the window and re-verifies before every write
+  (zero stale). The read and mutation lanes serve within the window.
 - A missing pin after it was established is a refusal, never a silent
   re-pin. Re-pin explicitly after a deliberate authority change:
   quiesce the deployment, then run

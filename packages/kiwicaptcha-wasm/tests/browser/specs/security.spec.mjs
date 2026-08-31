@@ -111,15 +111,23 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     // Worker side (the standalone asset; the driver no longer embeds the
     // worker bytes — the glue carries them for inline mode): the solve
     // request must be a v1 object with the full numeric/string field set,
-    // and the files-mode glue message must carry a same-origin runtime URL.
+    // and the glue message must carry a same-origin runtime URL.
     expect(worker).toMatch(/m\.v !== 1/);
     expect(worker).toMatch(/m\.type !== "solve"\) return;/);
     expect(worker).toMatch(/m\.type === "glue"/);
+    // The worker never eagerly imports a runtime: it boots with no loader
+    // and the driver always supplies the runtime URL through the glue
+    // handshake (files mode: the SRI-verified versioned runtime; legacy
+    // static-worker path: the URL derived from the worker's own URL), so
+    // no unversioned relative URL is ever probed and a stale app-served
+    // runtime can never race the verified one.
+    expect(worker, 'the worker must never eagerly import the runtime').not.toMatch(/importScripts\(\s*["']kiwicaptcha-wasm\.js["']\s*\)/);
     // The solve request the driver sends carries the version field.
     expect(src).toMatch(/v: 1,\n\s*type: "solve"/);
-    // The files-mode worker handshake the driver posts carries the version
-    // field and the same-origin runtime asset URL.
-    expect(src).toMatch(/v: 1, type: "glue", runtimeSrc: runtimeSrc/);
+    // The glue handshake the driver posts carries the version field and
+    // the runtime asset URL (SRI-verified in files mode, derived from the
+    // worker's own URL on the legacy static-worker path).
+    expect(src).toMatch(/v: 1, type: "glue", runtimeSrc: glueRuntimeSrc/);
   });
 
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {

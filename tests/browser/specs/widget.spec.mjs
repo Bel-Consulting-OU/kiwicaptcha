@@ -34,10 +34,13 @@ test.describe('KiwiCaptcha browser solver', () => {
   });
 
   test('external same-origin worker is used (data-kiwi-worker-src)', async ({ page }) => {
-    // The standalone worker path (CSP-friendly: no blob:) must load its WASM
-    // glue via importScripts("kiwicaptcha-wasm.js") — a typo in that name
-    // silently loses off-main-thread Argon. This test pins the flag the
-    // driver sets when the external worker is actually used.
+    // The standalone worker path (CSP-friendly: no blob:) never imports a
+    // runtime itself: the driver derives the runtime URL from the worker's
+    // own URL and supplies it through the { type: "glue" } handshake — a
+    // missing or wrong derivation silently loses off-main-thread Argon.
+    // This test pins the flag the driver sets when the external worker is
+    // actually used and verifies the end-to-end solve through the
+    // driver-directed runtime.
     await page.goto('/?worker=1&algorithm=argon2id');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
     const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
@@ -46,6 +49,30 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(token.length).toBeGreaterThan(0);
     const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
     expect((await resp.json()).ok).toBe(true);
+  });
+
+  test('the legacy static worker receives the driver-derived runtime URL (never a relative probe)', async ({ page }) => {
+    // The legacy data-kiwi-worker-src path (no integrity digest) must be
+    // driven through the same protocol as files mode: the driver derives
+    // the runtime URL from the worker's own URL ("kiwicaptcha-wasm.js"
+    // next to the worker) and posts it via the glue handshake before the
+    // solve. The worker's runtime load is the importScripts of exactly
+    // that derived URL — the fixture serves it at /kiwicaptcha-wasm.js —
+    // and no relative/unversioned probe is ever made.
+    const runtimeRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/kiwicaptcha-wasm.js')) runtimeRequests.push(req.url());
+    });
+    await page.goto('/?worker=1&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+    // The worker's importScripts of the derived runtime URL is captured in
+    // the page request stream; the legacy path must load exactly that
+    // same-directory runtime.
+    expect(runtimeRequests).toContain('http://127.0.0.1:8085/kiwicaptcha-wasm.js');
   });
 
   test('Privacy Strict: zero external requests and empty telemetry', async ({ page }) => {

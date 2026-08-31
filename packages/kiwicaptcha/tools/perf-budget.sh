@@ -11,6 +11,15 @@
 # section, non-numeric value) fails the script, because the budget
 # cannot be enforced from a second authority that does not exist.
 #
+# Measured-byte equality: the budgets section records the measured
+# sizes (raw_bytes of the widget driver, worker, runtime and css; plus
+# gzip/brotli of the driver), and this script verifies the recorded
+# raw_bytes equal the current measured bytes — a stale record describes
+# bytes the caps no longer gate, so a drift is a hard failure, never
+# just cap-compliance. The recorded sizes are re-measured by hand on a
+# clean local machine (the eager-import removal regenerated them against
+# the current assets).
+#
 # Compressed budgets: the same three copies must stay under a gzip cap
 # and a brotli cap, so a regression that bloats the wire bytes the
 # browser actually downloads (gzip on the wire, brotli when the server
@@ -110,6 +119,30 @@ for copy in packages/kiwicaptcha-wasm/assets/widget-driver.js \
     fi
   fi
 done
+
+# Measured-byte equality gate: the recorded raw_bytes in the budgets
+# section must equal the current measured bytes of the canonical copy of
+# every widget asset (driver, worker, runtime, css). raw_bytes is a
+# measured fact, never a budget: it is re-recorded by hand on a clean
+# local machine, and this equality check turns a drifted record into a
+# hard failure instead of letting the caps silently gate different bytes
+# than the record describes.
+verify_recorded_raw_bytes() {
+  local key="$1" file="$2" recorded actual
+  recorded=$(json_get "$BASELINES_FILE" "budgets.$key.raw_bytes")
+  actual=$(wc -c < "$file" | tr -d ' ')
+  if [ "$recorded" != "$actual" ]; then
+    echo "perf-budget FAILED: budgets.$key.raw_bytes records $recorded bytes but $file is actually $actual bytes (re-measure and re-record the budgets section)" >&2
+    FAILED=1
+  else
+    echo "perf-budget raw_bytes equality OK: budgets.$key.raw_bytes == $recorded bytes ($file)"
+  fi
+}
+
+verify_recorded_raw_bytes widget_driver packages/kiwicaptcha-wasm/assets/widget-driver.js
+verify_recorded_raw_bytes widget_worker packages/kiwicaptcha-wasm/assets/kiwi-worker.js
+verify_recorded_raw_bytes widget_runtime packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
+verify_recorded_raw_bytes widget_css packages/kiwicaptcha-wasm/assets/widget.css
 
 challenge_size() {
   "$PHP_BIN" -r '

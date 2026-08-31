@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
@@ -369,5 +370,124 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         $this->expectExceptionMessage('the serving authority changed');
 
         $wrapped->set('probe', '2');
+    }
+
+    // ── The guarded Lua seam (RedisSecurityCommandExecutor) ──────────────
+
+    public function testAPlainEvalOutsideTheSeamIsSecurityFinalByDefault(): void
+    {
+        // An EVAL the wrapper cannot prove non-final (no seam lane, no
+        // recorded sha) is an unknown mutating script: fail closed with
+        // the zero-stale lane — immediate revalidation, never a window
+        // pass.
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+
+        $wrapped->eval('-- a bare script nobody declared', 1, 'k', 'v');
+        $infoAfterEval = $this->infoCalls($fake);
+        self::assertGreaterThan(0, $infoAfterEval, 'the first EVAL verifies the authority');
+
+        // Within the window the ordinary lane serves from the cache...
+        $wrapped->get('probe');
+        $infoAfterOrdinary = $this->infoCalls($fake);
+        self::assertSame($infoAfterEval, $infoAfterOrdinary, 'an ordinary command serves from the cached verification');
+
+        // ...but a second bare EVAL re-verifies anyway: unknown mutating
+        // EVAL is security-final by default.
+        $wrapped->eval('-- a bare script nobody declared', 1, 'k', 'v');
+        self::assertGreaterThan(
+            $infoAfterOrdinary,
+            $this->infoCalls($fake),
+            'a bare EVAL is security-final by default: it bypasses the verification window',
+        );
+    }
+
+    public function testTheSeamOrdinaryLaneServesWithinTheWindow(): void
+    {
+        // The seam's declared ordinary lane (executeRead /
+        // executeMutation) relaxes the eval default: a known
+        // non-final script serves within the verification window.
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+        $seam = new RedisSecurityCommandExecutor($wrapped);
+
+        $seam->executeRead('-- Chain live read: read-only', 'k', ['arg']);
+        $seam->executeMutation('-- a known non-final mutation', 'k', ['v']);
+        $infoAfterSeam = $this->infoCalls($fake);
+
+        $seam->executeRead('-- Chain live read: read-only', 'k', ['arg']);
+        $seam->executeMutation('-- a known non-final mutation', 'k', ['v']);
+        self::assertSame(
+            $infoAfterSeam,
+            $this->infoCalls($fake),
+            'the seam\'s ordinary lanes serve within the verification window without re-verifying',
+        );
+    }
+
+    public function testTheSeamSecurityFinalLaneForcesRevalidationForEveryShape(): void
+    {
+        // The seam's security-final lane forces the zero-stale
+        // revalidation even inside the window, regardless of the
+        // command shape (`eval` here; `evalsha` rides the same
+        // forced lane through the wrapper).
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+        $seam = new RedisSecurityCommandExecutor($wrapped);
+
+        $seam->executeSecurityFinal('-- Chain verification: terminal', 'k', ['v']);
+        $infoAfterFinal = $this->infoCalls($fake);
+        self::assertGreaterThan(0, $infoAfterFinal, 'the security-final lane verifies the authority');
+
+        // An ordinary command serves from the cache inside the window...
+        $wrapped->get('probe');
+        $infoAfterOrdinary = $this->infoCalls($fake);
+        self::assertSame($infoAfterFinal, $infoAfterOrdinary, 'the ordinary lane still serves from the cache');
+
+        // ...and the next security-final transition re-verifies anyway.
+        $seam->executeSecurityFinal('-- Chain verification: terminal', 'k', ['v']);
+        self::assertGreaterThan(
+            $infoAfterOrdinary,
+            $this->infoCalls($fake),
+            'the seam\'s security-final lane bypasses the window for every command shape',
+        );
+    }
+
+    public function testTheSeamSecurityFinalLaneRefusesImmediatelyOnAChangedAuthority(): void
+    {
+        // The zero-stale refusal through the seam: a changed authority
+        // inside the window refuses the security-final write before the
+        // mutation reaches Redis (the guard runs first, the script never
+        // executes).
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+        $seam = new RedisSecurityCommandExecutor($wrapped);
+
+        $seam->executeSecurityFinal('-- Chain verification: terminal', 'k', ['v']);
+
+        // The authority changed; the window has NOT expired.
+        $fake->infoReplication['run_id'] = self::RUN_ID_B;
+        $fake->infoServer['run_id'] = self::RUN_ID_B;
+
+        $evalCallsBefore = \count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'EVAL'));
+        try {
+            $seam->executeSecurityFinal('-- Chain verification: terminal', 'k', ['v']);
+            self::fail('a security-final transition must refuse immediately after the authority changed, inside the window');
+        } catch (PinnedAuthorityRefusalException $e) {
+            self::assertStringContainsString('pinned master|'.self::RUN_ID_A, $e->getMessage());
+            self::assertStringContainsString('observed master|'.self::RUN_ID_B, $e->getMessage());
+        }
+        self::assertSame(
+            $evalCallsBefore,
+            \count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'EVAL')),
+            'the refused security-final write never reaches the client: the guard refuses before the mutation',
+        );
     }
 }

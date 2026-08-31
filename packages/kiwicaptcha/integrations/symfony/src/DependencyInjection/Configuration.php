@@ -893,14 +893,34 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(5)
                     ->min(1)
                 ->end()
-                ->scalarNode('ha_authority_expected')
-                    ->info('THE OPERATOR-PROVISIONED EXPECTED AUTHORITY IDENTITY (default null): the "role|run_id" identity the pinned-primary guard must observe, the same shape as the pin value (e.g. "master|5f8d..."). When set, the guard compares the serving authority against this value INSTEAD of the `{kiwi:<ns>}:authority:pin:<suffix>` key — the configuration is the pin, so an immutable-identity deployment can skip the Redis pin entirely. The guard refuses when the serving identity differs, and kiwicaptcha:ha-initialize refuses when the configured identity disagrees with the connected server. Production never auto-pins: without this option the deployment must run kiwicaptcha:ha-initialize to record the pin before the guard serves. See docs/ha-authority.md.')
+                ->variableNode('ha_authority_expected')
+                    ->info('THE OPERATOR-PROVISIONED EXPECTED AUTHORITY IDENTITY (default null): the "role|run_id" identity the pinned-primary guard must observe, the same shape as the pin value (e.g. "master|5f8d..."). Two forms are accepted. The scalar string form applies the ONE identity to EVERY authority (storage and, when distinct, risk). The per-authority map form {"storage": "master|...", "risk": "master|..."} applies a DIFFERENT expected identity to each authority — a deployment whose storage Redis and risk Redis are different servers cannot share one run_id, and the map is the contract that says so; when only one Redis is used the storage entry covers the shared authority, and an authority without an entry falls back to the pin key (it must be initialized). When set, the guard compares the serving authority against this value INSTEAD of the `{kiwi:<ns>}:authority:pin:<suffix>` key — the configuration is the pin, so an immutable-identity deployment can skip the Redis pin entirely. The guard refuses when the serving identity differs, and kiwicaptcha:ha-initialize refuses when the configured identity disagrees with the connected server. Production never auto-pins: without this option the deployment must run kiwicaptcha:ha-initialize to record the pin before the guard serves. See docs/ha-authority.md.')
                     ->defaultNull()
                     ->validate()
                         ->ifTrue(static function (mixed $v): bool {
-                            return \is_string($v) && $v !== '' && preg_match('/^[^|]+\|[^|]+$/D', $v) !== 1;
+                            if ($v === null || $v === '') {
+                                return false;
+                            }
+                            if (\is_string($v)) {
+                                return preg_match('/^[^|]+\|[^|]+$/D', $v) !== 1;
+                            }
+                            if (\is_array($v)) {
+                                foreach ($v as $authority => $identity) {
+                                    if (!\in_array($authority, ['storage', 'risk'], true)
+                                        || !\is_string($identity)
+                                        || $identity === ''
+                                        || preg_match('/^[^|]+\|[^|]+$/D', $identity) !== 1
+                                    ) {
+                                        return true;
+                                    }
+                                }
+
+                                return false;
+                            }
+
+                            return true;
                         })
-                        ->thenInvalid('must be the identity shape "role|run_id" (the same shape as the pin value, e.g. "master|<run_id>")')
+                        ->thenInvalid('must be either the identity shape "role|run_id" (the shorthand applying to EVERY authority) or a map {"storage": "role|run_id", "risk": "role|run_id"} naming only the storage/risk authorities, each value in the identity shape (the same shape as the pin value, e.g. "master|<run_id>")')
                     ->end()
                 ->end()
                 ->arrayNode('protocol_rollout')

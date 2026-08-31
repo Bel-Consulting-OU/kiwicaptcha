@@ -2160,8 +2160,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      *    guarded decorator consulting its own guard.
      *
      * The optional `ha_authority_expected` operator-provisioned identity
-     * is passed to every guard: when set, the guard compares the
-     * serving authority against it instead of the pin key.
+     * is passed to every guard: the scalar shorthand applies to every
+     * authority, and the per-authority map form applies each entry to
+     * its own authority (an authority without an entry falls back to
+     * the pin key).
      *
      * The decoration targets the resolved client service id, so the
      * storage (DSN-built or user RedisStorage), the limiter, the
@@ -2179,9 +2181,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             );
         }
         $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) ($config['risk']['namespace'] ?? 'kiwicaptcha')) ?: 'kiwi';
-        $expected = \is_string($config['ha_authority_expected'] ?? null) && $config['ha_authority_expected'] !== ''
-            ? $config['ha_authority_expected']
-            : null;
+        $expectedConfig = $config['ha_authority_expected'] ?? null;
+        if (\is_string($expectedConfig) && $expectedConfig !== '') {
+            // The scalar shorthand: ONE expected identity applies to
+            // every authority.
+            $expectedShorthand = $expectedConfig;
+            $expectedByAuthority = [];
+        } elseif (\is_array($expectedConfig)) {
+            // The per-authority map: each entry applies to its own
+            // authority; an authority without an entry falls back to
+            // the pin key (it must be initialized).
+            $expectedShorthand = null;
+            $expectedByAuthority = $expectedConfig;
+        } else {
+            $expectedShorthand = null;
+            $expectedByAuthority = [];
+        }
         $this->assertPinnedPrimaryClientClass($redisRef, 'the storage/limiter Redis client', $container);
         $redisId = $this->resolveClientServiceId((string) $redisRef, $container);
         if ($redisId === null) {
@@ -2196,7 +2211,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $namespace,
             $config['ha_authority_reverify_secs'],
             'storage',
-            $expected,
+            $expectedByAuthority['storage'] ?? $expectedShorthand,
         ]))
             ->setPublic(true));
         $guardRefs = ['storage' => new Reference($storageGuardId)];
@@ -2223,7 +2238,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $namespace,
                 $config['ha_authority_reverify_secs'],
                 'risk',
-                $expected,
+                $expectedByAuthority['risk'] ?? $expectedShorthand,
             ]))
                 ->setPublic(true));
             $guardRefs['risk'] = new Reference($riskGuardId);
