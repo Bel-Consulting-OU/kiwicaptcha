@@ -24,21 +24,3 @@
 # its tests, the HA doctor kernels, and the browser asset-mode spec).
 # The baseline-integrity step consumes these entries once the rows
 # land; a later writable run removes them.
-packages/kiwicaptcha/integrations/symfony/src/Controller/AssetController.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityClassification.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityGuardedPredisClient.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityTransitionGuard.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/PinnedAuthorityRefusalException.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/PinnedPrimaryAuthorityGuard.php
-packages/kiwicaptcha/integrations/symfony/src/Security/Authority/RuntimeAuthorityClassifier.php
-packages/kiwicaptcha/integrations/symfony/tests/AssetControllerTest.php
-packages/kiwicaptcha/integrations/symfony/tests/AuthorityTransitionGuardTest.php
-packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorHaSafeTestKernel.php
-packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorHighAbuseDecoyDeferredNormalKernel.php
-packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorPinnedPrimaryTestKernel.php
-packages/kiwicaptcha/integrations/symfony/tests/Kernel/FailClosedEnvPostureSentinelTestKernel.php
-packages/kiwicaptcha/integrations/symfony/tests/Kernel/FailClosedOpaqueFactoryClientTestKernel.php
-packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryAuthorityGuardTest.php
-packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryAuthorityPromotionTest.php
-packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryWiringTest.php
-tests/browser/specs/asset-mode.spec.mjs
