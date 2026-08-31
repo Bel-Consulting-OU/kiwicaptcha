@@ -20,12 +20,27 @@ use Predis\Command\CommandInterface;
  * wrapper), so its own `INFO` reads and pin-key operations cannot
  * recurse into the check.
  *
- * The guard caches its verification for a short window, so the wrapper
- * costs one `INFO` probe per window per process, not one round trip
- * per command. Within the window the check returns without any I/O.
- * Pipeline/transaction/pub-sub contexts (unused by the bundle today)
- * are verified at context entry; commands inside the context run
- * within the same verification window.
+ * Zero-stale security-final lane: the wrapper classifies every
+ * `EVALSHA` write by the script body it recorded at `SCRIPT LOAD`
+ * time. A mutating security-final script (the storage consume,
+ * delete-if-pending, cancel, commit and resume-claim transitions, the
+ * chain obligation/reservation/issuance/verification/step-up/denial/
+ * transaction-terminal/rearm/release/completion transitions, the
+ * post-solve disposition claim and finalize, and the siteverify
+ * idempotency finalize) is preceded by
+ * `assertServeEligible($inner, securityFinal: true)`. That lane
+ * bypasses the verification window and re-verifies the authority
+ * before every such write, so a security-final transition can never
+ * execute on a changed authority inside a stale window: the window
+ * applies to ordinary reads and non-final writes only. An `EVALSHA`
+ * whose script was never seen (an unrecorded sha) is treated as
+ * security-final too (fail closed, never a silent window pass).
+ *
+ * The guard caches its verification for a short window per connection
+ * object (spl_object_id), so the wrapper costs one `INFO` probe per
+ * window per connection per process, not one round trip per command.
+ * Within the window ordinary checks return without any I/O; a
+ * reconnect that replaces the connection object invalidates the cache.
  *
  * The wrapper is a Predis\Client subclass (never a proxy) so every
  * existing `\Predis\Client` type hint keeps accepting the decorated
@@ -35,6 +50,49 @@ use Predis\Command\CommandInterface;
  */
 final class AuthorityGuardedPredisClient extends \Predis\Client
 {
+    /**
+     * The distinctive body markers of the mutating security-final Lua
+     * scripts the bundle components load. A script whose body carries
+     * one of these markers is preceded by the zero-stale
+     * security-final guard lane. The markers mirror the components'
+     * script header comments (docs/ha-authority.md).
+     */
+    private const SECURITY_FINAL_MARKERS = [
+        '-- kiwicaptcha consume transition',
+        '-- kiwicaptcha delete-if-pending (atomic cleanup)',
+        '-- kiwicaptcha cancel transition',
+        '-- kiwicaptcha commit result',
+        '-- kiwicaptcha resume-derivation claim',
+        '-- Chain obligation create-or-get',
+        '-- Chain reservation:',
+        '-- Chain issuance:',
+        '-- Chain verification:',
+        '-- Chain step-up:',
+        '-- Chain denial:',
+        '-- Transaction denial:',
+        '-- Transaction step-up:',
+        '-- Chain rearm:',
+        '-- Chain release:',
+        '-- Chain completion',
+        '-- Chain obligation compare-delete:',
+        '-- Post-solve disposition claim:',
+        '-- Post-solve disposition guarded finalize:',
+        '-- Post-solve disposition finalize:',
+        '-- The finalize must authorize the state',
+        'Outstanding challenge issuance',
+        'Outstanding challenge release',
+        'Outstanding challenge cancellation admission',
+    ];
+
+    /**
+     * sha => script body, captured at `SCRIPT LOAD` time so an
+     * `EVALSHA` can be classified by its body without knowing the
+     * components' private Lua constants.
+     *
+     * @var array<string, string>
+     */
+    private array $scriptBodiesBySha = [];
+
     public function __construct(
         private readonly AuthorityTransitionGuard $guard,
         private readonly \Predis\Client $inner,
@@ -44,20 +102,25 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
 
     public function executeCommand(CommandInterface $command): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        $this->guard->assertServeEligible($this->inner, $this->isSecurityFinalCommand($command));
 
         return $this->inner->executeCommand($command);
     }
 
     public function __call($commandID, $arguments): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        if (strtoupper((string) $commandID) === 'SCRIPT') {
+            $this->recordScriptLoad($arguments);
+        }
+        $this->guard->assertServeEligible($this->inner, $this->isSecurityFinalCall($commandID, $arguments));
 
         return $this->inner->__call($commandID, $arguments);
     }
 
     public function executeRaw(array $arguments, &$error = null): mixed
     {
+        // The verified-WAIT executeRaw carries WAIT, never a
+        // security-final mutation, so the ordinary window lane applies.
         $this->guard->assertServeEligible($this->inner);
 
         return $this->inner->executeRaw($arguments, $error);
@@ -164,5 +227,67 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
     public function __isset(string $name): bool
     {
         return isset($this->inner->{$name});
+    }
+
+    /**
+     * Record a `SCRIPT LOAD` body under its sha so the later `EVALSHA`
+     * can be classified. Both the `__call` shape (the `script` command
+     * with the subcommand `LOAD`) and a direct command are covered.
+     *
+     * @param list<mixed> $arguments
+     */
+    private function recordScriptLoad(array $arguments): void
+    {
+        $sub = $arguments[0] ?? null;
+        if (\is_string($sub) && strtoupper($sub) === 'LOAD' && \is_string($arguments[1] ?? null)) {
+            $this->scriptBodiesBySha[sha1($arguments[1])] = $arguments[1];
+        }
+    }
+
+    /**
+     * Whether the command about to execute is a mutating security-final
+     * transition that must bypass the verification window.
+     */
+    private function isSecurityFinalCommand(CommandInterface $command): bool
+    {
+        return $this->isSecurityFinalCall($command->getId(), $command->getArguments());
+    }
+
+    /**
+     * @param mixed $commandID
+     * @param list<mixed> $arguments
+     */
+    private function isSecurityFinalCall(mixed $commandID, array $arguments): bool
+    {
+        if (strtoupper((string) $commandID) !== 'EVALSHA') {
+            return false;
+        }
+        $sha = $arguments[0] ?? null;
+        if (!\is_string($sha) || $sha === '') {
+            return false;
+        }
+        $body = $this->scriptBodiesBySha[$sha] ?? null;
+        if ($body === null) {
+            // An unrecorded script cannot be proven non-final: fail
+            // closed with the zero-stale lane.
+            return true;
+        }
+
+        return self::isSecurityFinalScript($body);
+    }
+
+    /**
+     * Whether a loaded Lua body is a mutating security-final
+     * transition: any of the components' security-final markers.
+     */
+    private static function isSecurityFinalScript(string $body): bool
+    {
+        foreach (self::SECURITY_FINAL_MARKERS as $marker) {
+            if (str_contains($body, $marker)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

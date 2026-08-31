@@ -98,11 +98,15 @@ for example the application's CSP header cannot be inspected from the
 CLI, so the CSP check states the documented requirements and warns
 that they stay unverified. The page CSP must allow the widget:
 `script-src` with the nonce (or `unsafe-inline`) plus
-`wasm-unsafe-eval`, `style-src` for the inline styles,
-`worker-src blob:` for the Argon worker, and `connect-src` for the
-challenge API. With `asset_mode: files` the same directives already
-cover the widget: the asset URLs are same-origin and the lazy runtime
-fetch uses `connect-src 'self'`. The recommended profile is in
+`wasm-unsafe-eval`, `style-src` for the styles, and `connect-src` for
+the challenge API. The worker directive depends on the asset mode.
+Files mode (the default) constructs a same-origin Worker from the
+fetched `worker.<hash>.js` asset, so `worker-src 'self'` applies and
+`blob:` is never required. The inline compatibility tier builds its
+worker from a Blob URL, so it needs `worker-src blob:`. With
+`asset_mode: files` the same directives cover the widget: the asset
+URLs are same-origin and the lazy runtime and worker fetches use
+`connect-src 'self'`. The recommended profile is in
 [getting-started.md](getting-started.md#content-security-policy).
 
 ## Preserve the widget lifecycle

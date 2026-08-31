@@ -13,6 +13,8 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use Composer\InstalledVersions;
 use KiwiCaptcha\AtomicDeleteIfPendingInterface;
 use KiwiCaptcha\AtomicStorageInterface;
+use KiwiCaptcha\AuthoritySafety;
+use KiwiCaptcha\AuthoritySafetyClassifier;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
@@ -62,9 +64,13 @@ final class KiwiCaptchaDoctorCommand extends Command
     private const ARGON_MEMORY_CEILING_KIB = 65536;
 
     /**
-     * @param array<string, mixed> $config the effective processed
+     * @param array<string, mixed>                     $config the effective processed
      *        configuration (profile-derived defaults included), the
      *        same array the extension consumed
+     * @param array<string, PinnedPrimaryAuthorityGuard>|null $authorityGuards
+     *        the wired pinned-primary guards keyed by authority label
+     *        ("storage", "risk"), null/empty when ha_authority is not
+     *        pinned_primary
      */
     public function __construct(
         private readonly string $environment,
@@ -76,7 +82,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly \Predis\Client|null $riskRedis,
         private readonly ?ChainedChallengeStateStore $chainStore,
         private readonly ?SiteVerifyIdempotencyStore $siteVerifyIdempotencyStore,
-        private readonly ?PinnedPrimaryAuthorityGuard $authorityGuard = null,
+        private readonly ?array $authorityGuards = null,
     ) {
         parent::__construct();
     }
@@ -274,16 +280,21 @@ final class KiwiCaptchaDoctorCommand extends Command
     /**
      * The mechanical authority guard state (docs/ha-authority.md):
      * reports the pinned identity, the last verification and the
-     * posture under `ha_authority: pinned_primary`. The check passes
-     * when the guard is armed and the serving authority is stable. It
-     * fails when the authority changed: the guard's refusal names the
-     * pinned vs observed identity and the re-pin remediation. It also
-     * fails when the guard is unarmed under the posture (no pin yet,
-     * or not wired), or when the ha_safe profile's pinned_primary
-     * promise was overridden away. The check itself performs a
-     * verification, so the first doctor run after a deployment pins
-     * the authority (auto-pin on first use) and reports the armed
-     * state.
+     * posture under `ha_authority: pinned_primary`. The check audits
+     * every distinct authority (the storage/limiter authority and a
+     * distinct risk authority), each with its own pin key
+     * (`{kiwi:<ns>}:authority:pin:storage` / `:pin:risk`). It passes
+     * when every guard is armed and the serving authorities are
+     * stable. It fails when any authority changed: the guard's refusal
+     * names the pinned vs observed identity and the re-pin
+     * remediation. It also fails when a guard is uninitialized under
+     * the posture (no pin and no ha_authority_expected identity: the
+     * production runtime never auto-pins, so the deployment must run
+     * kiwicaptcha:ha-initialize), or when the ha_safe profile's
+     * pinned_primary promise was overridden away. The pass output
+     * states exactly what the guard enforces: per-authority pins,
+     * zero-stale security-final transitions, connection-generation
+     * cache invalidation, and the operator-initialized bootstrap.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -299,50 +310,91 @@ final class KiwiCaptchaDoctorCommand extends Command
 
             return ['PASS', sprintf('no pinned-primary authority guard (ha_authority "%s"); the authority-change contract is governed by replay_durability "%s" (see docs/ha-authority.md)', $posture, $replay)];
         }
-        if ($this->authorityGuard === null) {
-            return ['FAIL', 'ha_authority "pinned_primary" but the authority guard is not wired: the deployment claims the mechanical posture but nothing enforces it (the extension wiring is broken)'];
+        if ($this->authorityGuards === null || $this->authorityGuards === []) {
+            return ['FAIL', 'ha_authority "pinned_primary" but no authority guard is wired: the deployment claims the mechanical posture but nothing enforces it (the extension wiring is broken)'];
         }
         if ($this->redis === null) {
             return ['FAIL', 'ha_authority "pinned_primary" but no storage/limiter Redis client is wired: there is no authority to pin'];
         }
-        try {
-            $this->authorityGuard->assertServeEligible($this->redis);
-        } catch (PinnedAuthorityRefusalException $e) {
-            return ['FAIL', $e->getMessage()];
-        } catch (\Throwable $e) {
-            return ['FAIL', sprintf('the pinned-primary authority check could not run: %s', $e->getMessage())];
-        }
-        $state = $this->authorityGuard->state();
-        if ($state['pinned'] === null) {
-            return ['FAIL', sprintf('ha_authority "pinned_primary" is unarmed: no pin is established (key %s). The guard refuses until the first verified use pins the authority (see docs/ha-authority.md).', $this->authorityGuard->pinKey())];
-        }
-        $pinned = $state['pinned'];
-        $lastVerified = $state['lastVerified'] ?? $pinned;
-        $ago = $state['lastCheckedAgoSecs'] ?? 0;
+        $failures = [];
+        $details = [];
+        foreach ($this->authorityGuards as $label => $guard) {
+            $client = $label === 'risk' ? $this->riskRedis : $this->redis;
+            if ($client === null) {
+                $failures[] = sprintf('the %s authority guard is wired but its Redis client is not', $label);
 
-        return ['PASS', sprintf('pinned-primary guard armed: pinned %s, last verified %s (%d s ago); replay_durability "%s" is now mechanically enforced', $pinned, $lastVerified, $ago, $replay)];
+                continue;
+            }
+            try {
+                $guard->assertServeEligible($client);
+            } catch (PinnedAuthorityRefusalException $e) {
+                $failures[] = $e->getMessage();
+
+                continue;
+            } catch (\Throwable $e) {
+                $failures[] = sprintf('the %s authority check could not run: %s', $label, $e->getMessage());
+
+                continue;
+            }
+            $state = $guard->state();
+            if ($state['pinned'] === null) {
+                $failures[] = sprintf(
+                    'the %s authority is uninitialized: no pin exists (key %s) and no ha_authority_expected identity is configured, and the production runtime never auto-pins. Run kiwicaptcha:ha-initialize to record the initial authority pin (see docs/ha-authority.md).',
+                    $label,
+                    $guard->pinKey(),
+                );
+
+                continue;
+            }
+            $lastVerified = $state['lastVerified'] ?? $state['pinned'];
+            $ago = $state['lastCheckedAgoSecs'] ?? 0;
+            $details[] = sprintf('%s pinned %s (key %s), last verified %s (%d s ago)', $label, $state['pinned'], $guard->pinKey(), $lastVerified, $ago);
+        }
+        if ($failures !== []) {
+            return ['FAIL', implode(' ', $failures)];
+        }
+
+        return ['PASS', sprintf(
+            'pinned-primary guard armed (%s); replay_durability "%s" is mechanically enforced — the guard enforces per-authority pins (one guard and one pin per distinct Redis authority), zero-stale security-final transitions (every consume/commit/chain/idempotency-finalize re-verifies the authority before the write, never inside the verification window), connection-generation cache invalidation (a reconnect that replaces the connection object re-verifies), and the operator-initialized bootstrap (the runtime never auto-pins; kiwicaptcha:ha-initialize records the pin)',
+            implode('; ', $details),
+            $replay,
+        )];
     }
 
     /**
-     * Describe a wired client when it is a Predis replication or
-     * cluster aggregate (the failover topologies), null otherwise.
-     * The classification mirrors the core VerifiedWaitGuard, so a
+     * Describe a wired client when it is an authority-unsafe shape (a
+     * Predis replication or cluster aggregate, or a retry-enabled
+     * direct connection), null otherwise. The classification is the
+     * canonical core authority-safety classifier
+     * ({@see AuthoritySafetyClassifier}), the same classification the
+     * verified-WAIT barrier and the runtime guards use, so a
      * deployment the barrier refuses is exactly the deployment this
      * check warns on.
      *
-     * @return string|null null for a single-node direct connection
+     * @return string|null null for a safe single-node direct connection
      */
     private function predisAggregateLabel(\Redis|\Predis\Client|null $client, string $label): ?string
     {
-        if (!$client instanceof \Predis\Client) {
+        if ($client === null) {
             return null;
         }
-        $connection = $client->getConnection();
-        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
-            return sprintf('%s is a Predis replication aggregate (%s): Sentinel or master-slave failover', $label, \get_class($connection));
+        if (AuthoritySafetyClassifier::classify($client) !== AuthoritySafety::Unsafe) {
+            return null;
         }
-        if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
-            return sprintf('%s is a Predis Redis Cluster aggregate (%s)', $label, \get_class($connection));
+        if ($client instanceof \Predis\Client) {
+            $connection = $client->getConnection();
+            if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+                return sprintf('%s is a Predis replication aggregate (%s): Sentinel or master-slave failover', $label, \get_class($connection));
+            }
+            if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+                return sprintf('%s is a Predis Redis Cluster aggregate (%s)', $label, \get_class($connection));
+            }
+            if ($connection instanceof \Predis\Connection\NodeConnectionInterface && !$connection->getParameters()->isDisabledRetry()) {
+                return sprintf('%s is a retry-enabled standalone connection (%s): the retry wrapper can re-execute a write on a replacement connection', $label, \get_class($connection));
+            }
+        }
+        if ($client instanceof \Redis) {
+            return sprintf('%s is a retry-enabled phpredis (\\Redis) client: automatic reconnect can move the WAIT to another connection', $label);
         }
 
         return null;
@@ -601,7 +653,7 @@ final class KiwiCaptchaDoctorCommand extends Command
      */
     private function checkCsp(): array
     {
-        return ['WARN', 'the page CSP cannot be verified from the CLI; ensure script-src allows the widget (nonce or unsafe-inline) plus wasm-unsafe-eval, style-src covers the inline styles, worker-src blob: covers the Argon worker, and connect-src covers the challenge API (see getting-started.md Content-Security-Policy)'];
+        return ['WARN', 'the page CSP cannot be verified from the CLI; ensure script-src allows the widget (nonce or unsafe-inline) plus wasm-unsafe-eval, style-src covers the styles, worker-src covers the Argon worker (files mode: \'self\'; inline compatibility mode: blob:), and connect-src covers the challenge API (see getting-started.md Content-Security-Policy)'];
     }
 
     /**

@@ -218,17 +218,18 @@ WebAssembly requires `'wasm-unsafe-eval'` in `script-src` (`CSP3`). The
 embedded WASM solver is compiled at runtime, which strict policies must
 explicitly allow. SHA-256 mode falls back to pure JS when WASM is blocked.
 Argon2id mode requires WASM; no JS fallback exists for the memory-hard
-solver. The memory-hard solver runs in a Web Worker built from a Blob URL.
-See [SECURITY.md](../../../../../SECURITY.md#csp--worker-requirements) for
-the authoritative worker/CSP requirements.
+solver. The memory-hard solver always runs off the main thread in a Web
+Worker. See [SECURITY.md](../../../../../SECURITY.md#csp--worker-requirements)
+for the authoritative worker/CSP requirements.
 
-Recommended CSP profile:
+Recommended CSP profile (files mode, the default `asset_mode`):
 
 ```
 default-src 'self';
 script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval';
 style-src 'self' 'nonce-{NONCE}';
 connect-src 'self';
+worker-src 'self';
 object-src 'none';
 frame-src 'none';
 frame-ancestors 'none';
@@ -239,13 +240,20 @@ form-action 'self'
 `connect-src 'self'` means even a future JS regression cannot exfiltrate.
 At runtime the driver refuses cross-origin challenge endpoints.
 
-With `asset_mode: files` the same profile already covers the widget:
-the stylesheet link and the driver script are same-origin
-(`script-src 'self'`, `style-src 'self'`), and the driver's lazy
-runtime fetch uses `connect-src 'self'`. The runtime is downloaded only
-when a memory-hard challenge arrives, so files mode needs no extra
-directive. See [configuration.md](configuration.md#asset-delivery-asset_mode)
-for the delivery tiers.
+Worker directive per asset mode:
+
+- `files` (default): the worker is a same-origin Worker constructed from
+  the versioned `worker.<hash>.js` asset the driver fetched and
+  SRI-verified. `worker-src 'self'` is required; `blob:` is never
+  allowed. The stylesheet link, the driver script and the lazy runtime
+  and worker fetches are covered by `style-src 'self'`,
+  `script-src 'self'` and `connect-src 'self'`.
+- `inline` (compatibility / zero-request tier): the driver builds the
+  worker from a Blob URL of local code, so this tier needs
+  `worker-src blob:` instead.
+
+See [configuration.md](configuration.md#asset-delivery-asset_mode) for the
+delivery tiers and the bootstrap-size target.
 
 ## Challenge endpoint
 

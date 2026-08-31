@@ -4,49 +4,76 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security\Authority;
 
+use KiwiCaptcha\AuthoritySafety;
+use KiwiCaptcha\AuthoritySafetyClassifier;
+
 /**
  * The pinned-primary authority guard (docs/ha-authority.md): pins the
- * serving authority identity on first use and refuses every
- * subsequent use when the authority changed.
+ * serving authority identity through an explicit operator bootstrap and
+ * refuses every use when the authority changed.
+ *
+ * Bootstrap: the production runtime never auto-pins. A guard with no
+ * pin and no {@see $expectedIdentity} refuses the first use with the
+ * typed {@see PinnedAuthorityRefusalException} naming the
+ * `kiwicaptcha:ha-initialize` command. The operator records the
+ * initial authority pin deliberately (`SET ... NX`), after quiescing a
+ * deliberate authority change. The pin key is per distinct Redis
+ * authority: `{kiwi:<ns>}:authority:pin:<suffix>` (the extension wires
+ * the suffix "storage" for the storage/limiter authority and "risk"
+ * for a distinct risk authority), so one deployment can pin two
+ * authorities independently.
+ *
+ * Expected identity: the optional `ha_authority_expected` configuration
+ * carries an operator-provisioned identity ("role|run_id"). When set,
+ * the guard compares the serving identity against it instead of the
+ * pin key. The configuration is the pin, and a deployment whose
+ * identity is immutable can skip the Redis pin entirely. The pin key
+ * may still exist (initialize writes it to match), but the comparison
+ * target is the operator-provisioned value.
  *
  * Pin store: one Redis key in the same security-Redis namespace,
- * `{kiwi:<ns>}:authority:pin`, holding "role|run_id". The pin is
- * write-once (`SET ... NX`). The first use of a guard that has never
- * seen a pin establishes it from the connected server's `INFO`
- * identity (the role and run_id of the pinned node), and every later
- * check compares the serving identity against the pin. Any change
- * (a promotion to a stale replica, a restarted primary with a new
- * run_id, a pointed-at replica) raises the typed
- * {@see PinnedAuthorityRefusalException} naming the pinned vs
+ * holding "role|run_id". The pin is write-once (`SET ... NX`). The
+ * first verified use of a pinless guard is a refusal (never a pin); an
+ * operator runs `kiwicaptcha:ha-initialize` to record the authority.
+ * Every later check compares the serving identity against the pin (or
+ * the expected identity). Any change (a promotion to a stale replica, a
+ * restarted primary with a new run_id, a pointed-at replica) raises the
+ * typed {@see PinnedAuthorityRefusalException} naming the pinned vs
  * observed identity and the remediation. The remediation is explicit:
- * quiesce the deployment, delete the pin key, and let the next first
- * use re-pin after a deliberate authority change.
+ * quiesce the deployment, delete the pin key, and re-run
+ * `kiwicaptcha:ha-initialize` after a deliberate authority change.
  *
- * Missing-pin semantics (documented choice): auto-pin on first use.
- * A fresh guard pins the first authority it can verify. Once the
- * guard has established or observed the pin in-process, a pin that
- * disappears (a failover to a node that never received the pin key)
- * is a refusal, and the guard refuses instead of re-pinning. The
- * deployment can only re-pin explicitly, exactly the operation a
- * stale-promotion recovery must not perform automatically. An
- * authority that cannot be verified (the `INFO` read fails, the pin
- * cannot be read) is a refusal too: the guard can only fail closed,
- * never fail open.
+ * Missing-pin semantics (documented choice): refuse, never re-pin. A
+ * pin that disappears (a failover to a node that never received the
+ * pin key) is a refusal, and the guard refuses instead of re-pinning.
+ * The deployment can only re-pin explicitly through the initialize
+ * command, exactly the operation a stale-promotion recovery must not
+ * perform automatically. An authority that cannot be verified (the
+ * `INFO` read fails, the pin cannot be read) is a refusal too: the
+ * guard can only fail closed, never fail open.
  *
- * Check window: the verification result is cached in-process for
- * `reverifySecs` (default 5). Within the window, subsequent checks
- * return without any round trip, so the `INFO` probe costs one round
- * trip per window per process, not one per operation. The pin key
- * itself is compared inside the same cached verification.
+ * Check window and connection generation: the verification result is
+ * cached in-process per connection object for `reverifySecs` (default
+ * 5). The cache key is `spl_object_id($connection)`, so a reconnect
+ * that replaces the connection object invalidates the cache and the
+ * next check re-verifies. Within the window, checks return without any
+ * round trip, so the `INFO` probe costs one round trip per window per
+ * process per connection, not one per operation. A mutating
+ * security-final transition (a consume, a committed result, a chain or
+ * idempotency finalize) calls {@see assertServeEligible()} with
+ * $securityFinal true and bypasses the cache. It re-verifies before
+ * every such write, so a security-final transition can never execute
+ * on a changed authority inside a stale window (zero stale).
  *
  * Topology contract: the guard refuses automatic-failover aggregates
- * (Predis Sentinel, replication and cluster connections). A pinned
- * authority is a single node, and an aggregate can change the
- * serving node under the client. That change is exactly what this
- * guard detects at the deployment boundary; it is not routed around.
- * The bundle refuses aggregates under `ha_authority: pinned_primary`
- * at container build time; the constructor check is the same
- * classification at runtime.
+ * (Predis Sentinel, replication and cluster connections) AND
+ * retry-enabled direct connections, and refuses an uninspectable
+ * client. A pinned authority is a single node, and an aggregate or a
+ * retry wrapper can change the serving node or re-execute the write
+ * under the client. That change is exactly what this guard detects at
+ * the deployment boundary; it is not routed around. The bundle refuses
+ * these shapes under `ha_authority: pinned_primary` at container build
+ * time; the constructor check is the same classification at runtime.
  */
 final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
 {
@@ -65,31 +92,57 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     private ?string $lastVerifiedIdentity = null;
 
     /**
-     * @param \Predis\Client|\Redis $client        the bound authority
+     * The connection-generation verification cache:
+     * spl_object_id(connection) => hrtime(true). A reconnect that
+     * replaces the connection object changes the key and forces a
+     * re-verification; each re-verification keeps only the current
+     * connection's entry.
+     *
+     * @var array<int, int>
+     */
+    private array $verifiedConnections = [];
+
+    /**
+     * @param \Predis\Client|\Redis $client          the bound authority
      *        client. Its `INFO` identity reads and its pin-key
      *        reads/writes go through this client, never through the
      *        passed client of {@see assertServeEligible()}. A guarded
      *        wrapper would otherwise recurse into its own check.
-     * @param string                $namespace     the deployment
+     * @param string                $namespace       the deployment
      *        namespace, sanitized to [A-Za-z0-9_.-] before it is
      *        embedded in the pin key. Matches every other bundle key.
-     * @param int                   $reverifySecs  the verification cache
-     *        window in seconds; 0 disables the cache (every check
-     *        re-verifies, the test-mode and doctor-mode behavior)
+     * @param int                   $reverifySecs    the verification cache
+     *        window in seconds. 0 disables the cache, so every check
+     *        re-verifies (the test-mode and doctor-mode behavior).
+     * @param string                $pinKeySuffix    the per-authority
+     *        suffix of the pin key ("storage", "risk"). An empty
+     *        suffix keeps the legacy single-authority key shape
+     *        `{kiwi:<ns>}:authority:pin`.
+     * @param string|null           $expectedIdentity the operator-
+     *        provisioned expected identity ("role|run_id", the same
+     *        shape as the pin value). When set, the guard compares the
+     *        serving identity against it instead of the pin key.
+     *
+     * @throws PinnedAuthorityRefusalException when the client is an
+     *         automatic-failover aggregate, a retry-enabled connection,
+     *         or an uninspectable client
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $client,
         string $namespace = 'kiwicaptcha',
         private readonly int $reverifySecs = 5,
+        string $pinKeySuffix = '',
+        private readonly ?string $expectedIdentity = null,
     ) {
         if ($reverifySecs < 0) {
             throw new \InvalidArgumentException(sprintf('reverifySecs must be >= 0, got %d', $reverifySecs));
         }
         $sanitized = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'kiwi';
-        $this->pinKey = sprintf('{kiwi:%s}:authority:pin', $sanitized);
-        if ($client instanceof \Predis\Client) {
-            $this->assertClientNotAggregate($client);
+        $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $sanitized, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
+        if ($expectedIdentity !== null && preg_match('/^[^|]+\|[^|]+$/D', $expectedIdentity) !== 1) {
+            throw new \InvalidArgumentException(sprintf('ha_authority_expected must be the identity shape "role|run_id" (got "%s")', $expectedIdentity));
         }
+        $this->assertClientSafe($client);
     }
 
     /**
@@ -102,23 +155,115 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     }
 
     /**
-     * The guard's observable state for the doctor: armed (a pin is
-     * established and was verified), the pinned identity, the last
-     * verified identity and the age of the last verification.
+     * The operator-provisioned expected identity ("role|run_id"), or
+     * null when the pin key carries the contract.
+     */
+    public function expectedIdentity(): ?string
+    {
+        return $this->expectedIdentity;
+    }
+
+    /**
+     * Record the initial authority pin (the explicit bootstrap,
+     * `kiwicaptcha:ha-initialize`). The pin is write-once: an existing
+     * pin is refused unless $force is set, because re-pinning an
+     * authority is a deliberate operation the operator must perform
+     * after a quiesce. With {@see $expectedIdentity} configured, the
+     * pin is written to match the operator-provisioned identity (and a
+     * mismatch between the expected identity and the serving server is
+     * refused).
+     *
+     * @return string the effective pin ("role|run_id")
+     *
+     * @throws PinnedAuthorityRefusalException when the authority cannot
+     *         be verified, the expected identity disagrees with the
+     *         serving server, or the pin already exists without $force
+     */
+    public function initializePin(bool $force = false): string
+    {
+        $observed = $this->readIdentity();
+        $observedIdentity = $this->formatIdentity($observed);
+        if ($this->expectedIdentity !== null && $this->expectedIdentity !== $observedIdentity) {
+            throw new PinnedAuthorityRefusalException(
+                sprintf(
+                    'kiwicaptcha:ha-initialize refused: ha_authority_expected is "%s" but the serving authority is %s (key %s) — the operator-provisioned expected identity and the connected server disagree. Fix the configuration, then re-run initialization (see docs/ha-authority.md).',
+                    $this->expectedIdentity,
+                    $observedIdentity,
+                    $this->pinKey,
+                ),
+                $this->expectedIdentity,
+                $observedIdentity,
+            );
+        }
+        $target = $this->expectedIdentity ?? $observedIdentity;
+        $existing = $this->readPin();
+        if ($existing !== null && !$force) {
+            throw new PinnedAuthorityRefusalException(
+                sprintf(
+                    'kiwicaptcha:ha-initialize refused: a pin already exists (key %s, %s). Re-initializing an authority is a deliberate operation: quiesce the deployment, then re-run with --force to record the new authority (see docs/ha-authority.md).',
+                    $this->pinKey,
+                    $existing,
+                ),
+                $existing,
+                $observedIdentity,
+            );
+        }
+        if ($existing === null) {
+            $written = $this->setNx($this->pinKey, $target);
+            if ($written) {
+                $this->establishedIdentity = $target;
+                $this->cacheVerified($target, $this->connectionIdOf($this->client));
+
+                return $target;
+            }
+            // A concurrent initialize won the write: adopt the winner's
+            // pin.
+            $winner = $this->readPin();
+            if ($winner === null) {
+                throw new PinnedAuthorityRefusalException(
+                    sprintf(
+                        'kiwicaptcha:ha-initialize refused: the pin could not be established (key %s) — the concurrent initialization and the re-read raced. Quiesce and retry (see docs/ha-authority.md).',
+                        $this->pinKey,
+                    ),
+                    null,
+                    $observedIdentity,
+                );
+            }
+            $this->establishedIdentity = $winner;
+            $this->cacheVerified($winner, $this->connectionIdOf($this->client));
+
+            return $winner;
+        }
+        // --force: overwrite the pin after a deliberate quiesce.
+        $this->client->set($this->pinKey, $target);
+        $this->establishedIdentity = $target;
+        $this->cacheVerified($target, $this->connectionIdOf($this->client));
+
+        return $target;
+    }
+
+    /**
+     * The guard's observable state for the doctor: armed (an identity
+     * is established and was verified), the pinned identity (the
+     * expected identity when configured, else the pin key value), the
+     * last verified identity and the age of the last verification.
      *
      * @return array{armed: bool, pinned: ?string, lastVerified: ?string, lastCheckedAgoSecs: ?int}
      */
     public function state(): array
     {
-        $pinned = $this->establishedIdentity;
+        $pinned = $this->expectedIdentity;
         if ($pinned === null) {
-            try {
-                $raw = $this->readPin();
-                if (\is_string($raw) && $raw !== '') {
-                    $pinned = $raw;
+            $pinned = $this->establishedIdentity;
+            if ($pinned === null) {
+                try {
+                    $raw = $this->readPin();
+                    if (\is_string($raw) && $raw !== '') {
+                        $pinned = $raw;
+                    }
+                } catch (\Throwable) {
+                    $pinned = null;
                 }
-            } catch (\Throwable) {
-                $pinned = null;
             }
         }
 
@@ -132,7 +277,7 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
         ];
     }
 
-    public function assertServeEligible(mixed $client): void
+    public function assertServeEligible(mixed $client, bool $securityFinal = false): void
     {
         if (!$client instanceof \Predis\Client && !$client instanceof \Redis) {
             throw new PinnedAuthorityRefusalException(
@@ -140,65 +285,64 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
                 $this->establishedIdentity,
             );
         }
-        if ($client instanceof \Predis\Client) {
-            $this->assertClientNotAggregate($client);
-        }
-        // Cached verification: within the window the pin was verified
-        // and no round trip is needed; outside it, the identity is
-        // re-read and compared against the pin.
-        if ($this->lastVerifiedAt !== null
-            && (hrtime(true) - $this->lastVerifiedAt) < $this->reverifySecs * 1_000_000_000
+        $this->assertClientSafe($client);
+        // Cached verification: a non-security-final check within the
+        // window on the same connection object serves without a round
+        // trip. A security-final transition bypasses the cache entirely
+        // (zero stale), and a connection object that was replaced by a
+        // reconnect is a cache miss.
+        $connectionId = $this->connectionIdOf($client);
+        if (!$securityFinal
+            && $connectionId !== null
+            && isset($this->verifiedConnections[$connectionId])
+            && (hrtime(true) - $this->verifiedConnections[$connectionId]) < $this->reverifySecs * 1_000_000_000
         ) {
             return;
         }
         $observed = $this->readIdentity();
         $observedIdentity = $this->formatIdentity($observed);
-        $pinned = $this->readPin();
-        if ($pinned === null) {
+        $expected = $this->expectedIdentity ?? $this->readPin();
+        if ($expected === null) {
             if ($this->establishedIdentity !== null) {
                 throw new PinnedAuthorityRefusalException(
                     sprintf(
-                        'pinned_primary authority check refused: the pinned identity is missing — the deployment was pinned to %s (key %s), but the key is gone now. A promotion to a node that never received the pin would present exactly this state, so the guard refuses instead of re-pinning. Re-pin explicitly after a deliberate authority change: quiesce the deployment, delete %s, and let the next first use pin the new authority (see docs/ha-authority.md).',
+                        'pinned_primary authority check refused: the pinned identity is missing — the deployment was pinned to %s (key %s), but the key is gone now. A promotion to a node that never received the pin would present exactly this state, so the guard refuses instead of re-pinning. Re-pin explicitly after a deliberate authority change: quiesce the deployment, run kiwicaptcha:ha-initialize, and verify the new authority (see docs/ha-authority.md).',
                         $this->establishedIdentity,
-                        $this->pinKey,
                         $this->pinKey,
                     ),
                     $this->establishedIdentity,
                     $observedIdentity,
                 );
             }
-            // First use: auto-pin the observed authority (write-once).
-            $pinned = $this->establishPin($observedIdentity);
-            if ($pinned === null) {
-                throw new PinnedAuthorityRefusalException(
-                    sprintf(
-                        'pinned_primary authority check refused: the pin could not be established (key %s) — the concurrent first use and the re-read raced. Re-pin explicitly after a deliberate authority change (see docs/ha-authority.md).',
-                        $this->pinKey,
-                    ),
-                    null,
-                    $observedIdentity,
-                );
-            }
-            $this->establishedIdentity = $pinned;
-            $this->cacheVerified($pinned);
-
-            return;
-        }
-        if ($pinned !== $observedIdentity) {
             throw new PinnedAuthorityRefusalException(
-                $this->mismatchMessage($pinned, $observedIdentity),
-                $pinned,
+                sprintf(
+                    'pinned_primary authority check refused: the deployment is not bootstrapped — no pin exists (key %s) and no ha_authority_expected identity is configured, and the production runtime never auto-pins. Run kiwicaptcha:ha-initialize after a deliberate authority quiesce to record the initial authority pin, or configure ha_authority_expected with the operator-provisioned identity (see docs/ha-authority.md).',
+                    $this->pinKey,
+                ),
+                null,
                 $observedIdentity,
             );
         }
-        $this->establishedIdentity = $pinned;
-        $this->cacheVerified($pinned);
+        if ($expected !== $observedIdentity) {
+            throw new PinnedAuthorityRefusalException(
+                $this->mismatchMessage($expected, $observedIdentity),
+                $expected,
+                $observedIdentity,
+            );
+        }
+        $this->establishedIdentity = $expected;
+        $this->cacheVerified($expected, $connectionId);
     }
 
-    private function cacheVerified(string $identity): void
+    private function cacheVerified(string $identity, ?int $connectionId): void
     {
         $this->lastVerifiedIdentity = $identity;
         $this->lastVerifiedAt = hrtime(true);
+        if ($connectionId !== null) {
+            // Keep only the current connection's entry: a replaced
+            // connection is a cache miss on the next check.
+            $this->verifiedConnections = [$connectionId => hrtime(true)];
+        }
     }
 
     /**
@@ -208,29 +352,25 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     private function mismatchMessage(string $pinned, string $observed): string
     {
         return sprintf(
-            'pinned_primary authority REFUSED: the serving authority changed — pinned %s, observed %s (key %s). A promotion to a stale replica or a restarted primary with a new run_id presents exactly this identity change, so the guard refuses every durability-critical transition. Re-pin explicitly after a deliberate authority change: quiesce the deployment, delete %s, and let the next first use pin the new authority (see docs/ha-authority.md).',
+            'pinned_primary authority REFUSED: the serving authority changed — pinned %s, observed %s (key %s). A promotion to a stale replica or a restarted primary with a new run_id presents exactly this identity change, so the guard refuses every durability-critical transition. Re-pin explicitly after a deliberate authority change: quiesce the deployment, run kiwicaptcha:ha-initialize, and verify the new authority (see docs/ha-authority.md).',
             $pinned,
             $observed,
-            $this->pinKey,
             $this->pinKey,
         );
     }
 
     /**
-     * Write the pin once (SET NX): the first use that wins establishes
-     * it; a concurrent first use reads the winner's pin and compares.
-     * Returns the effective pin, or null when the pin could neither be
-     * written nor re-read (a raced loss — fail closed).
+     * Write the pin once (SET NX): the first initialize that wins
+     * establishes it; a concurrent initialize reads the winner's pin.
+     * Returns whether this caller wrote the pin.
      */
-    private function establishPin(string $identity): ?string
+    private function setNx(string $key, string $value): bool
     {
-        $written = $this->setNx($this->pinKey, $identity);
-        if ($written) {
-            return $identity;
+        if ($this->client instanceof \Predis\Client) {
+            return $this->client->set($key, $value, 'NX') === 'OK';
         }
-        $existing = $this->readPin();
 
-        return \is_string($existing) && $existing !== '' ? $existing : null;
+        return (bool) $this->client->set($key, $value, ['nx' => true]);
     }
 
     /**
@@ -246,15 +386,6 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
         } catch (\Throwable) {
             return null;
         }
-    }
-
-    private function setNx(string $key, string $value): bool
-    {
-        if ($this->client instanceof \Predis\Client) {
-            return $this->client->set($key, $value, 'NX') === 'OK';
-        }
-
-        return (bool) $this->client->set($key, $value, ['nx' => true]);
     }
 
     /**
@@ -359,23 +490,81 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     }
 
     /**
-     * A pinned authority is a single node: a Predis replication or
-     * cluster aggregate can change the serving node under the client,
-     * so the guard refuses it outright.
+     * The connection object identity of a client, or null when no
+     * connection object is inspectable (phpredis, or a client whose
+     * connection cannot be read). The cache is keyed on this identity,
+     * so a reconnect that replaces the connection object invalidates
+     * the cached verification.
      */
-    private function assertClientNotAggregate(\Predis\Client $client): void
+    private function connectionIdOf(mixed $client): ?int
     {
-        $connection = $client->getConnection();
-        if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface
-            || $connection instanceof \Predis\Connection\Cluster\ClusterInterface
-        ) {
+        if (!$client instanceof \Predis\Client) {
+            return null;
+        }
+        try {
+            $connection = $client->getConnection();
+
+            return $connection === null ? null : spl_object_id($connection);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * A pinned authority is a single node with retries disabled: an
+     * aggregate can change the serving node under the client, a
+     * retry-enabled connection can re-execute the write on a
+     * replacement connection, and an uninspectable client cannot be
+     * proven safe. All three are refused outright.
+     */
+    private function assertClientSafe(\Predis\Client|\Redis $client): void
+    {
+        $classification = AuthoritySafetyClassifier::classify($client);
+        if ($classification === AuthoritySafety::Safe) {
+            return;
+        }
+        if ($classification === AuthoritySafety::Unknown) {
             throw new PinnedAuthorityRefusalException(
                 sprintf(
-                    'pinned_primary authority REFUSED: the client is a %s aggregate (%s) — automatic failover can change the serving node under the client, which is exactly the authority change the pin exists to detect at the deployment boundary. Wire a direct single-node client (standalone connection with retries disabled) for pinned_primary (see docs/ha-authority.md).',
-                    $connection instanceof \Predis\Connection\Cluster\ClusterInterface ? 'cluster' : 'replication',
-                    \get_class($connection),
+                    'pinned_primary authority REFUSED: the client (%s) cannot be classified as a single-node direct connection — unknown authority-transition semantics are unsafe under pinned_primary until proven safe. Wire a direct single-node Predis client with retries disabled (see docs/ha-authority.md).',
+                    get_debug_type($client),
                 ),
             );
         }
+        if ($client instanceof \Predis\Client) {
+            $connection = $client->getConnection();
+            if ($connection instanceof \Predis\Connection\Cluster\ClusterInterface) {
+                throw new PinnedAuthorityRefusalException(
+                    sprintf(
+                        'pinned_primary authority REFUSED: the client is a %s aggregate (%s) — automatic failover can change the serving node under the client, which is exactly the authority change the pin exists to detect at the deployment boundary. Wire a direct single-node client (standalone connection with retries disabled) for pinned_primary (see docs/ha-authority.md).',
+                        'cluster',
+                        \get_class($connection),
+                    ),
+                );
+            }
+            if ($connection instanceof \Predis\Connection\Replication\ReplicationInterface) {
+                throw new PinnedAuthorityRefusalException(
+                    sprintf(
+                        'pinned_primary authority REFUSED: the client is a %s aggregate (%s) — automatic failover can change the serving node under the client, which is exactly the authority change the pin exists to detect at the deployment boundary. Wire a direct single-node client (standalone connection with retries disabled) for pinned_primary (see docs/ha-authority.md).',
+                        'replication',
+                        \get_class($connection),
+                    ),
+                );
+            }
+            if ($connection instanceof \Predis\Connection\NodeConnectionInterface && !$connection->getParameters()->isDisabledRetry()) {
+                throw new PinnedAuthorityRefusalException(
+                    sprintf(
+                        'pinned_primary authority REFUSED: the client is a retry-enabled standalone Predis connection (%s) — the vendored retry wrapper can re-execute a durability-critical transition on a replacement connection whose write offset is empty, exactly the authority-change window the pin exists to detect at the deployment boundary. Wire a direct single-node client with retries disabled for pinned_primary (see docs/ha-authority.md).',
+                        \get_class($connection),
+                    ),
+                );
+            }
+        }
+        throw new PinnedAuthorityRefusalException(
+            sprintf(
+                'pinned_primary authority REFUSED: the client (%s) is unsafe under the canonical authority-safety classification — automatic failover or client-side retries can change the serving authority. Wire a direct single-node Predis client with retries disabled (see docs/ha-authority.md).',
+                get_debug_type($client),
+            ),
+        );
     }
 }

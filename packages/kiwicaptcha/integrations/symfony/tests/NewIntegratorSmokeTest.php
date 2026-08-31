@@ -84,6 +84,16 @@ final class NewIntegratorSmokeTest extends TestCase
             $storage = $container->get(StorageInterface::class);
             self::assertInstanceOf(RedisStorage::class, $storage, 'the DSN-built challenge storage is the atomic RedisStorage');
 
+            // A fresh integrator gets the recommended files asset tier by
+            // default (asset_mode default flip): the theme emits versioned
+            // immutable asset URLs, and the driver fetches the runtime and
+            // the worker only when a memory-hard challenge arrives.
+            self::assertSame(
+                'files',
+                $container->get(\BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime::class)->assetMode(),
+                'the minimal-configuration contract must default to the files asset tier',
+            );
+
             $tester = new CommandTester($container->get(KiwiCaptchaDoctorCommand::class));
             $tester->execute([]);
 

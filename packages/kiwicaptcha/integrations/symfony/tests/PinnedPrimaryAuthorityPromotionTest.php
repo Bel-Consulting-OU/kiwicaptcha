@@ -179,14 +179,14 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         $this->waitForPong($port, 10);
 
         $clientA = $this->client($port);
-        $guardA = new PinnedPrimaryAuthorityGuard($clientA, self::NS, 0);
-        $guardA->assertServeEligible($clientA);
+        $guardA = new PinnedPrimaryAuthorityGuard($clientA, self::NS, 0, 'storage');
+        $guardA->initializePin();
         $pinnedRunId = $this->identityOf($clientA)['run_id'];
         self::assertMatchesRegularExpression('/^[0-9a-f]{40}$/', (string) $pinnedRunId, 'the pinned run_id is the 40-hex Redis run_id');
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientA->get('{kiwi:'.self::NS.'}:authority:pin'),
-            'the first use pinned the serving identity to the namespace pin key',
+            $clientA->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
+            'the initialize command pinned the serving identity to the per-authority namespace pin key',
         );
 
         // Stop the primary and start a new server on the same port with
@@ -209,10 +209,10 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         self::assertNotSame($pinnedRunId, $observedRunId, 'a restarted Redis always regenerates its run_id');
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientB->get('{kiwi:'.self::NS.'}:authority:pin'),
+            $clientB->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
             'the pin survives the restart through the append-only file',
         );
-        $guardB = new PinnedPrimaryAuthorityGuard($clientB, self::NS, 0);
+        $guardB = new PinnedPrimaryAuthorityGuard($clientB, self::NS, 0, 'storage');
 
         try {
             $guardB->assertServeEligible($clientB);
@@ -268,8 +268,8 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         if ($acked !== 1) {
             self::markTestSkipped('the replica never acknowledged a write (WAIT returned '.var_export($acked, true).') — replication is unavailable on this build');
         }
-        $guardMaster = new PinnedPrimaryAuthorityGuard($clientMaster, self::NS, 0);
-        $guardMaster->assertServeEligible($clientMaster);
+        $guardMaster = new PinnedPrimaryAuthorityGuard($clientMaster, self::NS, 0, 'storage');
+        $guardMaster->initializePin();
         $pinnedRunId = $this->identityOf($clientMaster)['run_id'];
         $acked = $clientMaster->executeRaw(['WAIT', '1', '5000']);
         self::assertSame(1, $acked, 'the pin write reached the replica, so the replica carries the pin');
@@ -277,13 +277,13 @@ final class PinnedPrimaryAuthorityPromotionTest extends TestCase
         $clientReplica = $this->client($replicaPort);
         self::assertSame(
             'master|'.$pinnedRunId,
-            $clientReplica->get('{kiwi:'.self::NS.'}:authority:pin'),
+            $clientReplica->get('{kiwi:'.self::NS.'}:authority:pin:storage'),
             'the replica replicated the pin key',
         );
         $observedRole = $this->identityOf($clientReplica)['role'];
         self::assertSame('slave', $observedRole, 'the pointed-at server is a replica (role slave)');
 
-        $guardReplica = new PinnedPrimaryAuthorityGuard($clientReplica, self::NS, 0);
+        $guardReplica = new PinnedPrimaryAuthorityGuard($clientReplica, self::NS, 0, 'storage');
         try {
             $guardReplica->assertServeEligible($clientReplica);
             self::fail('the guard must refuse a pointed-at replica');

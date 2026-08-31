@@ -24,7 +24,10 @@ declare(strict_types=1);
  * baseline authority and a re-baselined record is the very file the
  * ratchets compare against. A missing leaf reads as the fallback
  * (0.0), which the tools report loudly as an unrecorded baseline
- * without failing.
+ * without failing. Under the $KIWI_STRICT_BASELINE=1 env flag a missing
+ * timing-baseline leaf fails instead: a hard-ratchet run with no
+ * baseline is not a hard ratchet. The noisy CI timing steps never set
+ * the flag, so they keep the note degradation.
  */
 
 function perf_baseline_read(string $file): array
@@ -65,6 +68,36 @@ function perf_baseline_float(string $file, array $path, float $fallback = 0.0): 
     }
 
     return is_int($cursor) || is_float($cursor) ? (float) $cursor : $fallback;
+}
+
+/**
+ * Whether this run is a hard-ratchet run: $KIWI_STRICT_BASELINE=1 in
+ * the environment. The manual workflow_dispatch perf-latency job sets
+ * it, so a missing timing-baseline leaf fails that run instead of
+ * degrading. The noisy CI timing steps run without it and keep the
+ * note behavior.
+ */
+function perf_baseline_strict(): bool
+{
+    return getenv('KIWI_STRICT_BASELINE') === '1';
+}
+
+/**
+ * Report a missing timing-baseline leaf. Under strict mode the missing
+ * leaf is a hard failure (the tool returns false and the run exits
+ * non-zero); otherwise it is the note degradation (returns true). The
+ * tool name and the leaf label are spelled in the message either way.
+ */
+function perf_baseline_missing(string $tool, string $label): bool
+{
+    if (perf_baseline_strict()) {
+        fwrite(STDERR, sprintf("%s FAILED: %s has no recorded baseline and this is a strict hard-ratchet run (KIWI_STRICT_BASELINE=1); record one with --baseline-out on a clean local machine\n", $tool, $label));
+
+        return false;
+    }
+    fwrite(STDERR, sprintf("%s NOTE: %s has no recorded baseline; run with --baseline-out on a clean local machine to record one\n", $tool, $label));
+
+    return true;
 }
 
 /**

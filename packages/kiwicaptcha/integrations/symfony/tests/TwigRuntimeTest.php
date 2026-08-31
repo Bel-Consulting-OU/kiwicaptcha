@@ -18,7 +18,26 @@ final class TwigRuntimeTest extends TestCase
         ]);
         $env = new Environment($loader);
 
-        return [$env, new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig')];
+        // The inline tier is the compatibility / zero-request mode; these
+        // tests pin its rendering explicitly (the bundle default is "files",
+        // asserted in testRuntimeDefaultAssetModeIsFiles).
+        return [$env, new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', assetMode: 'inline')];
+    }
+
+    public function testRuntimeDefaultAssetModeIsFiles(): void
+    {
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+        // No assetMode argument: the runtime default is the recommended
+        // files tier (a fresh integrator gets the versioned asset tags).
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig');
+
+        self::assertSame('files', $runtime->assetMode(), 'the runtime default asset mode must be files');
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('<link rel="stylesheet" href="/kiwi-captcha/assets/widget.', $html, 'the default render emits the versioned stylesheet link');
+        self::assertStringContainsString('<script src="/kiwi-captcha/assets/driver.', $html, 'the default render emits the versioned driver script');
     }
 
     public function testRenderEmbedsAllAssetsAndEndpoint(): void
@@ -215,7 +234,7 @@ final class TwigRuntimeTest extends TestCase
             '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
         ]);
         $env = new Environment($loader);
-        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', requestBinding: 'static-txn');
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', assetMode: 'inline', requestBinding: 'static-txn');
         $html = $runtime->renderWidget($env, []);
         self::assertStringContainsString('data-kiwi-request-binding="static-txn"', $html, 'the static binding must render as data-kiwi-request-binding');
 

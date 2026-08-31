@@ -148,6 +148,18 @@ The postures:
 `kiwicaptcha:doctor` warns with the exact contract wording above whenever the deployment has no cross-authority replay guarantee: a Predis Sentinel, master-slave or Cluster aggregate client, or Redis-backed storage with `waitReplicas` 0.
 The verified `WAIT` barrier itself is refused on Predis aggregates at construction (`VerifiedWaitGuard`), so an aggregate deployment always needs one of the documented postures; on a standalone authority the `risk.redis.wait_replicas` knob is the `fail_closed` lever.
 
+### The mechanical pinned-primary posture
+
+Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profile) the bundle enforces the authority contract mechanically instead of trusting the operator's failover policy alone. The details live in [ha-authority.md](../../../../../docs/ha-authority.md); the operational contract is:
+
+- The bundle wires one guard and one pin per distinct Redis authority: the storage/limiter authority pins `{kiwi:<ns>}:authority:pin:storage`, and a distinct `risk.redis_service` pins `{kiwi:<ns>}:authority:pin:risk`. When the risk client IS the storage client, the storage pin covers both. Each pin holds `role|run_id`, write-once (`SET NX`).
+- Auto-pinning is gone: the runtime never records a pin on its own. A pinned_primary deployment with no pin and no `ha_authority_expected` identity refuses every durability-critical transition with the `kiwicaptcha:ha-initialize` message. An operator records the initial authority pin through the explicit bootstrap command:
+  `php bin/console kiwicaptcha:ha-initialize`.
+- The drain procedure for a deliberate authority change: quiesce the deployment, perform the change, then re-pin. `php bin/console kiwicaptcha:ha-initialize --force` overwrites the pin after the quiesce; without `--force` an existing pin is refused. Run `kiwicaptcha:doctor` and confirm the "HA authority" check passes armed before resuming traffic.
+- `ha_authority_expected` replaces the pin: the optional operator-provisioned identity (`role|run_id`) makes the guard compare the serving authority against the configuration instead of the pin key. An immutable-identity deployment can skip the Redis pin entirely.
+- Zero-stale security-final writes: the guarded client re-verifies the authority before every mutating security-final `EVALSHA` (consume, commit, chain, idempotency finalize), never inside the verification window. Ordinary reads use the per-connection window, and a reconnect that replaces the connection object re-verifies.
+- Retry-enabled direct clients are refused under `pinned_primary` (and under `fail_closed`): the retry wrapper can re-execute a durability-critical write on a replacement connection. Wire a direct single-node Predis client with retries disabled.
+
 ## Health endpoints (rollback-resistant readiness)
 
 `risk.health.enabled` (default true) registers two GET endpoints under the route prefix:

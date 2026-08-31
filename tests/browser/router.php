@@ -1465,8 +1465,9 @@ $assetSpecs = [
     'widget' => ['file' => 'widget.css', 'type' => 'text/css; charset=UTF-8'],
     'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'type' => 'application/javascript; charset=UTF-8'],
     'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'worker' => ['file' => 'kiwi-worker.js', 'type' => 'application/javascript; charset=UTF-8'],
 ];
-if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver)\.([0-9a-f]{12})\.(js|css)$~', $path, $m) === 1) {
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker)\.([0-9a-f]{12})\.(js|css)$~', $path, $m) === 1) {
     [, $assetName, $assetHash, $assetExt] = $m;
     $spec = $assetSpecs[$assetName];
     if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
@@ -1609,18 +1610,21 @@ if ($path === '/' || $path === '/index.html') {
     $riskContextAttr = ($_GET['risk-context'] ?? '') === 'coarse' ? ' data-kiwi-risk-context="coarse"' : '';
     // Files-mode variant (?assets=files): mirrors the bundle theme's
     // files tier — the stylesheet link and the driver script are emitted
-    // once (the page-level dedup registry), the runtime stays lazy
-    // (data-kiwi-runtime-src + SRI digest on each container; the driver
-    // fetches it only when a memory-hard challenge arrives), and the
-    // inline style/script blocks are omitted.
+    // once (the page-level dedup registry), the runtime and the worker
+    // stay lazy (data-kiwi-runtime-src + data-kiwi-worker-src with their
+    // SRI digests on each container; the driver fetches them only when a
+    // memory-hard challenge arrives), and the inline style/script blocks
+    // are omitted.
     $filesMode = ($_GET['assets'] ?? '') === 'files';
     $assetTags = '';
     $runtimeAttr = '';
+    $workerAttrFiles = '';
     if ($filesMode) {
         $assetFiles = [
             'widget' => 'widget.css',
             'runtime' => 'kiwicaptcha-wasm.js',
             'driver' => 'widget-driver.js',
+            'worker' => 'kiwi-worker.js',
         ];
         $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
             $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
@@ -1634,15 +1638,17 @@ if ($path === '/' || $path === '/index.html') {
         $widgetAsset = $assetLink('widget', 'css');
         $driverAsset = $assetLink('driver', 'js');
         $runtimeAsset = $assetLink('runtime', 'js');
+        $workerAsset = $assetLink('worker', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
             .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
+        $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
     }
     header('Content-Type: text/html');
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

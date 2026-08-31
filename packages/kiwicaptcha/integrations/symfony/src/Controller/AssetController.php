@@ -32,6 +32,7 @@ final class AssetController
         'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'widget' => ['file' => 'widget.css', 'content_type' => 'text/css; charset=UTF-8'],
         'driver' => ['file' => 'widget-driver.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        'worker' => ['file' => 'kiwi-worker.js', 'content_type' => 'application/javascript; charset=UTF-8'],
     ];
 
     public function __construct(

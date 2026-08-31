@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
@@ -1400,10 +1401,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // the deployment can choose a mechanically enforced
         // replay-safe HA mode instead of trusting the operator alone.
         // Under "none" (the default) nothing is wired and the current
-        // boundary stays byte-identical.
-        $authorityGuardRef = null;
+        // boundary stays byte-identical. One guard and one pin are
+        // wired per distinct Redis authority: the storage/limiter
+        // authority (`{kiwi:<ns>}:authority:pin:storage`) and a
+        // distinct risk authority (`{kiwi:<ns>}:authority:pin:risk`);
+        // a risk client that IS the storage client shares the storage
+        // guard and pin.
+        $authorityGuardRefs = [];
         if ($config['ha_authority'] === 'pinned_primary') {
-            $authorityGuardRef = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $container);
+            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $container);
         }
         // Trusted client-IP policy, wired unconditionally (not gated on
         // risk.enabled): the canonical client IP feeds the challenge
@@ -1912,13 +1918,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // the runtime can also refuse the per-render override.
             $config['risk']['client_context'],
             $config['privacy_mode'] === 'strict',
-            // The asset delivery tier: "inline" (default) embeds every
-            // asset at render time; "files" emits versioned immutable
-            // first-party asset URLs with SRI + once-per-page dedup and
-            // lazily fetches the WASM runtime only when a memory-hard
-            // challenge arrives. The kernel.reset tag clears the
-            // request-scoped emission registry between requests in
-            // long-lived runtimes.
+            // The asset delivery tier: "files" (default) emits versioned
+            // immutable first-party asset URLs with SRI + once-per-page
+            // dedup and lazily fetches the WASM runtime and the Argon
+            // worker only when a memory-hard challenge arrives; "inline"
+            // is the compatibility / zero-request tier. The kernel.reset
+            // tag clears the request-scoped emission registry between
+            // requests in long-lived runtimes.
             $config['asset_mode'],
         ]))
             ->addTag('twig.runtime')
@@ -1931,7 +1937,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // the same services the extension just built, so a check can
         // never drift from the wiring it audits. Redis references and
         // the chain/siteverify stores are passed as resolved, exactly
-        // like every other consumer of this extension.
+        // like every other consumer of this extension. The pinned-
+        // primary authority guards are passed keyed by authority label
+        // (storage / risk), so the HA authority check audits each
+        // distinct authority's pin.
         $container->setDefinition(KiwiCaptchaDoctorCommand::class, (new Definition(KiwiCaptchaDoctorCommand::class, [
             $environment,
             $config,
@@ -1942,7 +1951,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskRedis,
             $chainStoreRef,
             $idempotencyStoreRef,
-            $authorityGuardRef,
+            $authorityGuardRefs,
+        ]))
+            ->addTag('console.command')
+            ->setPublic(true));
+
+        // The explicit authority bootstrap (kiwicaptcha:ha-initialize):
+        // the operator records the initial authority pin(s) for the
+        // pinned-primary authority guard(s), refusing an existing pin
+        // unless --force is given after a deliberate quiesce. The
+        // production runtime never auto-pins, so this command is the
+        // only way a pinned_primary deployment becomes armed.
+        $container->setDefinition(KiwiCaptchaHaInitializeCommand::class, (new Definition(KiwiCaptchaHaInitializeCommand::class, [
+            $config,
+            $authorityGuardRefs,
         ]))
             ->addTag('console.command')
             ->setPublic(true));
@@ -2116,36 +2138,50 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Wire the pinned-primary authority guard (ha_authority
-     * "pinned_primary", docs/ha-authority.md):
+     * Wire the pinned-primary authority guards (ha_authority
+     * "pinned_primary", docs/ha-authority.md): one guard and one pin
+     * per distinct Redis authority.
      *
-     *  - one PinnedPrimaryAuthorityGuard service bound to the raw
-     *    storage/limiter Redis client. Its `INFO` reads and pin-key
-     *    operations never pass through the guarded wrapper, so the
-     *    check cannot recurse into itself.
+     *  - the storage/limiter authority: one guard service
+     *    (`kiwi_captcha.ha_authority_guard.storage`) bound to the raw
+     *    storage/limiter Redis client, pinning
+     *    `{kiwi:<ns>}:authority:pin:storage`. Its `INFO` reads and
+     *    pin-key operations never pass through the guarded wrapper, so
+     *    the check cannot recurse into itself.
+     *  - a distinct risk authority: a second guard
+     *    (`kiwi_captcha.ha_authority_guard.risk`) bound to the raw risk
+     *    Redis client, pinning `{kiwi:<ns>}:authority:pin:risk`. When
+     *    the risk client IS the storage/limiter client, the storage
+     *    guard and pin cover both (one pin per distinct authority).
      *  - the storage/limiter Redis client service decorated with
      *    AuthorityGuardedPredisClient, so every command the bundle
      *    components issue (including the verified-WAIT executeRaw) is
-     *    preceded by the pin check.
-     *  - the risk Redis client decorated with the same guard when it
-     *    is a different service id.
+     *    preceded by the pin check. A distinct risk client gets its own
+     *    guarded decorator consulting its own guard.
+     *
+     * The optional `ha_authority_expected` operator-provisioned identity
+     * is passed to every guard: when set, the guard compares the
+     * serving authority against it instead of the pin key.
      *
      * The decoration targets the resolved client service id, so the
      * storage (DSN-built or user RedisStorage), the limiter, the
      * admission semaphore and the risk state all receive the guarded
      * client through their existing references.
      *
-     * @return Reference the guard service
+     * @return array<string, Reference> the guard services keyed by
+     *         authority label ("storage", "risk")
      */
-    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, ContainerBuilder $container): Reference
+    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, ContainerBuilder $container): array
     {
-        $guardId = 'kiwi_captcha.ha_authority_guard';
         if ($redisRef === null) {
             throw new \LogicException(
                 'kiwi_captcha.ha_authority is "pinned_primary", but no storage/limiter Redis client is wired — the pinned-primary guard pins the serving authority of the security Redis, and without a client there is no authority to pin and nothing to enforce. Configure redis_dsn / redis_service / a RedisStorage storage (a direct single-node Predis client), or set ha_authority: none (see docs/ha-authority.md).'
             );
         }
         $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) ($config['risk']['namespace'] ?? 'kiwicaptcha')) ?: 'kiwi';
+        $expected = \is_string($config['ha_authority_expected'] ?? null) && $config['ha_authority_expected'] !== ''
+            ? $config['ha_authority_expected']
+            : null;
         $this->assertPinnedPrimaryClientClass($redisRef, 'the storage/limiter Redis client', $container);
         $redisId = $this->resolveClientServiceId((string) $redisRef, $container);
         if ($redisId === null) {
@@ -2154,30 +2190,47 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 (string) $redisRef,
             ));
         }
-        $container->setDefinition($guardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
+        $storageGuardId = 'kiwi_captcha.ha_authority_guard.storage';
+        $container->setDefinition($storageGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
             new Reference($redisId.'.inner'),
             $namespace,
             $config['ha_authority_reverify_secs'],
+            'storage',
+            $expected,
         ]))
             ->setPublic(true));
-        $guardRef = new Reference($guardId);
-        $this->decorateGuardedClient($guardId, $redisId, 'kiwi_captcha.redis.authority_guarded', $container);
+        $guardRefs = ['storage' => new Reference($storageGuardId)];
+        $this->decorateGuardedClient($storageGuardId, $redisId, 'kiwi_captcha.redis.authority_guarded', $container);
         $decorated = [$redisId => true];
         if ($riskRedis !== null) {
             $riskId = $this->resolveClientServiceId((string) $riskRedis, $container);
-            if ($riskId === null || !isset($decorated[$riskId])) {
-                if ($riskId === null) {
-                    throw new \LogicException(sprintf(
-                        'kiwi_captcha.ha_authority is "pinned_primary", but the risk Redis client ("%s") cannot be resolved to a service the bundle can decorate at build time. Wire a direct single-node Predis\Client service id, or set ha_authority: none (see docs/ha-authority.md).',
-                        (string) $riskRedis,
-                    ));
-                }
-                $this->assertPinnedPrimaryClientClass($riskRedis, 'the risk Redis client', $container);
-                $this->decorateGuardedClient($guardId, $riskId, 'kiwi_captcha.risk.redis.authority_guarded', $container);
+            if ($riskId === null) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.ha_authority is "pinned_primary", but the risk Redis client ("%s") cannot be resolved to a service the bundle can decorate at build time. Wire a direct single-node Predis\Client service id, or set ha_authority: none (see docs/ha-authority.md).',
+                    (string) $riskRedis,
+                ));
             }
+            if (isset($decorated[$riskId])) {
+                // The risk client IS the storage/limiter client: one
+                // physical authority, so the storage guard and pin
+                // cover both.
+                return $guardRefs;
+            }
+            $this->assertPinnedPrimaryClientClass($riskRedis, 'the risk Redis client', $container);
+            $riskGuardId = 'kiwi_captcha.ha_authority_guard.risk';
+            $container->setDefinition($riskGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
+                new Reference($riskId.'.inner'),
+                $namespace,
+                $config['ha_authority_reverify_secs'],
+                'risk',
+                $expected,
+            ]))
+                ->setPublic(true));
+            $guardRefs['risk'] = new Reference($riskGuardId);
+            $this->decorateGuardedClient($riskGuardId, $riskId, 'kiwi_captcha.risk.redis.authority_guarded', $container);
         }
 
-        return $guardRef;
+        return $guardRefs;
     }
 
     /**

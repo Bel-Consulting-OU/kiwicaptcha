@@ -417,7 +417,9 @@ if ($redisMode) {
     }
     $baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'redis_concurrent', 'p95_ms']);
     if ($baselineP95 <= 0.0) {
-        fwrite(STDERR, "perf-bench-risk NOTE: no recorded real-Redis baseline; run with --baseline-out on a clean local machine to record one\n");
+        if (!perf_baseline_missing('perf-bench-risk', 'real-Redis concurrent risk-enabled issuance')) {
+            exit(1);
+        }
         exit(0);
     }
     if ($p95 > $baselineP95 * RATCHET) {
@@ -495,7 +497,9 @@ if (in_array('--update-baseline', $argv, true)) {
 
 $baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'in_memory', 'p95_ms']);
 if ($baselineP95 <= 0.0) {
-    fwrite(STDERR, "perf-bench-risk NOTE: no recorded in-memory baseline; run with --baseline-out on a clean local machine to record one\n");
+    if (!perf_baseline_missing('perf-bench-risk', 'risk-enabled controller issuance in-memory')) {
+        exit(1);
+    }
     exit(0);
 }
 if ($p95 > $baselineP95 * RATCHET) {

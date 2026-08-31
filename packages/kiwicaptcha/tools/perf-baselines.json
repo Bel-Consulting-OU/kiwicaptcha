@@ -9,14 +9,14 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 148860,
-            "gzip_bytes": 40898,
-            "brotli_bytes": 34540,
+            "raw_bytes": 139959,
+            "gzip_bytes": 39816,
+            "brotli_bytes": 33634,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 148860 bytes."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 139959 bytes."
         },
         "challenge_response_json": {
             "sha256_bytes_min": 1014,

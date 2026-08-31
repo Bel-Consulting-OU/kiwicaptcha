@@ -47,13 +47,15 @@ KC_REDIS_URL=redis://127.0.0.1:6399 php perf-wait-replica.php --baseline-out per
 The widget-driver and challenge-response sizes are the measured
 budgets of perf-budget.sh (the raw/gzip/brotli byte counts of the three
 identical widget-driver copies and the issued challenge-response JSON);
-they are recorded in the `budgets` section of the record by hand from
-the perf-budget.sh output, with the caps the script enforces. The
-concurrent modes (perf-bench-risk.php `--redis` and perf-load.php) are
-re-run twice and the conservative of the two runs is kept; the
-environment block of the record names the machine, the PHP and Redis
-versions and the recording date, and is adjusted when the recording
-machine changes.
+they are recorded in the `budgets` section of the record, and the CAPS
+the script enforces live in that same `budgets` section. The shell
+script reads the caps from the JSON at run time, so the record is the
+single hard-budget authority and the script compiles no duplicate
+constants. The concurrent modes (perf-bench-risk.php `--redis` and
+perf-load.php) are re-run twice and the conservative of the two runs is
+kept; the environment block of the record names the machine, the PHP
+and Redis versions and the recording date, and is adjusted when the
+recording machine changes.
 
 ## Measurement tools
 
@@ -87,6 +89,18 @@ machine changes.
   consume and commit with the replica acked, the replication-lag
   distribution, and the shortfall behavior on the same fixture when
   the replica is stopped.
+
+The browser-side lab is separate: `tools/client-perf/` drives the
+browser fixture over the real SHA-256 and Argon2id ladders (the Argon
+rung measured at the real adaptive-risk envelope, m=16384 KiB, target
+8) across the inline/files and cold/warm matrix, with per-cell
+transferred bytes, cache-hit loads, lazy runtime fetch and repeat
+navigation. Its tiers are desktop CPU-throttled emulation: the
+recorded numbers are desktop-emulation evidence, never a low-end
+mobile claim, and the physical-device procedure in that lab's README
+is the release boundary. The two labs are deliberately separate: this
+document measures the server paths, the client lab measures the
+browser paths.
 
 ## Measured baselines
 
@@ -158,12 +172,35 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh on the recording day): every widget-driver copy is
-144,735 bytes raw, 39,854 bytes gzip and 33,677 bytes brotli, against
+139,959 bytes raw, 39,816 bytes gzip and 33,634 bytes brotli, against
 caps of 160,000 / 50,000 / 45,000 bytes; the challenge-response JSON
 (decoy armed, the wire shape of the bundle's /challenge response) is
-1,014-1,047 bytes for sha256 and 1,025-1,057 bytes for argon2id (the
+1,014-1,045 bytes for sha256 and 1,025-1,046 bytes for argon2id (the
 grammar-composed name length varies the size between issuances),
-against the 4,096-byte cap.
+against the 4,096-byte cap. The caps are read by the shell from the
+record at run time; the record is the single hard-budget authority.
+
+## Ordinary-bootstrap target
+
+The widget-driver byte caps (160,000 raw / 50,000 gzip / 45,000 brotli,
+perf-budget.sh) are the guardrail: a regression there fails the perf
+budget job. They are not the goal. The Argon worker split removed the
+embedded worker source from the driver (the wasm glue carries it for the
+inline compatibility tier; files mode fetches the versioned
+`worker.<hash>.js` asset lazily), so the ordinary bootstrap — the bytes a
+plain SHA-256 page downloads before any memory-hard challenge — targets
+**sub-30 KB compressed** (gzip or brotli). The recorded driver sizes in
+the `budgets` section reflect the current bytes and are re-baselined on
+the next clean recording; the caps stay unchanged.
+
+Remaining lazy candidates that would shrink the bootstrap further, not
+yet split:
+
+- the provider-migration compatibility loader — the external `/api.js`
+  path ships the full glue and driver eagerly for migrated pages;
+- the advanced risk-triggered modules — the decoy/polymorphism and
+  client-context evidence machinery, loaded only when a risk-elevated
+  challenge arrives.
 
 ## Hot paths per lifecycle
 
@@ -267,10 +304,13 @@ itself.
 The deterministic byte budgets of perf-budget.sh must stay gating. The
 widget-driver raw, gzip and brotli caps and the challenge-response JSON
 cap are byte measurements with zero runner noise; a regression there is
-a fact, not a statistic. The recorded sizes (144,735 / 39,854 / 33,677
-bytes and a 1,014-1,057-byte challenge response) leave 9-31% headroom
-under the caps, so a legitimate addition lands inside them and an
-accidental bloating regression trips them.
+a fact, not a statistic. The caps are defined once, in the `budgets`
+section of packages/kiwicaptcha/tools/perf-baselines.json, and the
+shell script reads them from that record at run time, so there is no
+second authority that could drift. The recorded sizes (139,959 / 39,816
+/ 33,634 bytes and a 1,014-1,046-byte challenge response) leave 12-33%
+headroom under the caps, so a legitimate addition lands inside them and
+an accidental bloating regression trips them.
 
 The timing ratchets must stay advisory. All three timing tools
 (perf-bench.php, perf-bench-risk.php and perf-load.php) gate on a 3x
@@ -280,7 +320,11 @@ single worker or iteration without any code regression, so a hard
 latency gate would flake the merge lane. The right promotion path is a
 dedicated quiet runner for a p50 gate, never a p95 gate on a shared
 runner; the end state for that runner is described in the next
-section.
+section. The manual hard-ratchet benchmark job (the workflow_dispatch
+perf-latency job) sets $KIWI_STRICT_BASELINE=1, which turns a missing
+timing-baseline leaf into a hard failure: a hard-ratchet run with no
+baseline is not a hard ratchet. The noisy CI timing steps in the
+perf-budget job never set the flag and keep the note degradation.
 
 The deterministic command-count assertions belong in the gating set. The
 RedisConcurrencyLoadTest lifecycle check runs against real Redis in the
@@ -340,7 +384,10 @@ The honest current status:
   consult it.
 - The ratchets in the timing tools are advisory by design: a 3x p95
   against the recorded baseline, documented as noisy-runner-tolerant,
-  so a shared runner stall never flakes a merge.
+  so a shared runner stall never flakes a merge. The manual job sets
+  $KIWI_STRICT_BASELINE=1, so a missing timing-baseline leaf fails
+  that job even though a measured regression only signals: a
+  hard-ratchet run with no baseline is not a hard ratchet.
 - The only hard latency-adjacent gates are the deterministic ones: the
   perf-budget.sh byte caps and the RedisConcurrencyLoadTest command
   count. Until a dedicated runner exists, treat 3x-p95 failures as

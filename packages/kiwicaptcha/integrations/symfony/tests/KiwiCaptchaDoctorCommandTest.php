@@ -296,24 +296,48 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
     public function testDoctorReportsThePinnedPrimaryGuardArmedState(): void
     {
-        // The first doctor verification pins the authority (auto-pin on
-        // first use) and reports the armed state: pinned identity, last
-        // verification and the mechanically enforced posture.
+        // The production runtime never auto-pins: the operator records
+        // the initial authority pin through kiwicaptcha:ha-initialize,
+        // and the doctor then reports the armed state (per-authority
+        // pinned identity, the mechanically enforced posture and
+        // exactly what the guard enforces).
         $container = $this->containerFor(new DoctorPinnedPrimaryTestKernel('test', true));
+        $guard = $container->get('kiwi_captcha.ha_authority_guard.storage');
+        $guard->initializePin();
         $tester = $this->doctor($container);
         $tester->execute([]);
 
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] HA authority', $display);
-        self::assertStringContainsString('pinned-primary guard armed: pinned master|0123456789abcdef0123456789abcdef01234567', $display, 'the doctor names the pinned identity');
-        self::assertStringContainsString('replay_durability "operator_managed" is now mechanically enforced', $display);
+        self::assertStringContainsString('pinned master|0123456789abcdef0123456789abcdef01234567', $display, 'the doctor names the pinned identity');
+        self::assertStringContainsString('replay_durability "operator_managed" is mechanically enforced', $display);
+        self::assertStringContainsString('per-authority pins', $display, 'the PASS states the per-authority pin enforcement');
+        self::assertStringContainsString('zero-stale security-final', $display, 'the PASS states the zero-stale security-final enforcement');
+        self::assertStringContainsString('connection-generation cache invalidation', $display, 'the PASS states the connection-generation invalidation');
+        self::assertStringContainsString('operator-initialized bootstrap', $display, 'the PASS states the operator-initialized bootstrap');
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
 
         $fake = $container->get('doctor.pinned.redis');
         self::assertInstanceOf(FakePredisClient::class, $fake);
-        $guard = $container->get('kiwi_captcha.ha_authority_guard');
         $pin = $fake->strings[$guard->pinKey()] ?? null;
-        self::assertSame('master|0123456789abcdef0123456789abcdef01234567', $pin, 'the doctor run pinned the authority to the namespace pin key');
+        self::assertSame('master|0123456789abcdef0123456789abcdef01234567', $pin, 'the initialization recorded the authority to the namespace pin key');
+    }
+
+    public function testDoctorFailsWhenPinnedPrimaryIsUninitialized(): void
+    {
+        // No pin and no ha_authority_expected: the guard refuses every
+        // check, and the doctor FAILs with the explicit bootstrap
+        // message. The production runtime never auto-pins.
+        $container = $this->containerFor(new DoctorPinnedPrimaryTestKernel('test', true));
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] HA authority', $display);
+        self::assertStringContainsString('the deployment is not bootstrapped', $display, 'the doctor names the uninitialized state');
+        self::assertStringContainsString('never auto-pins', $display, 'the doctor states the no-auto-pin contract');
+        self::assertStringContainsString('kiwicaptcha:ha-initialize', $display, 'the doctor names the explicit bootstrap command');
     }
 
     public function testDoctorFailsWhenThePinnedAuthorityChanged(): void
@@ -325,7 +349,7 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $container = $this->containerFor(new DoctorPinnedPrimaryTestKernel('test', true));
         $fake = $container->get('doctor.pinned.redis');
         self::assertInstanceOf(FakePredisClient::class, $fake);
-        $guard = $container->get('kiwi_captcha.ha_authority_guard');
+        $guard = $container->get('kiwi_captcha.ha_authority_guard.storage');
         // Pre-seed a pin to a different run_id than the fake serves:
         // the guard observes the change and refuses.
         $fake->strings[$guard->pinKey()] = 'master|'.str_repeat('a', 40);
@@ -362,9 +386,12 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
     public function testDoctorPassesOnTheHaSafeProfileDerivedPosture(): void
     {
         // The ha_safe profile alone derives pinned_primary +
-        // operator_managed and wires the guard: the doctor runs the
-        // verification (pinning on first use) and passes armed.
+        // operator_managed and wires the guard: the operator records
+        // the pin through the initialize command, and the doctor then
+        // passes armed.
         $container = $this->containerFor(new DoctorHaSafeTestKernel('test', true));
+        $guard = $container->get('kiwi_captcha.ha_authority_guard.storage');
+        $guard->initializePin();
         $tester = $this->doctor($container);
         $tester->execute([]);
 

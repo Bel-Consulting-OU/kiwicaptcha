@@ -5,25 +5,26 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
-use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
-use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
-use KiwiCaptcha\Storage\RedisStorage;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Reference;
 
 /**
  * The ha_authority wiring contract (docs/ha-authority.md). Under
- * "pinned_primary" the storage/limiter/risk client construction wraps
- * the runtime authority guard with the PinnedPrimaryAuthorityGuard:
- * one guard per deployment, the client decorated with the per-command
- * AuthorityGuardedPredisClient. Under "none" (the default) nothing is
- * wired and the current boundary stays byte-identical. Aggregates,
- * phpredis clients and a missing client
+ * "pinned_primary" the bundle wraps the storage/limiter/risk clients
+ * with the PinnedPrimaryAuthorityGuard: one guard and one pin per
+ * distinct Redis authority (the storage/limiter authority pins
+ * `{kiwi:<ns>}:authority:pin:storage`, a distinct risk authority pins
+ * `{kiwi:<ns>}:authority:pin:risk`), and the clients are decorated
+ * with the per-command AuthorityGuardedPredisClient. The optional
+ * ha_authority_expected identity flows into every guard. Under "none"
+ * (the default) nothing is wired and the current boundary stays
+ * byte-identical. Aggregates, phpredis clients and a missing client
  * are refused at build time. The ha_safe protection profile derives
  * ha_authority pinned_primary + replay_durability operator_managed,
  * and an explicit override in any layer wins.
@@ -48,9 +49,9 @@ final class PinnedPrimaryWiringTest extends TestCase
         return $container;
     }
 
-    private function guardDefinition(ContainerBuilder $container): array
+    private function guardDefinition(ContainerBuilder $container, string $suffix = 'storage'): array
     {
-        $definition = $container->getDefinition('kiwi_captcha.ha_authority_guard');
+        $definition = $container->getDefinition('kiwi_captcha.ha_authority_guard.'.$suffix);
 
         return [
             'class' => $definition->getClass(),
@@ -64,10 +65,13 @@ final class PinnedPrimaryWiringTest extends TestCase
             ['secret_key' => self::SECRET, 'redis_service' => 'fake_redis'],
         ]);
 
-        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard'), 'ha_authority defaults to none: no guard is wired');
+        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'), 'ha_authority defaults to none: no guard is wired');
+        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.risk'), 'no risk guard without the posture');
         self::assertFalse($container->hasDefinition('kiwi_captcha.redis.authority_guarded'), 'no client decorator is wired');
         $doctorArgs = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArguments();
-        self::assertNull($doctorArgs[9] ?? null, 'the doctor receives no authority guard');
+        self::assertSame([], $doctorArgs[9] ?? null, 'the doctor receives no authority guards');
+        self::assertTrue($container->hasDefinition(KiwiCaptchaHaInitializeCommand::class), 'the initialize command is always registered');
+        self::assertSame([], $container->getDefinition(KiwiCaptchaHaInitializeCommand::class)->getArgument(1), 'without the posture the initialize command has no guards');
     }
 
     public function testPinnedPrimaryWiresTheGuardAndDecoratesTheCheckedClient(): void
@@ -96,17 +100,22 @@ final class PinnedPrimaryWiringTest extends TestCase
             'the pin key namespace is the sanitized deployment namespace, like every other bundle key',
         );
         self::assertSame(5, $guardArgs[2], 'the default reverify window is 5 seconds');
+        self::assertSame('storage', $guardArgs[3], 'the storage authority pins its own key suffix');
+        self::assertNull($guardArgs[4] ?? null, 'no expected identity by default');
 
         $decorator = $container->getDefinition('kiwi_captcha.redis.authority_guarded');
         self::assertSame(AuthorityGuardedPredisClient::class, $decorator->getClass(), 'the client is wrapped with the per-command guard wrapper');
         [$guardRef, $innerRef] = $decorator->getArguments();
-        self::assertSame('kiwi_captcha.ha_authority_guard', (string) $guardRef, 'the wrapper consults the pinned guard');
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $guardRef, 'the wrapper consults the storage guard');
         self::assertSame('.inner', (string) $innerRef, 'the wrapper delegates to the raw client through the decorator inner reference');
         [$decoratedId] = $decorator->getDecoratedService();
         self::assertSame('kiwi_captcha.redis.checked', $decoratedId, 'the checked client the bundle components receive is the guarded decorator');
 
         $doctorArgs = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArguments();
-        self::assertSame('kiwi_captcha.ha_authority_guard', (string) $doctorArgs[9], 'the doctor receives the guard for the HA authority state check');
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $doctorArgs[9]['storage'], 'the doctor receives the storage guard for the HA authority state check');
+        self::assertArrayNotHasKey('risk', $doctorArgs[9], 'no risk guard when the risk client is not wired');
+        $initializeArgs = $container->getDefinition(KiwiCaptchaHaInitializeCommand::class)->getArguments();
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $initializeArgs[1]['storage'], 'the initialize command receives the storage guard');
     }
 
     public function testPinnedPrimaryAppliesToTheDsnBuiltClientToo(): void
@@ -115,12 +124,12 @@ final class PinnedPrimaryWiringTest extends TestCase
             ['secret_key' => self::SECRET, 'redis_dsn' => 'redis://127.0.0.1:6399', 'ha_authority' => 'pinned_primary'],
         ]);
 
-        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard'), 'the DSN lane wires the guard');
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'), 'the DSN lane wires the guard');
         $storageClient = $container->getDefinition('kiwi_captcha.storage.redis_dsn')->getArgument(0);
         self::assertSame('kiwi_captcha.redis.checked', (string) $storageClient, 'the DSN-built storage receives the checked (decorated) client');
     }
 
-    public function testPinnedPrimaryWiresARiskDecoratorWhenTheRiskClientIsSeparate(): void
+    public function testPinnedPrimaryWiresARiskGuardWhenTheRiskClientIsSeparate(): void
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
@@ -140,12 +149,76 @@ final class PinnedPrimaryWiringTest extends TestCase
             ],
         ], $container);
 
+        $storageGuard = $this->guardDefinition($container, 'storage');
+        self::assertSame(PinnedPrimaryAuthorityGuard::class, $storageGuard['class']);
+        self::assertSame('storage', $storageGuard['arguments'][3], 'the storage authority pins the :storage key');
+        $riskGuard = $this->guardDefinition($container, 'risk');
+        self::assertSame(PinnedPrimaryAuthorityGuard::class, $riskGuard['class']);
+        self::assertSame('risk', $riskGuard['arguments'][3], 'the distinct risk authority pins its own :risk key');
+        self::assertNotEquals($storageGuard['arguments'][0], $riskGuard['arguments'][0], 'each guard binds its own raw client');
+
+        $storageDecorator = $container->getDefinition('kiwi_captcha.redis.authority_guarded');
+        [$storageGuardRef] = $storageDecorator->getArguments();
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $storageGuardRef, 'the storage client consults the storage guard');
         $riskDecorator = $container->getDefinition('kiwi_captcha.risk.redis.authority_guarded');
         self::assertSame(AuthorityGuardedPredisClient::class, $riskDecorator->getClass(), 'the separate risk client gets its own guarded wrapper');
         [$decoratedId] = $riskDecorator->getDecoratedService();
         self::assertSame('kiwi_captcha.redis.checked.risk', $decoratedId, 'the risk checked client is decorated');
-        [$guardRef] = $riskDecorator->getArguments();
-        self::assertSame('kiwi_captcha.ha_authority_guard', (string) $guardRef, 'the risk wrapper shares the one deployment guard');
+        [$riskGuardRef] = $riskDecorator->getArguments();
+        self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $riskGuardRef, 'the risk wrapper consults its own risk guard');
+
+        $doctorArgs = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArguments();
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $doctorArgs[9]['storage']);
+        self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $doctorArgs[9]['risk'], 'the doctor audits each distinct authority');
+        $initializeArgs = $container->getDefinition(KiwiCaptchaHaInitializeCommand::class)->getArguments();
+        self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $initializeArgs[1]['risk'], 'the initialize command pins each distinct authority');
+    }
+
+    public function testPinnedPrimarySharesOneGuardWhenTheRiskClientIsTheStorageClient(): void
+    {
+        $container = $this->load([
+            [
+                'secret_key' => self::SECRET,
+                'redis_service' => 'fake_redis',
+                'risk' => [
+                    'enabled' => true,
+                    'redis_service' => 'fake_redis',
+                    'request_binding_authority' => 'fake_redis',
+                ],
+                'ha_authority' => 'pinned_primary',
+            ],
+        ]);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'), 'the shared authority pins the storage key');
+        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.risk'), 'one pin per distinct authority: the risk client IS the storage client');
+        self::assertFalse($container->hasDefinition('kiwi_captcha.risk.redis.authority_guarded'), 'no second decorator for the same physical client');
+    }
+
+    public function testPinnedPrimaryWiresTheExpectedIdentityIntoEveryGuard(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setParameter('kernel.project_dir', self::PROJECT_DIR);
+        $container->register('fake_redis', FakePredisClient::class);
+        $container->register('fake_risk_redis', FakePredisClient::class);
+        (new KiwiCaptchaExtension())->load([
+            [
+                'secret_key' => self::SECRET,
+                'redis_service' => 'fake_redis',
+                'risk' => [
+                    'enabled' => true,
+                    'redis_service' => 'fake_risk_redis',
+                    'request_binding_authority' => 'fake_redis',
+                ],
+                'ha_authority' => 'pinned_primary',
+                'ha_authority_expected' => 'master|'.str_repeat('a', 40),
+            ],
+        ], $container);
+
+        $storageGuard = $this->guardDefinition($container, 'storage');
+        self::assertSame('master|'.str_repeat('a', 40), $storageGuard['arguments'][4], 'the expected identity flows into the storage guard');
+        $riskGuard = $this->guardDefinition($container, 'risk');
+        self::assertSame('master|'.str_repeat('a', 40), $riskGuard['arguments'][4], 'the expected identity flows into the risk guard too');
     }
 
     public function testPinnedPrimaryRefusesAnAggregateClient(): void
@@ -203,7 +276,7 @@ final class PinnedPrimaryWiringTest extends TestCase
         $config = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArgument(1);
         self::assertSame('pinned_primary', $config['ha_authority'], 'ha_safe derives ha_authority pinned_primary');
         self::assertSame('operator_managed', $config['replay_durability'], 'ha_safe derives replay_durability operator_managed');
-        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard'), 'ha_safe wires the mechanical guard');
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'), 'ha_safe wires the mechanical guard');
         self::assertSame('ha_safe', $config['protection_profile'], 'the visible profile stays ha_safe');
     }
 
@@ -220,6 +293,6 @@ final class PinnedPrimaryWiringTest extends TestCase
 
         $config = $container->getDefinition(KiwiCaptchaDoctorCommand::class)->getArgument(1);
         self::assertSame('none', $config['ha_authority'], 'an explicit ha_authority always wins over the profile-derived default');
-        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard'), 'no guard without the effective pinned_primary posture');
+        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'), 'no guard without the effective pinned_primary posture');
     }
 }

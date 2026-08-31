@@ -218,9 +218,11 @@ function report(string $label, array $r, float $bIssueP95, float $bVerifyP95): b
         $r['verify']['n'],
     );
     if ($bIssueP95 <= 0.0 || $bVerifyP95 <= 0.0) {
-        fwrite(STDERR, "perf-bench NOTE: $label has no recorded baseline; run with --baseline-out on a clean local machine to record one\n");
-
-        return true;
+        // A missing timing-baseline leaf: note degradation by default,
+        // a hard failure under $KIWI_STRICT_BASELINE=1 (the manual
+        // hard-ratchet job), because a hard-ratchet run with no
+        // baseline is not a hard ratchet.
+        return perf_baseline_missing('perf-bench', $label);
     }
     $failed = false;
     if ($r['issue']['p95'] > $bIssueP95 * RATCHET) {

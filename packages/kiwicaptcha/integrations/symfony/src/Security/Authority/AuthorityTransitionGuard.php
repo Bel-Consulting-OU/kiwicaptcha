@@ -38,12 +38,18 @@ interface AuthorityTransitionGuard
      * Refuse to serve when the client's authority-transition semantics
      * are unsafe under the deployment posture.
      *
-     * @param mixed $client the actual constructed client that is about
-     *        to serve durability-critical transitions
+     * @param mixed $client        the actual constructed client that is
+     *        about to serve durability-critical transitions
+     * @param bool  $securityFinal true when the operation about to
+     *        execute is a mutating security-final transition (a
+     *        consume, a committed result, a chain or idempotency
+     *        finalize). Implementations bypass their verification cache
+     *        for this lane, so a security-final transition can never
+     *        execute on a changed authority within a stale window.
      *
      * @throws \LogicException with the posture, the classification and
      *                         the remediation when the client must not
      *                         serve
      */
-    public function assertServeEligible(mixed $client): void;
+    public function assertServeEligible(mixed $client, bool $securityFinal = false): void;
 }

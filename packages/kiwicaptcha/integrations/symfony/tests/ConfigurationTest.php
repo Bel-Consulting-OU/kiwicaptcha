@@ -1146,6 +1146,20 @@ final class ConfigurationTest extends TestCase
         $this->process(['ha_authority_reverify_secs' => 0]);
     }
 
+    public function testHaAuthorityExpectedDefaultsNullAndValidatesTheIdentityShape(): void
+    {
+        self::assertNull($this->process()['ha_authority_expected'], 'no operator-provisioned expected identity by default');
+        $expected = 'master|'.str_repeat('a', 40);
+        self::assertSame($expected, $this->process(['ha_authority_expected' => $expected])['ha_authority_expected']);
+
+        try {
+            $this->process(['ha_authority_expected' => 'not-an-identity']);
+            self::fail('an expected identity without the role|run_id shape must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('role|run_id', $e->getMessage());
+        }
+    }
+
     public function testProtocolRolloutDefaultsToNormal(): void
     {
         $processed = $this->process();
@@ -1168,9 +1182,9 @@ final class ConfigurationTest extends TestCase
 
     // ── Asset delivery tier (asset_mode) ──────────────────────────────────
 
-    public function testAssetModeDefaultsToInline(): void
+    public function testAssetModeDefaultsToFiles(): void
     {
-        self::assertSame('inline', $this->process()['asset_mode'], 'the default keeps the historical inline delivery: every existing behavior stays byte-identical');
+        self::assertSame('files', $this->process()['asset_mode'], 'the default is the recommended files tier: versioned immutable assets with SRI, lazy runtime + worker');
     }
 
     public function testAssetModeAcceptsBothTiers(): void

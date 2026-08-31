@@ -434,7 +434,13 @@ function report(string $label, array $samples, float $windowMs, float $baselineP
         $ops,
     );
     if ($baselineP95 <= 0.0) {
-        fwrite(STDERR, "perf-load NOTE: $label has no recorded baseline; run with --update-baseline after a quiet-machine measurement\n");
+        // A missing timing-baseline leaf: note degradation by default,
+        // a hard failure under $KIWI_STRICT_BASELINE=1 (the manual
+        // hard-ratchet job). The flag is remembered so the final exit
+        // code reflects it even though no numeric ratchet applies.
+        if (!perf_baseline_missing('perf-load', $label)) {
+            $GLOBALS['perf_load_strict_missing_baseline'] = true;
+        }
 
         return ['p50' => $p50, 'p95' => $p95, 'n' => $n, 'throughput' => $ops];
     }
@@ -661,7 +667,7 @@ foreach ($measured as $key => $values) {
     }
 }
 
-if (!$allOk) {
+if (!$allOk || ($GLOBALS['perf_load_strict_missing_baseline'] ?? false)) {
     exit(1);
 }
 echo "perf-load: OK (every measured p95 within its 3x noisy-runner-tolerant ratchet)\n";

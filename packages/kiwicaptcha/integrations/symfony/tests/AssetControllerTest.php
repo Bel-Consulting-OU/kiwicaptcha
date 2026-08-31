@@ -64,6 +64,7 @@ final class AssetControllerTest extends TestCase
         yield 'widget css' => ['widget', 'widget.css', 'css', 'text/css; charset=UTF-8'];
         yield 'runtime js' => ['runtime', 'kiwicaptcha-wasm.js', 'js', 'application/javascript; charset=UTF-8'];
         yield 'driver js' => ['driver', 'widget-driver.js', 'js', 'application/javascript; charset=UTF-8'];
+        yield 'worker js' => ['worker', 'kiwi-worker.js', 'js', 'application/javascript; charset=UTF-8'];
     }
 
     public function testUnknownHashIs404(): void

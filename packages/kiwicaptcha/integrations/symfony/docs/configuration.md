@@ -207,6 +207,7 @@ names is refused.
     # replay_durability: best_effort    # best_effort | operator_managed | fail_closed
     # ha_authority: none                # none | pinned_primary
     # ha_authority_reverify_secs: 5     # the guard's verification cache window
+    # ha_authority_expected: null       # the operator-provisioned "role|run_id" identity (optional)
 ```
 
 `replay_durability` declares the authority-change contract (see
@@ -218,35 +219,58 @@ operator alone.
 
 How the pinned-primary guard behaves:
 
-- On first use it pins the connected server's identity (the `INFO`
-  role and run_id) to the `{kiwi:<ns>}:authority:pin` key, write-once
-  (`SET NX`), in the same security-Redis namespace as every other
-  bundle key.
-- On every subsequent use it re-verifies the serving authority: the
-  role must equal the pinned role and the run_id must equal the pinned
-  run_id. Any change — a promotion to a stale replica, a restarted
-  primary with a new run_id — raises the typed LogicException naming
-  the pinned vs observed identity, and the deployment refuses to
-  serve.
-- The verification result is cached in-process for
-  `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
-  probe costs one round trip per window per process, not one per
-  operation.
+- Per distinct Redis authority the bundle wires one guard and one pin:
+  the storage/limiter authority pins `{kiwi:<ns>}:authority:pin:storage`
+  and a distinct `risk.redis_service` pins
+  `{kiwi:<ns>}:authority:pin:risk`, each holding "role|run_id"
+  write-once (`SET NX`) in the same security-Redis namespace as every
+  other bundle key. A risk client that IS the storage client shares
+  the storage pin.
+- The runtime never auto-pins: an operator records the initial
+  authority pin through the explicit bootstrap command
+  `php bin/console kiwicaptcha:ha-initialize`; a guard with no pin and
+  no `ha_authority_expected` refuses every use with the initialize
+  message.
+- On every use it re-verifies the serving authority: the role must
+  equal the pinned role and the run_id must equal the pinned run_id.
+  Any change — a promotion to a stale replica, a restarted primary
+  with a new run_id, a re-pointed endpoint — raises the typed
+  LogicException naming the pinned vs observed identity, and the
+  deployment refuses to serve.
+- `ha_authority_expected` (optional) is the operator-provisioned
+  "role|run_id" identity. When set, the guard compares the serving
+  authority against it instead of the pin key: the configuration IS
+  the pin, and an immutable-identity deployment can skip the Redis pin
+  entirely.
+- The verification result is cached in-process per connection object
+  for `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
+  probe costs one round trip per window per process per connection,
+  not one per operation. A reconnect that replaces the connection
+  object invalidates the cache. A mutating security-final transition
+  (consume, commit, chain, idempotency finalize) bypasses the window
+  and re-verifies before every write (zero stale).
 - A missing pin after it was established is a refusal, never a silent
   re-pin. Re-pin explicitly after a deliberate authority change:
-  quiesce the deployment, delete `{kiwi:<ns>}:authority:pin`, and let
-  the next first use pin the new authority.
+  quiesce the deployment, then run
+  `php bin/console kiwicaptcha:ha-initialize --force` to record the
+  new authority.
 - The extension refuses the container build when the client is a
   Predis Sentinel/Cluster aggregate or a phpredis `\Redis` client:
   only a direct single-node Predis client can be mechanically guarded
-  (predis/predis is a direct bundle dependency).
+  (predis/predis is a direct bundle dependency). A retry-enabled
+  direct client is refused by the guard at runtime.
 
-The doctor's "HA authority" check reports the guard state: the pinned
-identity, the last verification and the posture. It passes when the
-guard is armed and stable. It fails on a changed authority or an
-unarmed guard under the posture, and it fails when the ha_safe
-profile's pinned_primary promise was overridden away. See
-docs/ha-authority.md for the full design and the deployment table.
+The doctor's "HA authority" check audits every distinct authority and
+reports the guard state: the pinned identity, the last verification
+and the posture. It passes when every guard is armed and stable, and
+the pass output states exactly what the guard enforces (per-authority
+pins, zero-stale security-final transitions, connection-generation
+cache invalidation, operator-initialized bootstrap). It fails on a
+changed authority, an uninitialized deployment (naming
+`kiwicaptcha:ha-initialize`), or an unarmed guard under the posture,
+and it fails when the ha_safe profile's pinned_primary promise was
+overridden away. See docs/ha-authority.md for the full design and the
+deployment table.
 
 ## Advanced configuration
 
@@ -285,33 +309,33 @@ kiwi_captcha:
 
 ### Asset delivery (`asset_mode`)
 
-The widget assets (the CSS, the WASM runtime and the driver) ship in
-two delivery tiers, selected with `asset_mode`:
+The widget assets (the CSS, the WASM runtime, the driver and the Argon
+worker) ship in two delivery tiers, selected with `asset_mode`:
 
 ```yaml
 kiwi_captcha:
-    asset_mode: inline    # inline (default) | files (recommended for production)
+    asset_mode: files     # files (default) | inline (compatibility / zero-request)
 ```
 
-`inline` (default) embeds the CSS, the WASM runtime and the driver into
-the page at render time. The widget makes zero extra requests and the
-deployment needs no static asset handling; every previous release
-behaves this way.
+`files` (default) emits versioned immutable first-party asset URLs under
+`{prefix}/assets/` (`widget.<sha256-12>.css`, `runtime.<sha256-12>.js`,
+`driver.<sha256-12>.js`, `worker.<sha256-12>.js`), served by the bundle
+with a long immutable cache lifetime
+(`Cache-Control: public, max-age=31536000, immutable`), the exact content
+hash in the URL and the content-hash ETag. Each asset is emitted once per
+page even with several widgets, and the tags carry SRI integrity
+attributes.
 
-`files` (recommended for production) emits versioned immutable
-first-party asset URLs under `{prefix}/assets/`
-(`widget.<sha256-12>.css`, `runtime.<sha256-12>.js`,
-`driver.<sha256-12>.js`), served by the bundle with a long immutable
-cache lifetime (`Cache-Control: public, max-age=31536000, immutable`),
-the exact content hash in the URL and the content-hash ETag. Each asset
-is emitted once per page even with several widgets, and the tags carry
-SRI integrity attributes.
-
-The runtime is the lazy heavy module: the page never downloads it
-eagerly. The widget container carries `data-kiwi-runtime-src` plus the
-SRI digest, and the driver fetches the WASM runtime only when a
+The runtime and the worker are the lazy heavy modules: the page never
+downloads them eagerly. The widget container carries
+`data-kiwi-runtime-src` + `data-kiwi-runtime-integrity` and
+`data-kiwi-worker-src` + `data-kiwi-worker-integrity`, and the driver
+fetches the WASM runtime and the Argon worker asset only when a
 memory-hard challenge actually arrives. A page that only ever receives
-SHA-256 challenges pays no request for the Argon machinery.
+SHA-256 challenges pays no request for the Argon machinery. The worker is
+constructed from the fetched source as a same-origin Worker (no Blob
+URL), and it loads its WASM glue from the verified runtime asset, so the
+worker download is deduplicated across widgets like the runtime.
 
 Why immutable caching: the URL contains the content hash, so the bytes
 for a URL can never change. A browser or CDN may keep the response
@@ -319,16 +343,38 @@ forever, and a deployment upgrade simply emits new hashed URLs. Unknown
 hashes are 404, so a stale page can never pair an old URL with new
 content.
 
-CSP: the assets are same-origin, so the existing recommended profile
-already allows them (`script-src 'self'`, `style-src 'self'`). The lazy
-runtime fetch uses `connect-src 'self'`. No CSP change is needed beyond
-the existing guidance; Argon2id still needs `worker-src blob:` for the
-same-origin worker.
+CSP per mode:
 
-Default-flip transition plan: `inline` stays the default until the
-browser lanes migrate to `files`. The documented follow-up flips the
-default and marks `inline` as the compatibility tier for zero-request
-deployments.
+- `files` (default): the assets are same-origin, so the existing
+  recommended profile already allows them (`script-src 'self'`,
+  `style-src 'self'`); the lazy runtime and worker fetches use
+  `connect-src 'self'`, and the same-origin Worker needs
+  `worker-src 'self'` — `blob:` is never required.
+- `inline` (compatibility / zero-request tier): every asset is embedded
+  into the page at render time (the historical behavior, zero requests,
+  no static asset handling). The worker is built from a Blob URL, so
+  this tier needs `worker-src blob:`.
+
+`inline` is the documented compatibility tier for zero-request
+deployments: it embeds the CSS, the WASM runtime and the driver into the
+page at render time. A deployment that cannot serve or cache the versioned
+asset URLs selects it explicitly.
+
+#### Ordinary-bootstrap size target
+
+The 160,000-byte widget-driver raw cap (with the gzip and brotli caps of
+50,000 / 45,000 bytes, see `packages/kiwicaptcha/tools/perf-budget.sh`)
+is the guardrail, not the goal. After the Argon worker split the driver
+no longer embeds the worker source (the glue carries it for inline mode;
+files mode fetches the versioned worker asset). The ordinary bootstrap,
+the bytes a plain SHA-256 page downloads before any memory-hard
+challenge, targets **sub-30 KB compressed** (gzip or brotli). Remaining
+lazy candidates, not yet split, would shrink the bootstrap further.
+The candidates are the provider-migration compatibility loader (the
+external `/api.js` path ships the full glue and driver eagerly) and the
+advanced risk-triggered modules (the decoy/polymorphism and
+client-context evidence machinery, loaded only when a risk-elevated
+challenge arrives).
 
 ### Redis (`redis_dsn`)
 

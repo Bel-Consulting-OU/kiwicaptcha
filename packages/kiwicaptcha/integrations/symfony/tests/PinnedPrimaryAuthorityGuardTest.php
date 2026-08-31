@@ -11,14 +11,18 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The pinned-primary authority guard (docs/ha-authority.md): pins the
- * serving authority identity on first use and refuses every
- * subsequent use when the authority changed. The pin is write-once
- * (`SET NX`) in the same Redis namespace. A pin that disappears after
- * it was established is a refusal, never a silent re-pin; an
- * unverifiable authority is a refusal. The verification result is
- * cached for the reverify window, so the `INFO` probe costs one round
- * trip per window per process.
+ * The pinned-primary authority guard (docs/ha-authority.md): the
+ * production runtime never auto-pins, so an operator records the
+ * initial authority pin through the `kiwicaptcha:ha-initialize`
+ * command, documented on {@see PinnedPrimaryAuthorityGuard::initializePin()}.
+ * Every subsequent use refuses when the authority changed. The pin is
+ * write-once (`SET NX`) in the same Redis namespace, one pin per
+ * distinct authority (`{kiwi:<ns>}:authority:pin:<suffix>`). A pin
+ * that disappears after it was established is a refusal, never a
+ * silent re-pin; an unverifiable authority is a refusal. The
+ * verification result is cached per connection object for the
+ * reverify window, and a security-final transition bypasses the cache
+ * entirely (zero stale).
  *
  * These fake-based tests run without a server and exercise the exact
  * refusal semantics; the real promotion simulation (a restarted
@@ -41,9 +45,9 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         return $fake;
     }
 
-    private function pinKey(): string
+    private function pinKey(string $suffix = ''): string
     {
-        return '{kiwi:'.self::NS.'}:authority:pin';
+        return '{kiwi:'.self::NS.'}:authority:pin'.($suffix !== '' ? ':'.$suffix : '');
     }
 
     private function infoCalls(FakePredisClient $fake): int
@@ -51,19 +55,24 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         return \count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'INFO'));
     }
 
-    public function testFirstUsePinsTheAuthorityAndSubsequentVerifiesPass(): void
+    public function testInitializeRecordsThePinAndVerifiesPass(): void
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
 
-        $guard->assertServeEligible($fake);
+        $pin = $guard->initializePin();
+        self::assertSame(
+            'master|'.self::RUN_ID_A,
+            $pin,
+            'the initialize command records the serving identity as the pin',
+        );
         self::assertSame(
             'master|'.self::RUN_ID_A,
             $fake->strings[$this->pinKey()] ?? null,
-            'the first use writes the pin once (SET NX) in the same Redis namespace',
+            'the pin is written once (SET NX) in the same Redis namespace',
         );
         $state = $guard->state();
-        self::assertTrue($state['armed'], 'after the first verification the guard is armed');
+        self::assertTrue($state['armed'], 'after the initialization the guard is armed');
         self::assertSame('master|'.self::RUN_ID_A, $state['pinned'], 'the state reports the pinned identity');
 
         $guard->assertServeEligible($fake);
@@ -75,10 +84,110 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         );
     }
 
+    public function testAnUninitializedGuardRefusesAndNamesTheInitializeCommand(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
+
+        try {
+            $guard->assertServeEligible($fake);
+            self::fail('an uninitialized guard must refuse: the production runtime never auto-pins');
+        } catch (PinnedAuthorityRefusalException $e) {
+            self::assertStringContainsString('the deployment is not bootstrapped', $e->getMessage());
+            self::assertStringContainsString('never auto-pins', $e->getMessage(), 'the refusal states the no-auto-pin contract');
+            self::assertStringContainsString('kiwicaptcha:ha-initialize', $e->getMessage(), 'the refusal names the explicit bootstrap command');
+            self::assertStringContainsString($this->pinKey(), $e->getMessage());
+        }
+        self::assertArrayNotHasKey($this->pinKey(), $fake->strings, 'the guard must not have auto-pinned');
+    }
+
+    public function testInitializeRefusesAnExistingPinWithoutForce(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
+        $guard->initializePin();
+
+        try {
+            $guard->initializePin();
+            self::fail('re-initializing an existing pin must refuse without --force');
+        } catch (PinnedAuthorityRefusalException $e) {
+            self::assertStringContainsString('a pin already exists', $e->getMessage());
+            self::assertStringContainsString('--force', $e->getMessage(), 'the refusal names the deliberate re-pin option');
+            self::assertStringContainsString('quiesce', $e->getMessage());
+        }
+    }
+
+    public function testInitializeWithForceOverwritesThePin(): void
+    {
+        $fake = $this->fake();
+        $fake->infoReplication['run_id'] = self::RUN_ID_B;
+        $fake->infoServer['run_id'] = self::RUN_ID_B;
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
+        $guard->initializePin();
+
+        $pin = $guard->initializePin(true);
+        self::assertSame('master|'.self::RUN_ID_B, $pin, '--force records the new serving identity');
+        self::assertSame('master|'.self::RUN_ID_B, $fake->strings[$this->pinKey()] ?? null);
+    }
+
+    public function testThePerAuthorityPinSuffixIsBakedIntoTheKey(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'storage');
+        self::assertSame(
+            '{kiwi:'.self::NS.'}:authority:pin:storage',
+            $guard->pinKey(),
+            'one pin per distinct Redis authority: the storage authority pins its own key',
+        );
+
+        $riskGuard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'risk');
+        self::assertSame(
+            '{kiwi:'.self::NS.'}:authority:pin:risk',
+            $riskGuard->pinKey(),
+            'a distinct risk authority pins its own key',
+        );
+    }
+
+    public function testTheExpectedIdentityReplacesThePinComparison(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, '', 'master|'.self::RUN_ID_A);
+
+        // No pin key at all: the operator-provisioned expected identity
+        // is the comparison target, so the guard serves.
+        $guard->assertServeEligible($fake);
+        self::assertSame('master|'.self::RUN_ID_A, $guard->expectedIdentity(), 'the expected identity is the operator contract');
+        self::assertNull($fake->strings[$this->pinKey()] ?? null, 'the expected identity path never requires a pin key');
+
+        // The serving authority changed: refused against the expected
+        // identity, exactly like a pin mismatch.
+        $fake->infoReplication['run_id'] = self::RUN_ID_B;
+        $fake->infoServer['run_id'] = self::RUN_ID_B;
+        $this->expectException(PinnedAuthorityRefusalException::class);
+        $this->expectExceptionMessage('pinned master|'.self::RUN_ID_A);
+        $this->expectExceptionMessage('observed master|'.self::RUN_ID_B);
+
+        $guard->assertServeEligible($fake);
+    }
+
+    public function testInitializeWritesThePinToMatchTheExpectedIdentity(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'storage', 'master|'.self::RUN_ID_A);
+
+        self::assertSame('master|'.self::RUN_ID_A, $guard->initializePin());
+        self::assertSame(
+            'master|'.self::RUN_ID_A,
+            $fake->strings['{kiwi:'.self::NS.'}:authority:pin:storage'] ?? null,
+            'the initialize command records the operator-provisioned identity as the pin',
+        );
+    }
+
     public function testTheVerificationIsCachedWithinTheWindow(): void
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
 
         $guard->assertServeEligible($fake);
         $infoAfterFirst = $this->infoCalls($fake);
@@ -93,11 +202,28 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         );
     }
 
+    public function testASecurityFinalCheckBypassesTheVerificationWindow(): void
+    {
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 5);
+        $guard->initializePin();
+
+        $guard->assertServeEligible($fake);
+        $infoAfterOrdinary = $this->infoCalls($fake);
+
+        $guard->assertServeEligible($fake, true);
+        self::assertGreaterThan(
+            $infoAfterOrdinary,
+            $this->infoCalls($fake),
+            'a security-final transition re-verifies the authority even inside the window: zero stale',
+        );
+    }
+
     public function testAChangedRunIdIsRefusedWithTheExactMessage(): void
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
-        $guard->assertServeEligible($fake);
+        $guard->initializePin();
 
         // The stale-promotion detection: the serving authority changed.
         // A restarted primary (new run_id) or a promoted stale replica
@@ -113,6 +239,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
             self::assertStringContainsString('pinned master|'.self::RUN_ID_A, $e->getMessage(), 'the refusal names the PINNED identity');
             self::assertStringContainsString('observed master|'.self::RUN_ID_B, $e->getMessage(), 'the refusal names the OBSERVED identity');
             self::assertStringContainsString($this->pinKey(), $e->getMessage(), 'the refusal names the pin key for the re-pin');
+            self::assertStringContainsString('kiwicaptcha:ha-initialize', $e->getMessage(), 'the refusal names the re-pin command');
             self::assertStringContainsString('Re-pin explicitly after a deliberate authority change', $e->getMessage(), 'the refusal names the remediation');
             self::assertSame('master|'.self::RUN_ID_A, $e->pinnedIdentity());
             self::assertSame('master|'.self::RUN_ID_B, $e->observedIdentity());
@@ -123,7 +250,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
-        $guard->assertServeEligible($fake);
+        $guard->initializePin();
 
         // Pointed at a replica: the serving role is no longer the
         // pinned role, so the guard refuses.
@@ -140,7 +267,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
-        $guard->assertServeEligible($fake);
+        $guard->initializePin();
         self::assertNotNull($fake->strings[$this->pinKey()] ?? null);
 
         // A failover to a node that never received the pin presents
@@ -159,7 +286,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         self::assertArrayNotHasKey($this->pinKey(), $fake->strings, 'the guard must not have re-pinned');
     }
 
-    public function testFirstUseWithAnUnverifiableIdentityIsRefused(): void
+    public function testAnUnverifiableIdentityIsRefused(): void
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
@@ -172,14 +299,15 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         $this->expectException(PinnedAuthorityRefusalException::class);
         $this->expectExceptionMessage('the serving authority cannot be verified');
 
-        $guard->assertServeEligible($fake);
+        $guard->initializePin();
     }
 
-    public function testAConcurrentFirstUseComparesAgainstTheWinningPin(): void
+    public function testAConcurrentInitializeComparesAgainstTheWinningPin(): void
     {
         $fake = $this->fake();
-        // The pin already exists (a concurrent process pinned first) and
-        // the observed identity matches it: the guard serves.
+        // The pin already exists (a concurrent process initialized
+        // first) and the observed identity matches it: the guard
+        // serves.
         $fake->strings[$this->pinKey()] = 'master|'.self::RUN_ID_A;
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
         $guard->assertServeEligible($fake);
@@ -194,10 +322,38 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         $guard->assertServeEligible($fake);
     }
 
+    public function testARetryEnabledDirectClientIsRefusedAtConstruction(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        $retryEnabled = new \Predis\Client([
+            'host' => '127.0.0.1',
+            'retry' => new \Predis\Retry\Retry(new \Predis\Retry\Strategy\ExponentialBackoff(), 3),
+        ]);
+
+        $this->expectException(PinnedAuthorityRefusalException::class);
+        $this->expectExceptionMessage('retry-enabled');
+
+        new PinnedPrimaryAuthorityGuard($retryEnabled, self::NS, 0);
+    }
+
+    public function testAnUnknownClientIsRefusedAtConstruction(): void
+    {
+        $opaque = new FakePredisClient();
+        $opaque->connectionOverride = null;
+
+        $this->expectException(PinnedAuthorityRefusalException::class);
+        $this->expectExceptionMessage('cannot be classified as a single-node direct connection');
+
+        new PinnedPrimaryAuthorityGuard($opaque, self::NS, 0);
+    }
+
     public function testTheGuardedClientWrapperDelegatesAndRefuses(): void
     {
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0);
+        $guard->initializePin();
         $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
 
         // The command goes through the guard to the inner client.

@@ -4,45 +4,55 @@
  *
  * A Playwright-based client benchmark that drives the browser fixture
  * (tests/browser/router.php) and measures, per difficulty tier
- * (SHA-256 16/18/20 bits + Argon2id):
+ * (SHA-256 16/18/20 bits + Argon2id) and per asset mode (inline vs
+ * files, the ?assets=files fixture variant):
  *
  *   - solve time (challenge fetch start -> kiwi:verified) and the pure
  *     proof computation (solving state -> verified): p50/p95/p99,
  *   - page-to-verified time (navigation start -> verified),
  *   - JS parse/compile/eval time: the Long Animation Frames script
  *     entries (performance entries; the fixture inlines the wasm glue
- *     and the driver), plus the script-timing entries when the build
- *     exposes them,
+ *     and the driver in inline mode and links them with SRI in files
+ *     mode), plus the isolated same-origin iframe evaluation of the
+ *     exact served script text (inline or fetched driver) when the
+ *     scripts are present,
  *   - WASM compile + instantiate time (WebAssembly wrappers, main
  *     thread),
  *   - worker startup latency for Argon2id (Worker constructor -> first
  *     message, i.e. the driver's ready handshake),
  *   - main-thread blocking (Long Task API): count, total, p95,
  *   - peak JS heap (performance.memory samples + final heap),
- *   - cold-cache vs warm-cache loads: a cold load runs in a fresh
- *     browser context with the HTTP cache disabled (every byte is
- *     re-fetched); a warm load reuses one context whose cache is
- *     enabled and already populated by the previous rep. Note: the
- *     fixture page inlines all its assets, so for this fixture the
- *     cache state mostly reflects connection/context reuse; the
- *     mechanism stays in place for pages with external assets (see
- *     README.md).
- *   - multiple-widget pages (the ?widgets=N fixture page).
+ *   - the inline/files x cold/warm matrix: transferred bytes (Resource
+ *     Timing transferSize, document + assets), cache-hit loads (warm
+ *     reps reusing one populated context), the lazy Argon runtime fetch
+ *     (files mode: the wasm glue is fetched only when a memory-hard
+ *     challenge arrives; the fetch start is recorded), and a repeat
+ *     navigation measurement after the warm reps (everything cached).
+ *
+ * The KEY benchmark cell is files + warm + ordinary SHA (16-20 bits):
+ * the returning-user path, which must be extremely cheap (all assets
+ * cached, no runtime fetch, no worker).
  *
  * Device tiers come from Playwright device emulation plus CDP CPU
- * throttling (Emulation.setCPUThrottlingRate). See README.md for the
- * tier table and the release-qualification procedure (physical-device
- * tiers are the release boundary; the emulation tiers are runnable
- * now).
+ * throttling (Emulation.setCPUThrottlingRate). The tiers are desktop
+ * CPU-throttled approximations of the device classes they name: CDP
+ * throttling is a coarse model of cheap hardware, and the emulation
+ * does NOT reproduce real thermals, battery savers, or the real
+ * device's JIT/wasm behavior. This lab records desktop-emulation
+ * evidence only; it makes no low-end-mobile claim. The physical-device
+ * tiers described in README.md are the release boundary.
  *
  * Usage:
- *   node tools/client-perf/client-perf.mjs [--tiers all] [--reps 5]
- *     [--cache both] [--fixture-port 8091] [--out FILE]
+ *   node tools/client-perf/client-perf.mjs [--tiers all] [--reps 50]
+ *     [--argon-reps 20] [--samples N] [--cache both] [--assets both]
+ *     [--fixture-port 8091] [--out FILE]
+ *   node tools/client-perf/client-perf.mjs --quick
  *   node tools/client-perf/client-perf.mjs --help
  */
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -68,7 +78,7 @@ try {
   process.exit(2);
 }
 
-const SCHEMA = 'kiwicaptcha.client-perf/1';
+const SCHEMA = 'kiwicaptcha.client-perf/2';
 
 const TIERS = {
   'low-android': {
@@ -165,7 +175,7 @@ const DIFFICULTIES = {
   sha18: { label: 'SHA-256, 18 leading zero bits', query: () => '?bits=18' },
   sha20: { label: 'SHA-256, 20 leading zero bits', query: () => '?bits=20' },
   argon2id: {
-    label: 'Argon2id (m_kib, t=3, p=1)',
+    label: 'Argon2id (m=16384 KiB, t=3, p=1, target 8)',
     query: (o) => `?algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
   },
 };
@@ -174,15 +184,16 @@ function parseArgs(argv) {
   const opts = {
     tiers: null, // null = all
     difficulties: ['sha16', 'sha18', 'sha20', 'argon2id'],
-    reps: 5,
-    argonReps: 3,
+    reps: 50, // SHA-256 solve repetitions per cell (the percentile-supporting default)
+    argonReps: 20, // Argon2id solve repetitions per cell (memory-hard, so fewer but still percentile-supporting)
     cache: 'both', // cold | warm | both
+    assets: 'both', // inline | files | both
     fixturePort: 8091,
     noFixture: false,
     php: 'php',
     out: null,
-    argonBits: 4,
-    argonMKib: 64,
+    argonBits: 8, // the real adaptive-risk ladder highest rung (not the fixture envelope default)
+    argonMKib: 16384, // the real ladder envelope (16 MiB), not the 64 KiB fixture default
     multiWidget: true,
     multiWidgetReps: 3,
     quick: false,
@@ -208,8 +219,15 @@ function parseArgs(argv) {
       case '--argon-reps':
         opts.argonReps = parseInt(next(), 10);
         break;
+      case '--samples':
+        opts.reps = parseInt(next(), 10);
+        opts.argonReps = opts.reps;
+        break;
       case '--cache':
         opts.cache = next();
+        break;
+      case '--assets':
+        opts.assets = next();
         break;
       case '--fixture-port':
         opts.fixturePort = parseInt(next(), 10);
@@ -246,6 +264,7 @@ function parseArgs(argv) {
     opts.reps = 3;
     opts.argonReps = 2;
     opts.cache = 'both';
+    opts.assets = 'both';
   }
   return opts;
 }
@@ -260,22 +279,29 @@ Options:
   --tiers <list>          comma list of device tiers (default: all)
                           ${Object.keys(TIERS).join(', ')}
   --difficulties <list>   comma list (default: sha16,sha18,sha20,argon2id)
-  --reps N                solve repetitions per tier/difficulty/cache (default 5)
-  --argon-reps N          repetitions for the argon2id tier (default 3)
+  --reps N                SHA-256 solve repetitions per tier/difficulty/cache/assets
+                          (default 50; the percentile-supporting range is 50-100)
+  --argon-reps N          Argon2id repetitions per cell (default 20; range 20-30)
+  --samples N             shorthand for --reps N --argon-reps N
   --cache <cold|warm|both>  cold = fresh context per load with the HTTP
                           cache disabled; warm = one reused context with
                           the cache enabled and populated (default both)
+  --assets <inline|files|both>  inline = the fixture's inlined wasm glue
+                          and driver; files = the ?assets=files variant
+                          (external SRI assets, lazy Argon runtime).
+                          Default both.
   --fixture-port N        fixture server port (default 8091)
   --no-fixture            attach to an already-running fixture (e.g. the
                           playwright lane on 8085)
   --php BIN               php binary for the fixture (default php)
-  --argon-bits N          argon2id target bits for the argon tier (default 4,
-                          the fixture envelope; use 8 for the risk-ladder
-                          highest rung, see README release-qualification)
-  --argon-m-kib N         argon2id memory KiB for the argon tier (default 64;
-                          use 16384 for the risk-ladder envelope)
+  --argon-bits N          argon2id target bits for the argon tier (default 8,
+                          the real adaptive-risk ladder highest rung)
+  --argon-m-kib N         argon2id memory KiB for the argon tier (default 16384,
+                          the real ladder envelope; the fixture clamps to
+                          8..65536 KiB, so 16384 is permitted)
   --no-multi-widget       skip the multiple-widget scenario
-  --quick                 low-android + mainstream-desktop, 3 reps
+  --quick                 iteration mode: low-android + mainstream-desktop,
+                          3 SHA / 2 Argon reps, cold and warm, inline and files
   --out FILE              results file (default results/results-<date>.json)
   --help                  this text
 
@@ -456,11 +482,6 @@ async function collectPageMetrics(page) {
   return page.evaluate(async () => {
     const P = window.__kiwiPerf || { states: [], verified: null, workers: [], wasm: { compile: [], instantiate: [] } };
     if (P.__stopMemSampling) P.__stopMemSampling();
-    // Long-task and long-animation-frame entries are not retained in
-    // the timeline by default (longtask) or only via the buffered
-    // timeline (LAF), so the collection arms buffered observers and
-    // reads the retained buffers; the init-script observer lists are
-    // the fallback.
     const longTasks = [];
     const lafScripts = [];
     let finalHeap = null;
@@ -509,6 +530,19 @@ async function collectPageMetrics(page) {
         scriptEntries.push({ invoker: e.invoker || '', duration: e.duration, startTime: e.startTime, executionStart: e.executionStart });
       }
     } catch (e) {}
+    const resources = [];
+    try {
+      for (const e of performance.getEntriesByType('resource')) {
+        resources.push({
+          name: e.name.slice(0, 120),
+          startTime: e.startTime,
+          duration: e.duration,
+          transferSize: typeof e.transferSize === 'number' ? e.transferSize : null,
+          encodedBodySize: typeof e.encodedBodySize === 'number' ? e.encodedBodySize : null,
+          decodedBodySize: typeof e.decodedBodySize === 'number' ? e.decodedBodySize : null,
+        });
+      }
+    } catch (e) {}
     const nav = performance.getEntriesByType('navigation')[0] || null;
     return {
       timeOrigin: P.timeOrigin,
@@ -521,33 +555,52 @@ async function collectPageMetrics(page) {
       longTasks,
       lafScripts,
       scriptEntries,
+      resources,
       memSamples: P.memSamples,
       finalHeap,
       nav: nav
-        ? { domContentLoadedMs: nav.domContentLoadedEventEnd - nav.startTime, loadMs: nav.loadEventEnd - nav.startTime }
+        ? {
+            domContentLoadedMs: nav.domContentLoadedEventEnd - nav.startTime,
+            loadMs: nav.loadEventEnd - nav.startTime,
+            transferSize: typeof nav.transferSize === 'number' ? nav.transferSize : null,
+          }
         : null,
     };
   });
 }
 
 /**
- * Measure the page's inline classic scripts (the wasm glue and the
- * widget driver — the fixture inlines them) with the browser's own V8:
- * each script's exact text is evaluated in an isolated same-origin
- * iframe under the active CPU throttle, and the wall time from script
- * insertion to the appended sentinel statement is the script's
- * parse + compile + eval time. The iframe is blank (no widget), so
- * executing the driver a second time has no page side effects. This
- * complements the long-animation-frame script entries (which only
- * populate when a frame exceeds 50 ms, i.e. on throttled tiers).
+ * Measure the page's served scripts (the wasm glue and the widget driver)
+ * with the browser's own V8: each script's exact text is evaluated in an
+ * isolated same-origin iframe under the active CPU throttle, and the wall
+ * time from script insertion to the appended sentinel statement is the
+ * script's parse + compile + eval time. In inline mode the fixture inlines
+ * the scripts, so the DOM text is used; in files mode the fixture links
+ * them, so the same-origin script src is fetched and evaluated. The iframe
+ * is blank (no widget), so executing the driver a second time has no page
+ * side effects.
  */
 async function measureInlineScripts(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const sources = [];
     for (const s of document.querySelectorAll('script')) {
-      if (s.src || (s.type && s.type !== 'text/javascript' && s.type !== 'application/javascript')) continue;
+      if (s.src) {
+        continue;
+      }
+      if (s.type && s.type !== 'text/javascript' && s.type !== 'application/javascript') continue;
       if (s.textContent.trim().length < 100) continue;
       sources.push(s.textContent);
+    }
+    if (sources.length === 0) {
+      for (const s of document.querySelectorAll('script[src]')) {
+        const url = s.src;
+        if (!url) continue;
+        try {
+          const resp = await fetch(url);
+          const text = await resp.text();
+          if (text.trim().length >= 100) sources.push(text);
+        } catch (e) {}
+      }
     }
     if (sources.length === 0) return [];
     const iframe = document.createElement('iframe');
@@ -563,7 +616,7 @@ async function measureInlineScripts(page) {
       const script = doc.createElement('script');
       script.textContent = src + ';window.__kiwiPerfScriptEvalDone = performance.now();';
       doc.body.appendChild(script);
-      const deadline = Date.now() + 30000;
+      const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
         if (doc.defaultView && doc.defaultView.__kiwiPerfScriptEvalDone !== undefined) break;
         // Synchronous spin: the script evaluation blocks this loop, so
@@ -592,6 +645,12 @@ function computeMetrics(raw) {
   const wasmInstantiate = (raw.wasm.instantiate || []).map((c) => c.ms);
   const mem = raw.memSamples || [];
   const peakHeapMb = mem.length ? Math.max(...mem) / (1024 * 1024) : null;
+  const resources = raw.resources || [];
+  const transferred = resources.reduce((a, r) => a + (typeof r.transferSize === 'number' ? r.transferSize : 0), 0);
+  const cacheHits = resources.filter((r) => typeof r.transferSize === 'number' && r.transferSize === 0).length;
+  const runtimeEntry = resources.find((r) => /\/assets\/runtime\./.test(r.name) || /kiwicaptacha-wasm/.test(r.name));
+  const driverEntry = resources.find((r) => /\/assets\/driver\./.test(r.name));
+  const navTransfer = raw.nav && typeof raw.nav.transferSize === 'number' ? raw.nav.transferSize : 0;
   return {
     solveMs: connecting !== null && verifiedT !== null ? verifiedT - connecting : null,
     pureSolveMs: solving !== null && verifiedT !== null ? verifiedT - solving : null,
@@ -611,17 +670,26 @@ function computeMetrics(raw) {
     finalHeapMb: raw.finalHeap !== null ? raw.finalHeap / (1024 * 1024) : null,
     domContentLoadedMs: raw.nav ? raw.nav.domContentLoadedMs : null,
     loadMs: raw.nav ? raw.nav.loadMs : null,
+    transferredBytes: transferred + navTransfer,
+    resourceTransferredBytes: transferred,
+    cacheHitCount: cacheHits,
+    resourceCount: resources.length,
+    runtimeLazyFetchStartMs: runtimeEntry ? runtimeEntry.startTime : null,
+    runtimeLazyFetchDurationMs: runtimeEntry ? runtimeEntry.duration : null,
+    driverFetchStartMs: driverEntry ? driverEntry.startTime : null,
+    driverFetchDurationMs: driverEntry ? driverEntry.duration : null,
     errorCount: (raw.errors || []).length,
     errors: (raw.errors || []).map((e) => ({ t: e.t, workerUnavailable: !!e.workerUnavailable, detail: e.detail || {} })),
   };
 }
 
-async function runLoad(browser, opts, tierName, difficultyName, warmContext, repIndex) {
+async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmContext, repIndex) {
   const tier = TIERS[tierName];
   const difficulty = DIFFICULTIES[difficultyName];
   const contextOptions = tierContextOptions(tierName);
   const base = `http://127.0.0.1:${opts.fixturePort}`;
-  const url = base + '/' + difficulty.query(opts);
+  const assetsParam = assetMode === 'files' ? '&assets=files' : '';
+  const url = base + '/' + difficulty.query(opts) + assetsParam;
   const cacheState = warmContext === null ? 'cold' : 'warm';
   let context = null;
   let page = null;
@@ -636,9 +704,6 @@ async function runLoad(browser, opts, tierName, difficultyName, warmContext, rep
     const cdpSession = await context.newCDPSession(page);
     await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
     if (cacheState === 'cold') {
-      // Cold-cache semantics: the HTTP cache is disabled, so every byte
-      // is re-fetched; the fresh context additionally starts with an
-      // empty cache.
       await cdpSession.send('Network.enable');
       await cdpSession.send('Network.setCacheDisabled', { cacheDisabled: true });
     }
@@ -666,6 +731,7 @@ async function runLoad(browser, opts, tierName, difficultyName, warmContext, rep
     metrics.difficulty = difficultyName;
     metrics.tier = tierName;
     metrics.cache = cacheState;
+    metrics.assets = assetMode;
     metrics.rep = repIndex;
     metrics.cpuThrottle = tier.cpuThrottle;
     metrics.device = tier.device || null;
@@ -682,65 +748,202 @@ async function runLoad(browser, opts, tierName, difficultyName, warmContext, rep
   }
 }
 
+/**
+ * The repeat-navigation measurement for a warm cell: after the reps have
+ * populated the cache, one more navigation of the same URL in the same
+ * context measures the fully-cached returning-user load (assets from
+ * cache; only the challenge POST round trip is paid again). The result is
+ * recorded as a named field on the cell, not as a solve rep.
+ */
+async function runRepeatNavigation(browser, opts, tierName, difficultyName, assetMode, warmContext) {
+  const tier = TIERS[tierName];
+  const difficulty = DIFFICULTIES[difficultyName];
+  const base = `http://127.0.0.1:${opts.fixturePort}`;
+  const assetsParam = assetMode === 'files' ? '&assets=files' : '';
+  const url = base + '/' + difficulty.query(opts) + assetsParam;
+  let page = null;
+  try {
+    page = await warmContext.newPage();
+    await page.addInitScript(INIT_SCRIPT);
+    const cdpSession = await warmContext.newCDPSession(page);
+    await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const isArgon = difficultyName === 'argon2id';
+    const timeoutMs = isArgon ? 300000 : 90000;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await page.evaluate(() => {
+        const P = window.__kiwiPerf || {};
+        return { verified: !!P.verified, errors: (P.errors || []).length };
+      });
+      if (state.verified) break;
+      if (state.errors > 0) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 150));
+    const raw = await collectPageMetrics(page);
+    const m = computeMetrics(raw);
+    return {
+      pageToVerifiedMs: m.pageToVerifiedMs,
+      domContentLoadedMs: m.domContentLoadedMs,
+      loadMs: m.loadMs,
+      transferredBytes: m.transferredBytes,
+      cacheHitCount: m.cacheHitCount,
+      resourceCount: m.resourceCount,
+      timedOut: raw.verified === null,
+    };
+  } finally {
+    if (page) await page.close().catch(() => {});
+  }
+}
+
 async function runTier(browser, opts, tierName, difficulties, results) {
-  for (const difficultyName of difficulties) {
-    const reps = difficultyName === 'argon2id' ? opts.argonReps : opts.reps;
-    const caches = opts.cache === 'both' ? ['cold', 'warm'] : [opts.cache];
-    for (const cacheState of caches) {
-      // Cold: a fresh context per load. Warm: ONE context reused across
-      // all reps of this cell, its cache enabled and populated by the
-      // first rep.
-      let warmContext = null;
-      if (cacheState === 'warm') {
-        warmContext = await browser.newContext(tierContextOptions(tierName));
-      }
-      const samples = [];
-      try {
-        for (let rep = 0; rep < reps; rep += 1) {
-          const m = await runLoad(browser, opts, tierName, difficultyName, cacheState === 'warm' ? warmContext : null, rep);
-          samples.push(m);
-          process.stdout.write(
-            `  ${tierName}/${difficultyName}/${cacheState} rep ${rep + 1}/${reps}: ` +
-              `solve ${m.solveMs === null ? '-' : m.solveMs.toFixed(0)} ms` +
-              ` (p2v ${m.pageToVerifiedMs === null ? '-' : m.pageToVerifiedMs.toFixed(0)} ms` +
-              `, js ${m.jsParseCompileMs === null ? '-' : m.jsParseCompileMs.toFixed(0)} ms` +
-              `, wasmC ${m.wasmCompileMs === null ? '-' : m.wasmCompileMs.toFixed(0)} ms` +
-              (m.workerStartupMs !== null ? `, worker ${m.workerStartupMs.toFixed(0)} ms` : '') +
-              `, longtasks ${m.longTaskCount}(${m.longTaskTotalMs.toFixed(0)} ms)` +
-              `, heap ${m.peakHeapMb === null ? '-' : m.peakHeapMb.toFixed(1)} MB` +
-              (m.timedOut ? ' TIMED OUT' : '') +
-              (m.errorCount ? ` ERRORS=${m.errorCount}` : '') +
-              `)`,
-          );
-          console.log('');
+  const assetModes = opts.assets === 'both' ? ['inline', 'files'] : [opts.assets];
+  for (const assetMode of assetModes) {
+    for (const difficultyName of difficulties) {
+      const reps = difficultyName === 'argon2id' ? opts.argonReps : opts.reps;
+      const caches = opts.cache === 'both' ? ['cold', 'warm'] : [opts.cache];
+      for (const cacheState of caches) {
+        let warmContext = null;
+        if (cacheState === 'warm') {
+          warmContext = await browser.newContext(tierContextOptions(tierName));
+          // Warm-cache semantics: the context is pre-warmed with one
+          // discarded load before any recorded rep, so every recorded
+          // warm rep is a genuinely cache-hit load (the returning-user
+          // path), not the populating load. For Argon files-mode cells
+          // the pre-warm also completes a solve, which fetches and
+          // caches the lazy runtime and worker assets.
+          try {
+            await runLoad(browser, opts, tierName, difficultyName, assetMode, warmContext, -1);
+            process.stdout.write(
+              `  ${tierName}/${difficultyName}/${assetMode}/warm pre-warmed the context (rep 0 discarded)\n`,
+            );
+            console.log('');
+          } catch (e) {
+            process.stderr.write(`  ${tierName}/${difficultyName}/${assetMode}/warm pre-warm failed: ${e.message}\n`);
+          }
         }
-      } finally {
-        if (warmContext) await warmContext.close().catch(() => {});
+        const samples = [];
+        let repeatNav = null;
+        try {
+          for (let rep = 0; rep < reps; rep += 1) {
+            let m;
+            try {
+              m = await runLoad(browser, opts, tierName, difficultyName, assetMode, cacheState === 'warm' ? warmContext : null, rep);
+            } catch (e) {
+              // A transient page/browser close under throttling must not
+              // abort the whole matrix: the rep is recorded as a failed
+              // sample and the cell continues. A cell whose samples all
+              // failed still lands with its errorCount, which the
+              // results language treats as a measured failure.
+              process.stderr.write(`  ${tierName}/${difficultyName}/${assetMode}/${cacheState} rep ${rep + 1} failed: ${e.message}\n`);
+              m = {
+                tier: tierName,
+                difficulty: difficultyName,
+                cache: cacheState,
+                assets: assetMode,
+                rep,
+                timedOut: true,
+                errorCount: 1,
+                errorMessage: String(e.message || e).slice(0, 200),
+                solveMs: null,
+                pureSolveMs: null,
+                pageToVerifiedMs: null,
+                bootstrapToConnectingMs: null,
+                jsParseCompileMs: null,
+                inlineScriptEvalMs: null,
+                wasmCompileMs: null,
+                wasmInstantiateMs: null,
+                workerStartupMs: null,
+                longTaskCount: 0,
+                longTaskTotalMs: 0,
+                longTaskMaxMs: null,
+                peakHeapMb: null,
+                finalHeapMb: null,
+                domContentLoadedMs: null,
+                loadMs: null,
+                transferredBytes: null,
+                cacheHitCount: null,
+                resourceCount: null,
+                runtimeLazyFetchStartMs: null,
+                runtimeLazyFetchDurationMs: null,
+                driverFetchStartMs: null,
+                driverFetchDurationMs: null,
+              };
+            }
+            samples.push(m);
+            process.stdout.write(
+              `  ${tierName}/${difficultyName}/${assetMode}/${cacheState} rep ${rep + 1}/${reps}: ` +
+                `solve ${m.solveMs === null ? '-' : m.solveMs.toFixed(0)} ms` +
+                ` (p2v ${m.pageToVerifiedMs === null ? '-' : m.pageToVerifiedMs.toFixed(0)} ms` +
+                `, tx ${m.transferredBytes} B` +
+                `, cachehits ${m.cacheHitCount}` +
+                `, js ${m.jsParseCompileMs === null ? '-' : m.jsParseCompileMs.toFixed(0)} ms` +
+                `, wasmC ${m.wasmCompileMs === null ? '-' : m.wasmCompileMs.toFixed(0)} ms` +
+                (m.workerStartupMs !== null ? `, worker ${m.workerStartupMs.toFixed(0)} ms` : '') +
+                `, longtasks ${m.longTaskCount}(${m.longTaskTotalMs.toFixed(0)} ms)` +
+                `, heap ${m.peakHeapMb === null ? '-' : m.peakHeapMb.toFixed(1)} MB` +
+                (m.timedOut ? ' TIMED OUT' : '') +
+                (m.errorCount ? ` ERRORS=${m.errorCount}` : '') +
+                `)`,
+            );
+            console.log('');
+          }
+        } finally {
+          if (warmContext) {
+            if (cacheState === 'warm' && samples.length > 0) {
+              try {
+                repeatNav = await runRepeatNavigation(browser, opts, tierName, difficultyName, assetMode, warmContext);
+              } catch (e) {
+                process.stderr.write(`  repeat-navigation measurement failed: ${e.message}\n`);
+              }
+            }
+            if (repeatNav) {
+              process.stdout.write(
+                `  repeat navigation ${tierName}/${difficultyName}/${assetMode}/warm: ` +
+                  `p2v ${repeatNav.pageToVerifiedMs === null ? '-' : repeatNav.pageToVerifiedMs.toFixed(0)} ms` +
+                  `, tx ${repeatNav.transferredBytes} B, cachehits ${repeatNav.cacheHitCount}, load ${repeatNav.loadMs === null ? '-' : repeatNav.loadMs.toFixed(0)} ms`,
+              );
+              console.log('');
+            }
+            await warmContext.close().catch(() => {});
+          }
+        }
+        const key = `${tierName}:${difficultyName}:${cacheState}:${assetMode}`;
+        const agg = { tier: tierName, difficulty: difficultyName, cache: cacheState, assets: assetMode, reps: samples };
+        for (const metric of [
+          'solveMs',
+          'pureSolveMs',
+          'pageToVerifiedMs',
+          'bootstrapToConnectingMs',
+          'jsParseCompileMs',
+          'inlineScriptEvalMs',
+          'wasmCompileMs',
+          'wasmInstantiateMs',
+          'workerStartupMs',
+          'longTaskTotalMs',
+          'longTaskMaxMs',
+          'peakHeapMb',
+          'domContentLoadedMs',
+          'loadMs',
+          'transferredBytes',
+          'cacheHitCount',
+          'resourceCount',
+          'runtimeLazyFetchStartMs',
+          'runtimeLazyFetchDurationMs',
+          'driverFetchStartMs',
+          'driverFetchDurationMs',
+        ]) {
+          agg[metric] = summarize(samples.map((s) => s[metric]).filter((v) => v !== null && v !== undefined));
+        }
+        agg.longTaskCount = summarize(samples.map((s) => s.longTaskCount).filter((v) => v !== null));
+        agg.timedOutCount = samples.filter((s) => s.timedOut).length;
+        agg.errorCount = samples.filter((s) => s.errorCount > 0).length;
+        if (repeatNav) {
+          agg.repeatNavigation = repeatNav;
+        }
+        results[key] = agg;
       }
-      const key = `${tierName}:${difficultyName}:${cacheState}`;
-      const agg = { tier: tierName, difficulty: difficultyName, cache: cacheState, reps: samples };
-      for (const metric of [
-        'solveMs',
-        'pureSolveMs',
-        'pageToVerifiedMs',
-        'bootstrapToConnectingMs',
-        'jsParseCompileMs',
-        'inlineScriptEvalMs',
-        'wasmCompileMs',
-        'wasmInstantiateMs',
-        'workerStartupMs',
-        'longTaskTotalMs',
-        'longTaskMaxMs',
-        'peakHeapMb',
-        'domContentLoadedMs',
-        'loadMs',
-      ]) {
-        agg[metric] = summarize(samples.map((s) => s[metric]).filter((v) => v !== null && v !== undefined));
-      }
-      agg.longTaskCount = summarize(samples.map((s) => s.longTaskCount).filter((v) => v !== null));
-      agg.timedOutCount = samples.filter((s) => s.timedOut).length;
-      agg.errorCount = samples.filter((s) => s.errorCount > 0).length;
-      results[key] = agg;
     }
   }
 }
@@ -748,70 +951,81 @@ async function runTier(browser, opts, tierName, difficulties, results) {
 async function runMultiWidget(browser, opts, results) {
   if (!opts.multiWidget) return;
   const base = `http://127.0.0.1:${opts.fixturePort}`;
-  const url = `${base}/?widgets=3&bits=18`;
-  const samples = [];
-  for (let rep = 0; rep < opts.multiWidgetReps; rep += 1) {
-    const context = await browser.newContext(tierContextOptions('mainstream-desktop'));
-    const page = await context.newPage();
-    try {
-      await page.addInitScript(INIT_SCRIPT);
-      const cdpSession = await context.newCDPSession(page);
-      await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: 1 });
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      const deadline = Date.now() + 120000;
-      let state;
-      while (Date.now() < deadline) {
-        state = await page.evaluate(() => {
-          const P = window.__kiwiPerf || {};
-          return { verifiedCount: Object.keys(P.verifiedWidgets || {}).length, errors: (P.errors || []).length };
-        });
-        if (state.verifiedCount >= 3) break;
-        if (state.errors > 0) break;
-        await new Promise((r) => setTimeout(r, 100));
+  const assetModes = opts.assets === 'both' ? ['inline', 'files'] : [opts.assets];
+  for (const assetMode of assetModes) {
+    const assetsParam = assetMode === 'files' ? '&assets=files' : '';
+    const url = `${base}/?widgets=3&bits=18${assetsParam}`;
+    const samples = [];
+    for (let rep = 0; rep < opts.multiWidgetReps; rep += 1) {
+      const context = await browser.newContext(tierContextOptions('mainstream-desktop'));
+      const page = await context.newPage();
+      try {
+        await page.addInitScript(INIT_SCRIPT);
+        const cdpSession = await context.newCDPSession(page);
+        await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const deadline = Date.now() + 120000;
+        let state;
+        while (Date.now() < deadline) {
+          state = await page.evaluate(() => {
+            const P = window.__kiwiPerf || {};
+            return { verifiedCount: Object.keys(P.verifiedWidgets || {}).length, errors: (P.errors || []).length };
+          });
+          if (state.verifiedCount >= 3) break;
+          if (state.errors > 0) break;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await new Promise((r) => setTimeout(r, 150));
+        const raw = await collectPageMetrics(page);
+        const widgets = await page.evaluate(() => document.querySelectorAll('[data-kiwi-widget]').length);
+        const verifiedTimes = Object.values(raw.verifiedWidgets || {});
+        const lt = (raw.longTasks || []).map((l) => l.duration);
+        const mem = raw.memSamples || [];
+        const m = computeMetrics(raw);
+        const sample = {
+          widgets,
+          verifiedCount: verifiedTimes.length,
+          allVerifiedMs: verifiedTimes.length ? Math.max(...verifiedTimes) : null,
+          firstVerifiedMs: verifiedTimes.length ? Math.min(...verifiedTimes) : null,
+          spreadMs: verifiedTimes.length ? Math.max(...verifiedTimes) - Math.min(...verifiedTimes) : null,
+          longTaskCount: lt.length,
+          longTaskTotalMs: lt.reduce((a, b) => a + b, 0),
+          peakHeapMb: mem.length ? Math.max(...mem) / (1024 * 1024) : null,
+          transferredBytes: m.transferredBytes,
+          cacheHitCount: m.cacheHitCount,
+          resourceCount: m.resourceCount,
+          errorCount: (raw.errors || []).length,
+          timedOut: verifiedTimes.length < widgets,
+        };
+        samples.push(sample);
+        process.stdout.write(
+          `  multi-widget (${widgets} widgets, sha18, ${assetMode}) rep ${rep + 1}/${opts.multiWidgetReps}: ` +
+            `all-verified ${sample.allVerifiedMs?.toFixed(0)} ms, ` +
+            `spread ${sample.spreadMs?.toFixed(0)} ms, ` +
+            `tx ${sample.transferredBytes} B, ` +
+            `longtasks ${sample.longTaskCount}(${sample.longTaskTotalMs.toFixed(0)} ms)` +
+            `, heap ${sample.peakHeapMb?.toFixed(1)} MB`,
+        );
+        console.log('');
+      } finally {
+        await page.close().catch(() => {});
+        await context.close().catch(() => {});
       }
-      await new Promise((r) => setTimeout(r, 150));
-      const raw = await collectPageMetrics(page);
-      const widgets = await page.evaluate(() => document.querySelectorAll('[data-kiwi-widget]').length);
-      const verifiedTimes = Object.values(raw.verifiedWidgets || {});
-      const lt = (raw.longTasks || []).map((l) => l.duration);
-      const mem = raw.memSamples || [];
-      const sample = {
-        widgets,
-        verifiedCount: verifiedTimes.length,
-        allVerifiedMs: verifiedTimes.length ? Math.max(...verifiedTimes) : null,
-        firstVerifiedMs: verifiedTimes.length ? Math.min(...verifiedTimes) : null,
-        spreadMs: verifiedTimes.length ? Math.max(...verifiedTimes) - Math.min(...verifiedTimes) : null,
-        longTaskCount: lt.length,
-        longTaskTotalMs: lt.reduce((a, b) => a + b, 0),
-        peakHeapMb: mem.length ? Math.max(...mem) / (1024 * 1024) : null,
-        errorCount: (raw.errors || []).length,
-        timedOut: verifiedTimes.length < widgets,
-      };
-      samples.push(sample);
-      process.stdout.write(
-        `  multi-widget (${widgets} widgets, sha18) rep ${rep + 1}/${opts.multiWidgetReps}: ` +
-          `all-verified ${sample.allVerifiedMs?.toFixed(0)} ms, ` +
-          `spread ${sample.spreadMs?.toFixed(0)} ms, ` +
-          `longtasks ${sample.longTaskCount}(${sample.longTaskTotalMs.toFixed(0)} ms)` +
-          `, heap ${sample.peakHeapMb?.toFixed(1)} MB`,
-      );
-      console.log('');
-    } finally {
-      await page.close().catch(() => {});
-      await context.close().catch(() => {});
     }
+    results[`multi-widget:sha18:3-widgets:${assetMode}`] = {
+      tier: 'mainstream-desktop',
+      difficulty: 'sha18',
+      widgets: 3,
+      assets: assetMode,
+      reps: samples,
+      allVerifiedMs: summarize(samples.map((s) => s.allVerifiedMs).filter((v) => v !== null)),
+      firstVerifiedMs: summarize(samples.map((s) => s.firstVerifiedMs).filter((v) => v !== null)),
+      spreadMs: summarize(samples.map((s) => s.spreadMs).filter((v) => v !== null)),
+      longTaskTotalMs: summarize(samples.map((s) => s.longTaskTotalMs)),
+      peakHeapMb: summarize(samples.map((s) => s.peakHeapMb).filter((v) => v !== null)),
+      transferredBytes: summarize(samples.map((s) => s.transferredBytes).filter((v) => v !== null)),
+    };
   }
-  results['multi-widget:sha18:3-widgets'] = {
-    tier: 'mainstream-desktop',
-    difficulty: 'sha18',
-    widgets: 3,
-    reps: samples,
-    allVerifiedMs: summarize(samples.map((s) => s.allVerifiedMs).filter((v) => v !== null)),
-    firstVerifiedMs: summarize(samples.map((s) => s.firstVerifiedMs).filter((v) => v !== null)),
-    spreadMs: summarize(samples.map((s) => s.spreadMs).filter((v) => v !== null)),
-    longTaskTotalMs: summarize(samples.map((s) => s.longTaskTotalMs)),
-    peakHeapMb: summarize(samples.map((s) => s.peakHeapMb).filter((v) => v !== null)),
-  };
 }
 
 function environment() {
@@ -825,6 +1039,32 @@ function environment() {
     out.php = execSync('php -v', { encoding: 'utf8' }).split('\n')[0];
   } catch (e) {
     out.php = 'unavailable';
+  }
+  return out;
+}
+
+/**
+ * Fingerprint the served client assets at measurement time: the harness
+ * measures whatever the working tree serves, so the results carry the
+ * exact bytes (sha256 + sizes) they were measured against. The driver and
+ * glue are edited by the delivery workstream, so this attribution is what
+ * makes a re-measurement reconciliation possible.
+ */
+function clientAssets() {
+  const assetsDir = join(REPO_ROOT, 'packages', 'kiwicaptcha-wasm', 'assets');
+  const names = ['widget-driver.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js'];
+  const out = {};
+  for (const name of names) {
+    const file = join(assetsDir, name);
+    try {
+      const bytes = readFileSync(file);
+      out[name] = {
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex').slice(0, 16),
+      };
+    } catch (e) {
+      out[name] = null;
+    }
   }
   return out;
 }
@@ -846,6 +1086,10 @@ async function main() {
   }
   if (!['cold', 'warm', 'both'].includes(opts.cache)) {
     console.error(`invalid --cache value: ${opts.cache}`);
+    process.exit(2);
+  }
+  if (!['inline', 'files', 'both'].includes(opts.assets)) {
+    console.error(`invalid --assets value: ${opts.assets}`);
     process.exit(2);
   }
 
@@ -880,11 +1124,32 @@ async function main() {
     harness: 'tools/client-perf/client-perf.mjs',
     chromium: chromiumVersion,
     environment: environment(),
+    clientAssets: clientAssets(),
+    methodology: {
+      note: 'desktop CPU-throttled emulation: the tiers are Playwright device descriptors plus CDP Emulation.setCPUThrottlingRate on an Apple silicon Mac. The emulation approximates the named device classes on a desktop CPU; it does NOT reproduce real device thermals, battery saver, or the real device browser JIT/wasm behavior. These numbers are desktop-emulation evidence only and make no low-end-mobile claim; the physical-device tiers described in README.md are the release boundary.',
+      sampleSizes: {
+        shaReps: opts.reps,
+        argonReps: opts.argonReps,
+        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration.',
+      },
+      argonLadder: {
+        mKib: opts.argonMKib,
+        targetBits: opts.argonBits,
+        note: 'the real adaptive-risk ladder (16 MiB envelope, target 8) as chosen by the server-side RiskProfileResolver, not the fixture envelope default.',
+      },
+      coldWarm: {
+        note: 'cold = a fresh context per load with the HTTP cache disabled, so every byte is re-fetched; warm = one reused context whose cache is enabled and populated by the first rep, so reps 2+ are cache-hit loads. The repeat-navigation field after the warm reps measures the fully-cached load.',
+      },
+      assets: {
+        inline: 'the fixture inlines the wasm glue and the driver in the page HTML',
+        files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, and a lazy Argon runtime that is fetched only when a memory-hard challenge arrives',
+      },
+    },
     fixture: {
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
       php: opts.php,
-      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib) and the widgets knob; the fixture default behavior is unchanged',
+      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib) and the assets=files knob; the fixture default behavior is unchanged',
     },
     tiers: Object.fromEntries(
       tierNames.map((t) => [
@@ -899,6 +1164,7 @@ async function main() {
       reps: opts.reps,
       argonReps: opts.argonReps,
       cache: opts.cache,
+      assets: opts.assets,
       argonBits: opts.argonBits,
       argonMKib: opts.argonMKib,
       multiWidget: opts.multiWidget,

@@ -88,17 +88,36 @@ Operational requirements:
 
 ## CSP / Worker requirements
 
-The memory-hard solver runs off the main thread in a Web Worker:
+The memory-hard solver runs off the main thread in a Web Worker; the
+worker directive depends on the asset delivery tier:
 
-- Blob-worker default: the driver builds the worker from a Blob URL of locally embedded code (`URL.createObjectURL`).
-  A CSP with `worker-src 'self'` and no `blob:` allowance blocks it; allow `worker-src blob:` (a nonce'd/self-inlined driver creates the Blob, so no network origin is involved).
-- Explicit worker URL: set `data-kiwi-worker-src` on the widget container to a **same-origin** asset URL, and allow that origin in `worker-src` (or use `worker-src 'self'` when serving it yourself).
-  Cross-origin worker URLs are never fetched by the driver.
-- No synchronous Argon2id on the main thread. Argon2id has no JS fallback and is never executed synchronously in the page; it runs only inside the worker (WASM).
-  When the worker is unavailable, SHA-256 mode falls back to the chunked JS solver; Argon2id mode simply cannot solve.
-  A CSP that blocks the worker therefore disables Argon2id challenges; choose `worker-src` accordingly.
-- WASM compilation: a strict CSP3 policy must also allow `'wasm-unsafe-eval'` in `script-src` for the WASM solver (optional in SHA-256 mode thanks to the JS fallback, required for Argon2id).
-- Style/script inline rules are unchanged: with a CSP nonce the emitted `<style>`/`<script>` carry `nonce="..."`; without one, `'unsafe-inline'` or application post-processing is required (see the root `README.md`).
+- Files mode (the default `asset_mode`): the driver lazily fetches the
+  versioned `worker.<hash>.js` asset (immutable URL + SRI), SRI-verifies it,
+  and constructs a **same-origin Worker** from the fetched source — no Blob
+  URL is ever created. The worker then loads its WASM glue from the verified
+  runtime asset. This tier needs `worker-src 'self'` and never allows
+  `blob:`.
+- Inline compatibility tier (`asset_mode: inline`): the driver builds the
+  worker from a Blob URL of locally embedded code (`URL.createObjectURL`).
+  A CSP with `worker-src 'self'` and no `blob:` allowance blocks it; this
+  tier needs `worker-src blob:`.
+- Explicit worker URL: setting `data-kiwi-worker-src` on the widget
+  container without the integrity attribute keeps the legacy
+  direct-construction path to a **same-origin** asset URL; allow that
+  origin in `worker-src` (or use `worker-src 'self'` when serving it
+  yourself). Cross-origin worker URLs are never fetched by the driver.
+- No synchronous Argon2id on the main thread. Argon2id has no JS fallback
+  and is never executed synchronously in the page; it runs only inside the
+  worker (WASM). When the worker is unavailable, SHA-256 mode falls back
+  to the chunked JS solver; Argon2id mode simply cannot solve.
+  A CSP that blocks the worker therefore disables Argon2id challenges;
+  choose `worker-src` for your asset mode accordingly.
+- WASM compilation: a strict CSP3 policy must also allow `'wasm-unsafe-eval'`
+  in `script-src` for the WASM solver (optional in SHA-256 mode thanks to
+  the JS fallback, required for Argon2id).
+- Style/script inline rules are unchanged: with a CSP nonce the emitted
+  `<style>`/`<script>` carry `nonce="..."`; without one, `'unsafe-inline'`
+  or application post-processing is required (see the root `README.md`).
 
 ## Proxy / IP-binding assumptions
 

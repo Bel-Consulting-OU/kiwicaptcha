@@ -60,6 +60,14 @@ final class AuthorityTransitionGuardTest extends TestCase
         return new \Predis\Client('tcp://127.0.0.1:6399');
     }
 
+    private static function retryEnabledDirectClient(): \Predis\Client
+    {
+        return new \Predis\Client([
+            'host' => '127.0.0.1',
+            'retry' => new \Predis\Retry\Retry(new \Predis\Retry\Strategy\ExponentialBackoff(), 3),
+        ]);
+    }
+
     /**
      * @param array<int, array<string, mixed>> $layers
      */
@@ -81,8 +89,11 @@ final class AuthorityTransitionGuardTest extends TestCase
 
         self::assertSame(AuthorityClassification::Unsafe, $classifier->classify(self::sentinelClient()), 'a Sentinel replication aggregate is a proven authority-change topology');
         self::assertSame(AuthorityClassification::Unsafe, $classifier->classify(self::clusterClient()), 'a Redis Cluster aggregate is a proven authority-change topology');
+        self::assertSame(AuthorityClassification::Unsafe, $classifier->classify(self::retryEnabledDirectClient()), 'a direct connection with retries enabled can re-execute a mutation on a replacement connection');
         self::assertSame(AuthorityClassification::Safe, $classifier->classify(self::singleNodeClient()), 'a single-node direct connection is the one authority, it cannot change');
-        self::assertSame(AuthorityClassification::Unknown, $classifier->classify(new FakePredisClient()), 'a Predis client without an inspectable connection is uninspectable');
+        $opaque = new FakePredisClient();
+        $opaque->connectionOverride = null;
+        self::assertSame(AuthorityClassification::Unknown, $classifier->classify($opaque), 'a Predis client without an inspectable connection is uninspectable');
         self::assertSame(AuthorityClassification::Unknown, $classifier->classify(new \stdClass()), 'an opaque non-Predis object cannot be classified');
         self::assertSame(AuthorityClassification::Unknown, $classifier->classify('not-a-client'), 'a non-object is uninspectable');
     }
@@ -124,6 +135,20 @@ final class AuthorityTransitionGuardTest extends TestCase
             self::assertStringContainsString('cannot be classified as a single-node direct connection', $e->getMessage(), 'the refusal names the classification');
             self::assertStringContainsString('until proven safe', $e->getMessage(), 'the refusal states the unknown-is-unsafe invariant');
             self::assertStringContainsString('pinned-primary/topology adapter', $e->getMessage());
+        }
+    }
+
+    public function testFailClosedRefusesARetryEnabledDirectClient(): void
+    {
+        $guard = new RuntimeAuthorityClassifier('fail_closed');
+
+        try {
+            $guard->assertServeEligible(self::retryEnabledDirectClient());
+            self::fail('a retry-enabled direct client must be refused under fail_closed: the retry wrapper can re-execute a durability-critical transition on a replacement connection');
+        } catch (\LogicException $e) {
+            self::assertStringContainsString('replay_durability is "fail_closed"', $e->getMessage());
+            self::assertStringContainsString('retries ENABLED', $e->getMessage(), 'the refusal names the retry state');
+            self::assertStringContainsString('pinned-primary/topology adapter', $e->getMessage(), 'the refusal offers the pinned-primary remediation');
         }
     }
 

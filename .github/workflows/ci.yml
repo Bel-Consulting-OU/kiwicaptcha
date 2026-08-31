@@ -1301,9 +1301,13 @@ jobs:
     # context, and the release workflow does not consult it. A shared
     # GitHub runner is too noisy to gate on, so the hard ratchets here
     # only certify a quiet, dedicated machine; until such a runner
-    # exists, treat the 3x-p95 failures as signals, not blockers. The
-    # byte budgets are not part of this job; they stay gating in
-    # "Performance budgets" on every push.
+    # exists, treat the 3x-p95 failures as signals, not blockers. Every
+    # ratchet step sets KIWI_STRICT_BASELINE=1, so a missing
+    # timing-baseline leaf fails the run: a hard-ratchet run with no
+    # baseline is not a hard ratchet. The noisy CI timing steps in the
+    # "Performance budgets" job never set the flag and keep the note
+    # degradation. The byte budgets are not part of this job; they stay
+    # gating in "Performance budgets" on every push.
     if: github.event_name == 'workflow_dispatch'
     name: Performance latency (manual hard-ratchet benchmark)
     runs-on: ubuntu-latest
@@ -1335,17 +1339,25 @@ jobs:
             echo "manual-benchmark preflight: Redis answers at $url\n";
           '
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
         run: php packages/kiwicaptcha/tools/perf-bench.php
       - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, hard ratchet gate)
         env:
+          KIWI_STRICT_BASELINE: '1'
           KC_REDIS_URL: ${{ inputs.redis_url }}
         run: php packages/kiwicaptcha/tools/perf-bench.php --redis
       - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
         run: php packages/kiwicaptcha/tools/perf-bench.php --argon
       - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
         run: php packages/kiwicaptcha/tools/perf-bench-risk.php
       - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, hard ratchet gate)
         env:
+          KIWI_STRICT_BASELINE: '1'
           KC_REDIS_URL: ${{ inputs.redis_url }}
         run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
       - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1, barrier invariants gate; timings advisory)

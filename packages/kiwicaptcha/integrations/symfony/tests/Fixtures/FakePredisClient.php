@@ -80,9 +80,26 @@ final class FakePredisClient extends \Predis\Client
 
     private float $clockMs = 0.0;
 
+    /**
+     * The standalone connection object the authority-safety classifier
+     * inspects. Defaults to a real direct StreamConnection (retries
+     * disabled), so the pinned-primary authority guard and the
+     * fail_closed runtime classifier see a provably-safe single-node
+     * client. Set to null to model an uninspectable client.
+     *
+     * @var \Predis\Connection\NodeConnectionInterface|null
+     */
+    public ?\Predis\Connection\NodeConnectionInterface $connectionOverride = null;
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
+        $this->connectionOverride = new \Predis\Connection\StreamConnection(new \Predis\Connection\Parameters());
+    }
+
+    public function getConnection(): mixed
+    {
+        return $this->connectionOverride;
     }
 
     /** @internal test hook: advance the fake Redis server clock (ms). */

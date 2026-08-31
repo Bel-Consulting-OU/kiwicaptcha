@@ -15,21 +15,25 @@ use Twig\Environment;
  * Rust implementations stay byte-identical.
  *
  * Two asset delivery tiers (kiwi_captcha.asset_mode):
- *  - "inline" (default): all assets are inlined at render time — the
- *    widget makes no external requests (the historical behavior).
- *  - "files" (recommended production tier): the theme emits versioned
- *    immutable first-party asset URLs ({prefix}/assets/widget.<hash>.css,
- *    runtime.<hash>.js, driver.<hash>.js) with SRI integrity attributes,
+ *  - "files" (default): the theme emits versioned immutable first-party
+ *    asset URLs ({prefix}/assets/widget.<hash>.css, runtime.<hash>.js,
+ *    driver.<hash>.js, worker.<hash>.js) with SRI integrity attributes,
  *    deduplicated once per page across widgets. The dedup registry is
  *    request-scoped, and the runtime resets it between requests via the
  *    kernel.reset tag, so long-lived runtimes never leak the registry
  *    into the next request. The stylesheet link and the driver script
- *    are emitted as tags. The runtime is the lazy heavy module. Its
- *    URL and SRI digest ride the widget container as
- *    data-kiwi-runtime-src and data-kiwi-runtime-integrity, and the
- *    driver fetches the WASM runtime only when a memory-hard
- *    challenge arrives, so a plain
- *    SHA-256 page pays nothing for the Argon machinery.
+ *    are emitted as tags. The runtime and the worker are the lazy heavy
+ *    modules. Their URLs and SRI digests ride the widget container as
+ *    data-kiwi-runtime-src / data-kiwi-runtime-integrity and
+ *    data-kiwi-worker-src / data-kiwi-worker-integrity, and the driver
+ *    fetches them only when a memory-hard challenge arrives, so a plain
+ *    SHA-256 page pays nothing for the Argon machinery. The worker runs
+ *    as a same-origin Worker (no Blob), so files mode needs
+ *    worker-src 'self'.
+ *  - "inline" (compatibility / zero-request tier): all assets are
+ *    inlined at render time — the widget makes no external requests (the
+ *    historical behavior). The Blob worker it builds needs
+ *    worker-src blob:.
  *
  * The telemetry mode (off/minimal/full) follows the bundle config (forced
  * 'off' under strict privacy mode) and is rendered as data-kiwi-telemetry on
@@ -48,11 +52,13 @@ final class KiwiCaptchaRuntime
         'widget' => ['css', 'css'],
         'runtime' => ['wasm', 'js'],
         'driver' => ['driver', 'js'],
+        'worker' => ['worker', 'js'],
     ];
 
     private readonly string $css;
     private readonly string $wasm;
     private readonly string $driver;
+    private readonly string $worker;
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -69,12 +75,13 @@ final class KiwiCaptchaRuntime
         private readonly array $challengeOriginAllowlist = [],
         private readonly bool $riskClientContext = false,
         private readonly bool $privacyStrict = false,
-        private readonly string $assetMode = 'inline',
+        private readonly string $assetMode = 'files',
     ) {
         $assetDir ??= \dirname(__DIR__, 2).'/Resources/public';
         $this->css = $this->readAsset($assetDir, 'widget.css');
         $this->wasm = $this->readAsset($assetDir, 'kiwicaptcha-wasm.js');
         $this->driver = $this->readAsset($assetDir, 'widget-driver.js');
+        $this->worker = $this->readAsset($assetDir, 'kiwi-worker.js');
     }
 
     private function readAsset(string $dir, string $name): string
@@ -101,6 +108,11 @@ final class KiwiCaptchaRuntime
     public function driver(): string
     {
         return $this->driver;
+    }
+
+    public function worker(): string
+    {
+        return $this->worker;
     }
 
     public function assetMode(): string
@@ -135,7 +147,7 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver];
+        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
             $content = $contents[$key];
@@ -212,6 +224,36 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The driver's data-kiwi-worker-src value (files mode): the versioned
+     * worker asset URL the driver fetches lazily when a memory-hard
+     * challenge arrives and runs as a same-origin Worker (no Blob URL).
+     * Empty in inline mode.
+     */
+    public function workerSrc(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['worker']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-worker-integrity value (files mode): the SRI
+     * digest of the worker asset (sha256-<base64>), verified by the driver
+     * against the fetched bytes before the same-origin Worker is
+     * constructed. Empty in inline mode.
+     */
+    public function workerIntegrity(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['worker']['sri'];
+    }
+
+    /**
      * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist), always explicit, never
@@ -274,11 +316,14 @@ final class KiwiCaptchaRuntime
             'kiwi_wasm' => $this->wasm,
             'kiwi_driver' => $this->driver,
             // Files-mode delivery state (asset_mode + the request-scoped
-            // emission registry + the driver's lazy runtime URL and SRI).
+            // emission registry + the driver's lazy runtime and worker
+            // URLs and SRI digests).
             'asset_mode' => $this->assetMode,
             'asset_tags' => $this->assetTags($context['nonce'] ?? null),
             'runtime_src' => $this->runtimeSrc(),
             'runtime_integrity' => $this->runtimeIntegrity(),
+            'worker_src' => $this->workerSrc(),
+            'worker_integrity' => $this->workerIntegrity(),
         ]);
     }
 }

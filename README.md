@@ -218,7 +218,7 @@ style-src 'nonce-<nonce>';
 
 In SHA-256 mode the widget falls back to the pure-JS solver when WASM compilation is blocked, so `'wasm-unsafe-eval'` is optional there.
 Argon2id mode requires WASM; there is no JS fallback for the memory-hard solver.
-The memory-hard solver runs off the main thread in a Web Worker; the full worker/CSP requirements (including `worker-src blob:`) are authoritative in [the security document](SECURITY.md#csp--worker-requirements).
+The memory-hard solver runs off the main thread in a Web Worker; the full worker/CSP requirements (`worker-src 'self'` for the default files mode, `worker-src blob:` for the inline compatibility tier) are authoritative in [the security document](SECURITY.md#csp--worker-requirements).
 
 ## Argon2id profile
 
