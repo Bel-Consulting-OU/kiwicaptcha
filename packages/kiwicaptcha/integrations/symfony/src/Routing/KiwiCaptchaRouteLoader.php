@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Routing;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
+use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
@@ -28,6 +29,11 @@ use Symfony\Component\Routing\RouteCollection;
  *                                       endpoint — retire an abandoned
  *                                       challenge and release its
  *                                       live-outstanding slot).
+ *  - GET   {prefix}/assets/{name}.{hash}.{js|css}
+ *                                      (the versioned immutable widget
+ *                                       assets of asset_mode "files":
+ *                                       runtime/widget/driver, served with
+ *                                       a long immutable cache lifetime).
  *  - GET   {prefix}/health/live        (liveness, always 200).
  *  - GET   {prefix}/health/ready       (readiness, 200 only when signing
  *                                       keys + security Redis + the central
@@ -87,6 +93,22 @@ final class KiwiCaptchaRouteLoader extends Loader
             $prefix.'/widget.css',
             ['_controller' => [ApiJsController::class, 'widgetCss']],
             [],
+            [],
+            '',
+            [],
+            ['GET'],
+        ));
+
+        // The versioned immutable asset route (asset_mode "files"): the
+        // theme emits {prefix}/assets/{name}.{sha256-12}.{js|css} URLs and
+        // the controller serves the exact inline-mode bytes with a long
+        // immutable cache lifetime, an exact content hash in the URL, the
+        // content-hash ETag and the Content-Length. The hash is
+        // validated before any bytes are served; an unknown hash is a 404.
+        $routes->add('kiwicaptcha_asset', new Route(
+            $prefix.'/assets/{name}.{hash}.{extension}',
+            ['_controller' => [AssetController::class, 'asset']],
+            ['name' => 'runtime|widget|driver', 'hash' => '[0-9a-f]{12}', 'extension' => 'js|css'],
             [],
             '',
             [],

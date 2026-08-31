@@ -19,11 +19,15 @@ rather than Packagist).
 Composer release-readiness checks, run on all three Composer packages:
 
 - Version fields: `composer validate --strict` passes; the published
-  tag series matches the branch alias (1.0.x for the PHP core and the
-  bundle). The bundle requires `kiwicaptcha/kiwicaptcha-risk-php` at
-  `^0.1`, so a 0.1.x tag must exist even though its branch alias
-  declares 1.0.x; verify the released tags satisfy every constraint in
-  the require graph.
+  tag series matches the branch alias (1.0.x for all three Composer
+  packages). The bundle-to-risk-mirror constraint is aligned:
+  `bel-consulting/kiwicaptcha-symfony` requires
+  `kiwicaptcha/kiwicaptcha-risk-php` at `^1.0`, matching the mirror's
+  declared 1.0.x-dev branch alias, so a published 1.0.0 satisfies the
+  constraint and no second tag series is needed. The path-repository
+  version override in this repository pins the risk mirror at 1.0.0,
+  the version the Packagist publication will carry; verify the
+  released tags satisfy every constraint in the require graph.
 - Repository and autoload validity: the PSR-4 roots map to existing
   directories, the `autoload.files` entry
   (`src/Storage/ProcessEmergencyCap.php`) exists, and the path
@@ -33,7 +37,7 @@ Composer release-readiness checks, run on all three Composer packages:
   path repository. `kiwicaptcha/kiwicaptcha-risk-php` requires
   `kiwicaptcha/kiwicaptcha-php` at `^1.0` and `predis/predis` at
   `^3.5`. `bel-consulting/kiwicaptcha-symfony` requires the PHP core at
-  `^1.0`, the risk mirror at `^0.1`, and the Symfony packages. Publish
+  `^1.0`, the risk mirror at `^1.0`, and the Symfony packages. Publish
   the Composer packages bottom-up so every constraint resolves at
   install time.
 

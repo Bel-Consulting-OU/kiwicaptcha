@@ -718,18 +718,28 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
  * armed name so a spec can force a deliberate collision with an
  * application field; the pinned name is signed into the record exactly
  * like any other armed name.
+ *
+ * $shaBits / $argonBits / $argonMKib are opt-in difficulty
+ * overrides (the client-performance lab's ?bits= / ?argon_bits= /
+ * ?m_kib= knobs). The defaults reproduce the historical fixture
+ * byte-for-byte, and every value is clamped to the same ceilings the
+ * core enforces, so a malformed override falls back to the default
+ * instead of crashing the fixture.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64): ?array
 {
+    $shaBits = min(max($shaBits, 1), Config::MAX_SHA_TARGET_BITS);
+    $argonBits = min(max($argonBits, 1), Config::MAX_ARGON2_TARGET_BITS);
+    $argonMKib = min(max($argonMKib, 8), 65536);
     $config = new Config(
         secretKey: $GLOBALS['kiwi_secret'],
         algorithm: $algorithm,
         ttlSecs: $ttlOverride ?? 120,
-        mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
+        mKib: $algorithm === PoWAlgorithm::Argon2id ? $argonMKib : 0,
         t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
         p: 1,
-        targetBits: 8,
-        argon2TargetBits: 4,
+        targetBits: $shaBits,
+        argon2TargetBits: $argonBits,
         minDurationMs: 0,
     );
     $storage = new ArrayStorage();
@@ -928,7 +938,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         writeCapture($_GET['capture'], $rawBody);
     }
     $body = json_decode($rawBody, true);
-    $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    // ?escalate=argon mirrors the adaptive risk escalation: the server
+    // issues a memory-hard challenge even though the widget asked for the
+    // SHA-256 profile (the driver accepts the stronger algorithm and
+    // lazily fetches the WASM runtime in files mode).
+    $escalated = ($_GET['escalate'] ?? '') === 'argon';
+    $requestedArgon = ($body['algorithm'] ?? 'sha256') === 'argon2id';
+    $algorithm = $escalated || $requestedArgon ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
     // The bundle maps incumbent sitekeys -> policy scopes server-side
     // (sitekey_allowlist); the fixture mirrors that mapping so compat
@@ -995,7 +1011,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // a spec can force a deliberate collision with an application field.
     $pinnedDecoy = (string) ($_GET['decoyname'] ?? '');
     $pinnedDecoy = $pinnedDecoy !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $pinnedDecoy) === 1 ? $pinnedDecoy : null;
-    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy);
+    // Client-performance-lab difficulty knobs (opt-in; the defaults
+    // reproduce the historical fixture): ?bits=<1..20> overrides the
+    // SHA-256 target bits, ?argon_bits=<1..10> and ?m_kib=<8..65536>
+    // override the Argon2id target bits and memory envelope. Malformed
+    // values fall back to the defaults inside mintChallenge.
+    $shaBits = ctype_digit((string) ($_GET['bits'] ?? '')) ? (int) $_GET['bits'] : 8;
+    $argonBits = ctype_digit((string) ($_GET['argon_bits'] ?? '')) ? (int) $_GET['argon_bits'] : 4;
+    $argonMKib = ctype_digit((string) ($_GET['m_kib'] ?? '')) ? (int) $_GET['m_kib'] : 64;
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib);
     if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
@@ -1430,6 +1454,59 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     return true;
 }
 
+// ── Files-mode versioned asset route (asset_mode "files") ──────────────
+// GET /kiwi-captcha/assets/{name}.{sha256-12}.{js|css} serves the exact
+// bytes the inline page embeds, with the content hash in the URL, a long
+// immutable cache lifetime, the Content-Length and the content-hash
+// ETag. An unknown hash is a 404, exactly like the bundle's
+// AssetController (the fixture mirrors the bundle route; the spec asserts
+// the headers, the 404 and the 304 revalidation).
+$assetSpecs = [
+    'widget' => ['file' => 'widget.css', 'type' => 'text/css; charset=UTF-8'],
+    'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
+];
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver)\.([0-9a-f]{12})\.(js|css)$~', $path, $m) === 1) {
+    [, $assetName, $assetHash, $assetExt] = $m;
+    $spec = $assetSpecs[$assetName];
+    if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetBody = @file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$spec['file']);
+    if ($assetBody === false || $assetBody === '') {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetFull = hash('sha256', $assetBody);
+    if (!hash_equals(substr($assetFull, 0, 12), $assetHash)) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetEtag = '"'.$assetFull.'"';
+    if (($_SERVER['HTTP_IF_NONE_MATCH'] ?? '') === $assetEtag) {
+        header('ETag: '.$assetEtag);
+        header('Cache-Control: public, max-age=31536000, immutable');
+        http_response_code(304);
+
+        return true;
+    }
+    header('Content-Type: '.$spec['type']);
+    header('Cache-Control: public, max-age=31536000, immutable');
+    header('ETag: '.$assetEtag);
+    header('Content-Length: '.\strlen($assetBody));
+    header('X-Content-Type-Options: nosniff');
+    echo $assetBody;
+
+    return true;
+}
+
 // Incumbent-compatibility loader + migration fixtures.
 $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
 
@@ -1511,12 +1588,61 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
+    if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
+    // Client-performance-lab difficulty knobs, propagated to the
+    // challenge endpoint (opt-in; absent = the historical fixture):
+    // ?bits=<1..20> (SHA-256 target bits), ?argon_bits=<1..10> and
+    // ?m_kib=<8..65536> (Argon2id target bits and memory envelope).
+    foreach (['bits', 'argon_bits', 'm_kib'] as $labKnob) {
+        if (($_GET[$labKnob] ?? '') !== '' && ctype_digit((string) $_GET[$labKnob])) {
+            $endpointQuery[] = $labKnob.'='.rawurlencode((string) $_GET[$labKnob]);
+        }
+    }
+    // Multi-widget page (opt-in): ?widgets=N renders N widget
+    // containers, all auto-initialized by the driver (the
+    // client-performance lab's multiple-widget scenario). The default
+    // N=1 keeps the historical single-container markup byte-identical.
+    $widgets = (int) ($_GET['widgets'] ?? 1);
+    if ($widgets < 1 || $widgets > 4) $widgets = 1;
     $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
     $chainAttr = ($_GET['chain'] ?? '') !== '' ? ' data-kiwi-chain-ticket="'.htmlspecialchars((string) $_GET['chain'], ENT_QUOTES).'"' : '';
     $riskContextAttr = ($_GET['risk-context'] ?? '') === 'coarse' ? ' data-kiwi-risk-context="coarse"' : '';
+    // Files-mode variant (?assets=files): mirrors the bundle theme's
+    // files tier — the stylesheet link and the driver script are emitted
+    // once (the page-level dedup registry), the runtime stays lazy
+    // (data-kiwi-runtime-src + SRI digest on each container; the driver
+    // fetches it only when a memory-hard challenge arrives), and the
+    // inline style/script blocks are omitted.
+    $filesMode = ($_GET['assets'] ?? '') === 'files';
+    $assetTags = '';
+    $runtimeAttr = '';
+    if ($filesMode) {
+        $assetFiles = [
+            'widget' => 'widget.css',
+            'runtime' => 'kiwicaptcha-wasm.js',
+            'driver' => 'widget-driver.js',
+        ];
+        $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
+            $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
+            $full = hash('sha256', $body);
+
+            return [
+                'url' => '/kiwi-captcha/assets/'.$name.'.'.substr($full, 0, 12).'.'.$ext,
+                'sri' => 'sha256-'.base64_encode(hash('sha256', $body, true)),
+            ];
+        };
+        $widgetAsset = $assetLink('widget', 'css');
+        $driverAsset = $assetLink('driver', 'js');
+        $runtimeAsset = $assetLink('runtime', 'js');
+        $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
+            .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
+        $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
+    }
     header('Content-Type: text/html');
-    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}>
+    $containers = '';
+    for ($i = 1; $i <= $widgets; ++$i) {
+        $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
@@ -1527,7 +1653,11 @@ if ($path === '/' || $path === '/index.html') {
     </div>
   </div>
 </div>
-<script>{$wasm}</script><script>{$driver}</script></body></html>";
+";
+    }
+    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>';
+    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}{$assetTags}</head><body>
+{$containers}{$inlineScripts}</body></html>";
 
     return true;
 }

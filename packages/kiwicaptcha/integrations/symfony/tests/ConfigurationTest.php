@@ -1123,4 +1123,66 @@ final class ConfigurationTest extends TestCase
 
         $this->process(['replay_durability' => 'automatic']);
     }
+
+    public function testHaAuthorityDefaultsToNoneAndAcceptsPinnedPrimary(): void
+    {
+        self::assertSame('none', $this->process()['ha_authority'], 'ha_authority defaults to none: the current boundary stays byte-identical');
+        self::assertSame('none', $this->process(['ha_authority' => 'none'])['ha_authority']);
+        self::assertSame('pinned_primary', $this->process(['ha_authority' => 'pinned_primary'])['ha_authority']);
+    }
+
+    public function testHaAuthorityRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['ha_authority' => 'quorum']);
+    }
+
+    public function testHaAuthorityReverifySecsDefaultsAndBounds(): void
+    {
+        self::assertSame(5, $this->process()['ha_authority_reverify_secs'], 'the default verification cache window is 5 seconds');
+        self::assertSame(1, $this->process(['ha_authority_reverify_secs' => 1])['ha_authority_reverify_secs']);
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['ha_authority_reverify_secs' => 0]);
+    }
+
+    public function testProtocolRolloutDefaultsToNormal(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame('normal', $processed['protocol_rollout']['mode'], 'the default rollout mode is normal: no deliberate protocol-v3 migration exception is declared');
+    }
+
+    public function testProtocolRolloutAcceptsBothModes(): void
+    {
+        self::assertSame('normal', $this->process(['protocol_rollout' => ['mode' => 'normal']])['protocol_rollout']['mode']);
+        self::assertSame('migration', $this->process(['protocol_rollout' => ['mode' => 'migration']])['protocol_rollout']['mode']);
+    }
+
+    public function testProtocolRolloutRejectsUnknownModes(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['protocol_rollout' => ['mode' => 'experimental']]);
+    }
+
+    // ── Asset delivery tier (asset_mode) ──────────────────────────────────
+
+    public function testAssetModeDefaultsToInline(): void
+    {
+        self::assertSame('inline', $this->process()['asset_mode'], 'the default keeps the historical inline delivery: every existing behavior stays byte-identical');
+    }
+
+    public function testAssetModeAcceptsBothTiers(): void
+    {
+        self::assertSame('files', $this->process(['asset_mode' => 'files'])['asset_mode']);
+        self::assertSame('inline', $this->process(['asset_mode' => 'inline'])['asset_mode']);
+    }
+
+    public function testAssetModeRejectsUnknownTiers(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['asset_mode' => 'cdn']);
+    }
 }

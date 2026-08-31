@@ -14,9 +14,12 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailClosedSentinelTestKer
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailClosedSingleNodeTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailingRedisTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHighAbuseDecoyDeferredKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHighAbuseDecoyDeferredNormalKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHighAbuseV3WriterKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorNullClearedProfileV3WriterKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorOperatorManagedSentinelTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorPinnedPrimaryTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHaSafeTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitOperatorManagedKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorSentinelRedisTestKernel;
@@ -291,6 +294,86 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('operator_managed', $display);
     }
 
+    public function testDoctorReportsThePinnedPrimaryGuardArmedState(): void
+    {
+        // The first doctor verification pins the authority (auto-pin on
+        // first use) and reports the armed state: pinned identity, last
+        // verification and the mechanically enforced posture.
+        $container = $this->containerFor(new DoctorPinnedPrimaryTestKernel('test', true));
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] HA authority', $display);
+        self::assertStringContainsString('pinned-primary guard armed: pinned master|0123456789abcdef0123456789abcdef01234567', $display, 'the doctor names the pinned identity');
+        self::assertStringContainsString('replay_durability "operator_managed" is now mechanically enforced', $display);
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+
+        $fake = $container->get('doctor.pinned.redis');
+        self::assertInstanceOf(FakePredisClient::class, $fake);
+        $guard = $container->get('kiwi_captcha.ha_authority_guard');
+        $pin = $fake->strings[$guard->pinKey()] ?? null;
+        self::assertSame('master|0123456789abcdef0123456789abcdef01234567', $pin, 'the doctor run pinned the authority to the namespace pin key');
+    }
+
+    public function testDoctorFailsWhenThePinnedAuthorityChanged(): void
+    {
+        // A changed authority under pinned_primary: the doctor FAILs
+        // with the guard's exact refusal (pinned vs observed + the
+        // re-pin remediation), so the deploy gate refuses to pass a
+        // deployment whose authority moved.
+        $container = $this->containerFor(new DoctorPinnedPrimaryTestKernel('test', true));
+        $fake = $container->get('doctor.pinned.redis');
+        self::assertInstanceOf(FakePredisClient::class, $fake);
+        $guard = $container->get('kiwi_captcha.ha_authority_guard');
+        // Pre-seed a pin to a different run_id than the fake serves:
+        // the guard observes the change and refuses.
+        $fake->strings[$guard->pinKey()] = 'master|'.str_repeat('a', 40);
+        $fake->infoReplication['run_id'] = str_repeat('b', 40);
+        $fake->infoServer['run_id'] = str_repeat('b', 40);
+
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode(), 'a changed pinned authority must fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] HA authority', $display);
+        self::assertStringContainsString('the serving authority changed — pinned master|'.str_repeat('a', 40), $display);
+        self::assertStringContainsString('observed master|'.str_repeat('b', 40), $display);
+        self::assertStringContainsString('Re-pin explicitly after a deliberate authority change', $display);
+    }
+
+    public function testDoctorFailsWhenTheHaSafeProfilePromiseWasOverridden(): void
+    {
+        // protection_profile ha_safe derives pinned_primary; an
+        // explicit ha_authority: none drops the mechanical enforcement,
+        // and the doctor FAILs: the profile's promise cannot silently
+        // weaken.
+        $container = $this->containerFor(new DoctorHaSafeTestKernel('test', true, true));
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] HA authority', $display);
+        self::assertStringContainsString('"ha_safe" promises the pinned-primary authority guard, but ha_authority is "none"', $display);
+    }
+
+    public function testDoctorPassesOnTheHaSafeProfileDerivedPosture(): void
+    {
+        // The ha_safe profile alone derives pinned_primary +
+        // operator_managed and wires the guard: the doctor runs the
+        // verification (pinning on first use) and passes armed.
+        $container = $this->containerFor(new DoctorHaSafeTestKernel('test', true));
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('[PASS] HA authority', $display);
+        self::assertStringContainsString('pinned-primary guard armed', $display);
+    }
+
     /**
      * Seed the fake security Redis' central policy hash with a
      * `min_protocol_version` floor, the same `{kiwi:<ns>}:security-policy`
@@ -357,9 +440,12 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
     public function testDoctorWarnsOnHighAbuseWithTheDecoyExplicitlyDeferred(): void
     {
         // An explicit risk.decoy_v3_enabled: false under high_abuse is
-        // the documented deferral: the check must warn (exit 0), never
-        // fail, so the two-phase rollout stays safe and the deploy gate
-        // stays green for an explicit, informed choice.
+        // the documented deferral only when the deployment declares the
+        // two-phase migration state (protocol_rollout.mode: migration):
+        // the check must warn (exit 0), never fail, so the deliberate
+        // rollout deferral keeps the deploy gate green. Without the
+        // declaration the same configuration FAILs (see
+        // testDoctorFailsOnHighAbuseWithTheDecoyDeferredAndNoMigrationMode).
         $container = $this->containerFor(new DoctorHighAbuseDecoyDeferredKernel('test', true));
         $this->seedProtocolFloor($container, 2);
         $tester = $this->doctor($container);
@@ -368,8 +454,27 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Protocol-v3 writer', $display);
-        self::assertStringContainsString('risk.decoy_v3_enabled is explicitly false: protocol v3 emission is deferred while the profile stays active', $display);
+        self::assertStringContainsString('protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established', $display);
         self::assertStringNotContainsString('[FAIL] Protocol-v3 writer', $display);
+    }
+
+    public function testDoctorFailsOnHighAbuseWithTheDecoyDeferredAndNoMigrationMode(): void
+    {
+        // The M7 boundary: a false security switch under high_abuse does
+        // not itself prove the deployment is intentionally in the v3
+        // migration phase, so without protocol_rollout.mode "migration"
+        // the check FAILs (exit 1) with the exact remediation — a
+        // forgotten override must not silently persist.
+        $container = $this->containerFor(new DoctorHighAbuseDecoyDeferredNormalKernel('test', true));
+        $this->seedProtocolFloor($container, 2);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode(), 'high_abuse with the decoy deferred and no migration declaration must fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Protocol-v3 writer', $display);
+        self::assertStringContainsString('high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared.', $display, 'the FAIL must carry the exact audit message');
+        self::assertStringContainsString('Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established.', $display, 'the FAIL must carry the remediation line');
     }
 
     public function testDoctorWarnsOnExplicitDecoyWithoutTheHighAbuseProfile(): void

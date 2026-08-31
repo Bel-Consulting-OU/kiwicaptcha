@@ -29,11 +29,11 @@ final class Configuration implements ConfigurationInterface
         $root
             ->children()
                 ->scalarNode('protection_profile')
-                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission). See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
+                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission); "ha_safe" = the replay-safe HA posture (replay_durability operator_managed + ha_authority pinned_primary, the other defaults mirror balanced) — the mechanical pinned-primary authority guard makes the operator contract a real guarantee; the guard refuses on any authority change and the doctor reports its state. See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
                     ->defaultNull()
                     ->validate()
-                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'compatibility'], true))
-                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "compatibility" (or null = no profile)')
+                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'compatibility', 'ha_safe'], true))
+                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "compatibility", "ha_safe" (or null = no profile)')
                     ->end()
                 ->end()
                 ->scalarNode('secret_key')
@@ -279,6 +279,11 @@ final class Configuration implements ConfigurationInterface
                 ->scalarNode('route_prefix')
                     ->info('Prefix for the challenge endpoint route.')
                     ->defaultValue('/kiwi-captcha')
+                ->end()
+                ->enumNode('asset_mode')
+                    ->info('Widget asset delivery tier. "inline" (default) embeds the CSS, the WASM runtime and the driver into the page at render time: zero extra requests, byte-identical behavior to every previous release. "files" is the recommended production tier: the theme emits versioned immutable first-party asset URLs ({prefix}/assets/widget.<sha256-12>.css, runtime.<sha256-12>.js, driver.<sha256-12>.js) with long cache lifetimes and SRI integrity attributes, deduplicated once per page across widgets, and the driver fetches the WASM runtime only when a memory-hard challenge arrives, so a plain SHA-256 page pays nothing for the Argon machinery. The default flip to "files" is a documented follow-up after the browser lanes migrate.')
+                    ->values(['inline', 'files'])
+                    ->defaultValue('inline')
                 ->end()
                 ->scalarNode('rate_limit_cache')
                     ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. The class check resolves parameter-indirected service ids (%param% placeholders), follows alias chains to the end, follows parent-declared pools (a framework.cache.pools entry with `parent: cache.adapter.array` is refused the same way) and resolves %param% classes; a pool id still unresolvable at compile time FAILS CLOSED in production (reference a concrete pool service id). In dev/test the guard does not apply. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
@@ -849,10 +854,54 @@ final class Configuration implements ConfigurationInterface
                         ->thenInvalid('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority — the chain is a server-side transaction obligation anchored on the AUTHORITATIVE binding, never on an unexamined client string')
                     ->end()
                 ->end()
-                ->enumNode('replay_durability')
-                    ->info('THE AUTHORITY-CHANGE REPLAY POSTURE SWITCH (default best_effort): how the deployment treats the boundary between per-authority atomic replay safety and promotion of a stale replica. best_effort = the current boundary: single-authority atomicity with the documented stale-promotion window accepted as the deployment boundary (the doctor keeps the "Replication topology" WARN). operator_managed = the operator owns promotion eligibility (replication gating, catch-up rules, a promotion-eligibility gate on the failover manager) and acknowledges the invariant; the doctor reports PASS with the operator contract noted. fail_closed = the deployment refuses to rely on automatic failover: the bundle MUST NOT run with a Predis Sentinel/Cluster aggregate client under this posture, and the extension refuses the container build (LogicException naming the posture and the remediation) whenever the storage/limiter/risk client is a replication or cluster aggregate. Single-node direct clients are fine under every posture. See docs/redis-topologies.md and docs/ha-authority.md.')
-                    ->values(['fail_closed', 'operator_managed', 'best_effort'])
+                ->scalarNode('replay_durability')
+                    ->info('THE AUTHORITY-CHANGE REPLAY POSTURE SWITCH (default best_effort): how the deployment treats the boundary between per-authority atomic replay safety and promotion of a stale replica. best_effort = the current boundary: single-authority atomicity with the documented stale-promotion window accepted as the deployment boundary (the doctor keeps the "Replication topology" WARN). operator_managed = the operator owns promotion eligibility (replication gating, catch-up rules, a promotion-eligibility gate on the failover manager) and acknowledges the invariant; the doctor reports PASS with the operator contract noted. fail_closed = the deployment refuses to rely on automatic failover: the bundle MUST NOT run with a Predis Sentinel/Cluster aggregate client under this posture, nor with a client it cannot prove safe. A literal value is validated here at build time; a %env()% placeholder is accepted and the RESOLVED posture is enforced by the runtime authority-transition guard when the Redis-backed services are constructed, because an env-resolved posture is invisible to every build-time lane (see docs/ha-authority.md). Single-node direct clients are fine under every posture.')
                     ->defaultValue('best_effort')
+                    ->validate()
+                        ->ifTrue(static function (mixed $v): bool {
+                            // The empty string is the synthetic fixture
+                            // Symfony's ValidateEnvPlaceholdersPass
+                            // substitutes for an env-managed value when
+                            // it re-processes this tree (string type
+                            // fixture), so it must be tolerated here:
+                            // the runtime guard receives the resolved
+                            // posture at service construction.
+                            if ($v === '') {
+                                return false;
+                            }
+                            if (!\is_string($v)) {
+                                return true;
+                            }
+                            if (preg_match('/^%env\([^%]+\)%$/D', $v) === 1
+                                || preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $v) === 1
+                            ) {
+                                return false;
+                            }
+
+                            return !\in_array($v, ['fail_closed', 'operator_managed', 'best_effort'], true);
+                        })
+                        ->thenInvalid('must be one of "fail_closed", "operator_managed", "best_effort" (a %%env()%% placeholder is accepted; the resolved posture is enforced by the runtime authority-transition guard)')
+                    ->end()
+                ->end()
+                ->enumNode('ha_authority')
+                    ->info('THE MECHANICAL AUTHORITY GUARD (default none): whether the bundle enforces a pinned serving authority for the storage/limiter/risk Redis client. none = the current boundary: no guard is wired and the authority is governed by the replay_durability posture alone. pinned_primary = the PinnedPrimaryAuthorityGuard is wired around the storage/limiter/risk client: on first use it pins the connected server identity (INFO role + run_id) to the `{kiwi:<ns>}:authority:pin` key (write-once, in the same Redis namespace) and REFUSES every subsequent use when the authority changed (a promotion to a stale replica, a restarted primary with a new run_id) with a typed LogicException naming the pinned vs observed identity and the re-pin remediation. This is the mechanical enforcement that makes replay_durability "operator_managed" a real contract instead of an operator promise. Refused at container build time when the storage/limiter/risk client is a Predis Sentinel/Cluster aggregate or a phpredis client (only a Predis single-node direct client can be mechanically guarded), and when no Redis client is wired. See docs/ha-authority.md.')
+                    ->values(['none', 'pinned_primary'])
+                    ->defaultValue('none')
+                ->end()
+                ->integerNode('ha_authority_reverify_secs')
+                    ->info('The pinned-primary guard verification cache window in seconds (default 5, min 1): the guard re-reads the serving authority (INFO + pin-key compare) at most every N seconds per process; within the window every check passes without a round trip. A smaller window detects an authority change sooner, a larger window costs less INFO traffic.')
+                    ->defaultValue(5)
+                    ->min(1)
+                ->end()
+                ->arrayNode('protocol_rollout')
+                    ->info('THE EXPLICIT PROTOCOL-V3 ROLLOUT STATE (default mode "normal"): the deployment declares whether it is deliberately in the two-phase protocol-v3 migration. mode "normal" = no deliberate exception: under the high_abuse protection profile with risk.decoy_v3_enabled false, the doctor FAILS the protocol-v3 writer check (a forgotten override must not silently persist — the false switch alone does not prove the deployment is intentionally deferring v3 emission). mode "migration" = the deployment is deliberately in the two-phase protocol-v3 rollout (v3 emission deferred until the fleet floor is confirmed); the doctor records the same high_abuse deferral as a WARN (exit 0) while the profile stays active. Non-high_abuse paths are unaffected: protocol v2 emission passes regardless of the declared mode. See operations.md "Protocol v3 two-phase rollout".')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->enumNode('mode')
+                            ->values(['normal', 'migration'])
+                            ->defaultValue('normal')
+                        ->end()
+                    ->end()
                 ->end()
             ->end()
             // Cross-field rotation invariants over the signing key

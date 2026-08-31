@@ -132,29 +132,31 @@ The layering semantics:
 
 ```yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility | ha_safe
 ```
 
-| Knob | balanced | privacy_strict | high_abuse | compatibility |
-|------|----------|----------------|------------|---------------|
-| `algorithm` | sha256 | sha256 | sha256 | sha256 |
-| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
-| `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
-| `challenge_ttl_secs` | 120 | 120 | 120 | 300 |
-| `rate_limit` | 10 | 10 | 5 | 10 |
-| `rate_limit_global` | 500 | 500 | 2000 | 500 |
-| `resource_capacity.issuance_per_second` | 500 | 500 | 2000 | 500 |
-| `privacy_mode` / `telemetry` | strict / off | strict / off | strict / off | strict / off |
-| `enforce_telemetry` | false | false | false | false |
-| `min_duration_ms` | derived | 0 | derived | derived |
-| `binding_mode` | nonce_ip_hmac | none | nonce_ip_hmac | none |
-| `risk.enabled` | false | false | true | false |
-| `risk.decoy_v3_enabled` | false | false | true | false |
-| `risk.client_context` | false | false | false | false |
-| `risk.max_outstanding_challenges` | 20 | 20 | 10 | 20 |
-| `risk.max_outstanding_challenges_global` | 100000 | 100000 | 250000 | 100000 |
-| `risk.hard_limits.process_per_second` | 10000 | 10000 | 5000 | 10000 |
-| `risk.weights.bad_proof / malformed / replay / action_failure` | contract | contract | 320 / 340 / 380 / 160 | contract |
+| Knob | balanced | privacy_strict | high_abuse | compatibility | ha_safe |
+|------|----------|----------------|------------|---------------|---------|
+| `algorithm` | sha256 | sha256 | sha256 | sha256 | sha256 |
+| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
+| `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
+| `challenge_ttl_secs` | 120 | 120 | 120 | 300 | 120 |
+| `rate_limit` | 10 | 10 | 5 | 10 | 10 |
+| `rate_limit_global` | 500 | 500 | 2000 | 500 | 500 |
+| `resource_capacity.issuance_per_second` | 500 | 500 | 2000 | 500 | 500 |
+| `privacy_mode` / `telemetry` | strict / off | strict / off | strict / off | strict / off | strict / off |
+| `enforce_telemetry` | false | false | false | false | false |
+| `min_duration_ms` | derived | 0 | derived | derived | derived |
+| `binding_mode` | nonce_ip_hmac | none | nonce_ip_hmac | none | nonce_ip_hmac |
+| `risk.enabled` | false | false | true | false | false |
+| `risk.decoy_v3_enabled` | false | false | true | false | false |
+| `risk.client_context` | false | false | false | false | false |
+| `risk.max_outstanding_challenges` | 20 | 20 | 10 | 20 | 20 |
+| `risk.max_outstanding_challenges_global` | 100000 | 100000 | 250000 | 100000 | 100000 |
+| `risk.hard_limits.process_per_second` | 10000 | 10000 | 5000 | 10000 | 10000 |
+| `risk.weights.bad_proof / malformed / replay / action_failure` | contract | contract | 320 / 340 / 380 / 160 | contract | contract |
+| `replay_durability` | best_effort | best_effort | best_effort | best_effort | operator_managed |
+| `ha_authority` | none | none | none | none | pinned_primary |
 
 Profile rationale:
 
@@ -180,12 +182,71 @@ Profile rationale:
   conservative 300 s TTL (Turnstile token-lifetime parity), binding off
   (IP churn behind NAT/mobile), risk and the decoy surface off
   (protocol-v2 emission), no behavioral coupling.
+- ha_safe is the replay-safe HA posture: the deployment that wants the
+  authority-change contract mechanically enforced instead of only
+  contracted. It derives `replay_durability: operator_managed` +
+  `ha_authority: pinned_primary` and mirrors balanced everywhere else.
+  The pinned-primary authority guard pins the serving authority on
+  first use and refuses on any change; the doctor reports its state
+  and fails the deploy gate when the authority moved or the guard is
+  unarmed. Requires a direct single-node Predis client (a Predis
+  Sentinel/Cluster aggregate or a phpredis client is refused at
+  container build time). See the "HA authority" section below and
+  docs/ha-authority.md.
 
 The profiles never override an explicitly configured knob: the profile
 defaults are merged as the lowest-precedence layer, so they apply only
 where the key is absent from your configuration. `protection_profile:
-null` (the default) selects no profile, and any value outside the four
+null` (the default) selects no profile, and any value outside the five
 names is refused.
+
+## HA authority: the mechanical replay-safety posture
+
+```yaml
+    # ── Authority-change replay safety ────────────────────────────────
+    # replay_durability: best_effort    # best_effort | operator_managed | fail_closed
+    # ha_authority: none                # none | pinned_primary
+    # ha_authority_reverify_secs: 5     # the guard's verification cache window
+```
+
+`replay_durability` declares the authority-change contract (see
+redis-topologies.md). `ha_authority: pinned_primary` makes it
+mechanical: the bundle wires the PinnedPrimaryAuthorityGuard around
+the storage/limiter/risk client, so the deployment can choose a
+mechanically enforced replay-safe HA mode instead of trusting the
+operator alone.
+
+How the pinned-primary guard behaves:
+
+- On first use it pins the connected server's identity (the `INFO`
+  role and run_id) to the `{kiwi:<ns>}:authority:pin` key, write-once
+  (`SET NX`), in the same security-Redis namespace as every other
+  bundle key.
+- On every subsequent use it re-verifies the serving authority: the
+  role must equal the pinned role and the run_id must equal the pinned
+  run_id. Any change — a promotion to a stale replica, a restarted
+  primary with a new run_id — raises the typed LogicException naming
+  the pinned vs observed identity, and the deployment refuses to
+  serve.
+- The verification result is cached in-process for
+  `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
+  probe costs one round trip per window per process, not one per
+  operation.
+- A missing pin after it was established is a refusal, never a silent
+  re-pin. Re-pin explicitly after a deliberate authority change:
+  quiesce the deployment, delete `{kiwi:<ns>}:authority:pin`, and let
+  the next first use pin the new authority.
+- The extension refuses the container build when the client is a
+  Predis Sentinel/Cluster aggregate or a phpredis `\Redis` client:
+  only a direct single-node Predis client can be mechanically guarded
+  (predis/predis is a direct bundle dependency).
+
+The doctor's "HA authority" check reports the guard state: the pinned
+identity, the last verification and the posture. It passes when the
+guard is armed and stable. It fails on a changed authority or an
+unarmed guard under the posture, and it fails when the ha_safe
+profile's pinned_primary promise was overridden away. See
+docs/ha-authority.md for the full design and the deployment table.
 
 ## Advanced configuration
 
@@ -221,6 +282,53 @@ kiwi_captcha:
     #                                       # observes the consumed state
     #                                       # instead of re-verifying
 ```
+
+### Asset delivery (`asset_mode`)
+
+The widget assets (the CSS, the WASM runtime and the driver) ship in
+two delivery tiers, selected with `asset_mode`:
+
+```yaml
+kiwi_captcha:
+    asset_mode: inline    # inline (default) | files (recommended for production)
+```
+
+`inline` (default) embeds the CSS, the WASM runtime and the driver into
+the page at render time. The widget makes zero extra requests and the
+deployment needs no static asset handling; every previous release
+behaves this way.
+
+`files` (recommended for production) emits versioned immutable
+first-party asset URLs under `{prefix}/assets/`
+(`widget.<sha256-12>.css`, `runtime.<sha256-12>.js`,
+`driver.<sha256-12>.js`), served by the bundle with a long immutable
+cache lifetime (`Cache-Control: public, max-age=31536000, immutable`),
+the exact content hash in the URL and the content-hash ETag. Each asset
+is emitted once per page even with several widgets, and the tags carry
+SRI integrity attributes.
+
+The runtime is the lazy heavy module: the page never downloads it
+eagerly. The widget container carries `data-kiwi-runtime-src` plus the
+SRI digest, and the driver fetches the WASM runtime only when a
+memory-hard challenge actually arrives. A page that only ever receives
+SHA-256 challenges pays no request for the Argon machinery.
+
+Why immutable caching: the URL contains the content hash, so the bytes
+for a URL can never change. A browser or CDN may keep the response
+forever, and a deployment upgrade simply emits new hashed URLs. Unknown
+hashes are 404, so a stale page can never pair an old URL with new
+content.
+
+CSP: the assets are same-origin, so the existing recommended profile
+already allows them (`script-src 'self'`, `style-src 'self'`). The lazy
+runtime fetch uses `connect-src 'self'`. No CSP change is needed beyond
+the existing guidance; Argon2id still needs `worker-src blob:` for the
+same-origin worker.
+
+Default-flip transition plan: `inline` stays the default until the
+browser lanes migrate to `files`. The documented follow-up flips the
+default and marks `inline` as the compatibility tier for zero-request
+deployments.
 
 ### Redis (`redis_dsn`)
 
@@ -504,6 +612,27 @@ is never forced) are the privacy contract; see
     #                                       # correct on expiry (an
     #                                       # expired claim is released and
     #                                       # a retry re-claims it)
+```
+
+### Protocol rollout mode
+
+```yaml
+    # ── Protocol v3 rollout state ──────────────────────────────────────
+    # protocol_rollout:
+    #     mode: normal                  # normal | migration (default normal)
+    #
+    # The explicit migration state: the deployment declares whether it is
+    # deliberately in the two-phase protocol-v3 rollout. mode "normal"
+    # means no deliberate exception — under protection_profile:
+    # high_abuse with risk.decoy_v3_enabled: false the doctor FAILS the
+    # protocol-v3 writer check, because a false security switch alone
+    # does not prove the deployment is intentionally deferring v3
+    # emission (a forgotten override must not silently persist). mode
+    # "migration" declares the deliberate two-phase migration (v3
+    # emission deferred until the fleet floor is confirmed); the doctor
+    # records the same high_abuse deferral as a WARN (exit 0). The
+    # two-phase rollout procedure itself is unchanged; see operations.md
+    # "Protocol v3 two-phase rollout".
 ```
 
 ### Risk configuration

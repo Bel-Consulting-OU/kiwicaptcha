@@ -496,15 +496,24 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly three fetch calls exist in the whole driver: the
+    // Exactly four fetch calls exist in the whole driver: the
     // loader-glue fetch (the external /api.js path fetches its own
     // source to hand the wasm glue to the Blob worker), the challenge
-    // fetch and the bounded cancellation fetch ({endpoint}/cancel).
+    // fetch, the bounded cancellation fetch ({endpoint}/cancel) and the
+    // files-mode lazy runtime fetch (kiwiFetchRuntimeGlue — the WASM
+    // runtime is downloaded only when a memory-hard challenge arrives;
+    // a SHA-256 solve pays no runtime request at all). The runtime
+    // fetch is SRI-verified, deduplicated per URL across the page and
+    // bounded to two retries; its failure enters the controlled
+    // worker-unavailable state, never a main-thread Argon hash.
     // There can be no "retry with a weaker challenge" code path to fetch
     // a second challenge: exactly ONE fetch targets the challenge
     // endpoint itself.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(3);
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(4);
     expect(src.match(/fetch\(endpoint,/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(compatScriptUrl\.split\("\?"\)\[0\]/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(cancelUrl,/g) ?? []).toHaveLength(1);
     // The algorithm variable is declared exactly twice in the file: once in
     // the driver (from the container/widget attributes only) and once in the
     // embedded worker source (from the solve request). No other declaration.

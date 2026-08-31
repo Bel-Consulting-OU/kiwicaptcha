@@ -6,6 +6,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Command;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use Composer\InstalledVersions;
@@ -74,6 +76,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly \Predis\Client|null $riskRedis,
         private readonly ?ChainedChallengeStateStore $chainStore,
         private readonly ?SiteVerifyIdempotencyStore $siteVerifyIdempotencyStore,
+        private readonly ?PinnedPrimaryAuthorityGuard $authorityGuard = null,
     ) {
         parent::__construct();
     }
@@ -99,6 +102,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Storage atomicity' => $this->checkStorage(),
             'Redis reachability' => $this->checkRedis($this->redis, 'storage/limiter Redis'),
             'Replication topology' => $this->checkReplicationTopology(),
+            'HA authority' => $this->checkHaAuthority(),
             'Secret key' => $this->checkSecret(),
             'Keyring state' => $this->checkKeyring(),
             'Public origin' => $this->checkPublicOrigin(),
@@ -196,20 +200,27 @@ final class KiwiCaptchaDoctorCommand extends Command
      * replication-topology warn. operator_managed passes: the operator
      * owns promotion eligibility (replication gating, catch-up rules, a
      * promotion-eligibility gate on the failover manager) and
-     * acknowledges the invariant. fail_closed is refused at container
-     * build time when an HA aggregate client is wired, so a doctor that
-     * observes that combination is itself a broken wiring. A
-     * Redis-backed storage with waitReplicas 0 is the same boundary on
-     * a single-node direct connection. The warn is the best_effort
-     * acknowledgment; the other postures pass with the operator
-     * contract noted. See docs/redis-topologies.md and
-     * docs/ha-authority.md.
+     * acknowledges the invariant. fail_closed is enforced by the
+     * runtime authority-transition guard at service construction: the
+     * actual client is classified, and an aggregate or uninspectable
+     * client is refused with a LogicException naming the posture and
+     * the remediation. The extension additionally refuses
+     * statically-known aggregates at container build time. A doctor
+     * that observes the fail_closed aggregate combination is therefore
+     * a broken wiring. An env-managed posture is opaque to this check:
+     * the runtime guard enforces the resolved value, and this check
+     * reports the best_effort boundary. A Redis-backed storage with
+     * waitReplicas 0 is the same boundary on a single-node direct
+     * connection. The warn is the best_effort acknowledgment; the
+     * other postures pass with the operator contract noted. See
+     * docs/redis-topologies.md and docs/ha-authority.md.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkReplicationTopology(): array
     {
         $posture = (string) ($this->config['replay_durability'] ?? 'best_effort');
+        $envManaged = self::isEnvManagedPosture($posture);
         $aggregate = $this->predisAggregateLabel($this->redis, 'storage/limiter Redis')
             ?? $this->predisAggregateLabel($this->riskRedis, 'risk Redis');
         if ($aggregate !== null) {
@@ -217,7 +228,10 @@ final class KiwiCaptchaDoctorCommand extends Command
                 return ['PASS', sprintf('%s — replay_durability "operator_managed": the operator owns promotion eligibility (replication gating / catch-up rules) and acknowledges the stale-promotion boundary (see docs/ha-authority.md).', $aggregate)];
             }
             if ($posture === 'fail_closed') {
-                return ['FAIL', sprintf('%s — replay_durability "fail_closed" must never reach the doctor: the extension refuses this combination at container build time (a LogicException naming the posture and the remediation). A doctor that observes it means the wiring is broken.', $aggregate)];
+                return ['FAIL', sprintf('%s — replay_durability "fail_closed" must never reach the doctor: the runtime authority-transition guard refuses this combination when the Redis-backed services are constructed (a LogicException naming the posture and the remediation), and the extension refuses statically-known aggregates at build time. A doctor that observes it means the wiring is broken.', $aggregate)];
+            }
+            if ($envManaged) {
+                return ['WARN', sprintf('%s — replay_durability is resolved from the environment, so the posture is opaque at build time: the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
             }
 
             return ['WARN', sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
@@ -228,6 +242,9 @@ final class KiwiCaptchaDoctorCommand extends Command
                 if ($posture === 'operator_managed' || $posture === 'fail_closed') {
                     return ['PASS', sprintf('Redis-backed storage (%s) with waitReplicas 0 under replay_durability "%s": single-node direct client, %s', \get_class($this->storage), $posture, $posture === 'operator_managed' ? 'the operator owns the authority-change contract (promotion eligibility gated; see docs/ha-authority.md)' : 'the deployment keeps automatic failover out of the security-Redis contract (see docs/redis-topologies.md)')];
                 }
+                if ($envManaged) {
+                    return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) under an env-managed replay_durability posture — the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
+                }
 
                 return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
             }
@@ -236,6 +253,74 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['PASS', sprintf('no Redis-backed storage and no aggregate client: one-shot atomicity is per-authority and no promotion boundary applies (replay_durability "%s")', $posture)];
+    }
+
+    /**
+     * Whether the configured posture value is an env-managed form (a
+     * Symfony %env()% placeholder or the resolved env marker the merge
+     * pass produces). The value is opaque to this command; the
+     * runtime authority-transition guard enforces the resolved posture
+     * at service construction.
+     */
+    private static function isEnvManagedPosture(string $posture): bool
+    {
+        if (preg_match('/^%env\([^%]+\)%$/D', $posture) === 1) {
+            return true;
+        }
+
+        return preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $posture) === 1;
+    }
+
+    /**
+     * The mechanical authority guard state (docs/ha-authority.md):
+     * reports the pinned identity, the last verification and the
+     * posture under `ha_authority: pinned_primary`. The check passes
+     * when the guard is armed and the serving authority is stable. It
+     * fails when the authority changed: the guard's refusal names the
+     * pinned vs observed identity and the re-pin remediation. It also
+     * fails when the guard is unarmed under the posture (no pin yet,
+     * or not wired), or when the ha_safe profile's pinned_primary
+     * promise was overridden away. The check itself performs a
+     * verification, so the first doctor run after a deployment pins
+     * the authority (auto-pin on first use) and reports the armed
+     * state.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkHaAuthority(): array
+    {
+        $posture = (string) ($this->config['ha_authority'] ?? 'none');
+        $profile = $this->config['protection_profile'] ?? null;
+        $replay = (string) ($this->config['replay_durability'] ?? 'best_effort');
+        if ($posture !== 'pinned_primary') {
+            if ($profile === 'ha_safe') {
+                return ['FAIL', sprintf('protection_profile "ha_safe" promises the pinned-primary authority guard, but ha_authority is "%s": the profile-derived mechanical enforcement was overridden away, so the operator contract is not mechanically enforced. Restore ha_authority: pinned_primary, or drop the ha_safe profile explicitly (see docs/ha-authority.md).', $posture)];
+            }
+
+            return ['PASS', sprintf('no pinned-primary authority guard (ha_authority "%s"); the authority-change contract is governed by replay_durability "%s" (see docs/ha-authority.md)', $posture, $replay)];
+        }
+        if ($this->authorityGuard === null) {
+            return ['FAIL', 'ha_authority "pinned_primary" but the authority guard is not wired: the deployment claims the mechanical posture but nothing enforces it (the extension wiring is broken)'];
+        }
+        if ($this->redis === null) {
+            return ['FAIL', 'ha_authority "pinned_primary" but no storage/limiter Redis client is wired: there is no authority to pin'];
+        }
+        try {
+            $this->authorityGuard->assertServeEligible($this->redis);
+        } catch (PinnedAuthorityRefusalException $e) {
+            return ['FAIL', $e->getMessage()];
+        } catch (\Throwable $e) {
+            return ['FAIL', sprintf('the pinned-primary authority check could not run: %s', $e->getMessage())];
+        }
+        $state = $this->authorityGuard->state();
+        if ($state['pinned'] === null) {
+            return ['FAIL', sprintf('ha_authority "pinned_primary" is unarmed: no pin is established (key %s). The guard refuses until the first verified use pins the authority (see docs/ha-authority.md).', $this->authorityGuard->pinKey())];
+        }
+        $pinned = $state['pinned'];
+        $lastVerified = $state['lastVerified'] ?? $pinned;
+        $ago = $state['lastCheckedAgoSecs'] ?? 0;
+
+        return ['PASS', sprintf('pinned-primary guard armed: pinned %s, last verified %s (%d s ago); replay_durability "%s" is now mechanically enforced', $pinned, $lastVerified, $ago, $replay)];
     }
 
     /**
@@ -406,14 +491,24 @@ final class KiwiCaptchaDoctorCommand extends Command
         // reflected here.
         $profile = $this->config['protection_profile'] ?? null;
         $decoyEnabled = (bool) ($this->config['risk']['decoy_v3_enabled'] ?? false);
+        $rolloutMode = (string) ($this->config['protocol_rollout']['mode'] ?? 'normal');
         if ($profile === 'high_abuse' && !$decoyEnabled) {
             // Under high_abuse the profile-derived default is true, so
-            // an effective false can only be an explicit deferral: the
-            // operator chose the profile and consciously deferred v3
-            // emission, which the check records as a warning, never a
-            // fail (the two-phase rollout stays safe and the deploy
-            // gate stays green for an explicit, documented choice).
-            return ['WARN', 'high_abuse promises the decoy surface, but risk.decoy_v3_enabled is explicitly false: protocol v3 emission is deferred while the profile stays active'];
+            // an effective false can only be an explicit deferral. The
+            // deferral is deliberate only when the deployment declares
+            // the two-phase migration state: a false switch alone does
+            // not prove the deployment is intentionally in the v3
+            // migration phase, so without protocol_rollout.mode
+            // "migration" the check FAILs and the deploy gate exits
+            // non-zero — a forgotten override must not silently
+            // persist. With the migration mode declared, the deferral
+            // is the documented two-phase rollout and the check warns
+            // (exit 0).
+            if ($rolloutMode !== 'migration') {
+                return ['FAIL', 'high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established.'];
+            }
+
+            return ['WARN', 'high_abuse promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)'];
         }
         if (!$decoyEnabled) {
             return ['PASS', 'protocol v2 emission (decoy surface off)'];

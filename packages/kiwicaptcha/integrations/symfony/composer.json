@@ -36,7 +36,7 @@
         "symfony/routing": "^6.0|^7.0|^8.0",
         "psr/cache": "^3.0",
         "psr/log": "^3.0",
-        "kiwicaptcha/kiwicaptcha-risk-php": "^0.1",
+        "kiwicaptcha/kiwicaptcha-risk-php": "^1.0",
         "predis/predis": "^3.5"
     },
     "require-dev": {
@@ -64,7 +64,7 @@
             "options": {
                 "symlink": false,
                 "versions": {
-                    "kiwicaptcha/kiwicaptcha-risk-php": "0.1.0"
+                    "kiwicaptcha/kiwicaptcha-risk-php": "1.0.0"
                 }
             }
         }

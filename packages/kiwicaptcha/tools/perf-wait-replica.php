@@ -43,13 +43,14 @@ declare(strict_types=1);
  *
  * The fixture is non-gating on timing by design, like the other perf
  * tools: it reports p50, p95 and the p95 delta of the ack phase over
- * the baseline, and the recorded values live in the header as
- * documentation. The only hard failure is a correctness invariant: an
- * ack-phase write that raises ReplicaWaitException, or a shortfall
- * write that does not, proves the barrier was silently downgraded and
- * fails the run. A missing redis-server / redis-cli binary, an
- * unreachable gate Redis, or a topology that never reaches acked
- * sync prints a loud note and exits 0.
+ * the baseline, and the recorded values live in
+ * tools/perf-baselines.json below. The only hard failure is a
+ * correctness invariant: an ack-phase write that raises
+ * ReplicaWaitException, or a shortfall write that does not, proves
+ * the barrier was silently downgraded and fails the run. A missing
+ * redis-server / redis-cli binary, an unreachable gate Redis, or a
+ * topology that never reaches acked sync prints a loud note and exits
+ * 0.
  *
  * Teardown is unconditional: both redis-server child processes are
  * terminated (SIGTERM first, a forced kill after a grace period) and

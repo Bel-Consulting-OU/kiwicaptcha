@@ -626,171 +626,243 @@
   var kiwiInstanceCounter = 0;
   function kiwiFindGlueSource() {
     // The renderers embed the wasm glue inline as a script element before this
-    // driver; its source contains KIWI_WASM_B64 (unique marker). The glue is
-    // a self-contained IIFE, so its text can run inside the worker with a
+    // driver; its source contains the "var KIWI_WASM_B64" assignment (the
+    // unique marker, deliberately the assignment form: the driver's own
+    // comments mention the name without the assignment, so an inlined
+    // driver copy can never be mistaken for the glue). The glue is a
+    // self-contained IIFE, so its text can run inside the worker with a
     // `var window = self` prelude to expose self.__kiwiCaptchaWasm.
     try {
       var scripts = document.scripts || [];
       for (var i = 0; i < scripts.length; i++) {
         var text = scripts[i].textContent || "";
-        if (text.indexOf("KIWI_WASM_B64") !== -1 && text.indexOf("__kiwiCaptchaWasm") !== -1) {
+        if (text.indexOf("var KIWI_WASM_B64") !== -1 && text.indexOf("__kiwiCaptchaWasm") !== -1) {
           return text;
         }
       }
     } catch (e) {}
     return null;
   }
+
+  // ── Files-mode lazy runtime loading ─────────────────────────────────
+  // In files mode (data-kiwi-runtime-src) the WASM runtime is fetched
+  // only when a memory-hard challenge arrives: a SHA-256 solve pays no
+  // runtime request at all, the pure-JS solver runs. The fetch is
+  // bounded (two retries), deduplicated per URL across every widget on
+  // the page (a shared promise), and verified against the page-issued
+  // SRI digest (data-kiwi-runtime-integrity) before the bytes run in
+  // the worker. A failure enters the controlled worker-unavailable
+  // state, never a main-thread Argon hash.
+  var kiwiRuntimeGlueCache = {};
+  function kiwiVerifyRuntimeIntegrity(src, integrity) {
+    if (!integrity || !window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
+      return Promise.resolve(true);
+    }
+    var expected = integrity.indexOf("sha256-") === 0 ? integrity.slice(7) : null;
+    if (!expected) return Promise.resolve(false);
+    return crypto.subtle.digest("SHA-256", encoder.encode(src)).then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      var bin = "";
+      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin) === expected;
+    }).catch(function () { return false; });
+  }
+  function kiwiFetchRuntimeGlue(url, integrity) {
+    if (kiwiRuntimeGlueCache[url]) return kiwiRuntimeGlueCache[url];
+    var promise = new Promise(function (resolve) {
+      var attempt = 0;
+      function tryFetch() {
+        fetch(url, { cache: "force-cache", credentials: "same-origin" })
+          .then(function (r) { if (!r.ok) throw new Error("KiwiCaptcha runtime fetch failed"); return r.text(); })
+          .then(function (src) {
+            if (src.indexOf("var KIWI_WASM_B64") === -1 || src.indexOf("__kiwiCaptchaWasm") === -1) {
+              throw new Error("KiwiCaptcha runtime asset malformed");
+            }
+            return kiwiVerifyRuntimeIntegrity(src, integrity).then(function (ok) {
+              if (!ok) throw new Error("KiwiCaptcha runtime integrity mismatch");
+              return src;
+            });
+          })
+          .then(resolve)
+          .catch(function () {
+            if (attempt < 2) { attempt++; setTimeout(tryFetch, 250 * attempt); }
+            else { resolve(null); }
+          });
+      }
+      tryFetch();
+    });
+    kiwiRuntimeGlueCache[url] = promise;
+    return promise;
+  }
   function solveWithWorker(data, onProgress, container, deadline) {
     var terminateHandle = function () {};
-    var promise = new Promise(function(resolve) {
-      if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
-      var worker = null;
-      var blobUrl = null;
-      try {
-        var workerSrc = container.getAttribute("data-kiwi-worker-src");
-        if (workerSrc) {
-          worker = new Worker(workerSrc);
-        } else {
-          // The compat loader's fetched glue covers the external /api.js
-          // case (no inline script element on the page).
-          var glue = kiwiFindGlueSource() || kiwiCompatGlue;
-          var blobSrc = (glue ? "var window = self;" + glue + "\n" : "") + KIWI_WORKER_SRC;
-          blobUrl = URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" }));
-          worker = new Worker(blobUrl);
-        }
-      } catch (e) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
-      if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
-      if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
-      kiwiActiveBlobUrl = blobUrl;
-      // A cancelled generation terminates the worker outright — revoking
-      // the blob URL alone would NOT stop it.
-      terminateHandle = function () {
-        try { worker.terminate(); } catch (e) {}
-        teardown();
-      };
-      window.__kiwiWorkerUsed = true;
-      var workerStart = performance.now();
-      var expectedHashes = Math.pow(2, data.targetBits);
-      var settled = false;
-      // Blob-URL cleanup: the object URL is revoked exactly once on EVERY
-      // terminal path — done, failed, build-id mismatch, worker error, and
-      // postMessage failure. Revoking never kills the worker itself
-      // (terminate() does that); it only releases the URL, so a stale
-      // blob URL can never leak for the page's lifetime.
-      function teardown() {
-        if (blobUrl) {
-          URL.revokeObjectURL(blobUrl);
-          if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
-          blobUrl = null;
-        }
+    var workerSrc = container.getAttribute("data-kiwi-worker-src");
+    var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
+    // The worker glue source: the inline script element (inline mode),
+    // the compat loader's fetched glue (/api.js), or the lazy runtime
+    // fetch of files mode (data-kiwi-runtime-src). A missing glue with
+    // no runtime URL keeps the historical glue-less blob worker.
+    var glue = workerSrc ? null : (kiwiFindGlueSource() || kiwiCompatGlue);
+    var glueReady = (workerSrc || glue)
+      ? Promise.resolve(glue)
+      : (runtimeSrc ? kiwiFetchRuntimeGlue(runtimeSrc, container.getAttribute("data-kiwi-runtime-integrity")) : Promise.resolve(null));
+    var promise = glueReady.then(function (resolvedGlue) {
+      if (resolvedGlue === null && runtimeSrc && !workerSrc) {
+        // The lazy runtime fetch failed after its bounded retries: the
+        // memory-hard machinery cannot run, so the widget enters the
+        // controlled worker-unavailable state, never a main-thread Argon
+        // hash and never a weaker-profile retry.
+        return { unavailable: true, reason: "runtime-unavailable" };
       }
-      // The solve deadline (challenge expiry − margin): a memory-hard
-      // solve that would outlive the challenge is pure waste and the
-      // token would be rejected anyway, so the worker is TERMINATED at
-      // the deadline — the same mechanics as generation cancellation
-      // (terminate() + teardown, exactly once). The driver's retry flow
-      // then re-acquires a fresh challenge.
-      var deadlineTimer = null;
-      if (deadline && deadline > performance.now()) {
-        deadlineTimer = setTimeout(function () {
+      return new Promise(function(resolve) {
+        if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
+        var worker = null;
+        var blobUrl = null;
+        try {
+          if (workerSrc) {
+            worker = new Worker(workerSrc);
+          } else {
+            // The compat loader's fetched glue covers the external /api.js
+            // case; the files-mode lazy fetch covers data-kiwi-runtime-src
+            // pages (no inline script element on the page).
+            var blobSrc = (resolvedGlue ? "var window = self;" + resolvedGlue + "\n" : "") + KIWI_WORKER_SRC;
+            blobUrl = URL.createObjectURL(new Blob([blobSrc], { type: "application/javascript" }));
+            worker = new Worker(blobUrl);
+          }
+        } catch (e) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
+        if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
+        if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
+        kiwiActiveBlobUrl = blobUrl;
+        // A cancelled generation terminates the worker outright — revoking
+        // the blob URL alone would NOT stop it.
+        terminateHandle = function () {
+          try { worker.terminate(); } catch (e) {}
+          teardown();
+        };
+        window.__kiwiWorkerUsed = true;
+        var workerStart = performance.now();
+        var expectedHashes = Math.pow(2, data.targetBits);
+        var settled = false;
+        // Blob-URL cleanup: the object URL is revoked exactly once on EVERY
+        // terminal path — done, failed, build-id mismatch, worker error, and
+        // postMessage failure. Revoking never kills the worker itself
+        // (terminate() does that); it only releases the URL, so a stale
+        // blob URL can never leak for the page's lifetime.
+        function teardown() {
+          if (blobUrl) {
+            URL.revokeObjectURL(blobUrl);
+            if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
+            blobUrl = null;
+          }
+        }
+        // The solve deadline (challenge expiry − margin): a memory-hard
+        // solve that would outlive the challenge is pure waste and the
+        // token would be rejected anyway, so the worker is TERMINATED at
+        // the deadline — the same mechanics as generation cancellation
+        // (terminate() + teardown, exactly once). The driver's retry flow
+        // then re-acquires a fresh challenge.
+        var deadlineTimer = null;
+        if (deadline && deadline > performance.now()) {
+          deadlineTimer = setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            clearTimeout(deadlineTimer);
+            try { worker.terminate(); } catch (e) {}
+            teardown();
+            resolve({ deadline: true });
+          }, deadline - performance.now());
+        }
+        // The worker is CREATED BY THIS DRIVER (a Blob URL built from local
+        // code, or the explicitly configured same-origin asset URL), so no
+        // cross-origin postMessage target exists and no rate-limit window is
+        // needed here — admission rate limiting lives on the challenge
+        // endpoint, server-side. The shape guard below is defense-in-depth
+        // for the worker port: any message that is not a versioned
+        // progress/done/failed solution message with the expected payload is
+        // ignored outright, never acted on.
+        worker.onmessage = function(ev) {
+          var msg = ev.data;
+          if (!msg || typeof msg !== "object" || msg.v !== 1) return;
+          if (msg.type === "ready") {
+            // Startup handshake: the worker must report the SAME solver
+            // protocol id as this driver. A stale cached worker is refused —
+            // it never contributes a solution and there is no fallback.
+            if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
+              if (!settled) {
+                console.error("KiwiCaptcha worker protocol mismatch: ready buildId", msg.buildId);
+                settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
+              }
+            }
+            return;
+          }
+          if (msg.type === "progress") {
+            if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
+            onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
+          } else if (msg.type === "done") {
+            if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
+            if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
+              if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
+              return;
+            }
+            settled = true;
+            clearTimeout(deadlineTimer);
+            worker.terminate();
+            teardown();
+            resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
+          } else if (msg.type === "failed") {
+            if (typeof msg.reason !== "string") return;
+            // The worker verifies the wasm glue's exported protocol version
+            // BEFORE ready and reports protocol-mismatch when the wasm/worker
+            // generations differ — surfaced as the controlled
+            // solver-mismatch state (a stale worker or a mixed-generation
+            // deployment; same UX as a worker reporting the wrong protocol
+            // id in its ready handshake).
+            if (msg.reason === "protocol-mismatch") {
+              if (!settled) {
+                console.error("KiwiCaptcha worker protocol mismatch: wasm/worker generation differ");
+                settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
+              }
+              return;
+            }
+            settled = true;
+            clearTimeout(deadlineTimer);
+            worker.terminate();
+            teardown();
+            console.error("KiwiCaptcha worker failed:", msg.reason);
+            resolve({ unavailable: true, reason: "worker-failed-" + msg.reason });
+          }
+        };
+        worker.onerror = function(ev) {
           if (settled) return;
           settled = true;
           clearTimeout(deadlineTimer);
-          try { worker.terminate(); } catch (e) {}
-          teardown();
-          resolve({ deadline: true });
-        }, deadline - performance.now());
-      }
-      // The worker is CREATED BY THIS DRIVER (a Blob URL built from local
-      // code, or the explicitly configured same-origin asset URL), so no
-      // cross-origin postMessage target exists and no rate-limit window is
-      // needed here — admission rate limiting lives on the challenge
-      // endpoint, server-side. The shape guard below is defense-in-depth
-      // for the worker port: any message that is not a versioned
-      // progress/done/failed solution message with the expected payload is
-      // ignored outright, never acted on.
-      worker.onmessage = function(ev) {
-        var msg = ev.data;
-        if (!msg || typeof msg !== "object" || msg.v !== 1) return;
-        if (msg.type === "ready") {
-          // Startup handshake: the worker must report the SAME solver
-          // protocol id as this driver. A stale cached worker is refused —
-          // it never contributes a solution and there is no fallback.
-          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
-            if (!settled) {
-              console.error("KiwiCaptcha worker protocol mismatch: ready buildId", msg.buildId);
-              settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
-            }
-          }
-          return;
-        }
-        if (msg.type === "progress") {
-          if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
-          onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
-        } else if (msg.type === "done") {
-          if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
-          if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
-            if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
-            return;
-          }
-          settled = true;
-          clearTimeout(deadlineTimer);
           worker.terminate();
           teardown();
-          resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
-        } else if (msg.type === "failed") {
-          if (typeof msg.reason !== "string") return;
-          // The worker verifies the wasm glue's exported protocol version
-          // BEFORE ready and reports protocol-mismatch when the wasm/worker
-          // generations differ — surfaced as the controlled
-          // solver-mismatch state (a stale worker or a mixed-generation
-          // deployment; same UX as a worker reporting the wrong protocol
-          // id in its ready handshake).
-          if (msg.reason === "protocol-mismatch") {
-            if (!settled) {
-              console.error("KiwiCaptcha worker protocol mismatch: wasm/worker generation differ");
-              settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true });
-            }
-            return;
-          }
-          settled = true;
-          clearTimeout(deadlineTimer);
-          worker.terminate();
-          teardown();
-          console.error("KiwiCaptcha worker failed:", msg.reason);
-          resolve({ unavailable: true, reason: "worker-failed-" + msg.reason });
+          console.error("KiwiCaptcha worker error:", ev && ev.message, ev && ev.filename, ev && ev.lineno);
+          resolve({ unavailable: true, reason: "worker-error" });
+        };
+        var prefixBytes = encoder.encode(data.prefix);
+        var saltBytes = b64decode(data.salt);
+        try {
+          worker.postMessage({
+            v: 1,
+            type: "solve",
+            algorithm: "argon2id",
+            prefix: data.prefix,
+            prefixLen: prefixBytes.length,
+            salt: data.salt,
+            saltLen: saltBytes.length,
+            targetBits: data.targetBits,
+            mKib: data.mKib || 0,
+            t: data.t || 1,
+            p: data.p || 1,
+            startCounter: 0,
+            maxHashes: MAX_SHA_HASHES,
+          });
+        } catch (e) {
+          if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
         }
-      };
-      worker.onerror = function(ev) {
-        if (settled) return;
-        settled = true;
-        clearTimeout(deadlineTimer);
-        worker.terminate();
-        teardown();
-        console.error("KiwiCaptcha worker error:", ev && ev.message, ev && ev.filename, ev && ev.lineno);
-        resolve({ unavailable: true, reason: "worker-error" });
-      };
-      var prefixBytes = encoder.encode(data.prefix);
-      var saltBytes = b64decode(data.salt);
-      try {
-        worker.postMessage({
-          v: 1,
-          type: "solve",
-          algorithm: "argon2id",
-          prefix: data.prefix,
-          prefixLen: prefixBytes.length,
-          salt: data.salt,
-          saltLen: saltBytes.length,
-          targetBits: data.targetBits,
-          mKib: data.mKib || 0,
-          t: data.t || 1,
-          p: data.p || 1,
-          startCounter: 0,
-          maxHashes: MAX_SHA_HASHES,
-        });
-      } catch (e) {
-        if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
-      }
+      });
     });
     return { promise: promise, terminate: terminateHandle };
   }

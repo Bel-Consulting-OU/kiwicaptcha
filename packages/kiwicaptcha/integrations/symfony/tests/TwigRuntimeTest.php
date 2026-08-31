@@ -59,6 +59,93 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
     }
 
+    // ── Files-mode asset delivery (asset_mode "files") ───────────────────
+
+    private function filesRuntime(): array
+    {
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+
+        return [$env, new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig', assetMode: 'files')];
+    }
+
+    public function testFilesModeEmitsVersionedAssetTagsWithSri(): void
+    {
+        [$env, $runtime] = $this->filesRuntime();
+        $html = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge', 'scope' => 'login']);
+
+        // No inline style/script blocks in files mode.
+        self::assertStringNotContainsString('<style', $html);
+        self::assertStringNotContainsString('KIWI_WASM_B64', $html, 'the runtime embed must stay lazy in files mode');
+        self::assertStringNotContainsString('window.KiwiCaptcha = {', $html, 'the driver must not be inlined in files mode');
+
+        // The stylesheet link and the driver script carry the versioned
+        // URLs and the SRI integrity of the exact bytes they reference.
+        preg_match_all('~<link rel="stylesheet" href="(/kiwi-captcha/assets/widget\.[0-9a-f]{12}\.css)" integrity="(sha256-[A-Za-z0-9+/=]+)">~', $html, $cssMatches);
+        self::assertCount(1, $cssMatches[0], 'the widget stylesheet must be emitted exactly once');
+        self::assertSame('/kiwi-captcha/assets/widget.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css')), 0, 12).'.css', $cssMatches[1][0]);
+        self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css'), true)), $cssMatches[2][0]);
+
+        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{12}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)"></script>~', $html, $driverMatches);
+        self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once');
+        self::assertSame('/kiwi-captcha/assets/driver.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js')), 0, 12).'.js', $driverMatches[1][0]);
+        self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js'), true)), $driverMatches[2][0]);
+
+        // The runtime stays lazy: no runtime script tag (only the driver
+        // script is emitted); its URL and SRI digest ride the container
+        // attributes for the driver's argon-time fetch.
+        self::assertStringNotContainsString('<script src="/kiwi-captcha/assets/runtime.', $html, 'the runtime must never be emitted as a script tag');
+        self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js')), 0, 12).'.js"', $html);
+        self::assertStringContainsString('data-kiwi-runtime-integrity="sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js'), true)).'"', $html);
+    }
+
+    public function testFilesModeEmitsEachAssetExactlyOnceAcrossWidgets(): void
+    {
+        [$env, $runtime] = $this->filesRuntime();
+        $first = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge', 'scope' => 'login']);
+        $second = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge', 'scope' => 'login']);
+
+        // The request-scoped registry: the first widget emits the assets,
+        // the second widget renders the container only.
+        self::assertSame(1, substr_count($first, '<link rel="stylesheet"'), 'the first widget emits the stylesheet');
+        self::assertSame(1, substr_count($first, '<script src='), 'the first widget emits the driver');
+        self::assertStringNotContainsString('<link ', $second, 'the second widget must not re-emit the stylesheet');
+        self::assertStringNotContainsString('<script src=', $second, 'the second widget must not re-emit the driver');
+        self::assertStringContainsString('data-kiwi-runtime-src=', $second, 'the second widget still carries the runtime URL');
+        self::assertStringContainsString('data-kiwi-token', $second, 'the second widget still renders its container');
+    }
+
+    public function testFilesModeNonceRidesTheDriverScriptTag(): void
+    {
+        [$env, $runtime] = $this->filesRuntime();
+        $html = $runtime->renderWidget($env, ['nonce' => 'abc123']);
+
+        self::assertStringContainsString(' integrity="sha256-', $html);
+        self::assertSame(1, substr_count($html, ' nonce="abc123"'), 'the driver script tag carries the CSP nonce exactly once');
+    }
+
+    public function testFilesModeSkippedOutsideFilesMode(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge']);
+
+        self::assertStringNotContainsString('<link ', $html);
+        self::assertStringNotContainsString('<script src=', $html);
+        self::assertStringNotContainsString('data-kiwi-runtime-src=', $html, 'inline mode renders no runtime URL attribute');
+    }
+
+    public function testResetClearsTheEmissionRegistry(): void
+    {
+        [$env, $runtime] = $this->filesRuntime();
+        $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge']);
+        $runtime->reset();
+        $html = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge']);
+
+        self::assertSame(1, substr_count($html, '<link rel="stylesheet"'), 'after reset the next render emits the assets again (kernel.reset contract)');
+    }
+
     // ── Widget-page frame-ancestors CSP helper ────────────────────────────
 
     public function testCspFrameAncestorsIsNullForAnEmptyAllowlist(): void

@@ -1141,9 +1141,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     /**
      * No admin endpoint keys off a client-supplied identifier: the route
-     * surface is exactly challenge + health (both fully public), so no
-     * control-plane route can be reached with a client-provided
-     * credential.
+     * surface is exactly the public set (challenge, challenge/cancel,
+     * siteverify, api.js, the versioned assets, health) — all fully
+     * public, so no control-plane route can be reached with a
+     * client-provided credential.
      */
     public function testNoAdminEndpointExistsForKeyingOffAClientIdentifier(): void
     {
@@ -1152,7 +1153,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         $names = array_keys($routes->all());
         sort($names);
-        self::assertSame(['kiwicaptcha_api_js', 'kiwicaptcha_challenge', 'kiwicaptcha_challenge_cancel', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready', 'kiwicaptcha_siteverify', 'kiwicaptcha_widget_css'], $names, 'the bundle exposes ONLY the public surface (challenge, challenge/cancel, siteverify, api.js, health) — no admin/control-plane routes');
+        self::assertSame(['kiwicaptcha_api_js', 'kiwicaptcha_asset', 'kiwicaptcha_challenge', 'kiwicaptcha_challenge_cancel', 'kiwicaptcha_health_live', 'kiwicaptcha_health_ready', 'kiwicaptcha_siteverify', 'kiwicaptcha_widget_css'], $names, 'the bundle exposes ONLY the public surface (challenge, challenge/cancel, siteverify, api.js, the versioned assets, health) — no admin/control-plane routes');
 
         foreach ($routes->all() as $route) {
             self::assertNotSame('admin', $route->getDefault('_controller')[1] ?? null);

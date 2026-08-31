@@ -153,16 +153,21 @@ WebKit (Playwright build 2336).
 
 Automation evidence (headless, local run). The new
 `autofill-evidence.spec.mjs` suite runs all six scenarios on every
-engine:
+engine. Every scenario below is an automated simulation of a native
+autofill engine, so the row records the simulation result only:
+`AUTOMATED PASS / MANUAL PENDING`. The native-autofill manual
+confirmation is still pending and is tracked row by row in the
+qualification matrix further down. An automated run cannot make a
+native-autofill row `PASS`; only the real-engine qualification can.
 
 | Scenario | Chromium | Firefox | WebKit |
 |---|---|---|---|
-| Firefox-style heuristic autofill: candidate scan plus focus and blur fills | PASS | PASS | PASS |
-| WebKit-style form assistant: composition events plus a delayed post-blur commit | PASS | PASS | PASS |
-| Chromium-style autofill preview: silent writes, committed at submit | PASS | PASS | PASS |
-| Offscreen decoy (`autocomplete=new-password`) under all three fills: never a candidate, never autofilled | PASS | PASS | PASS |
-| Deferred presentation: the post-solve decoy stays off the candidate surface | PASS | PASS | PASS |
-| Accessibility tooling: the AT snapshot never exposes the decoy, any presentation | PASS | PASS | PASS |
+| Firefox-style heuristic autofill: candidate scan plus focus and blur fills | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
+| WebKit-style form assistant: composition events plus a delayed post-blur commit | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
+| Chromium-style autofill preview: silent writes, committed at submit | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
+| Offscreen decoy (`autocomplete=new-password`) under all three fills: never a candidate, never autofilled | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
+| Deferred presentation: the post-solve decoy stays off the candidate surface | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
+| Accessibility tooling: the AT snapshot never exposes the decoy, any presentation | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING | AUTOMATED PASS / MANUAL PENDING |
 
 Each scenario asserts the pass criteria. The decoy stays empty through
 every fill unless a test fills it deliberately; real-field fills
@@ -235,14 +240,18 @@ channel; the decoy suites of the a11y spec set):
 
 | Suite | Real Google Chrome 147 |
 |---|---|
-| autofill-evidence (engine form-assistance simulations) | PASS |
+| autofill-evidence (engine form-assistance simulations) | AUTOMATED PASS / MANUAL PENDING |
 | decoy-polymorphism (presentation variants, axe-clean, lifecycle) | PASS |
 | targeted-bot (learned-name adaptation, additive evidence) | PASS |
 
 The three suites ran 21 tests against the installed binary with
-retries disabled and every test passed, so the invariant surface (the
+retries disabled and every test passed. The invariant surface (the
 decoy stays empty, real-field fills never trip the evidence, evidence
-stays additive) holds on the installed Chrome build. Real Safari
+stays additive) therefore holds on the installed Chrome build under
+the automated simulations. The native-autofill row above stays
+`AUTOMATED PASS / MANUAL PENDING`: the real Chrome address/password
+autofill interaction on the fixture form is a separate manual
+qualification, tracked in the matrix below. Real Safari
 remains blocked by the documented safaridriver gate (see the blocked
 attempt above).
 

@@ -40,13 +40,16 @@ declare(strict_types=1);
  * count budgets live in perf-budget.sh, which gates deterministically;
  * this timing signal is loud but never a hard merge gate by itself.
  *
- * The recorded baseline values live in tools/perf-baselines.json, the
- * single machine-readable record for the performance-analysis
- * document. After a deliberate change, run each mode with
+ * The recorded baseline values live in tools/perf-baselines.json,
+ * the single machine-readable record for the performance-analysis
+ * document. The ratchets read them straight from that record
+ * (perf_baseline_float), so the JSON is the single baseline authority
+ * and no compiled ratchet constants exist to drift. After a
+ * deliberate change, run each mode with
  * --baseline-out tools/perf-baselines.json on a clean local machine to
- * merge the fresh measurements into the record (the ratchet constants
- * below are the values the run-time gate reads). --update-baseline
- * prints the fresh values without touching the record.
+ * merge the fresh measurements into the record, the very file the
+ * ratchets read on the next run. --update-baseline prints the fresh
+ * values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -72,18 +75,6 @@ const ITERATIONS = 400;
 const ARGON_WARMUP = 5;
 const ARGON_ITERATIONS = 20;
 const RATCHET = 3.0;
-const BASELINE_ISSUE_P50 = 0.010;
-const BASELINE_ISSUE_P95 = 0.026;
-const BASELINE_VERIFY_P50 = 0.011;
-const BASELINE_VERIFY_P95 = 0.037;
-const BASELINE_REDIS_ISSUE_P50 = 0.063;
-const BASELINE_REDIS_ISSUE_P95 = 0.107;
-const BASELINE_REDIS_VERIFY_P50 = 0.240;
-const BASELINE_REDIS_VERIFY_P95 = 0.408;
-const BASELINE_ARGON_ISSUE_P50 = 0.032;
-const BASELINE_ARGON_ISSUE_P95 = 0.043;
-const BASELINE_ARGON_VERIFY_P50 = 79.077;
-const BASELINE_ARGON_VERIFY_P95 = 83.331;
 
 /** The in-process admission gate of the harness: a token-set cap, the
  *  InProcessArgonGate contract without the bundle dependency. */
@@ -214,7 +205,7 @@ function runWorkload(callable $issue, callable $solve, callable $verify, int $wa
     ];
 }
 
-function report(string $label, array $r, float $bIssueP50, float $bIssueP95, float $bVerifyP50, float $bVerifyP95): bool
+function report(string $label, array $r, float $bIssueP95, float $bVerifyP95): bool
 {
     printf(
         "perf-bench: %s issuance p50 %.3f ms p95 %.3f ms (n=%d); verification p50 %.3f ms p95 %.3f ms (n=%d)\n",
@@ -226,6 +217,11 @@ function report(string $label, array $r, float $bIssueP50, float $bIssueP95, flo
         $r['verify']['p95'],
         $r['verify']['n'],
     );
+    if ($bIssueP95 <= 0.0 || $bVerifyP95 <= 0.0) {
+        fwrite(STDERR, "perf-bench NOTE: $label has no recorded baseline; run with --baseline-out on a clean local machine to record one\n");
+
+        return true;
+    }
     $failed = false;
     if ($r['issue']['p95'] > $bIssueP95 * RATCHET) {
         fwrite(STDERR, sprintf("perf-bench FAILED: %s issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $label, $r['issue']['p95'], $bIssueP95 * RATCHET, $bIssueP95));
@@ -253,6 +249,7 @@ foreach ($argv as $i => $arg) {
 $allOk = true;
 $record = [];
 $phaseFmt = static fn (array $p): array => ['p50_ms' => $p['p50'], 'p95_ms' => $p['p95'], 'n' => $p['n']];
+$baselineFile = $baselineOut ?? __DIR__.'/perf-baselines.json';
 
 if ($modeArray) {
     $storage = new ArrayStorage();
@@ -265,7 +262,12 @@ if ($modeArray) {
         WARMUP,
         ITERATIONS,
     );
-    $allOk = report('SHA-256 array', $r, BASELINE_ISSUE_P50, BASELINE_ISSUE_P95, BASELINE_VERIFY_P50, BASELINE_VERIFY_P95) && $allOk;
+    $allOk = report(
+        'SHA-256 array',
+        $r,
+        perf_baseline_float($baselineFile, ['bench', 'sha_array', 'issue', 'p95_ms']),
+        perf_baseline_float($baselineFile, ['bench', 'sha_array', 'verify', 'p95_ms']),
+    ) && $allOk;
     $record['sha_array'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
 }
 
@@ -297,7 +299,12 @@ if ($modeRedis) {
             WARMUP,
             ITERATIONS,
         );
-        $allOk = report('SHA-256 redis', $r, BASELINE_REDIS_ISSUE_P50, BASELINE_REDIS_ISSUE_P95, BASELINE_REDIS_VERIFY_P50, BASELINE_REDIS_VERIFY_P95) && $allOk;
+        $allOk = report(
+            'SHA-256 redis',
+            $r,
+            perf_baseline_float($baselineFile, ['bench', 'sha_redis', 'issue', 'p95_ms']),
+            perf_baseline_float($baselineFile, ['bench', 'sha_redis', 'verify', 'p95_ms']),
+        ) && $allOk;
         $record['sha_redis'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
     }
 }
@@ -315,7 +322,12 @@ if ($modeArgon) {
         ARGON_WARMUP,
         ARGON_ITERATIONS,
     );
-    $allOk = report('Argon2id admission', $r, BASELINE_ARGON_ISSUE_P50, BASELINE_ARGON_ISSUE_P95, BASELINE_ARGON_VERIFY_P50, BASELINE_ARGON_VERIFY_P95) && $allOk;
+    $allOk = report(
+        'Argon2id admission',
+        $r,
+        perf_baseline_float($baselineFile, ['bench', 'argon', 'issue', 'p95_ms']),
+        perf_baseline_float($baselineFile, ['bench', 'argon', 'verify', 'p95_ms']),
+    ) && $allOk;
     $record['argon'] = ['issue' => $phaseFmt($r['issue']), 'verify' => $phaseFmt($r['verify'])];
 }
 

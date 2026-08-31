@@ -63,6 +63,17 @@ final class ProtectionProfileDefaults
      *    sha256, a conservative TTL (300 s, Turnstile parity), binding
      *    off (IP churn behind NAT/mobile), risk and the decoy surface
      *    off (protocol v2 emission), no behavioral coupling.
+     *  - ha_safe: the replay-safe HA posture. replay_durability
+     *    operator_managed + ha_authority pinned_primary; every other
+     *    derived default mirrors balanced (the tree defaults). The
+     *    mechanical pinned-primary authority guard turns the
+     *    operator_managed contract into a bundle-enforced guarantee:
+     *    the guard pins the serving authority on first use and refuses
+     *    on any change, and the doctor reports its state. An explicit
+     *    override of ha_authority or replay_durability in any layer
+     *    wins (the doctor then FAILs the "HA authority" check when the
+     *    profile promises pinned_primary but the effective posture
+     *    dropped it, so the promise cannot silently weaken).
      *
      * @var array<string, array{root: array<string, mixed>, risk: array<string, mixed>}>
      */
@@ -168,6 +179,27 @@ final class ProtectionProfileDefaults
                 'telemetry' => 'off',
                 'enforce_telemetry' => false,
                 'binding_mode' => 'none',
+            ],
+            'risk' => [
+                'enabled' => false,
+                'decoy_v3_enabled' => false,
+                'client_context' => false,
+                'hard_limits' => ['process_per_second' => 10000],
+                'max_outstanding_challenges' => 20,
+                'max_outstanding_challenges_global' => 100000,
+            ],
+        ],
+        'ha_safe' => [
+            // The replay-safe HA posture: the mechanical authority
+            // guard + the operator contract it makes real. Every other
+            // knob mirrors balanced (the tree defaults) — including the
+            // explicit risk defaults, because the risk node is
+            // canBeEnabled(): a present-but-empty risk key would
+            // silently default enabled to true, exactly what a
+            // pass-through profile must never do.
+            'root' => [
+                'replay_durability' => 'operator_managed',
+                'ha_authority' => 'pinned_primary',
             ],
             'risk' => [
                 'enabled' => false,

@@ -62,13 +62,16 @@ declare(strict_types=1);
  * deterministically; this timing signal is loud but never a hard merge
  * gate by itself.
  *
- * The recorded baseline values live in tools/perf-baselines.json, the
- * single machine-readable record for the performance-analysis
- * document. After a deliberate change, run each phase with
+ * The recorded baseline values live in tools/perf-baselines.json,
+ * the single machine-readable record for the performance-analysis
+ * document. The ratchets read them straight from that record
+ * (perf_baseline_float), so the JSON is the single baseline authority
+ * and no compiled ratchet constants exist to drift. After a
+ * deliberate change, run each phase with
  * --baseline-out tools/perf-baselines.json on a clean local machine to
- * merge the fresh measurements into the record (the ratchet constants
- * below are the values the run-time gate reads). --update-baseline
- * prints the fresh values without touching the record.
+ * merge the fresh measurements into the record, the very file the
+ * ratchets read on the next run. --update-baseline prints the fresh
+ * values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha-php/vendor/autoload.php';
@@ -87,11 +90,6 @@ use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Verifier;
 
 const RATCHET = 3.0;
-const BASELINE_ISSUE_P95 = 0.177;
-const BASELINE_VERIFY_P95 = 0.880;
-const BASELINE_MIXED_ISSUE_P95 = 0.307;
-const BASELINE_MIXED_VERIFY_P95 = 0.944;
-const BASELINE_RISK_ISSUE_P95 = 0.0;
 
 function percentile(array $samples, float $q): float
 {
@@ -528,6 +526,7 @@ foreach ($argv as $i => $arg) {
         $baselineOut = $argv[$i + 1];
     }
 }
+$baselineFile = $baselineOut ?? __DIR__.'/perf-baselines.json';
 
 $url = redisUrlFromArgs($argv);
 $probe = redisOrNull($url);
@@ -573,7 +572,7 @@ if ($modeIssue) {
         }
         $allOk = false;
     } else {
-        $measured['issue'] = report('concurrent issue ('.($workers * $perWorker).' challenges)', $r['samples']['issue'] ?? [], $r['windowMs'], BASELINE_ISSUE_P95);
+        $measured['issue'] = report('concurrent issue ('.($workers * $perWorker).' challenges)', $r['samples']['issue'] ?? [], $r['windowMs'], perf_baseline_float($baselineFile, ['load', 'issue', 'p95_ms']));
     }
 }
 
@@ -585,7 +584,7 @@ if ($modeVerify) {
         }
         $allOk = false;
     } else {
-        $measured['verify'] = report('concurrent verify ('.($workers * $perWorker).' tokens)', $r['samples']['verify'] ?? [], $r['windowMs'], BASELINE_VERIFY_P95);
+        $measured['verify'] = report('concurrent verify ('.($workers * $perWorker).' tokens)', $r['samples']['verify'] ?? [], $r['windowMs'], perf_baseline_float($baselineFile, ['load', 'verify', 'p95_ms']));
     }
 }
 
@@ -597,8 +596,8 @@ if ($modeMixed) {
         }
         $allOk = false;
     } else {
-        $measured['mixed-issue'] = report('mixed-pipeline issue ('.($workers * $perWorker).' challenges)', $r['samples']['issue'] ?? [], $r['windowMs'], BASELINE_MIXED_ISSUE_P95);
-        $measured['mixed-verify'] = report('mixed-pipeline verify ('.($workers * $perWorker).' tokens)', $r['samples']['verify'] ?? [], $r['windowMs'], BASELINE_MIXED_VERIFY_P95);
+        $measured['mixed-issue'] = report('mixed-pipeline issue ('.($workers * $perWorker).' challenges)', $r['samples']['issue'] ?? [], $r['windowMs'], perf_baseline_float($baselineFile, ['load', 'mixed-issue', 'p95_ms']));
+        $measured['mixed-verify'] = report('mixed-pipeline verify ('.($workers * $perWorker).' tokens)', $r['samples']['verify'] ?? [], $r['windowMs'], perf_baseline_float($baselineFile, ['load', 'mixed-verify', 'p95_ms']));
     }
 }
 
@@ -613,7 +612,7 @@ if ($modeRisk) {
             }
             $allOk = false;
         } else {
-            $measured['risk-issue'] = report('risk-enabled concurrent issue ('.($workers * $perWorker).' challenges)', $r['samples']['risk-issue'] ?? [], $r['windowMs'], BASELINE_RISK_ISSUE_P95);
+            $measured['risk-issue'] = report('risk-enabled concurrent issue ('.($workers * $perWorker).' challenges)', $r['samples']['risk-issue'] ?? [], $r['windowMs'], perf_baseline_float($baselineFile, ['load', 'risk-issue', 'p95_ms']));
         }
     }
 }
@@ -656,14 +655,7 @@ if ($update) {
 }
 
 foreach ($measured as $key => $values) {
-    $baseline = match ($key) {
-        'issue' => BASELINE_ISSUE_P95,
-        'verify' => BASELINE_VERIFY_P95,
-        'mixed-issue' => BASELINE_MIXED_ISSUE_P95,
-        'mixed-verify' => BASELINE_MIXED_VERIFY_P95,
-        'risk-issue' => BASELINE_RISK_ISSUE_P95,
-        default => 0.0,
-    };
+    $baseline = perf_baseline_float($baselineFile, ['load', $key, 'p95_ms']);
     if ($baseline > 0.0 && $values['p95'] > $baseline * RATCHET) {
         $allOk = false;
     }

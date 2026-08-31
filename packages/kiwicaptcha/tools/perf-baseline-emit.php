@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Machine-readable baseline emission for the perf tools.
+ * Machine-readable baseline emission and read-back for the perf tools.
  *
  * The five timing tools (perf-bench.php, perf-bench-risk.php,
  * perf-load.php, perf-wait.php and perf-wait-replica.php) share this
@@ -18,6 +18,13 @@ declare(strict_types=1);
  * leaves a truncated record. The record is updated only by hand on a
  * clean local machine with --baseline-out; the CI timing steps never
  * write it.
+ *
+ * The ratchets read the record back through perf_baseline_float(): the
+ * tools compile no baseline constants, so the JSON is the single
+ * baseline authority and a re-baselined record is the very file the
+ * ratchets compare against. A missing leaf reads as the fallback
+ * (0.0), which the tools report loudly as an unrecorded baseline
+ * without failing.
  */
 
 function perf_baseline_read(string $file): array
@@ -36,6 +43,28 @@ function perf_baseline_read(string $file): array
     }
 
     return is_array($data) ? $data : [];
+}
+
+/**
+ * Read a numeric leaf from the record at the given nested path. The
+ * fallback is returned when the leaf is absent or not numeric, so a
+ * partial record degrades to the unrecorded-baseline path instead of
+ * a hard failure.
+ *
+ * @param list<string> $path
+ */
+function perf_baseline_float(string $file, array $path, float $fallback = 0.0): float
+{
+    $data = perf_baseline_read($file);
+    $cursor = $data;
+    foreach ($path as $key) {
+        if (!is_array($cursor) || !array_key_exists($key, $cursor)) {
+            return $fallback;
+        }
+        $cursor = $cursor[$key];
+    }
+
+    return is_int($cursor) || is_float($cursor) ? (float) $cursor : $fallback;
 }
 
 /**

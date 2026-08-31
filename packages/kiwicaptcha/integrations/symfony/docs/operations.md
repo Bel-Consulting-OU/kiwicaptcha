@@ -222,6 +222,32 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 A node with `risk.decoy_v3_enabled: true` whose central floor is below 3 logs a warning naming the floor and keeps emitting v2.
 A rollback is the reverse: lower the floor (or delete the key) before any older binary can be re-admitted, and the next re-read (one cache window) stops v3 emission automatically.
 
+### The explicit migration state (`protocol_rollout.mode`)
+
+Deferring v3 emission while a security profile promises the decoy surface is a deliberate operational state, and the deployment must declare it: `protocol_rollout.mode` (default `normal`) is the explicit protocol-rollout migration state. `normal` = no deliberate exception; `migration` = the deployment is deliberately in the two-phase protocol-v3 rollout (v3 emission deferred until the fleet floor is confirmed).
+
+The doctor's protocol-v3 writer check keys on it:
+
+| high_abuse | `risk.decoy_v3_enabled` | `protocol_rollout.mode` | Doctor status |
+|---|---|---|---|
+| yes | false | normal (or absent) | **FAIL** — a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
+| yes | false | migration | **WARN** (exit 0) — the deliberate two-phase deferral |
+| yes | true | any | PASS once the central floor confirms v3; FAIL while the floor is absent or below 3 |
+| no | any | any | unchanged (protocol v2 emission passes; the armed-but-unconfirmed floor keeps its warn) |
+
+A deployment in the migration phase declares it explicitly:
+
+```yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+    protocol_rollout:
+        mode: migration
+    risk:
+        decoy_v3_enabled: false
+```
+
+The two-phase procedure above is preserved unchanged: raise the floor to 3, then flip `risk.decoy_v3_enabled: true`, then remove the migration declaration once v3 emission is armed. An empty `protocol_rollout` block or an absent key is `normal`; any value outside the two names is refused at compile time.
+
 Residual bounds and failure behavior:
 - Raising the floor does not drain old binaries atomically: a v2-only binary still processing in-flight requests rejects any v3 record it receives as malformed, and the solve is burned (fail closed, the client re-requests).
   The operator drains through the readiness gate; the drain window is deployment-specific and must be confirmed before step 2.

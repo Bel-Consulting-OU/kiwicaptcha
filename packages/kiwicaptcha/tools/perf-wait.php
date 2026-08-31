@@ -48,10 +48,10 @@ declare(strict_types=1);
  *
  * The fixture is non-gating on timing by design: it reports p50, p95
  * and the p95 delta of the barrier phase over the baseline, and the
- * recorded values live in the header as documentation. The only hard
- * failure is a correctness invariant: a barrier-phase operation that
- * does not raise ReplicaWaitException proves the barrier was silently
- * downgraded and fails the run.
+ * recorded values live in tools/perf-baselines.json below. The only
+ * hard failure is a correctness invariant: a barrier-phase operation
+ * that does not raise ReplicaWaitException proves the barrier was
+ * silently downgraded and fails the run.
  *
  * The recorded values live in tools/perf-baselines.json, the single
  * machine-readable record for the performance-analysis document.

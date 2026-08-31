@@ -100,7 +100,9 @@ that they stay unverified. The page CSP must allow the widget:
 `script-src` with the nonce (or `unsafe-inline`) plus
 `wasm-unsafe-eval`, `style-src` for the inline styles,
 `worker-src blob:` for the Argon worker, and `connect-src` for the
-challenge API. The recommended profile is in
+challenge API. With `asset_mode: files` the same directives already
+cover the widget: the asset URLs are same-origin and the lazy runtime
+fetch uses `connect-src 'self'`. The recommended profile is in
 [getting-started.md](getting-started.md#content-security-policy).
 
 ## Preserve the widget lifecycle

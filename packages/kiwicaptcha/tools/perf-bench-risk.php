@@ -56,13 +56,16 @@ declare(strict_types=1);
  * count budgets in perf-budget.sh remain the gating gate and this
  * timing signal is loud but never a hard merge gate by itself.
  *
- * The recorded baseline values live in tools/perf-baselines.json, the
- * single machine-readable record for the performance-analysis
- * document. After a deliberate change, run each mode with
+ * The recorded baseline values live in tools/perf-baselines.json,
+ * the single machine-readable record for the performance-analysis
+ * document. The ratchets read them straight from that record
+ * (perf_baseline_float), so the JSON is the single baseline authority
+ * and no compiled ratchet constants exist to drift. After a
+ * deliberate change, run each mode with
  * --baseline-out tools/perf-baselines.json on a clean local machine to
- * merge the fresh measurements into the record (the ratchet constants
- * below are the values the run-time gate reads). --update-baseline
- * prints the fresh values without touching the record.
+ * merge the fresh measurements into the record, the very file the
+ * ratchets read on the next run. --update-baseline prints the fresh
+ * values without touching the record.
  */
 
 $autoload = __DIR__.'/../../kiwicaptcha/integrations/symfony/vendor/autoload.php';
@@ -97,13 +100,9 @@ use Symfony\Component\HttpFoundation\Request;
 const WARMUP = 40;
 const ITERATIONS = 400;
 const RATCHET = 3.0;
-const BASELINE_P50 = 0.047;
-const BASELINE_P95 = 0.065;
 const REDIS_WARMUP = 10;
 const REDIS_WORKERS = 8;
 const REDIS_PER_WORKER = 100;
-const BASELINE_REDIS_P50 = 1.185;
-const BASELINE_REDIS_P95 = 1.855;
 
 /** In-memory risk state store: zero signal vectors, outcome no-ops. */
 final class BenchRiskStateStore implements RiskStateStoreInterface
@@ -369,6 +368,7 @@ foreach ($argv as $i => $arg) {
         $perWorker = max(1, (int) $argv[$i + 1]);
     }
 }
+$baselineFile = $baselineOut ?? __DIR__.'/perf-baselines.json';
 
 if ($redisMode) {
     $url = redisUrlFromArgs($argv);
@@ -412,15 +412,16 @@ if ($redisMode) {
         }
     }
     if ($redisUpdate) {
-        printf("perf-bench-risk: update the constants: p50 %.3f p95 %.3f\n", $p50, $p95);
+        printf("perf-bench-risk: record these values with --baseline-out: p50 %.3f p95 %.3f\n", $p50, $p95);
         exit(0);
     }
-    if (BASELINE_REDIS_P95 <= 0.0) {
-        fwrite(STDERR, "perf-bench-risk NOTE: no recorded real-Redis baseline; run with --update-baseline after a quiet-machine measurement\n");
+    $baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'redis_concurrent', 'p95_ms']);
+    if ($baselineP95 <= 0.0) {
+        fwrite(STDERR, "perf-bench-risk NOTE: no recorded real-Redis baseline; run with --baseline-out on a clean local machine to record one\n");
         exit(0);
     }
-    if ($p95 > BASELINE_REDIS_P95 * RATCHET) {
-        fwrite(STDERR, sprintf("perf-bench-risk FAILED: real-Redis risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, BASELINE_REDIS_P95 * RATCHET, BASELINE_REDIS_P95));
+    if ($p95 > $baselineP95 * RATCHET) {
+        fwrite(STDERR, sprintf("perf-bench-risk FAILED: real-Redis risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, $baselineP95 * RATCHET, $baselineP95));
         exit(1);
     }
     echo "perf-bench-risk: OK (real-Redis p95 within the 3x noisy-runner-tolerant ratchet)\n";
@@ -488,12 +489,17 @@ if ($baselineOut !== null) {
 }
 
 if (in_array('--update-baseline', $argv, true)) {
-    printf("perf-bench-risk: update the constants: p50 %.3f p95 %.3f\n", $p50, $p95);
+    printf("perf-bench-risk: record these values with --baseline-out: p50 %.3f p95 %.3f\n", $p50, $p95);
     exit(0);
 }
 
-if ($p95 > BASELINE_P95 * RATCHET) {
-    fwrite(STDERR, sprintf("perf-bench-risk FAILED: risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, BASELINE_P95 * RATCHET, BASELINE_P95));
+$baselineP95 = perf_baseline_float($baselineFile, ['bench_risk', 'in_memory', 'p95_ms']);
+if ($baselineP95 <= 0.0) {
+    fwrite(STDERR, "perf-bench-risk NOTE: no recorded in-memory baseline; run with --baseline-out on a clean local machine to record one\n");
+    exit(0);
+}
+if ($p95 > $baselineP95 * RATCHET) {
+    fwrite(STDERR, sprintf("perf-bench-risk FAILED: risk-enabled issuance p95 %.3f ms exceeds the ratchet %.3f ms (3x baseline %.3f ms)\n", $p95, $baselineP95 * RATCHET, $baselineP95));
     exit(1);
 }
 echo "perf-bench-risk: OK (p95 within the 3x noisy-runner-tolerant ratchet)\n";

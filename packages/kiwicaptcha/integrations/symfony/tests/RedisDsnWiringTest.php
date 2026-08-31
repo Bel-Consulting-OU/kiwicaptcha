@@ -71,16 +71,18 @@ final class RedisDsnWiringTest extends TestCase
         self::assertSame(\Predis\Client::class, $client->getClass());
         self::assertSame([self::DSN], $client->getArguments(), 'the DSN is handed to Predis\Client verbatim (scheme, host, db, password and query parameters)');
 
-        // The challenge storage is a RedisStorage over the DSN client.
+        // The challenge storage is a RedisStorage over the DSN client,
+        // through the checked-client seam (the runtime authority guard
+        // runs on the actual client at construction).
         $storage = $container->getDefinition('kiwi_captcha.storage.redis_dsn');
         self::assertSame(RedisStorage::class, $storage->getClass());
-        self::assertEquals(new Reference('kiwi_captcha.redis.dsn'), $storage->getArgument(0));
+        self::assertEquals(new Reference('kiwi_captcha.redis.checked'), $storage->getArgument(0));
         self::assertSame('kiwi_captcha.storage.redis_dsn', (string) $container->getAlias(StorageInterface::class), 'the StorageInterface alias points at the DSN-built storage');
 
         // The distributed rate limiter and the Argon admission both run
-        // on the DSN client.
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the atomic rate limiter uses the DSN client');
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'the Argon admission semaphore uses the DSN client');
+        // on the DSN client, through the same checked seam.
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the atomic rate limiter uses the checked DSN client');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'the Argon admission semaphore uses the checked DSN client');
         self::assertTrue($container->hasDefinition('kiwi_captcha.argon2_scope_gate'), 'the scope-aware gate wraps the DSN-backed semaphore');
     }
 
@@ -96,8 +98,8 @@ final class RedisDsnWiringTest extends TestCase
             ],
         ]]);
 
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.risk.store')->getArgument(0), 'the risk state store reuses the DSN client (Predis, so the canonical risk-v1 EVALSHA store works)');
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.risk.issuance_counter')->getArgument(0), 'the issuance-rate counter uses the DSN client');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.risk.store')->getArgument(0), 'the risk state store reuses the checked DSN client (Predis, so the canonical risk-v1 EVALSHA store works)');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.risk.issuance_counter')->getArgument(0), 'the issuance-rate counter uses the checked DSN client');
     }
 
     public function testExplicitRedisServiceWinsOverTheDsn(): void
@@ -119,8 +121,8 @@ final class RedisDsnWiringTest extends TestCase
         // admission; the DSN storage is NOT built (no storage key set,
         // but the DSN client is not the selected client, so the
         // challenge storage stays the resolved default).
-        self::assertSame('my.redis.client', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'the explicit redis_service wins over the DSN for the Argon admission');
-        self::assertSame('my.redis.client', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the explicit redis_service wins over the DSN for the rate limiter');
+        self::assertSame('kiwi_captcha.redis.checked.my.redis.client', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'the explicit redis_service wins over the DSN for the Argon admission, through its own checked wrapper');
+        self::assertSame('kiwi_captcha.redis.checked.my.redis.client', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the explicit redis_service wins over the DSN for the rate limiter, through the checked seam');
         self::assertTrue($container->hasDefinition('kiwi_captcha.redis.dsn'), 'the DSN client is still built (it drives the challenge storage)');
         self::assertTrue($container->hasDefinition('kiwi_captcha.storage.redis_dsn'), 'the DSN still builds the challenge storage when no explicit storage is set');
     }
@@ -140,7 +142,7 @@ final class RedisDsnWiringTest extends TestCase
         self::assertFalse($container->hasDefinition('kiwi_captcha.storage.redis_dsn'), 'the explicit storage service wins over the DSN-built storage');
         self::assertSame('my.redis.storage', (string) $container->getAlias(StorageInterface::class), 'the StorageInterface alias follows the explicit storage');
         // The DSN client still drives the unset knobs (limiter/admission).
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the DSN client fills the rate-limit knob no explicit service set');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the DSN client fills the rate-limit knob no explicit service set, through the checked seam');
     }
 
     public function testExplicitRiskRedisServiceWinsOverTheDsn(): void
@@ -158,7 +160,7 @@ final class RedisDsnWiringTest extends TestCase
             $c->register('my.predis.client', \Predis\Client::class);
         });
 
-        self::assertSame('my.predis.client', (string) $container->getDefinition('kiwi_captcha.risk.store')->getArgument(0), 'the explicit risk.redis_service wins over the DSN for the risk state');
+        self::assertSame('kiwi_captcha.redis.checked.risk', (string) $container->getDefinition('kiwi_captcha.risk.store')->getArgument(0), 'the explicit risk.redis_service wins over the DSN for the risk state, through the checked seam');
     }
 
     public function testMalformedDsnFailsClosedAtContainerBuild(): void
@@ -187,7 +189,7 @@ final class RedisDsnWiringTest extends TestCase
             'public_base_url' => 'https://captcha.example.com',
         ]], 'prod');
 
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'production Argon admission runs on the DSN client');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(0), 'production Argon admission runs on the checked DSN client');
     }
 
     public function testNoDsnDefinitionsAreCreatedWhenRedisDsnIsAbsent(): void
@@ -221,7 +223,7 @@ final class RedisDsnWiringTest extends TestCase
         self::assertSame(['%env(KIWI_REDIS_DSN)%'], $client->getArguments(), 'the placeholder flows through the container parameter bag untouched');
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.storage.redis_dsn'), 'the env DSN still builds the challenge storage');
-        self::assertSame('kiwi_captcha.redis.dsn', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the atomic rate limiter uses the env-resolved DSN client');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $container->getDefinition('kiwi_captcha.rate_limiter')->getArgument(5), 'the atomic rate limiter uses the env-resolved DSN client, through the checked seam');
     }
 
     public function testEnvPlaceholderPublicBaseUrlPassesTheProductionValidation(): void

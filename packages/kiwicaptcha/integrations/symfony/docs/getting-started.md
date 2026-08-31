@@ -239,6 +239,14 @@ form-action 'self'
 `connect-src 'self'` means even a future JS regression cannot exfiltrate.
 At runtime the driver refuses cross-origin challenge endpoints.
 
+With `asset_mode: files` the same profile already covers the widget:
+the stylesheet link and the driver script are same-origin
+(`script-src 'self'`, `style-src 'self'`), and the driver's lazy
+runtime fetch uses `connect-src 'self'`. The runtime is downloaded only
+when a memory-hard challenge arrives, so files mode needs no extra
+directive. See [configuration.md](configuration.md#asset-delivery-asset_mode)
+for the delivery tiers.
+
 ## Challenge endpoint
 
 The bundle ships `POST /kiwi-captcha/challenge` (prefix configurable via
