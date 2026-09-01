@@ -39,7 +39,8 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
   All required security CI checks must pass (strict). The ruleset currently requires 25 check contexts, including the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job and the two stable matrix aggregators.
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
-  The trust model: organization admins retain an explicit always-bypass.
+  The trust model: organization admins retain an explicit
+  always-bypass on the protected branches and the protected tags.
   This is operational protection, not mathematical impossibility.
 - `refs/tags/v*` are protected by an active tag ruleset: deletion and non-fast-forward updates are blocked, creation is restricted to organization admins (the same documented trust model).
 - **GitHub Immutable Releases is enabled** (`PUT /repos/{owner}/{repo}/immutable-releases`; the setting is also available in Settings -> General -> Immutable Releases).
@@ -65,7 +66,102 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 - **Tested bytes == released bytes**: the release pipeline rebuilds the assets under the strict pinned toolchain and fails unless `git diff --exit-code` shows they are byte-identical to the committed assets that the browser suite and Symfony byte-parity job tested.
 - Releases are published atomically (`gh release create` with the assets inline: draft → upload → publish); a failure never leaves a public partial release.
 
+### Organization-admin bypass
+
+The current governance reality: both the branch ruleset and the tag
+ruleset carry an explicit `OrganizationAdmin` bypass actor with
+`bypass_mode: always`. An organization admin can push to protected
+`main` and can create protected `v*` tags without reviews, without
+checks and without the tag-creation restriction. That is the standard
+GitHub trust model for repository governance; it applies only to
+organization admins, never to a routine actor, and it is documented
+here rather than hidden.
+
+The recommendation: no routine actor should hold a permanent bypass.
+The bypass should narrow to a scoped emergency break-glass identity,
+used only when the normal path is blocked. The break-glass identity
+should be a custom repository role or a dedicated GitHub App, should
+authenticate with hardware-backed credentials (security keys), and
+every use should land in the organization audit log with alerting on
+bypass events.
+
+Signed release tags stay mandatory regardless. The release workflow
+independently verifies that the exact tag commit is GitHub-verified
+(signed), reachable from protected `main`, with the exact tag CI run
+succeeded. It also enforces the immutability chain and the SLSA
+attestation, so an administrator bypass cannot publish an unsigned or
+unattested artifact. That independent verification limits the blast
+radius of any bypass.
+
+Concrete steps an organization admin takes to narrow the bypass,
+through the rulesets API:
+
+- Enumerate the rulesets: `GET /repos/{owner}/{repo}/rulesets`, then
+  `GET /repos/{owner}/{repo}/rulesets/{id}` for each, and inspect the
+  `bypass_actors` array.
+- Update each ruleset with `PUT /repos/{owner}/{repo}/rulesets/{id}`:
+  remove the `OrganizationAdmin` entry from `bypass_actors`.
+- Add a narrow replacement: a `RepositoryRole` entry whose custom role
+  carries the bypass permission and is granted to the break-glass
+  identities only, or an `Integration` entry for a dedicated
+  break-glass GitHub App. Prefer `bypass_mode: pull_request` where the
+  operation permits, so the bypass covers pull-request rules only.
+- Enforce hardware-backed authentication at the organization level: a
+  security-key two-factor requirement, so the break-glass identity
+  cannot authenticate with a password or a copied token.
+- Stream the organization audit log to an external monitoring system
+  and alert on ruleset edits and on every bypass event.
+- Verify with `GET` after the `PUT`, and keep the signed-commit
+  requirement, the linear-history rule and the release workflow's
+  signature checks, which remain the release integrity boundary.
+
+This is a governance hardening recommendation, not evidence that
+releases are currently unsafe. The release pipeline verifies
+signatures and provenance independently of branch and tag rules, so
+releases stay protected even while the bypass exists.
+
 [GitHub Security Advisories]: https://github.com/Bel-Consulting-OU/kiwicaptcha/security/advisories
+
+## External security audit (next milestone)
+
+The next governance milestone is an independent external security
+audit of the full production attack surface. The acceptance criterion
+is 100/100: the audit must attack every item on the scope checklist
+below, and at closure no finding rated high or critical may remain
+open. The audit is performed by an independent firm with no prior
+access to this repository, never by the maintainers, and the report is
+the evidence.
+
+Scope checklist (the audit must attack all of these):
+
+- Challenge issuance: the nonce-bound HMAC binding, the record build
+  and the TTL semantics.
+- Replay and concurrent verification: the atomic pending-to-consumed
+  transition under parallel verify requests.
+- Redis failover: stale-replica promotion, the WAIT barrier invariants
+  and the durability contract.
+- Key and policy transitions: rotation windows, the authority
+  transition guards and the security-epoch monitor.
+- SiteVerify migration: the idempotency and metadata stores across
+  the cutover.
+- Mixed v2/v3 fleets: protocol interop during a versioned rollout.
+- Chained challenge state: the chained tickets and their transactional
+  stores.
+- Risk-state poisoning: the risk-v1 Lua state machine under
+  adversarial input.
+- Decoy manipulation: the decoy payload grammar and the adaptation
+  paths.
+- CSP and browser asset substitution: SRI, the worker cryptographic
+  preflight and the asset delivery tiers.
+- Request smuggling and framing: the HTTP parsing and the
+  header-singularity rules.
+- Origin and forwarded-IP trust boundaries: `client_ip_mode`, the
+  trusted-proxy list and the exact-IP binding.
+
+Pass criteria: the audit report covers 100/100 of the checklist, every
+finding has a disposition, and no finding rated high or critical is
+open at closure. This milestone, the bypass hardening and the
+dedicated latency runner are tracked in the release checklist.
 
 ## Asset / protocol-id coupling
 

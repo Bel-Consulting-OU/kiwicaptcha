@@ -1171,7 +1171,7 @@ jobs:
         # the canonical wasm assets.
         run: |
           set -euo pipefail
-          for f in widget-driver.js widget.css kiwicaptcha-wasm.js; do
+          for f in widget-driver.js widget.css kiwicaptcha-wasm.js execution-interpreter.js; do
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/resources/$f" \
               || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh"; exit 1; }
@@ -1184,7 +1184,7 @@ jobs:
         # cmp on every push.
         run: |
           set -euo pipefail
-          for f in widget-driver.js kiwicaptcha-wasm.js widget.css; do
+          for f in widget-driver.js kiwicaptcha-wasm.js widget.css execution-interpreter.js; do
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
               || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh"; exit 1; }

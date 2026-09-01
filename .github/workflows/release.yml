@@ -240,6 +240,7 @@ jobs:
           git diff --exit-code -- \
             assets/kiwicaptcha-wasm.js \
             assets/kiwi-worker.js \
+            assets/execution-interpreter.js \
             assets/widget-driver.js \
             assets/widget.css
           echo "strict rebuild == committed/tested assets"
@@ -252,7 +253,7 @@ jobs:
         # flattening ambiguity across multiple upload paths).
         run: |
           set -euo pipefail
-          ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+          ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
       - name: upload the immutable build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

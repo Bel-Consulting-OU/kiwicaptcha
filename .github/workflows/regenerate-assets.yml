@@ -45,6 +45,7 @@ jobs:
           path: |
             packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
             packages/kiwicaptcha-wasm/assets/kiwi-worker.js
+            packages/kiwicaptcha-wasm/assets/execution-interpreter.js
             packages/kiwicaptcha-wasm/assets/widget-driver.js
             packages/kiwicaptcha-wasm/assets/widget.css
           if-no-files-found: error

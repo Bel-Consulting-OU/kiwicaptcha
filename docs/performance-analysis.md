@@ -362,11 +362,13 @@ where a timing ratchet can only whisper.
 
 ## The dedicated hard-latency-runner end state
 
-The end state for a latency gate that can block merges is a dedicated,
-isolated runner, and the honest current status is that it does not
-exist yet.
+The stable end state for a latency gate that can block merges is a
+dedicated, isolated runner. The honest current status is that the
+runner is not provisioned yet: the latency signal remains the manually
+dispatched benchmark job, the one CI job skipped on every push and
+pull_request.
 
-The desired end state:
+The stable end state:
 
 - A fixed CPU class and an isolated runner: a dedicated machine or a
   pinned runner class with no co-tenants, so run-to-run variance comes
@@ -406,9 +408,9 @@ The honest current status:
 - The latency signal today is the manually dispatched benchmark job
   (workflow_dispatch only, a shared GitHub-hosted runner, the same
   timing steps without continue-on-error). It is not a merge gate: it
-  is skipped on every push and pull_request, it is not a
-  protected-main required context, and the release workflow does not
-  consult it.
+  remains the one CI job skipped on every push and pull_request, it is
+  not a protected-main required context, and the release workflow does
+  not consult it.
 - The ratchets in the timing tools are advisory by design: a 3x p95
   against the recorded baseline, documented as noisy-runner-tolerant,
   so a shared runner stall never flakes a merge. The manual job sets
@@ -420,6 +422,48 @@ The honest current status:
   count. Until a dedicated runner exists, treat 3x-p95 failures as
   signals, not blockers, and do not claim a latency gate that is not
   there.
+
+## Operational steps: provision the dedicated runner and flip the gate
+
+Provisioning and validation:
+
+1. Provision a dedicated machine with no co-tenants, or a pinned
+   runner class, and record the exact CPU model as the fixed class.
+   A "latest" label is never acceptable.
+2. Install the exact pinned PHP patch version and the exact Redis
+   version and build, with Redis on loopback, matching the versions
+   the suites are validated on.
+3. Register the machine as a self-hosted GitHub Actions runner with
+   a stable label (for example `perf-latency-quiet`) pinned to that
+   machine class.
+4. Prove the runner is quiet before it gates anything: run the
+   timing tools repeatedly on an unchanged commit, and verify that
+   the within-run spread stays under the variance bound and that the
+   p50/p90/p95 distribution is stable across sessions. A run whose
+   spread exceeds the bound is rejected and re-run.
+5. Record the new machine in the environment block of
+   perf-baselines.json, regenerate the baselines on the dedicated
+   runner with the documented regeneration command, and keep the
+   earlier recording machine's baselines out of the record.
+
+Flipping the gate:
+
+6. Point the manual perf-latency job at the dedicated label, and let
+   the job run on every push and pull_request by dropping the
+   workflow_dispatch-only skip.
+7. Keep the strict-baseline flag in the gate steps, and extend the
+   harness to record p90 and the p95/p50 spread as the variance
+   signal.
+8. Add the job to the required check contexts of the protected-main
+   ruleset through the rulesets API
+   (`PUT /repos/{owner}/{repo}/rulesets/{id}`). Once the job runs on
+   push, the release workflow's exact-tag-CI gate covers it
+   automatically.
+9. The gate blocks only on a confident regression: a distribution
+   shift that is both statistically significant and above the
+   practical-significance bound (for example a double-digit
+   percentage at p95). An ambiguous result fails loudly but does not
+   block.
 
 ## What this analysis does not measure
 
