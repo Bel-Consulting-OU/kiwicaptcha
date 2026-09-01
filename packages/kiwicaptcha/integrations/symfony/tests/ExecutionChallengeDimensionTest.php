@@ -185,15 +185,22 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $expected = ExecutionChallengeGenerator::expectedDigest($payload['execution_program'], $payload['nonce']);
         self::assertNotNull($expected);
 
+        // The risk engine escalates the issued difficulty above the
+        // configured floor, so the solver must match the bits the
+        // response actually carries; the winning counter is a pure
+        // function of the challenge, so it is computed once and reused
+        // for every token.
+        $counter = $this->winningCounter($payload);
+
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
-        $good = SolutionToken::create($payload['nonce'], $this->winningCounter($payload), 5000, [], $expected)->encode();
+        $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected)->encode();
         self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1')->isOk());
 
-        $wrong = SolutionToken::create($payload['nonce'], $this->winningCounter($payload), 5000, [], str_repeat('0', 64))->encode();
+        $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
         self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1')->error);
 
-        $missing = SolutionToken::create($payload['nonce'], $this->winningCounter($payload), 5000, [])->encode();
+        $missing = SolutionToken::create($payload['nonce'], $counter, 5000, [])->encode();
         self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1')->error);
     }
 
@@ -224,32 +231,22 @@ final class ExecutionChallengeDimensionTest extends TestCase
     /**
      * Brute-force a counter whose SHA-256(prefix || counter || salt)
      * meets the issued target bits — the same derivation the browser
-     * solver performs.
+     * solver performs. Unbounded like the repository's other solver
+     * helpers: the risk engine may escalate the issued difficulty, so
+     * the search matches the response's bits and terminates with
+     * probability 1.
      *
      * @param array<string, mixed> $challenge
      */
     private function winningCounter(array $challenge): int
     {
         $salt = base64_decode($challenge['salt'], true);
-        for ($counter = 0; $counter < 1_000_000; $counter++) {
+        $counter = 0;
+        do {
             $hash = hash('sha256', $challenge['prefix'].$counter.$salt, true);
-            $zeros = 0;
-            foreach (str_split($hash) as $byte) {
-                $b = \ord($byte);
-                if ($b === 0) {
-                    $zeros += 8;
-                    continue;
-                }
-                while (($b & 0x80) === 0) {
-                    $zeros++;
-                    $b <<= 1;
-                }
-                break;
-            }
-            if ($zeros >= $challenge['targetBits']) {
-                return $counter;
-            }
-        }
-        self::fail('no winning counter found within the search bound');
+            $counter++;
+        } while (\KiwiCaptcha\Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+
+        return $counter - 1;
     }
 }
