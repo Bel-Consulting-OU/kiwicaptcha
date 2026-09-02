@@ -199,11 +199,13 @@ impl SolutionToken {
             // the digest is exactly 64 lowercase hex characters (the
             // shape the driver's interpreter produces) and the trace is
             // canonical unpadded base64url ([A-Za-z0-9_-], non-empty,
-            // at most 10924 characters — the base64 of an 8 KiB trace).
-            // A malformed trace on an armed token is rejected outright,
-            // exactly like the PHP decoder throws for the same shape;
-            // a tail that is not digest-shaped falls through to the
-            // telemetry JSON parse below (fail closed).
+            // at most 10924 characters — the base64 of an 8 KiB trace,
+            // and byte-exact with the re-encode of its own decoded
+            // bytes, the PHP trace gate). A malformed trace on an
+            // armed token is rejected outright, exactly like the PHP
+            // decoder throws for the same shape; a tail that is not
+            // digest-shaped falls through to the telemetry JSON parse
+            // below (fail closed).
             let colon = last.find(':');
             let digest_part = match colon {
                 Some(i) => &last[..i],
@@ -222,7 +224,8 @@ impl SolutionToken {
                             && trace.len() <= 10924
                             && trace
                                 .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                            && trace_is_canonical_base64url(trace);
                         if !trace_ok {
                             return Err(DecodeError::Malformed);
                         }
@@ -293,6 +296,67 @@ impl SolutionToken {
             execution_trace,
         })
     }
+}
+
+/// True when `trace` is the canonical unpadded base64url encoding of
+/// its own decoded bytes, the exact gate the PHP decoder applies to
+/// the `digest:trace` tail (SolutionToken::decode throws
+/// DecodeError::malformed for any divergence).
+///
+/// The PHP gate round-trips the trace: translate the base64url
+/// alphabet to the standard one ('-' to '+', '_' to '/'), re-pad with
+/// '=' to a multiple of 4, strict-decode (a failure rejects), then
+/// re-encode the bytes, translate back to base64url and strip the
+/// padding, and compare byte-exact with the submitted trace. The
+/// caller of this function has already enforced the non-empty, at
+/// most 10924 characters, [A-Za-z0-9_-] fast path, so the remaining
+/// rejections are exactly the non-canonical encodings: an unpadded
+/// length of 4k+1 (the re-padded form carries a one-data-char final
+/// group with three '=' signs, which both the crate engine and the
+/// PHP strict decoder refuse) and final groups whose low residual
+/// bits are non-zero (the crate engine rejects them in the strict
+/// decode; PHP decodes them and the re-encode comparison diverges,
+/// so both implementations reject).
+///
+/// Engine behavior notes (verified against base64 0.22): the crate
+/// `STANDARD` engine used here requires canonical padding, so unpadded
+/// input fails with InvalidPadding (the input is re-padded first,
+/// which makes that moot), rejects non-zero trailing bits with
+/// InvalidLastSymbol, and rejects a data char followed by three pad
+/// signs with InvalidByte. Those verdicts match PHP 8.5 strict
+/// base64_decode on every shape tested, so the decode + re-encode
+/// comparison below accepts exactly the trace strings PHP accepts.
+fn trace_is_canonical_base64url(trace: &str) -> bool {
+    let mut padded = Vec::with_capacity(trace.len() + 3);
+    padded.extend(trace.bytes().map(|b| match b {
+        b'-' => b'+',
+        b'_' => b'/',
+        b => b,
+    }));
+    // Re-pad with '=' to a multiple of 4, the PHP str_pad step.
+    match padded.len() % 4 {
+        1 => padded.extend_from_slice(b"==="),
+        2 => padded.extend_from_slice(b"=="),
+        3 => padded.push(b'='),
+        _ => {}
+    }
+    let Ok(bytes) = B64.decode(padded.as_slice()) else {
+        return false;
+    };
+    // Canonical re-encode, translated back to base64url with the
+    // padding stripped, compared byte-exact with the submitted trace
+    // (the PHP rtrim and strtr round trip). A canonical encode pads
+    // only at the tail, so dropping every '=' is the rtrim.
+    let mut canonical = Vec::with_capacity(trace.len());
+    for b in B64.encode(bytes).into_bytes() {
+        match b {
+            b'+' => canonical.push(b'-'),
+            b'/' => canonical.push(b'_'),
+            b'=' => {}
+            b => canonical.push(b),
+        }
+    }
+    canonical == trace.as_bytes()
 }
 
 /// Error returned when a [`SolutionToken`] cannot be decoded.
@@ -953,5 +1017,130 @@ mod tests {
             SolutionToken::decode(&token.encode()),
             Err(DecodeError::Malformed)
         ));
+    }
+
+    // ── digest:trace canonicality differential vectors ──────────────────
+
+    /// The fixed 64-lowercase-hex execution digest every differential
+    /// vector below rides behind. The PHP verdict of each vector was
+    /// confirmed by running the PHP SolutionToken::decode on the
+    /// identical wire bytes before the expectation was pinned here.
+    const VECTOR_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Wrap `trace` (or the digest-only tail when None) behind the
+    /// fixed digest in an otherwise valid token, the exact wire shape
+    /// SolutionToken::encode emits.
+    fn vector_wire(trace: Option<&str>) -> String {
+        let tail = match trace {
+            Some(t) => format!("{VECTOR_DIGEST}:{t}"),
+            None => VECTOR_DIGEST.to_string(),
+        };
+        B64.encode(format!("{}.1.2.{{}}.{tail}", VALID_NONCE).into_bytes())
+    }
+
+    #[test]
+    fn execution_trace_canonicality_agrees_with_php_decode() {
+        // PHP accepts a trace exactly when it is the canonical
+        // unpadded base64url encoding of its own decoded bytes and
+        // rejects every other alphabet-valid trace as malformed; the
+        // Rust decoder must agree vector for vector.
+        let cases: &[(&str, bool)] = &[
+            // Canonical unpadded base64url encodings: accepted.
+            ("Y2hlY2stdHJhY2Uta2V5XzEyMzQ1Ng", true),
+            ("aGk", true),
+            ("aA", true),
+            ("YWJjZA", true),
+            ("----", true),
+            ("____", true),
+            // An unpadded length of 4k+1 re-pads to a one-data-char
+            // final group with three padding signs, a shape both the
+            // PHP strict decode and the crate engine refuse.
+            ("a", false),
+            ("aaaaa", false),
+            // Non-zero residual bits in the final group: PHP decodes
+            // the bytes but the canonical re-encode diverges, so the
+            // trace is rejected as non-canonical.
+            ("aGh", false),
+            ("aB", false),
+            ("aa", false),
+            // The 10924-character boundary: the all-a form at the cap
+            // is canonical (10924 is a multiple of 4, full groups
+            // only) and accepted; one character more is over the cap.
+            (&"a".repeat(10924), true),
+            (&"a".repeat(10925), false),
+        ];
+        for (trace, expect_ok) in cases {
+            let wire = vector_wire(Some(trace));
+            match SolutionToken::decode(&wire) {
+                Ok(token) => {
+                    assert!(
+                        *expect_ok,
+                        "a {} char trace must be accepted: PHP accepts it",
+                        trace.len()
+                    );
+                    assert_eq!(token.execution_digest.as_deref(), Some(VECTOR_DIGEST));
+                    assert_eq!(token.execution_trace.as_deref(), Some(*trace));
+                }
+                Err(err) => {
+                    assert!(
+                        !*expect_ok,
+                        "a {} char trace must be rejected: PHP rejects it",
+                        trace.len()
+                    );
+                    assert_eq!(err, DecodeError::Malformed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn digest_only_and_uppercase_hex_digest_keep_their_verdicts() {
+        // The digest-only shape (no colon): the fifth segment is
+        // exactly the 64-lowercase-hex digest, the decode recovers it
+        // with the trace field None. PHP accepts the identical wire
+        // bytes.
+        let decoded = SolutionToken::decode(&vector_wire(None)).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(VECTOR_DIGEST));
+        assert_eq!(decoded.execution_trace, None);
+        // An uppercase-hex digest tail is not digest-shaped: it falls
+        // through to the telemetry JSON parse and fails closed with
+        // Malformed, exactly like PHP.
+        let upper_tail: String = VECTOR_DIGEST
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        let upper_plain = format!("{}.1.2.{{}}.{upper_tail}", VALID_NONCE);
+        let upper_wire = B64.encode(upper_plain.into_bytes());
+        assert!(matches!(
+            SolutionToken::decode(&upper_wire),
+            Err(DecodeError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn canonical_trace_encode_decode_is_byte_stable() {
+        // The trace field holds the base64url wire form verbatim, so
+        // for a canonical trace a decode followed by a re-encode
+        // returns the exact token bytes.
+        let traces: &[&str] = &[
+            "Y2hlY2stdHJhY2Uta2V5XzEyMzQ1Ng",
+            "aGk",
+            "----",
+            &"a".repeat(10924),
+        ];
+        for trace in traces {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter: 1,
+                duration_ms: 2,
+                telemetry: serde_json::json!({}),
+                execution_digest: Some(VECTOR_DIGEST.to_string()),
+                execution_trace: Some(trace.to_string()),
+            };
+            let wire = token.encode();
+            let decoded = SolutionToken::decode(&wire).unwrap();
+            assert_eq!(decoded.execution_trace.as_deref(), Some(*trace));
+            assert_eq!(decoded.encode(), wire);
+        }
     }
 }
