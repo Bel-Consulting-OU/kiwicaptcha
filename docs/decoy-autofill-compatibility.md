@@ -256,31 +256,37 @@ qualification, tracked in the matrix below. Real Safari
 remains blocked by the documented safaridriver gate (see the blocked
 attempt above).
 
-### Real Firefox: pending manual qualification
+### 2026-08-30, real Firefox qualification run
 
-Firefox is not installed on this machine, so no real-browser Firefox
-row exists yet. Install and run steps:
+Same environment: macOS 26.5.2 (arm64), PHP 8.5.4, Redis 7 on
+127.0.0.1:6399, Playwright 1.62.1. Browser under test: the installed
+Firefox binary at /Applications/Firefox.app (release channel), a
+Homebrew cask install (`brew install --cask firefox`) completed for
+this run, driven through the Playwright `firefox` channel by the
+config override `tests/browser/playwright.firefox.config.mjs`, a new
+file mirroring the real-chrome lane. The recorded identity, read from
+a page launched through the channel:
 
-1. Install Firefox for macOS (release channel): download from
-   https://www.mozilla.org/firefox/ or `brew install --cask firefox`,
-   then launch it once so the profile initializes.
-2. Start the fixture server: `php -d opcache.jit=off -S
-   127.0.0.1:8088 router.php` in `tests/browser`.
-3. Register an address profile in Firefox (Settings, Privacy and
-   Security, Autofill) and save a login for the fixture origin in the
-   Firefox password manager.
-4. Drive the real browser through the Playwright `firefox` channel: a
-   config override that mirrors
-   `tests/browser/playwright.real-chrome.config.mjs` with
-   `channel: 'firefox'`, `browserName: 'firefox'` and a distinct port
-   (for example 8089), then run the same three suites:
-   `npx playwright test --config=playwright.real-firefox.config.mjs
-   --retries=0`.
-5. Record the row here with the `navigator.userAgent` version and the
-   date. The expected behavior is the invariant surface: the decoy
-   stays empty, real-field fills produce no honeypot evidence, and an
-   exact-name fill reports the hit additively with the proof verdict
-   intact.
+- `browser.version()`: 154.0.1
+
+Real-browser automation evidence (headless, local run through the
+channel; the decoy suites of the a11y spec set):
+
+| Suite | Real Firefox 154.0.1 |
+|---|---|
+| autofill-evidence (engine form-assistance simulations) | AUTOMATED PASS / MANUAL PENDING |
+| decoy-polymorphism (presentation variants, axe-clean, lifecycle) | PASS |
+| targeted-bot (learned-name adaptation, additive evidence) | PASS |
+
+The three suites ran 21 tests against the installed binary with
+retries disabled and every test passed. The invariant surface (the
+decoy stays empty, real-field fills never trip the evidence, evidence
+stays additive) therefore holds on the installed Firefox build under
+the automated simulations. The native Firefox autofill interaction
+remains MANUAL PENDING: the real Firefox address/password autofill
+prompt on the fixture form is a separate manual qualification,
+tracked in the matrix below and logged with its procedure in
+autofill-qualification-protocol.md.
 
 ### External password managers: pending manual qualification
 
