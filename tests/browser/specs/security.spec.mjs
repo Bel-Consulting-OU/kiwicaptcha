@@ -681,13 +681,13 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     // only under the explicit data-kiwi-risk-context="coarse" opt-in.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
     expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
+      'reqBody.execution_max_version',
       'reqBody.algorithm',
       'reqBody.request_binding',
       'reqBody.chain_ticket',
       'reqBody.client_context',
       'reqBody.decoy_field',
       'reqBody.honeypot',
-      'reqBody.execution_max_version',
       'reqBody.action',
       'reqBody.cdata',
       'reqBody.sitekey',
