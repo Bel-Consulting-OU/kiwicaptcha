@@ -3407,6 +3407,7 @@ mod tests {
             duration_ms: 5000,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         }
         .encode()
     }

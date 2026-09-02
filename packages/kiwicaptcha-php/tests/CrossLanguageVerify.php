@@ -11,12 +11,18 @@ declare(strict_types=1);
  * a record issued for another region (or unbound) then fails with
  * wrong_region, exercising the region interop in both directions.
  *
+ * A Rust-issued protocol v4 record (execution_armed) is verified with
+ * the execution digest recomputed by the PHP core from the stored
+ * program, exercising the v4 canonical reconstruction and the
+ * commitment equivalence in the PHP direction.
+ *
  * Run: php tests/CrossLanguageVerify.php
  */
 
 require __DIR__.'/../vendor/autoload.php';
 
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
@@ -54,8 +60,24 @@ if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
     --$counter;
 }
 
+// A Rust-issued execution-armed record is protocol v4 and carries the
+// authenticated triplet; the PHP side recomputes the expected digest
+// from the stored program and presents it with the token.
+$digest = null;
+if ($record->executionProgram !== null) {
+    if ($record->protocolVersion !== 4) {
+        fwrite(STDERR, "an execution-armed record must be protocol v4\n");
+        exit(4);
+    }
+    $digest = ExecutionChallengeGenerator::expectedDigest($record->executionProgram, $record->nonce);
+    if ($digest === null) {
+        fwrite(STDERR, "the Rust-issued execution program must parse in PHP\n");
+        exit(5);
+    }
+}
+
 $region = getenv('KC_RUST_REGION');
-$token = SolutionToken::create($record->nonce, $counter, 5000, [])->encode();
+$token = SolutionToken::create($record->nonce, $counter, 5000, [], $digest)->encode();
 $outcome = (new Verifier($storage, region: $region !== false && $region !== '' ? $region : null))
     ->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', $record->issuedAtNs + 1_000_000);
 if (!$outcome->isOk()) {

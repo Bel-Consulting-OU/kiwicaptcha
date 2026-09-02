@@ -46,8 +46,12 @@ namespace KiwiCaptcha;
  *
  * Check order: structural validation of the stored record (scope shape,
  * nonce/salt sizes, TTL ceiling, prefix binding, per-algorithm
- * difficulty range 1..20, and the armed decoy field's `[A-Za-z0-9_-]{1,64}`
- * alphabet). The kid gate and secret selection follow: a
+ * difficulty range 1..20, the armed decoy field's `[A-Za-z0-9_-]{1,64}`
+ * alphabet, and the protocol-v4 execution commitment: stored program,
+ * version 1 and 64-hex commitment present together).
+ * SHA256(stored program) == commitment is enforced in constant time.
+ * The kid gate and secret
+ * selection follow: a
  * revoked kid fails immediately, a kid beyond the newest configured kid
  * fails the rollback/forward guard. Then comes the HMAC signature
  * re-check. Next come the absolute Argon2id process ceilings after
@@ -561,7 +565,7 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $token->executionDigest);
+        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $token->executionDigest, $token->executionTrace);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -1278,7 +1282,7 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $token->executionDigest);
+        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $token->executionDigest, $token->executionTrace);
         if ($failure !== null) {
             if ($failure->isReplayExempt()
                 && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, $token->executionDigest)) !== null
@@ -1549,10 +1553,27 @@ final class Verifier
      * can never be altered by a stored value. A non-conforming name is
      * a corrupt or foreign record: MalformedRecord, the Rust
      * `validate_record` decoy check. The protocol-vs-decoy grammar is
-     * total: the segment rides a protocol v3 record (an armed issuance
-     * writes version 3), so a v2 record carrying a decoy is rejected by
-     * the protocol gate above. A v3 record without one (absent or null)
-     * is rejected too, because the decoy is mandatory on v3.
+     * total. The segment rides a protocol v3/v4 record (an armed
+     * issuance writes version 3, or version 4 when the execution
+     * dimension is armed too), so a v2 record carrying a decoy is
+     * rejected by the protocol gate above.
+     * A v3 record without one (absent or null) is rejected too, because
+     * the decoy is mandatory on v3.
+     *
+     * The execution dimension is an authenticated protocol v4 canonical
+     * extension: the stored program, the `execution_version` (exactly
+     * the canonical byte 1) and the `execution_commitment` (64
+     * lowercase hex) are present together or all absent.
+     * SHA256(stored program) must equal the signed commitment
+     * (constant-time).
+     * A v2/v3 record carrying any execution field is rejected, because
+     * the v2/v3 canonical never includes the segments.
+     * A v4 record without the execution triplet is rejected too, since
+     * the commitment is mandatory on v4, and a program whose hash does
+     * not match the signed commitment is rejected before any execution
+     * work.
+     * Stripping, substituting or injecting a program always invalidates
+     * the challenge.
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -1564,25 +1585,39 @@ final class Verifier
     private function validateRecord(ChallengeRecord $record): bool
     {
         // Protocol version is part of the wire contract: 1 (legacy,
-        // migration window), 2 (current, unarmed) and 3 (the
-        // decoy-capable canonical) exist. Anything else is a corrupt or
-        // foreign record. The protocol-vs-decoy grammar is total: a
-        // protocol-v2 record that carries a decoy is rejected explicitly
-        // (the v2 canonical never includes the `|decoy_field` segment,
-        // so the combination cannot come from a conforming issuer — an
-        // armed issuance writes protocol v3), and a protocol-v3 record
-        // without one is rejected too. The decoy is mandatory on v3, so
-        // a signed v2 record with its stored version flipped to 3 keeps
-        // the plain 18-field canonical bytes and is refused here. The
+        // migration window), 2 (current, unarmed), 3 (the
+        // decoy-capable canonical) and 4 (the execution-capable
+        // canonical) exist. Anything else is a corrupt or foreign
+        // record. The protocol-vs-decoy-vs-execution grammar is total:
+        // a protocol-v2 record that carries a decoy is rejected
+        // explicitly (the v2 canonical never includes the
+        // `|decoy_field` segment, so the combination cannot come from a
+        // conforming issuer — an armed issuance writes protocol v3),
+        // and a protocol-v3 record without one is rejected too. The
+        // decoy is mandatory on v3, so a signed v2 record with its
+        // stored version flipped to 3 keeps the plain 18-field canonical
+        // bytes and is refused here. The execution segments are a v4
+        // canonical extension: a v2/v3 record carrying any execution
+        // field is rejected, and a v4 record without the execution
+        // triplet (program + version + commitment) is rejected too, so
+        // a signed v2/v3 record with its stored version flipped to 4
+        // keeps the plain canonical bytes and is refused here. The
         // capability is fully inferable from the authenticated canonical
         // shape, which is the point.
-        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2 && $record->protocolVersion !== 3) {
+        if ($record->protocolVersion < 1 || $record->protocolVersion > ChallengeRecord::MAX_PROTOCOL_VERSION) {
             return false;
         }
         if ($record->protocolVersion === 2 && $record->decoyField !== null) {
             return false;
         }
         if ($record->protocolVersion === 3 && $record->decoyField === null) {
+            return false;
+        }
+        $executionPresent = $record->executionProgram !== null;
+        if (($record->protocolVersion === 2 || $record->protocolVersion === 3) && $executionPresent) {
+            return false;
+        }
+        if ($record->protocolVersion === 4 && !$executionPresent) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
@@ -1593,13 +1628,35 @@ final class Verifier
         ) {
             return false;
         }
-        // The decoy (honeypot) field name is an authenticated v3 canonical
-        // field: when present it must match the exact shape the issuer
-        // mints and the widget driver renders — 1..=64 bytes of
-        // [A-Za-z0-9_-] (no `.`, `:` or `|`, so the canonical segment
+        // The decoy (honeypot) field name is an authenticated v3/v4
+        // canonical field: when present it must match the exact shape
+        // the issuer mints and the widget driver renders — 1..=64 bytes
+        // of [A-Za-z0-9_-] (no `.`, `:` or `|`, so the canonical segment
         // structure can never be altered by a stored value). A
         // non-conforming name is a corrupt or foreign record.
         if ($record->decoyField !== null && !Config::isValidDecoyFieldName($record->decoyField)) {
+            return false;
+        }
+        // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix:
+        // signed commitment absent <=> stored program absent, signed
+        // commitment present <=> stored program present, and
+        // SHA256(stored program) == the signed commitment (constant
+        // time). A hand-rolled record that carries a program without
+        // the commitment triplet, a commitment without the program, or
+        // a program whose hash does not match the signed commitment is
+        // a corrupt or foreign record — stripping, substituting or
+        // injecting a program always invalidates the challenge.
+        if ($executionPresent) {
+            if ($record->executionVersion !== 1 || $record->executionCommitment === null) {
+                return false;
+            }
+            if (preg_match('/^[0-9a-f]{64}$/D', $record->executionCommitment) !== 1) {
+                return false;
+            }
+            if (!hash_equals(Issuer::executionCommitment($record->executionProgram), $record->executionCommitment)) {
+                return false;
+            }
+        } elseif ($record->executionVersion !== null || $record->executionCommitment !== null) {
             return false;
         }
         $nonceBytes = base64_decode($record->nonce, true);
@@ -1723,6 +1780,7 @@ final class Verifier
         ?int $nowNs,
         RequestBindingExpectation $expectation,
         ?string $presentedExecutionDigest = null,
+        ?string $presentedExecutionTrace = null,
     ): ?VerifyError {
         // 1-2b. The authenticated hard core: structure, protocol gate,
         //       kid revocation/resolution, signature, Argon ceilings.
@@ -1759,7 +1817,7 @@ final class Verifier
         //     missing or mismatched digest is the deterministic
         //     ExecutionMismatch. An unarmed record skips the check
         //     entirely (byte-identical current behavior).
-        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest)) !== null) {
+        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest, $presentedExecutionTrace)) !== null) {
             return $e;
         }
 
@@ -1777,9 +1835,12 @@ final class Verifier
      * execution digest, and it MUST equal (constant-time) the expected
      * digest recomputed from the stored program and the record's nonce.
      *
-     * - An unarmed record skips the check entirely: the no-program path
-     *   is byte-identical to the pre-execution behavior, and a stray
-     *   digest on an unarmed token is ignored.
+     * - An unarmed record (no stored program, no signed commitment)
+     *   demands no digest: a presented digest is stray execution
+     *   evidence and is rejected with the deterministic
+     *   ExecutionMismatch — never silently ignored. The signed
+     *   canonical carries no commitment, so no digest can be
+     *   legitimate for it.
      * - An armed record without a presented digest, or with a digest
      *   that does not match the expected value, is the deterministic
      *   ExecutionMismatch, a hard verdict, never replay-exempt, and
@@ -1793,20 +1854,43 @@ final class Verifier
      *   challenge fails on the nonce-bound context. The digest binds
      *   the submission to this challenge's program.
      */
-    private function checkExecutionBinding(ChallengeRecord $record, ?string $presentedDigest): ?VerifyError
+    private function checkExecutionBinding(ChallengeRecord $record, ?string $presentedDigest, ?string $presentedTrace): ?VerifyError
     {
         if ($record->executionProgram === null) {
-            return null;
+            // Stray execution evidence: execution evidence presented
+            // for a record whose signed canonical carries NO
+            // commitment is deterministic invalid, never silently
+            // ignored.
+            return ($presentedDigest !== null || $presentedTrace !== null) ? VerifyError::ExecutionMismatch : null;
         }
-        if ($presentedDigest === null) {
+        if ($presentedDigest === null || $presentedTrace === null) {
             return VerifyError::ExecutionMismatch;
         }
-        $expected = ExecutionChallengeGenerator::expectedDigest($record->executionProgram, $record->nonce);
-        if ($expected === null) {
-            // The record's program failed the parse (validateRecord
-            // already rejects this shape; defense in depth).
+        // The trace travels on the wire as base64url, unpadded (the
+        // driver's format); translate back to canonical standard base64
+        // before the strict decode.
+        $standard = strtr($presentedTrace, '-_', '+/');
+        $standard = str_pad($standard, (int) ceil(\strlen($standard) / 4) * 4, '=');
+        $traceBytes = base64_decode($standard, true);
+        if ($traceBytes === false
+            || rtrim(strtr(base64_encode($traceBytes), '+/', '-_'), '=') !== $presentedTrace) {
+            return VerifyError::ExecutionMismatch;
+        }
+        $trace = (string) $traceBytes;
+        $verifiedTrace = ExecutionChallengeGenerator::verifyExecutedTrace($record->executionProgram, $record->nonce, $trace);
+        if ($verifiedTrace === null) {
+            return VerifyError::ExecutionMismatch;
+        }
+        $bytes = base64_decode($record->executionProgram, true);
+        $program = ExecutionChallengeGenerator::decode($record->executionProgram);
+        if ($bytes === false || $program === null) {
             return VerifyError::MalformedRecord;
         }
+        $expected = hash_hmac(
+            'sha256',
+            ExecutionChallengeGenerator::LABEL.'|'.$record->nonce.'|'.$program['scope'].'|'.$program['action'].'|'.$program['op_version'].'|'.$verifiedTrace,
+            $bytes,
+        );
         if (!hash_equals($expected, $presentedDigest)) {
             return VerifyError::ExecutionMismatch;
         }
@@ -1850,6 +1934,7 @@ final class Verifier
         ?string $expectedScope,
         RequestBindingExpectation $expectation,
         ?string $presentedExecutionDigest = null,
+        ?string $presentedExecutionTrace = null,
     ): ?VerifyError {
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
             return $e;
@@ -1860,7 +1945,7 @@ final class Verifier
         if (($e = $this->checkDeploymentExpectations($record)) !== null) {
             return $e;
         }
-        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest)) !== null) {
+        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest, $presentedExecutionTrace)) !== null) {
             return $e;
         }
         if (($e = $this->checkMinDuration($record, null)) !== null) {
@@ -1890,8 +1975,11 @@ final class Verifier
         //     v2 has been the unarmed issuance format longer than the
         //     maximum challenge lifetime, so any surviving v1 record is
         //     stale or foreign. Protocol v3 (the decoy-capable canonical)
-        //     is accepted; the structural gate of validateRecord already
-        //     rejected the v2-plus-decoy combination and unknown versions.
+        //     and v4 (the execution-capable canonical) are accepted; the
+        //     structural gate of validateRecord already rejected the
+        //     v2-plus-decoy combination, the v2/v3-with-execution
+        //     combination, the executionless-v4 shape and unknown
+        //     versions.
         if ($record->protocolVersion === 1 && !$this->acceptLegacyV1) {
             return VerifyError::MalformedRecord;
         }
@@ -2322,14 +2410,20 @@ final class Verifier
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
      * carries an armed decoy (honeypot) field, the name is covered too:
-     * it is the final `|<decoy_field>` segment appended after the kid
+     * it is the `|<decoy_field>` segment appended after the kid
      * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
-     * splicing it breaks the signature. The decoy segment rides a
-     * protocol v3 record: armed issuance writes version 3, and the
-     * v2-plus-decoy combination is rejected by the structural gate. An
-     * unarmed record — a v2 — renders the legacy 18-field canonical
-     * bytes, byte-identical to the pre-extension format; a v3 record
-     * always carries the decoy segment (the decoy is mandatory on v3).
+     * splicing it breaks the signature. When the record carries an armed
+     * execution program, its commitment is covered too: the final
+     * `|execution_version|execution_commitment` segments, so stripping,
+     * substituting or injecting a program breaks the signature. The
+     * decoy segment rides a protocol v3/v4 record: armed issuance writes
+     * version 3 (or 4 when the execution dimension is armed too), and the
+     * v2-plus-decoy combination is rejected by the structural gate.
+     * An unarmed record (a v2) renders the legacy 18-field canonical
+     * bytes, byte-identical to the pre-extension format.
+     * A v3 record always carries the decoy segment (the decoy is
+     * mandatory on v3) and a v4 record always carries the execution
+     * segments (the commitment is mandatory on v4).
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
@@ -2360,6 +2454,8 @@ final class Verifier
                 $record->issuer,
                 $record->kid ?? 1,
                 $record->decoyField,
+                $record->executionVersion,
+                $record->executionCommitment,
             ), $secretKey);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));

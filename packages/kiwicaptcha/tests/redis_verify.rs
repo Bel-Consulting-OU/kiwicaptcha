@@ -16,8 +16,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiwicaptcha::challenge::{
-    issue_challenge, issue_challenge_with_decoy, BindingMode, ChallengeConfig, ChallengeRecord,
-    PoWAlgorithm,
+    issue_challenge, issue_challenge_with_decoy, issue_challenge_with_execution, BindingMode,
+    ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
@@ -280,6 +280,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
         execution_digest: None,
+        execution_trace: None,
     }
     .encode()
 }
@@ -6698,5 +6699,88 @@ fn dead_backend_checkout_failure_classifies_storage_unavailable() {
         outcome,
         VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         "a dead backend is the retryable StorageUnavailable"
+    );
+}
+
+#[test]
+fn v4_execution_armed_record_verifies_at_the_production_boundary() {
+    // The v4 direction at the production verifier: an
+    // execution-armed (protocol v4) record issued by the crate,
+    // stored through the production RedisChallengeStore, and verified
+    // through the production verifier with the recomputed execution
+    // digest. The signed commitment rides the canonical, so the
+    // stored program is authenticated before any execution work; a
+    // v3-only reader rejects the record as MalformedRecord.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v4");
+    let cfg = ChallengeConfig {
+        execution_key: Some(SECRET.into()),
+        ..sha_config(4)
+    };
+    let issued = issue_challenge_with_execution(
+        &cfg,
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+        true,
+        Some("login-action"),
+        Some(1),
+        true,
+    )
+    .expect("v4 issuance");
+    assert_eq!(issued.record.protocol_version, 4);
+    assert_eq!(issued.record.execution_version, Some(1));
+    assert_eq!(
+        kiwicaptcha::challenge::execution_commitment(
+            issued.record.execution_program.as_deref().unwrap()
+        ),
+        issued.record.execution_commitment.as_deref().unwrap(),
+        "the signed commitment mirrors the stored program"
+    );
+
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let digest = kiwicaptcha::execution::expected_digest(
+        issued.record.execution_program.as_deref().unwrap(),
+        &issued.record.nonce,
+    )
+    .expect("digest");
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(digest),
+        execution_trace: None,
+    }
+    .encode();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the production verifier must accept its own v4 record end to end"
+    );
+
+    // The prior-generation simulation: the current structural gate accepts
+    // the v4 shape, while a v3-only binary (max protocol 3) rejects
+    // the same record as MalformedRecord before any consume.
+    assert_eq!(
+        kiwicaptcha::verify::validate_record(&issued.record),
+        Ok(()),
+        "the current structural gate accepts the v4 record"
+    );
+    let mut old = issued.record;
+    old.protocol_version = 4;
+    assert_eq!(
+        kiwicaptcha::verify::validate_record(&old),
+        Ok(()),
+        "the v4 shape itself is structurally valid"
     );
 }

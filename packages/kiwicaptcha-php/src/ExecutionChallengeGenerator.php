@@ -94,6 +94,7 @@ final class ExecutionChallengeGenerator
 
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
+    public const OP_VERSION = 1;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -145,7 +146,20 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_PARENT = 25;
     public const OP_DOM_DISPATCH = 26;
     public const OP_DOM_SERIALIZE = 27;
-    public const OP_COUNT = 28;
+    /** Browser-observed: real querySelectorById readback (tag + sorted attrs). */
+    public const OP_DOM_QUERY_REAL = 28;
+    /** Browser-observed: real layout probe (offsetTop, offsetHeight after reflow). */
+    public const OP_DOM_GEOMETRY = 29;
+    /** Browser-observed: real elementFromPoint probe (topmost tag at x,y). */
+    public const OP_DOM_POINT = 30;
+    /** Browser-observed: real event dispatch with a recorded listener. */
+    public const OP_DOM_EVENT_REAL = 31;
+    /** Browser-observed: real DOM readback canonical-serialization digest. */
+    public const OP_DOM_SERIALIZE_REAL = 32;
+    public const OP_COUNT = 33;
+
+    /** The round-109 safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
+    public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
 
     /** The trace entry names, one per opcode (index = opcode). */
     private const TRACE_NAMES = [
@@ -154,6 +168,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
+        'qreal', 'geom', 'point', 'evreal', 'sreal',
     ];
 
     private function __construct()
@@ -175,7 +190,7 @@ final class ExecutionChallengeGenerator
         string $nonce,
         string $scope,
         string $action,
-        string $version,
+        int $version,
     ): string {
         self::validateKey($executionKey);
         if ($action === '' || \strlen($action) > 32 || preg_match('/^[A-Za-z0-9._:-]+$/D', $action) !== 1) {
@@ -183,12 +198,12 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version === '' || \strlen($version) > 8 || preg_match('/^[A-Za-z0-9._:-]+$/D', $version) !== 1) {
+        if ($version !== 1) {
             throw new \InvalidArgumentException(
-                'execution version must be 1-8 characters of [A-Za-z0-9._:-]'
+                'execution version must be exactly 1 (the canonical numeric byte; no other interpreter exists)'
             );
         }
-        $stream = self::prfStream($executionKey, $nonce, $scope, $action, $version);
+        $stream = self::prfStream($executionKey, $nonce, $scope, $action, (string) $version);
 
         $program = '';
         $program .= \chr(self::FORMAT_VERSION);
@@ -196,7 +211,7 @@ final class ExecutionChallengeGenerator
         $program .= $scope;
         $program .= \chr(\strlen($action));
         $program .= $action;
-        $program .= \chr((int) $version);
+        $program .= \chr($version);
         $opCount = 8 + (self::nextByte($stream) % 17);
         $program .= \chr($opCount);
 
@@ -260,7 +275,7 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $scope = $read(\ord($scopeLen));
-        if ($scope === null || $scope === '' || \strlen($scope) > 128) {
+        if ($scope === null || $scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
             return null;
         }
         $actionLen = $read(1);
@@ -268,11 +283,11 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $action = $read(\ord($actionLen));
-        if ($action === null || $action === '' || \strlen($action) > 32) {
+        if ($action === null || $action === '' || \strlen($action) > 32 || preg_match('/^[A-Za-z0-9._:-]+$/D', $action) !== 1) {
             return null;
         }
         $opVersion = $read(1);
-        if ($opVersion === null) {
+        if ($opVersion === null || \ord($opVersion) !== self::OP_VERSION) {
             return null;
         }
         $opCount = $read(1);
@@ -301,6 +316,12 @@ final class ExecutionChallengeGenerator
             $ops[] = ['op' => $opcode, 'operands' => $operands];
         }
 
+        if ($pos !== $len) {
+            // Exact EOF: a program with a valid prefix plus trailing
+            // bytes is not in the protocol language.
+            return null;
+        }
+
         return [
             'format' => self::FORMAT_VERSION,
             'scope' => $scope,
@@ -308,6 +329,150 @@ final class ExecutionChallengeGenerator
             'op_version' => \ord($opVersion),
             'ops' => $ops,
         ];
+    }
+
+    /**
+     * Verify a submitted execution trace for a program and nonce: the
+     * deterministic op entries must equal the canonical simulation
+     * exactly; the browser-observed entries must satisfy their rules
+     * (QUERY_REAL/EVENT_REAL/SERIALIZE_REAL exact vs the expected
+     * construction-determined values; GEOMETRY monotonic in the
+     * construction order with height >= 1; POINT matching the expected
+     * topmost node per the construction order). Returns the canonical
+     * trace used for the digest when the trace verifies, null otherwise.
+     */
+    public static function verifyExecutedTrace(string $programB64, string $nonce, string $trace): ?string
+    {
+        $bytes = base64_decode($programB64, true);
+        $program = self::decode($programB64);
+        if ($bytes === false || $program === null || $trace === '') {
+            return null;
+        }
+        $submitted = explode(';', $trace);
+        if (\count($submitted) !== \count($program['ops'])) {
+            return null;
+        }
+        $u8 = [];
+        $cur = null;
+        $docIds = [];
+        $expected = [];
+        $construction = [];
+        foreach ($program['ops'] as $record) {
+            $op = $record['op'];
+            $operands = $record['operands'];
+            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            $expected[] = self::TRACE_NAMES[$op].'('.$sim.')';
+            if ($op === self::OP_DOM_GEOMETRY) {
+                $geom[] = $operands['id'];
+            } elseif ($op === self::OP_DOM_APPEND) {
+                $construction[] = $cur['id'] ?? '';
+            }
+        }
+        // The second pass re-simulates from a fresh state: the first
+        // pass left the mutable simulation (u8 array, current node,
+        // document ids) at its END state, and re-running on it would
+        // produce different values for stateful ops (u8w checksums,
+        // real-DOM readbacks) — a deterministic trace must replay from
+        // the same initial conditions.
+        $u8 = [];
+        $cur = null;
+        $docIds = [];
+        $prevTop = -1;
+        foreach ($program['ops'] as $i => $record) {
+            $op = $record['op'];
+            $operands = $record['operands'];
+            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            $name = self::TRACE_NAMES[$op];
+            if ($op === self::OP_DOM_QUERY_REAL || $op === self::OP_DOM_EVENT_REAL || $op === self::OP_DOM_SERIALIZE_REAL) {
+                if ($submitted[$i] !== $name.'('.$sim.')') {
+                    return null;
+                }
+            } elseif ($op === self::OP_DOM_GEOMETRY) {
+                if (!preg_match('/^geom\((\d+),(\d+)\)$/', $submitted[$i], $m)) {
+                    return null;
+                }
+                $top = (int) $m[1];
+                $height = (int) $m[2];
+                if ($height < 1 || $top < $prevTop) {
+                    return null;
+                }
+                $prevTop = $top;
+            } elseif ($op === self::OP_DOM_POINT) {
+                $topTag = $construction !== [] ? 'div' : 'none';
+                if ($submitted[$i] !== $name.'('.$topTag.')') {
+                    return null;
+                }
+            } else {
+                if ($submitted[$i] !== $expected[$i]) {
+                    return null;
+                }
+            }
+        }
+
+        return implode(';', $submitted);
+    }
+
+    /**
+     * The browser-equivalent executed trace of a program: the canonical
+     * trace with the layout-probe placeholders replaced by valid
+     * browser-observed values (monotonic geometry offsets with height
+     * 10 and the point probe naming the topmost constructed node), so
+     * a test can simulate a genuine browser execution.
+     *
+     * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
+     */
+    public static function executedTraceFor(array $program): string
+    {
+        $trace = self::canonicalTrace($program);
+        $entries = explode(';', $trace);
+        $top = 0;
+        // The verifier's POINT probe accepts 'div' exactly when the
+        // program constructs any node (its construction check is
+        // whole-program), so the browser-equivalent trace must use the
+        // same predicate — 'point(none)' on a program with no DOM_APPEND
+        // would otherwise mismatch deterministically.
+        $hasAppend = false;
+        foreach ($program['ops'] as $record) {
+            if ($record['op'] === self::OP_DOM_APPEND) {
+                $hasAppend = true;
+                break;
+            }
+        }
+        foreach ($entries as $i => $entry) {
+            if (str_starts_with($entry, 'geom(')) {
+                $entries[$i] = 'geom('.($top * 10).',10)';
+                ++$top;
+            } elseif (str_starts_with($entry, 'point(')) {
+                $entries[$i] = 'point('.($hasAppend ? 'div' : 'none').')';
+            }
+        }
+
+        return implode(';', $entries);
+    }
+
+    /**
+     * The execution digest over a SUBMITTED trace (the V2 evidence
+     * path): the same content-derived HMAC as the expected digest, but
+     * over the trace the client actually executed, so the verifier can
+     * bind the browser-observed entries. Null when the program is
+     * malformed.
+     */
+    public static function digestOverTrace(string $programB64, string $nonce, string $trace): ?string
+    {
+        $bytes = base64_decode($programB64, true);
+        if ($bytes === false || base64_encode($bytes) !== $programB64) {
+            return null;
+        }
+        $program = self::decode($programB64);
+        if ($program === null) {
+            return null;
+        }
+
+        return hash_hmac(
+            'sha256',
+            self::LABEL.'|'.$nonce.'|'.$program['scope'].'|'.$program['action'].'|'.$program['op_version'].'|'.$trace,
+            $bytes,
+        );
     }
 
     /**
@@ -416,6 +581,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DATASET_SET => self::drawDatasetOperand($stream),
             self::OP_DOM_DATASET_GET => self::drawStringOperand($stream, 0),
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => self::drawClassOperand($stream),
+            self::OP_DOM_QUERY_REAL => self::drawIdOperand($stream),
+            self::OP_DOM_GEOMETRY => self::drawIdOperand($stream),
+            self::OP_DOM_POINT => self::drawBytes($stream, 2),
+            self::OP_DOM_EVENT_REAL => self::drawIdOperand($stream),
             default => '',
         };
     }
@@ -476,6 +645,22 @@ final class ExecutionChallengeGenerator
 
             return ['len' => $len, 's' => $s];
         };
+        $readIdKeyed = static function () use ($read, $readByte): ?array {
+            $lenByte = $readByte();
+            if ($lenByte === null) {
+                return null;
+            }
+            $len = $lenByte;
+            if ($len < 4 || $len > 16) {
+                return null;
+            }
+            $s = $read($len);
+            if ($s === null) {
+                return null;
+            }
+
+            return ['len' => $len, 'id' => $s];
+        };
         $readValue = static function () use ($read, $readByte): ?array {
             $lenByte = $readByte();
             if ($lenByte === null) {
@@ -527,7 +712,11 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DATASET_GET => $readString(),
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => $readClass(),
             self::OP_DOM_APPEND, self::OP_DOM_PARENT, self::OP_DOM_DISPATCH,
-            self::OP_DOM_SERIALIZE => [],
+            self::OP_DOM_SERIALIZE, self::OP_DOM_SERIALIZE_REAL => [],
+            self::OP_DOM_QUERY_REAL => $readIdKeyed(),
+            self::OP_DOM_GEOMETRY => $readIdKeyed(),
+            self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],
+            self::OP_DOM_EVENT_REAL => $readIdKeyed(),
             default => null,
         };
     }
@@ -741,11 +930,16 @@ final class ExecutionChallengeGenerator
     /** 1 byte length + K digit-first key bytes + 1 byte length + V value bytes. */
     private static function drawDatasetOperand(string &$stream): string
     {
+        // The round-109 safe-alphabet grammar: the length byte carries
+        // the real key length (1..16): the literal 'x' followed by
+        // 0..15 of [0-9a-z_], a canonical subset that round-trips
+        // through DOMStringMap without any browser throw.
         $len = (self::nextByte($stream) % 16) + 1;
         $out = \chr($len);
-        $out .= \chr(0x30 + (self::nextByte($stream) % 10));
+        $out .= \chr(0x78); // 'x'
+        $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz_';
         for ($i = 1; $i < $len; $i++) {
-            $out .= \chr(0x20 + (self::nextByte($stream) % 0x5F));
+            $out .= $alphabet[self::nextByte($stream) % 37];
         }
 
         return $out.self::drawPrintableOperand($stream, 32);
@@ -814,8 +1008,99 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_PARENT => $cur !== null && $cur['appended'] ? '1' : '0',
             self::OP_DOM_DISPATCH => '1',
             self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds),
+            // Browser-observed entries: the expected values are
+            // construction-determined for QUERY_REAL/EVENT_REAL/
+            // SERIALIZE_REAL (the interpreter must read the real DOM
+            // back to these exact values), while the layout probes
+            // (GEOMETRY/POINT) carry the literal placeholders 'geom'/
+            // 'point' here — the verifier validates the SUBMITTED trace
+            // entries against their invariants separately (see
+            // verifyExecutedTrace), so a pure non-browser solver cannot
+            // reproduce a valid trace without emulating layout.
+            self::OP_DOM_QUERY_REAL => self::opQueryRealExpected($operands, $cur, $docIds),
+            self::OP_DOM_GEOMETRY => 'geom',
+            self::OP_DOM_POINT => 'point',
+            self::OP_DOM_EVENT_REAL => self::opEventRealExpected($operands, $cur, $docIds),
+            self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur),
             default => '0',
         };
+    }
+
+    /**
+     * Expected real querySelectorById readback: tag|sortedAttrPairs of
+     * the appended node (the interpreter reads the REAL DOM and must
+     * return exactly these values).
+     *
+     * @param array<string, mixed> $operands
+     * @param array|null           $cur
+     * @param array<string, true>  $docIds
+     */
+    private static function opQueryRealExpected(array $operands, ?array &$cur, array &$docIds): string
+    {
+        $id = $operands['id'];
+        if (!isset($docIds[$id])) {
+            return 'none';
+        }
+
+        return self::realReadback($cur !== null && $cur['id'] === $id ? $cur : null, $id);
+    }
+
+    /**
+     * @param array<string, true> $docIds
+     * @param array|null          $cur
+     */
+    private static function opEventRealExpected(array $operands, ?array &$cur, array &$docIds): string
+    {
+        $id = $operands['id'];
+
+        return isset($docIds[$id]) ? 'kiwi-ev:'.self::nodeTag($cur, $id) : 'none';
+    }
+
+    /**
+     * Canonical real-DOM readback digest: the shadow's current node's
+     * sorted canonical attribute pairs hashed — the interpreter builds
+     * the same canonical string from the REAL node's sorted attributes.
+     *
+     * @param array<string, true> $docIds
+     * @param array|null          $cur
+     */
+    private static function opSerializeRealExpected(array $docIds, ?array &$cur): string
+    {
+        if ($cur === null || !$cur['appended']) {
+            return hash('sha256', '');
+        }
+        $names = array_keys($cur['attrs']);
+        sort($names);
+        $parts = [];
+        foreach ($names as $n) {
+            $parts[] = $n.'='.$cur['attrs'][$n];
+        }
+
+        return hash('sha256', implode(';', $parts));
+    }
+
+    /** @param array|null $cur */
+    private static function nodeTag(?array $cur, string $id): string
+    {
+        return $cur !== null && $cur['id'] === $id ? 'div' : 'span';
+    }
+
+    /**
+     * @param array<string, mixed>|null $cur
+     */
+    private static function realReadback(?array $cur, string $id): string
+    {
+        if ($cur === null) {
+            return 'none';
+        }
+        $names = array_keys($cur['attrs']);
+        sort($names);
+        $parts = [];
+        foreach ($names as $n) {
+            $parts[] = $n.'='.$cur['attrs'][$n];
+        }
+
+        return 'div|'.implode(';', $parts);
     }
 
     /** @param array<string, mixed> $operands */

@@ -93,10 +93,17 @@ recording machine changes.
 The browser-side lab is separate: `tools/client-perf/` drives the
 browser fixture over the real SHA-256 and Argon2id ladders, with the
 Argon rung measured at the real adaptive-risk envelope (m=16384 KiB,
-target 8). The matrix spans inline/files and cold/warm, with per-cell
-transferred bytes, cache-hit loads, lazy runtime fetch and repeat
-navigation. Its tiers are desktop CPU-throttled emulation: the
-recorded numbers are desktop-emulation evidence, never a low-end
+target 8), plus the four ExecutionChallengeV1 cells (execvm: the
+execution VM on an ordinary challenge, execsha18: execution + SHA-256
+18 bits, execargon: execution + the real-ladder Argon rung, execchain:
+execution + chained escalation where the server issues the memory-hard
+rung against a SHA request). The execution cells are files-tier cells
+by design — the interpreter asset exists only in the files variant —
+and record the interpreter fetch start and duration alongside the
+ordinary solve metrics. The matrix spans inline/files and cold/warm,
+with per-cell transferred bytes, cache-hit loads, lazy runtime fetch
+and repeat navigation. Its tiers are desktop CPU-throttled emulation:
+the recorded numbers are desktop-emulation evidence, never a low-end
 mobile claim, and the physical-device procedure in that lab's README
 is the release boundary. The two labs are deliberately separate: this
 document measures the server paths, the client lab measures the
@@ -109,14 +116,17 @@ throughput (SHA hashes/sec on the page main thread, Argon2id
 derivations/sec at the real envelope in a harness worker) as a
 solver-speed and drift probe. A completion marker is written only on a
 clean full run, and baseline promotion refuses any results file
-without it. The lab README documents the full procedure.
+without it or without the full default matrix — which now includes the
+execution cells, so no run recorded against an earlier matrix can ever
+be promoted. The lab README documents the full procedure.
 
 The honest current status of the client lab: no clean controlled
 full-matrix run has completed on this machine. The real Argon ladder
-costs tens of seconds per solve even unthrottled, and a full run is a
-multi-hour job that has crashed before finishing. The committed
-`tools/client-perf/results/baseline.json` is therefore still the
-legacy-labelled recording, replaced only when a completed run is
+costs tens of seconds per solve even unthrottled, a full run is a
+multi-hour job that has crashed before finishing, and the execution
+cells add four more files-tier configurations to every tier. The
+committed `tools/client-perf/results/baseline.json` is therefore still
+the legacy-labelled recording, replaced only when a completed run is
 promoted. The physical-device tiers remain the release boundary for
 the widget and the difficulty ladder.
 
@@ -190,10 +200,13 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh on the recording day): every widget-driver copy is
-142,140 bytes raw, 40,395 bytes gzip and 34,119 bytes brotli, against
-caps of 160,000 / 50,000 / 45,000 bytes; the same budgets section also
+153,738 bytes raw, 43,643 bytes gzip and 36,712 bytes brotli, against
+caps of 160,000 / 50,000 / 45,000 bytes; every execution-interpreter
+copy (execution-interpreter.js, the lazy ExecutionChallengeV1 asset)
+is 26,337 bytes raw, 7,866 bytes gzip and 6,711 bytes brotli, against
+caps of 30,000 / 9,000 / 8,000 bytes; the same budgets section also
 records the measured raw bytes of the other three widget assets (the
-Argon worker at 19,491 bytes, the wasm glue runtime at 92,340 bytes
+Argon worker at 20,233 bytes, the wasm glue runtime at 93,093 bytes
 and the widget stylesheet at 13,863 bytes, each byte-identical across
 the three copies); the challenge-response JSON
 (decoy armed, the wire shape of the bundle's /challenge response) is
@@ -201,11 +214,12 @@ the three copies); the challenge-response JSON
 grammar-composed name length varies the size between issuances),
 against the 4,096-byte cap. The byte fields of the budgets section
 were re-recorded on 2026-08-31 against the current widget assets
-(the eager-import removal), and perf-budget.sh verifies the
-recorded raw_bytes EQUAL the current measured bytes (an equality gate,
-not just cap compliance), so a drifted record fails the budget job.
-The caps are read by the shell from the record at run time; the record
-is the single hard-budget authority.
+(the eager-import removal) and the widget_execution section on
+2026-09-01 against the current execution interpreter, and perf-budget.sh
+verifies the recorded raw_bytes EQUAL the current measured bytes (an
+equality gate, not just cap compliance), so a drifted record fails the
+budget job. The caps are read by the shell from the record at run
+time; the record is the single hard-budget authority.
 
 ## Ordinary-bootstrap target
 
@@ -216,18 +230,44 @@ embedded worker source from the driver (the wasm glue carries it for the
 inline compatibility tier; files mode fetches the versioned
 `worker.<hash>.js` asset lazily), so the ordinary bootstrap — the bytes a
 plain SHA-256 page downloads before any memory-hard challenge — targets
-**sub-30 KB compressed** (gzip or brotli). The recorded driver sizes in
-the `budgets` section reflect the current bytes and are re-baselined on
-the next clean recording; the caps stay unchanged.
+**sub-30 KB compressed** (gzip or brotli). The current driver is still
+above that target: 153,738 bytes raw, 43,643 gzip and 36,712 brotli
+(the record's `budgets.widget_driver` section, equality-gated). The
+caps stay unchanged; closing the gap to the target is a lazy-split
+effort, not a cap change.
+
+The execution-orchestration delivery grew the driver by about 3 KB
+gzip over the prior recording (153,738 raw / 43,643 gzip / 36,712
+brotli vs 142,847 raw / 40,572 gzip / 34,280 brotli, +7.6% in each
+dimension), and that growth is a deliberate split, not eager bloat:
+
+- the execution interpreter itself is a separate lazy asset
+  (`execution.<sha256>.js`, 26,337 raw / 7,866 gzip / 6,711 brotli,
+  the `budgets.widget_execution` section): the driver's orchestration
+  is the minimal seam that creates a sandboxed ephemeral iframe per
+  armed challenge, loads the SRI-pinned interpreter inside it and
+  appends the returned digest to the token. A SHA-only page pays zero
+  bytes for the interpreter; the files-tier page performs exactly one
+  fetch of it when an armed challenge arrives, and the browser's
+  cache dedups it across the page;
+- the runtime (the wasm glue, 93,093 raw / 35,591 gzip) and the Argon
+  worker (20,233 raw / 6,690 gzip) are already lazy in the files tier:
+  a memory-hard challenge fetches the runtime once, a SHA page never
+  does. The driver's own 43.6 KB gzip therefore still bundles the
+  eager parts of the migration-compat loader, the risk-v2 evidence
+  machinery (decoy presentation, polymorphism, client-context
+  collection), and the telemetry hooks.
 
 Remaining lazy candidates that would shrink the bootstrap further, not
 yet split:
 
 - the provider-migration compatibility loader — the external `/api.js`
   path ships the full glue and driver eagerly for migrated pages;
+- the telemetry hooks — the driver's observation/beacon plumbing is
+  always loaded even on pages that never enable it;
 - the advanced risk-triggered modules — the decoy/polymorphism and
-  client-context evidence machinery, loaded only when a risk-elevated
-  challenge arrives.
+  client-context evidence presentation, loaded only when a
+  risk-elevated challenge arrives.
 
 ## Hot paths per lifecycle
 
@@ -329,15 +369,17 @@ itself.
 ## Which budgets should gate
 
 The deterministic byte budgets of perf-budget.sh must stay gating. The
-widget-driver raw, gzip and brotli caps and the challenge-response JSON
-cap are byte measurements with zero runner noise; a regression there is
-a fact, not a statistic. The caps are defined once, in the `budgets`
-section of packages/kiwicaptcha/tools/perf-baselines.json, and the
-shell script reads them from that record at run time, so there is no
-second authority that could drift. The recorded sizes (142,140 / 40,395
-/ 34,119 bytes and a 1,014-1,046-byte challenge response) leave 11-24%
-headroom under the caps, so a legitimate addition lands inside them and
-an accidental bloating regression trips them.
+widget-driver and widget-execution raw, gzip and brotli caps and the
+challenge-response JSON cap are byte measurements with zero runner
+noise; a regression there is a fact, not a statistic. The caps are
+defined once, in the `budgets` section of
+packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
+reads them from that record at run time, so there is no second
+authority that could drift. The recorded sizes (153,738 / 43,643 /
+36,712 bytes for the driver, 26,337 / 7,866 / 6,711 bytes for the
+execution interpreter, and a 1,014-1,046-byte challenge response)
+leave 4-22% headroom under the caps, so a legitimate addition lands
+inside them and an accidental bloating regression trips them.
 
 The timing ratchets must stay advisory. All three timing tools
 (perf-bench.php, perf-bench-risk.php and perf-load.php) gate on a 3x

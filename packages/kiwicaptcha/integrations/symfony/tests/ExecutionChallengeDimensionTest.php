@@ -150,13 +150,23 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $container = $this->load([[
             'secret_key' => self::SECRET,
             'execution_key' => self::EXECUTION_KEY,
+            // The storage/limiter Redis: the SecurityEpochMonitor's
+            // central security-policy read rides this client, so the
+            // test can seed the v4 floor.
+            'redis_service' => 'fake_redis',
             'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
             'storage' => 'kiwi_captcha.storage.array',
-            'difficulty_bits' => 8,
             'difficulty_bits' => 8,
         ]]);
         $controller = $container->get(ChallengeController::class);
         self::assertTrue($container->getDefinition(ChallengeController::class)->getArgument('$executionGate'));
+
+        // The two-phase protocol-v4 rollout gate: execution arming
+        // requires the confirmed central floor >= 4, so the fake
+        // security Redis is seeded with the v4 floor first.
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $redis->hset($monitor->policyKey(), 'min_protocol_version', 4);
 
         // Without the risk engine deciding, the gate itself is the
         // trigger: every issuance is armed.

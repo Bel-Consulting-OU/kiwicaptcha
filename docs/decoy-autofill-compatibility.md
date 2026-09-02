@@ -34,7 +34,8 @@ or a cleanup path could key on. A same-named application field is left
 untouched by every lifecycle path: reissue, reset and teardown.
 
 The name is authenticated: it is signed into the challenge record
-(protocol v3), and verification checks the submitted name against the
+(protocol v3, or v4 when the execution dimension rides along), and
+verification checks the submitted name against the
 record. A name issued for one challenge is never meaningful for
 another, and the server only ever treats a non-empty value under the
 exact authenticated name of the verified record as a hit.

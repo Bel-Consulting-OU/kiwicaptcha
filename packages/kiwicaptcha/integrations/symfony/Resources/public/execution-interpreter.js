@@ -659,7 +659,7 @@
         return;
       }
       var digest = computeDigest(programBytes, program, nonce, trace);
-      post(KIWI_EXECUTION_RESULT, { id: id, digest: digest });
+      post(KIWI_EXECUTION_RESULT, { id: id, digest: digest, trace: trace });
     });
 
     post(KIWI_EXECUTION_READY, {});

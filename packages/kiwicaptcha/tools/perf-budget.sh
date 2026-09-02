@@ -4,21 +4,25 @@
 #
 # The three widget-driver copies (the canonical WASM asset, the core
 # crate's embedded resources copy and the Symfony bundle's public copy)
-# must each stay under the widget-driver cap. The cap values are not
-# defined here: the shell reads them from the budgets section of
+# must each stay under the widget-driver cap, and the three
+# execution-interpreter copies (the same three trees) must each stay
+# under the widget_execution cap. The cap values are not defined here:
+# the shell reads them from the budgets section of
 # packages/kiwicaptcha/tools/perf-baselines.json, the single hard-budget
 # authority. A cap that the record cannot supply (missing file, missing
 # section, non-numeric value) fails the script, because the budget
 # cannot be enforced from a second authority that does not exist.
 #
 # Measured-byte equality: the budgets section records the measured
-# sizes (raw_bytes of the widget driver, worker, runtime and css; plus
-# gzip/brotli of the driver), and this script verifies the recorded
+# sizes (raw_bytes of the widget driver, worker, runtime, css and
+# execution interpreter; plus gzip/brotli of the driver and the
+# execution interpreter), and this script verifies the recorded
 # raw_bytes equal the current measured bytes — a stale record describes
 # bytes the caps no longer gate, so a drift is a hard failure, never
 # just cap-compliance. The recorded sizes are re-measured by hand on a
 # clean local machine (the eager-import removal regenerated them against
-# the current assets).
+# the current assets; the widget_execution section was recorded against
+# the current execution interpreter).
 #
 # Compressed budgets: the same three copies must stay under a gzip cap
 # and a brotli cap, so a regression that bloats the wire bytes the
@@ -69,6 +73,9 @@ json_get() {
 WIDGET_DRIVER_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_driver.raw_cap_bytes")
 WIDGET_DRIVER_GZIP_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_cap_bytes")
 WIDGET_DRIVER_BROTLI_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_cap_bytes")
+WIDGET_EXECUTION_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_cap_bytes")
+WIDGET_EXECUTION_GZIP_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_cap_bytes")
+WIDGET_EXECUTION_BROTLI_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_cap_bytes")
 CHALLENGE_JSON_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json.cap_bytes")
 
 brotli_size() {
@@ -120,13 +127,51 @@ for copy in packages/kiwicaptcha-wasm/assets/widget-driver.js \
   fi
 done
 
+# The execution interpreter (execution-interpreter.js) gets the same
+# three-copy raw/gzip/brotli treatment as the driver: the asset is
+# lazy in the files tier (a SHA-only page pays zero bytes for it), but
+# an armed challenge pays exactly one fetch, so its wire size is a
+# per-challenge cost with its own hard caps.
+for copy in packages/kiwicaptcha-wasm/assets/execution-interpreter.js \
+            packages/kiwicaptcha/resources/execution-interpreter.js \
+            packages/kiwicaptcha/integrations/symfony/Resources/public/execution-interpreter.js; do
+  size=$(wc -c < "$copy")
+  if [ "$size" -gt "$WIDGET_EXECUTION_CAP" ]; then
+    echo "perf budget FAILED: $copy is $size bytes (cap $WIDGET_EXECUTION_CAP)" >&2
+    FAILED=1
+  else
+    echo "widget-execution budget OK: $copy $size bytes (cap $WIDGET_EXECUTION_CAP)"
+  fi
+
+  gzip_size=$(gzip -c "$copy" | wc -c | tr -d ' ')
+  if [ "$gzip_size" -gt "$WIDGET_EXECUTION_GZIP_CAP" ]; then
+    echo "perf budget FAILED: gzip of $copy is $gzip_size bytes (cap $WIDGET_EXECUTION_GZIP_CAP)" >&2
+    FAILED=1
+  else
+    echo "widget-execution gzip budget OK: $copy $gzip_size bytes (cap $WIDGET_EXECUTION_GZIP_CAP)"
+  fi
+
+  br_size=$(brotli_size "$copy")
+  if [ "$br_size" = "unavailable" ]; then
+    echo "widget-execution brotli budget NOTE: brotli is not installed; the brotli cap is not enforced on this machine"
+  else
+    BROTLI_AVAILABLE=1
+    if [ "$br_size" -gt "$WIDGET_EXECUTION_BROTLI_CAP" ]; then
+      echo "perf budget FAILED: brotli of $copy is $br_size bytes (cap $WIDGET_EXECUTION_BROTLI_CAP)" >&2
+      FAILED=1
+    else
+      echo "widget-execution brotli budget OK: $copy $br_size bytes (cap $WIDGET_EXECUTION_BROTLI_CAP)"
+    fi
+  fi
+done
+
 # Measured-byte equality gate: the recorded raw_bytes in the budgets
 # section must equal the current measured bytes of the canonical copy of
-# every widget asset (driver, worker, runtime, css). raw_bytes is a
-# measured fact, never a budget: it is re-recorded by hand on a clean
-# local machine, and this equality check turns a drifted record into a
-# hard failure instead of letting the caps silently gate different bytes
-# than the record describes.
+# every widget asset (driver, worker, runtime, css, execution
+# interpreter). raw_bytes is a measured fact, never a budget: it is
+# re-recorded by hand on a clean local machine, and this equality check
+# turns a drifted record into a hard failure instead of letting the
+# caps silently gate different bytes than the record describes.
 verify_recorded_raw_bytes() {
   local key="$1" file="$2" recorded actual
   recorded=$(json_get "$BASELINES_FILE" "budgets.$key.raw_bytes")
@@ -143,6 +188,7 @@ verify_recorded_raw_bytes widget_driver packages/kiwicaptcha-wasm/assets/widget-
 verify_recorded_raw_bytes widget_worker packages/kiwicaptcha-wasm/assets/kiwi-worker.js
 verify_recorded_raw_bytes widget_runtime packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
 verify_recorded_raw_bytes widget_css packages/kiwicaptcha-wasm/assets/widget.css
+verify_recorded_raw_bytes widget_execution packages/kiwicaptcha-wasm/assets/execution-interpreter.js
 
 challenge_size() {
   "$PHP_BIN" -r '
@@ -186,7 +232,7 @@ if [ "$FAILED" = "1" ]; then
   exit 1
 fi
 if [ "$BROTLI_AVAILABLE" = "0" ]; then
-  echo "perf-budget: OK (all widget-driver copies raw and gzip, and the challenge response, within their caps; brotli not enforced — no brotli on this machine)"
+  echo "perf-budget: OK (all widget-driver and widget-execution copies raw and gzip, and the challenge response, within their caps; brotli not enforced — no brotli on this machine)"
   exit 0
 fi
-echo "perf-budget: OK (all widget-driver copies raw/gzip/brotli and the challenge response within their caps)"
+echo "perf-budget: OK (all widget-driver and widget-execution copies raw/gzip/brotli and the challenge response within their caps)"

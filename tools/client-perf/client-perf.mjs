@@ -4,8 +4,9 @@
  *
  * A Playwright-based client benchmark that drives the browser fixture
  * (tests/browser/router.php) and measures, per difficulty tier
- * (SHA-256 16/18/20 bits + Argon2id) and per asset mode (inline vs
- * files, the ?assets=files fixture variant):
+ * (SHA-256 16/18/20 bits, Argon2id, and the four ExecutionChallengeV1
+ * cells) and per asset mode (inline vs files, the ?assets=files
+ * fixture variant):
  *
  *   - solve time (challenge fetch start -> kiwi:verified) and the pure
  *     proof computation (solving state -> verified): p50/p95/p99,
@@ -28,6 +29,16 @@
  *     (files mode: the wasm glue is fetched only when a memory-hard
  *     challenge arrives; the fetch start is recorded), and a repeat
  *     navigation measurement after the warm reps (everything cached).
+ *
+ * The ExecutionChallengeV1 cells (?execution=1 armed, files tier only)
+ * are: execvm (the execution VM on an ordinary fixture-default SHA
+ * challenge, no PoW change), execsha18 (execution + SHA-256 18 bits),
+ * execargon (execution + Argon2id at the real ladder) and execchain
+ * (execution + chained escalation: the driver requests SHA-256, the
+ * server escalates to Argon2id). The interpreter asset is lazy in the
+ * files tier, so the cell records when its single fetch starts and
+ * how long it takes (executionFetchStartMs/DurationMs), alongside the
+ * ordinary solve/parse/wasm/worker/fixed-work metrics.
  *
  * The KEY benchmark cell is files + warm + ordinary SHA (16-20 bits):
  * the returning-user path, which must be extremely cheap (all assets
@@ -224,19 +235,79 @@ const TIERS = {
 };
 
 const DIFFICULTIES = {
-  sha16: { label: 'SHA-256, 16 leading zero bits', query: () => '?bits=16' },
-  sha18: { label: 'SHA-256, 18 leading zero bits', query: () => '?bits=18' },
-  sha20: { label: 'SHA-256, 20 leading zero bits', query: () => '?bits=20' },
+  sha16: {
+    label: 'SHA-256, 16 leading zero bits',
+    query: () => '?bits=16',
+    dimension: 'sha',
+    isArgon: false,
+    assetModes: ['inline', 'files'],
+  },
+  sha18: {
+    label: 'SHA-256, 18 leading zero bits',
+    query: () => '?bits=18',
+    dimension: 'sha',
+    isArgon: false,
+    assetModes: ['inline', 'files'],
+  },
+  sha20: {
+    label: 'SHA-256, 20 leading zero bits',
+    query: () => '?bits=20',
+    dimension: 'sha',
+    isArgon: false,
+    assetModes: ['inline', 'files'],
+  },
   argon2id: {
     label: 'Argon2id (m=16384 KiB, t=3, p=1, target 8)',
     query: (o) => `?algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
+    dimension: 'argon',
+    isArgon: true,
+    assetModes: ['inline', 'files'],
+  },
+  // The ExecutionChallengeV1 cells. The fixture arms the execution
+  // dimension with ?execution=1 (the mirror of the bundle's
+  // risk.execution_challenge gate); the challenge response then carries
+  // an execution program the driver runs in a sandboxed ephemeral
+  // iframe (the lazy execution.<sha256>.js interpreter asset) and the
+  // execution digest rides the solution token. The interpreter asset is
+  // a FILES-TIER feature: the fixture emits its SRI-linked
+  // data-kiwi-execution-src only in the ?assets=files variant, so these
+  // cells are files-only by design — an inline page never arms the
+  // dimension, and a cell that deterministically fails its verify state
+  // would measure nothing.
+  execvm: {
+    label: 'execution VM only (armed, fixture SHA default, no PoW change)',
+    query: () => '?execution=1',
+    dimension: 'execution',
+    isArgon: false,
+    assetModes: ['files'],
+  },
+  execsha18: {
+    label: 'execution + SHA-256, 18 leading zero bits',
+    query: () => '?execution=1&bits=18',
+    dimension: 'execution',
+    isArgon: false,
+    assetModes: ['files'],
+  },
+  execargon: {
+    label: 'execution + Argon2id (m=16384 KiB, t=3, p=1, target 8)',
+    query: (o) => `?execution=1&algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
+    dimension: 'execution',
+    isArgon: true,
+    assetModes: ['files'],
+  },
+  execchain: {
+    label: 'execution + chained escalation (SHA request, Argon issued at the real ladder)',
+    query: (o) => `?execution=1&escalate=argon&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
+    dimension: 'execution',
+    isArgon: true,
+    assetModes: ['files'],
   },
 };
 
 function parseArgs(argv) {
   const opts = {
     tiers: null, // null = all
-    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id'],
+    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id', 'execvm', 'execsha18', 'execargon', 'execchain'],
     reps: 50, // SHA-256 solve repetitions per cell (the percentile-supporting default)
     argonReps: 20, // Argon2id solve repetitions per cell (memory-hard, so fewer but still percentile-supporting)
     cache: 'both', // cold | warm | both
@@ -347,18 +418,25 @@ Usage:
 Options:
   --tiers <list>          comma list of device tiers (default: all)
                           ${Object.keys(TIERS).join(', ')}
-  --difficulties <list>   comma list (default: sha16,sha18,sha20,argon2id)
+  --difficulties <list>   comma list (default:
+                          sha16,sha18,sha20,argon2id,execvm,execsha18,execargon,execchain)
   --reps N                SHA-256 solve repetitions per tier/difficulty/cache/assets
                           (default 50; the percentile-supporting range is 50-100)
   --argon-reps N          Argon2id repetitions per cell (default 20; range 20-30)
+                          (the execution cells inherit the rep count of their PoW
+                          profile: execvm and execsha18 use --reps, execargon and
+                          execchain use --argon-reps)
   --samples N             shorthand for --reps N --argon-reps N
   --cache <cold|warm|both>  cold = fresh context per load with the HTTP
                           cache disabled; warm = one reused context with
                           the cache enabled and populated (default both)
   --assets <inline|files|both>  inline = the fixture's inlined wasm glue
                           and driver; files = the ?assets=files variant
-                          (external SRI assets, lazy Argon runtime).
-                          Default both.
+                          (external SRI assets, lazy Argon runtime and
+                          lazy execution interpreter).
+                          Default both; the execution cells are files-only
+                          by design (the interpreter asset exists only in
+                          the files tier).
   --fixture-port N        fixture server port (default 8091)
   --no-fixture            attach to an already-running fixture (e.g. the
                           playwright lane on 8085)
@@ -443,15 +521,21 @@ function seededShuffle(arr, rng) {
 
 // Every configured cell (tier x difficulty x cache x assets) as one
 // flat list; the run executes the list once, in seeded random order.
+// A difficulty may restrict its asset modes (the execution cells are
+// files-only by design), intersected with the CLI --assets selection.
 function buildCellList(opts, tierNames) {
   const assetModes = opts.assets === 'both' ? ['inline', 'files'] : [opts.assets];
   const caches = opts.cache === 'both' ? ['cold', 'warm'] : [opts.cache];
   const cells = [];
   for (const tier of tierNames) {
-    for (const difficulty of opts.difficulties) {
+    for (const difficultyName of opts.difficulties) {
+      const modes = (DIFFICULTIES[difficultyName].assetModes || ['inline', 'files']).filter(
+        (m) => assetModes.includes(m),
+      );
+      if (modes.length === 0) continue;
       for (const cache of caches) {
-        for (const assets of assetModes) {
-          cells.push({ tier, difficulty, cache, assets });
+        for (const assets of modes) {
+          cells.push({ tier, difficulty: difficultyName, cache, assets });
         }
       }
     }
@@ -1089,6 +1173,13 @@ function computeMetrics(raw) {
     runtimeLazyFetchDurationMs: runtimeEntry ? runtimeEntry.duration : null,
     driverFetchStartMs: driverEntry ? driverEntry.startTime : null,
     driverFetchDurationMs: driverEntry ? driverEntry.duration : null,
+    // The execution interpreter fetch is NOT visible to the top
+    // document's resource timing: the driver loads it inside a
+    // sandboxed ephemeral iframe that is removed after the run, so the
+    // harness captures the fetch from the network layer instead (see
+    // runLoad) and stamps it onto the metrics there.
+    executionFetchStartMs: null,
+    executionFetchDurationMs: null,
     errorCount: (raw.errors || []).length,
     errors: (raw.errors || []).map((e) => ({ t: e.t, workerUnavailable: !!e.workerUnavailable, detail: e.detail || {} })),
   };
@@ -1104,6 +1195,7 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
   const cacheState = warmContext === null ? 'cold' : 'warm';
   let context = null;
   let page = null;
+  let executionFetch = null;
   try {
     if (warmContext === null) {
       context = await browser.newContext(contextOptions);
@@ -1111,6 +1203,22 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
       context = warmContext;
     }
     page = await context.newPage();
+    // The execution interpreter is fetched by the sandboxed ephemeral
+    // iframe the driver creates per armed challenge (the iframe is
+    // removed after the run, so the top document's resource timing
+    // never sees the fetch). The network layer records it: the request
+    // start is an epoch timestamp that anchors to the page's
+    // performance.timeOrigin, and responseEnd (available at
+    // requestfinished, before the iframe is removed) is the duration
+    // in ms from the same baseline.
+    page.on('requestfinished', (req) => {
+      if (executionFetch === null && /\/assets\/execution\./.test(req.url())) {
+        try {
+          const t = req.timing();
+          executionFetch = { epochStartMs: t.startTime, responseEndMs: t.responseEnd };
+        } catch (e) {}
+      }
+    });
     await page.addInitScript(INIT_SCRIPT);
     const cdpSession = await context.newCDPSession(page);
     await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
@@ -1119,7 +1227,7 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
       await cdpSession.send('Network.setCacheDisabled', { cacheDisabled: true });
     }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    const isArgon = difficultyName === 'argon2id';
+    const isArgon = difficulty.isArgon;
     const timeoutMs = isArgon ? 300000 : 90000;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -1140,6 +1248,13 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
         };
     const raw = await collectPageMetrics(page);
     const metrics = computeMetrics(raw);
+    if (executionFetch && typeof raw.timeOrigin === 'number') {
+      const startMs = executionFetch.epochStartMs - raw.timeOrigin;
+      if (startMs >= 0) metrics.executionFetchStartMs = startMs;
+      if (typeof executionFetch.responseEndMs === 'number' && executionFetch.responseEndMs >= 0) {
+        metrics.executionFetchDurationMs = executionFetch.responseEndMs;
+      }
+    }
     const inlineScripts = await measureInlineScripts(page);
     metrics.inlineScriptEvalMs = inlineScripts.length ? inlineScripts.reduce((a, b) => a + b.ms, 0) : null;
     metrics.inlineScriptEvalCount = inlineScripts.length;
@@ -1154,6 +1269,8 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
     metrics.argonFixedWorkPath = fixedWork.argon.path;
     metrics.timedOut = raw.verified === null;
     metrics.difficulty = difficultyName;
+    metrics.dimension = difficulty.dimension;
+    metrics.execution = difficulty.dimension === 'execution';
     metrics.tier = tierName;
     metrics.cache = cacheState;
     metrics.assets = assetMode;
@@ -1193,7 +1310,7 @@ async function runRepeatNavigation(browser, opts, tierName, difficultyName, asse
     const cdpSession = await warmContext.newCDPSession(page);
     await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    const isArgon = difficultyName === 'argon2id';
+    const isArgon = DIFFICULTIES[difficultyName].isArgon;
     const timeoutMs = isArgon ? 300000 : 90000;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -1232,7 +1349,7 @@ async function runRepeatNavigation(browser, opts, tierName, difficultyName, asse
  */
 async function runCell(browser, opts, cell, results) {
   const { tier: tierName, difficulty: difficultyName, cache: cacheState, assets: assetMode } = cell;
-  const reps = difficultyName === 'argon2id' ? opts.argonReps : opts.reps;
+  const reps = DIFFICULTIES[difficultyName].isArgon ? opts.argonReps : opts.reps;
   let warmContext = null;
   if (cacheState === 'warm') {
     warmContext = await browser.newContext(tierContextOptions(tierName));
@@ -1296,6 +1413,8 @@ async function runCell(browser, opts, cell, results) {
           runtimeLazyFetchDurationMs: null,
           driverFetchStartMs: null,
           driverFetchDurationMs: null,
+          executionFetchStartMs: null,
+          executionFetchDurationMs: null,
           shaFixedWorkN: opts.shaFixedWork,
           shaFixedWorkMs: null,
           shaHashesPerSec: null,
@@ -1370,6 +1489,8 @@ async function runCell(browser, opts, cell, results) {
     'runtimeLazyFetchDurationMs',
     'driverFetchStartMs',
     'driverFetchDurationMs',
+    'executionFetchStartMs',
+    'executionFetchDurationMs',
     'shaHashesPerSec',
     'shaFixedWorkMs',
     'argonDerivationsPerSec',
@@ -1503,7 +1624,7 @@ function environment() {
  */
 function clientAssets() {
   const assetsDir = join(REPO_ROOT, 'packages', 'kiwicaptcha-wasm', 'assets');
-  const names = ['widget-driver.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js'];
+  const names = ['widget-driver.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js', 'execution-interpreter.js'];
   const out = {};
   for (const name of names) {
     const file = join(assetsDir, name);
@@ -1572,7 +1693,7 @@ function buildPayload(opts, ctx, completion) {
       sampleSizes: {
         shaReps: opts.reps,
         argonReps: opts.argonReps,
-        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration.',
+        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration. The execution cells inherit the rep count of their PoW profile (execvm and execsha18 use the SHA count, execargon and execchain the Argon count).',
       },
       argonLadder: {
         mKib: opts.argonMKib,
@@ -1584,14 +1705,14 @@ function buildPayload(opts, ctx, completion) {
       },
       assets: {
         inline: 'the fixture inlines the wasm glue and the driver in the page HTML',
-        files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, and a lazy Argon runtime that is fetched only when a memory-hard challenge arrives',
+        files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, a lazy Argon runtime that is fetched only when a memory-hard challenge arrives, and the lazy execution interpreter that is fetched only when an armed challenge arrives (the execution cells are files-only by design)',
       },
     },
     fixture: {
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
       php: opts.php,
-      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib) and the assets=files knob; the fixture default behavior is unchanged',
+      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib), the assets=files knob, and the execution arms (?execution=1 armed challenges, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
     },
     tiers: Object.fromEntries(
       tierNames.map((t) => [
@@ -1600,7 +1721,15 @@ function buildPayload(opts, ctx, completion) {
       ]),
     ),
     difficulties: Object.fromEntries(
-      opts.difficulties.map((d) => [d, { label: DIFFICULTIES[d].label, query: DIFFICULTIES[d].query(opts) }]),
+      opts.difficulties.map((d) => [
+        d,
+        {
+          label: DIFFICULTIES[d].label,
+          dimension: DIFFICULTIES[d].dimension,
+          query: DIFFICULTIES[d].query(opts),
+          assetModes: DIFFICULTIES[d].assetModes || ['inline', 'files'],
+        },
+      ]),
     ),
     options: {
       reps: opts.reps,
@@ -1624,11 +1753,13 @@ function buildPayload(opts, ctx, completion) {
  * reasons, any results file that is not a clean completed full-matrix
  * run: the completion marker must be present (the incomplete-run
  * guard), the full default matrix must be covered (all seven tiers,
- * all four difficulties, cold and warm, inline and files), the sample
- * sizes must meet the defaults, and the argon ladder must be the real
- * one. Only then is the file copied to results/baseline.json. The
- * current committed baseline.json stays untouched by every run; it is
- * replaced only through this loader.
+ * all eight difficulties — the four ordinary cells plus the four
+ * ExecutionChallengeV1 cells — cold and warm, inline and files, with
+ * the execution cells files-only by design), the sample sizes must
+ * meet the defaults, and the argon ladder must be the real one. Only
+ * then is the file copied to results/baseline.json. The current
+ * committed baseline.json stays untouched by every run; it is replaced
+ * only through this loader.
  */
 function promoteBaseline(file, baselinePath) {
   let payload;
@@ -1654,8 +1785,9 @@ function promoteBaseline(file, baselinePath) {
     const expected = [];
     for (const t of Object.keys(TIERS)) {
       for (const d of Object.keys(DIFFICULTIES)) {
+        const modes = DIFFICULTIES[d].assetModes || ['inline', 'files'];
         for (const c of ['cold', 'warm']) {
-          for (const a of ['inline', 'files']) {
+          for (const a of modes) {
             expected.push(`${t}:${d}:${c}:${a}`);
           }
         }

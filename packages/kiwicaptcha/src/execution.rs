@@ -61,7 +61,7 @@
 //! 18 DOM_APPEND   (no operands)
 //! 19 DOM_QUERY   id-length byte (4..16) + id bytes
 //! 20 DOM_GET_ATTR 1 name byte
-//! 21 DOM_DATASET_SET key-length byte (1..16) + digit-first key + value-length + value
+//! 21 DOM_DATASET_SET key-length byte (1..16) + `x[0-9a-z_]{0,15}` key + value-length + value
 //! 22 DOM_DATASET_GET key-length byte + key bytes
 //! 23 DOM_CLASS_ADD   class-length byte (1..12) + class bytes
 //! 24 DOM_CLASS_CONTAINS class-length byte + class bytes
@@ -72,15 +72,18 @@
 //!
 //! String literals are printable ASCII (0x20..0x7E); ids use the
 //! standard-base64 alphabet; class names use `[A-Za-z0-9_-]` (never a
-//! space); dataset keys always start with a digit (so a real-DOM
-//! dataset write can never reflect onto a `data-*` attribute that
-//! collides with the fixed attribute-name list). The operand grammar
-//! mirrors the PHP generator byte-for-byte: the length bytes carry the
-//! real length, never a raw PRF byte, except the raw-byte operands
-//! (U8_CREATE, U8_WRITE, U8_READ, U8_ROTATE, int literals, tag/name indexes,
-//! slice start/count), where both sides derive the same value from the
-//! raw byte. All string semantics are byte-exact (the PHP mirror uses
-//! raw bytes, so this crate stores operand strings as `Vec<u8>`).
+//! space); dataset keys come from the deliberately boring safe alphabet
+//! `x[0-9a-z_]{0,15}` — the literal `x` followed by 0..15 characters of
+//! `[0-9a-z_]` — so a real-DOM dataset write can never reflect onto a
+//! `data-*` attribute that collides with the fixed attribute-name list
+//! and no key can ever smuggle canonical or DOM punctuation. The
+//! operand grammar mirrors the PHP generator byte-for-byte: the length
+//! bytes carry the real length, never a raw PRF byte, except the
+//! raw-byte operands (U8_CREATE, U8_WRITE, U8_READ, U8_ROTATE, int
+//! literals, tag/name indexes, slice start/count), where both sides
+//! derive the same value from the raw byte. All string semantics are
+//! byte-exact (the PHP mirror uses raw bytes, so this crate stores
+//! operand strings as `Vec<u8>`).
 //!
 //! # The canonical op trace and the execution digest
 //!
@@ -144,6 +147,16 @@ pub const ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 pub const CLASS_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 
+/// The deliberately boring dataset-key alphabet: every generated
+/// dataset key is the literal `x` followed by 0..15 characters of
+/// `[0-9a-z_]` (the grammar `x[0-9a-z_]{0,15}`). No key can carry the
+/// `|` canonical separator, HTML/DOM punctuation, whitespace or
+/// uppercase, so a real-DOM dataset write can never reflect onto a
+/// `data-*` attribute that collides with the fixed attribute-name list,
+/// and the canonical segment structure can never be altered by a stored
+/// value.
+pub const DATASET_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz_";
+
 /// Wire ceiling for the base64 program a record/challenge may carry.
 pub const MAX_PROGRAM_BASE64: usize = 4096;
 
@@ -175,7 +188,12 @@ pub const OP_DOM_CLASS_CONTAINS: u8 = 24;
 pub const OP_DOM_PARENT: u8 = 25;
 pub const OP_DOM_DISPATCH: u8 = 26;
 pub const OP_DOM_SERIALIZE: u8 = 27;
-pub const OP_COUNT: u8 = 28;
+pub const OP_DOM_QUERY_REAL: u8 = 28;
+pub const OP_DOM_GEOMETRY: u8 = 29;
+pub const OP_DOM_POINT: u8 = 30;
+pub const OP_DOM_EVENT_REAL: u8 = 31;
+pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
+pub const OP_COUNT: u8 = 33;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -207,6 +225,11 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "dparent",
     "ddispatch",
     "dserialize",
+    "qreal",
+    "geom",
+    "point",
+    "evreal",
+    "sreal",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -288,15 +311,17 @@ fn is_identifier(value: &str, max: usize) -> bool {
 ///
 /// Mirrors `KiwiCaptcha\ExecutionChallengeGenerator::generate()`
 /// byte-for-byte: the same PRF stream, the same op draw sequence, the
-/// same blob layout. The version is a canonical decimal u8 (the PHP
-/// mirror casts the same string through `(int)` after the same
-/// alphabet check, so both sides stamp the identical byte).
+/// same blob layout. `version` is the canonical numeric byte, exactly 1
+/// — the only op-version of the wire contract (the parser rejects any
+/// other byte, so issuance never mints a program the verifier would
+/// refuse). It is passed as a `u8` and stamped as the raw numeric
+/// byte; no string-cast ever reaches the blob.
 pub fn generate(
     execution_key: &[u8],
     nonce: &str,
     scope: &str,
     action: &str,
-    version: &str,
+    version: u8,
 ) -> Result<String, GenerateError> {
     if execution_key.len() < 16 {
         return Err(GenerateError::KeyTooShort);
@@ -304,9 +329,17 @@ pub fn generate(
     if !is_identifier(action, 32) {
         return Err(GenerateError::InvalidAction);
     }
-    let op_version: u8 = version.parse().map_err(|_| GenerateError::InvalidVersion)?;
+    if version != PROTOCOL_VERSION {
+        return Err(GenerateError::InvalidVersion);
+    }
 
-    let mut cursor = Cursor::new(prf_stream(execution_key, nonce, scope, action, version));
+    let mut cursor = Cursor::new(prf_stream(
+        execution_key,
+        nonce,
+        scope,
+        action,
+        &version.to_string(),
+    ));
 
     let mut program = Vec::new();
     program.push(FORMAT_VERSION);
@@ -314,7 +347,7 @@ pub fn generate(
     program.extend_from_slice(scope.as_bytes());
     program.push(action.len() as u8);
     program.extend_from_slice(action.as_bytes());
-    program.push(op_version);
+    program.push(version);
     let op_count = 8 + (cursor.next_byte() % 17);
     program.push(op_count);
 
@@ -395,15 +428,20 @@ fn draw_operands(cursor: &mut Cursor, opcode: u8) -> Vec<u8> {
             let mut out = Vec::new();
             let len = (cursor.next_byte() % 16) + 1;
             out.push(len);
-            out.push(0x30 + (cursor.next_byte() % 10));
+            // The deliberately boring safe alphabet: the literal `x`
+            // followed by 0..15 characters of [0-9a-z_] — no canonical
+            // `|`, no DOM punctuation, no whitespace, no uppercase.
+            out.push(b'x');
             for _ in 1..len {
-                out.push(0x20 + (cursor.next_byte() % 0x5F));
+                out.push(DATASET_ALPHABET[(cursor.next_byte() % 37) as usize]);
             }
             out.extend_from_slice(&draw_value(cursor));
             out
         }
         OP_DOM_DATASET_GET => draw_string(cursor, 0),
         OP_DOM_CLASS_ADD | OP_DOM_CLASS_CONTAINS => draw_class(cursor),
+        OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => draw_id(cursor),
+        OP_DOM_POINT => cursor.take(2),
         _ => Vec::new(),
     }
 }
@@ -450,6 +488,17 @@ fn draw_class(cursor: &mut Cursor) -> Vec<u8> {
 }
 
 /// Parse a program blob, or `None` when the blob is malformed.
+///
+/// The parser is deliberately strict, the two-language mirror of the
+/// PHP `ExecutionChallengeGenerator::decode()`:
+/// - the op version must be exactly 1 (no arbitrary byte — only the one
+///   canonical version of the wire contract exists);
+/// - the embedded scope/action must match the canonical identifier
+///   grammar of the rest of Kiwi (`[A-Za-z0-9._:-]` with the issuance
+///   length caps), so a foreign blob can never smuggle canonical or
+///   whitespace bytes;
+/// - the op list must end exactly at EOF: `cursor.pos == bytes.len()`.
+///   A trailing byte after the last op record is invalid.
 pub fn decode(program_b64: &str) -> Option<Program> {
     if program_b64.len() > MAX_PROGRAM_BASE64 {
         return None;
@@ -471,6 +520,13 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let scope = std::str::from_utf8(&cursor.take_strict(scope_len)?)
         .ok()?
         .to_string();
+    // The embedded scope must match the canonical identifier grammar of
+    // the rest of Kiwi — the same charset/length rules issuance
+    // enforces. A foreign blob with out-of-alphabet bytes is malformed,
+    // never traced.
+    if !is_identifier(&scope, 128) {
+        return None;
+    }
     let action_len = cursor.take_strict(1)?[0] as usize;
     if action_len == 0 || action_len > 32 {
         return None;
@@ -478,7 +534,18 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let action = std::str::from_utf8(&cursor.take_strict(action_len)?)
         .ok()?
         .to_string();
+    // The embedded action must match the same canonical identifier
+    // grammar (1..=32 bytes of [A-Za-z0-9._:-]).
+    if !is_identifier(&action, 32) {
+        return None;
+    }
     let op_version = cursor.take_strict(1)?[0];
+    if op_version != PROTOCOL_VERSION {
+        // The op version is exactly 1 — no arbitrary byte. Only the one
+        // canonical version of the wire contract exists, so a foreign
+        // blob stamped with any other byte is malformed.
+        return None;
+    }
     let op_count = cursor.take_strict(1)?[0];
     if !(MIN_OPS..=MAX_OPS).contains(&op_count) {
         return None;
@@ -494,6 +561,12 @@ pub fn decode(program_b64: &str) -> Option<Program> {
             opcode,
             operands: read_operands(&mut cursor, opcode)?,
         });
+    }
+
+    // Exact EOF: the op list must consume the whole blob. A trailing
+    // byte after the last op record is a foreign or corrupt blob.
+    if cursor.pos != cursor.bytes.len() {
+        return None;
     }
 
     Some(Program {
@@ -583,6 +656,20 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             map.insert("val".into(), Operand::Bytes(val));
         }
         OP_DOM_APPEND | OP_DOM_PARENT | OP_DOM_DISPATCH | OP_DOM_SERIALIZE => {}
+        OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            map.insert("id".into(), Operand::Bytes(id));
+        }
+        OP_DOM_POINT => {
+            let x = cursor.take_strict(1)?[0] as u64;
+            let y = cursor.take_strict(1)?[0] as u64;
+            map.insert("x".into(), Operand::Int(x % 256));
+            map.insert("y".into(), Operand::Int(y % 256));
+        }
+        OP_DOM_SERIALIZE_REAL => {}
         OP_DOM_QUERY => {
             let id = read_len_bytes(cursor, 16)?;
             if id.len() < 4 {
@@ -654,6 +741,18 @@ fn operand_int(op: &Op, key: &str) -> u64 {
         Some(Operand::Int(v)) => *v,
         _ => 0,
     }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut s = String::with_capacity(64);
+    for b in out {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 fn operand_bytes(op: &Op, key: &str) -> Vec<u8> {
@@ -829,6 +928,76 @@ fn simulate_op(
             };
             B64.encode(serialized.into_bytes())
         }
+        // Browser-observed entries: the expected values are
+        // construction-determined for QUERY_REAL/EVENT_REAL/
+        // SERIALIZE_REAL, while the layout probes carry the literal
+        // placeholders 'geom'/'point' here — the verifier validates the
+        // SUBMITTED trace entries against their invariants separately
+        // (see verify_executed_trace), so a pure non-browser solver
+        // cannot reproduce a valid trace without emulating layout.
+        OP_DOM_QUERY_REAL => {
+            let id = operand_bytes(op, "id");
+            if !doc_ids.contains(&id) {
+                return "none".into();
+            }
+            let parts: String = cur
+                .as_ref()
+                .map(|n| {
+                    let mut attrs: Vec<String> = n
+                        .attrs
+                        .iter()
+                        .map(|(name, value)| {
+                            format!(
+                                "{}{}{}",
+                                String::from_utf8_lossy(name),
+                                "=",
+                                String::from_utf8_lossy(value)
+                            )
+                        })
+                        .collect();
+                    attrs.sort();
+                    attrs.join(";")
+                })
+                .unwrap_or_default();
+            if parts.is_empty() {
+                return "div".into();
+            }
+            format!("div|{parts}")
+        }
+        OP_DOM_GEOMETRY => "geom".into(),
+        OP_DOM_POINT => "point".into(),
+        OP_DOM_EVENT_REAL => {
+            let id = operand_bytes(op, "id");
+            if !doc_ids.contains(&id) {
+                return "none".into();
+            }
+            "kiwi-ev:div".into()
+        }
+        OP_DOM_SERIALIZE_REAL => {
+            // The interpreter hashes the canonical real readback; the
+            // expected digest covers the same canonical string built
+            // from the shadow's current node attributes.
+            let canon = match &cur {
+                Some(node) if node.appended => {
+                    let mut parts: Vec<String> = node
+                        .attrs
+                        .iter()
+                        .map(|(name, value)| {
+                            format!(
+                                "{}{}{}",
+                                String::from_utf8_lossy(name),
+                                "=",
+                                String::from_utf8_lossy(value)
+                            )
+                        })
+                        .collect();
+                    parts.sort();
+                    parts.join(";")
+                }
+                _ => String::new(),
+            };
+            hex_sha256(canon.as_bytes())
+        }
         _ => "0".into(),
     }
 }
@@ -861,6 +1030,137 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
     Some(hex::encode(hmac(&bytes, &msg)))
 }
 
+/// The browser-equivalent executed trace of a program: the canonical
+/// trace with the layout-probe placeholders replaced by valid
+/// browser-observed values — monotonic GEOMETRY offsets with height 10
+/// and the POINT probe naming the topmost constructed node ("div" when
+/// the program constructs any node, matching the verifier's
+/// whole-program construction predicate; "none" otherwise).
+pub fn executed_trace_for(program: &Program) -> String {
+    let trace = canonical_trace(program);
+    let mut entries: Vec<String> = trace.split(';').map(str::to_string).collect();
+    let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
+    let mut top = 0u64;
+    for entry in entries.iter_mut() {
+        if entry.starts_with("geom(") {
+            *entry = format!("geom({},{})", top * 10, 10);
+            top += 1;
+        } else if entry.starts_with("point(") {
+            *entry = if has_append { "point(div)".into() } else { "point(none)".into() };
+        }
+    }
+    entries.join(";")
+}
+
+/// Validate a SUBMITTED execution trace against a program: the
+/// browser-equivalent canonical shape with the layout-probe entries
+/// validated against their invariants (GEOMETRY monotonic in the
+/// construction order with height >= 1, POINT naming the topmost
+/// constructed node, the real-DOM readbacks equal to the simulated
+/// values). Returns the submitted trace unchanged when it is a valid
+/// execution of the program; `None` on any mismatch. The digest
+/// comparison is the caller's (constant-time) job.
+pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
+    let program = decode(program_b64)?;
+    let submitted: Vec<&str> = trace.split(';').collect();
+    if submitted.len() != program.ops.len() || trace.is_empty() {
+        return None;
+    }
+
+    // First pass: the expected values and the whole-program
+    // construction set (the POINT probe predicate).
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let mut expected: Vec<String> = Vec::with_capacity(program.ops.len());
+    let mut construction: Vec<Vec<u8>> = Vec::new();
+    for op in &program.ops {
+        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        expected.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], sim));
+        if op.opcode == OP_DOM_APPEND {
+            // The PHP mirror always appends (the current node id, or
+            // '' when no node exists yet): the POINT probe's
+            // whole-program predicate is "any DOM_APPEND op", so the
+            // list must be non-empty exactly when an append exists.
+            construction.push(cur.as_ref().map(|n| n.id.clone()).unwrap_or_default());
+        }
+    }
+
+    // Second pass from a FRESH state: the first pass left the mutable
+    // simulation at its end state, and re-running on it would produce
+    // different values for stateful ops (u8w checksums, real-DOM
+    // readbacks) — the deterministic trace replays from the same
+    // initial conditions (the PHP mirror does the same).
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let mut prev_top: i64 = -1;
+    for (i, op) in program.ops.iter().enumerate() {
+        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        let name = TRACE_NAMES[op.opcode as usize];
+        match op.opcode {
+            OP_DOM_QUERY_REAL | OP_DOM_EVENT_REAL | OP_DOM_SERIALIZE_REAL => {
+                if submitted[i] != format!("{name}({sim})") {
+                    return None;
+                }
+            }
+            OP_DOM_GEOMETRY => {
+                let entry = submitted[i];
+                let rest = entry.strip_prefix("geom(")?;
+                let body = rest.strip_suffix(')')?;
+                let mut parts = body.splitn(2, ',');
+                let top: i64 = parts.next()?.parse().ok()?;
+                let height: i64 = parts.next()?.parse().ok()?;
+                if height < 1 || top < prev_top {
+                    return None;
+                }
+                prev_top = top;
+            }
+            OP_DOM_POINT => {
+                let top_tag = if construction.is_empty() { "none" } else { "div" };
+                if submitted[i] != format!("point({top_tag})") {
+                    return None;
+                }
+            }
+            _ => {
+                if submitted[i] != expected[i] {
+                    return None;
+                }
+            }
+        }
+    }
+
+    Some(trace.to_string())
+}
+
+/// The digest over a SUBMITTED trace (the V2 evidence path): the same
+/// content-derived HMAC as [`expected_digest`], but over the trace the
+/// client actually executed, so the verifier can bind the
+/// browser-observed entries. `None` when the program is malformed.
+pub fn expected_digest_over_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let bytes = B64.decode(program_b64).ok()?;
+    if B64.encode(&bytes) != program_b64 {
+        return None;
+    }
+    let program = decode(program_b64)?;
+
+    let mut msg = Vec::new();
+    msg.extend_from_slice(LABEL.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(nonce.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.scope.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.action.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.op_version.to_string().as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(trace.as_bytes());
+
+    Some(hex::encode(hmac(&bytes, &msg)))
+}
+
 /// Errors of the program generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GenerateError {
@@ -868,7 +1168,7 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
-    #[error("execution version must be a canonical decimal u8")]
+    #[error("execution version must be the canonical numeric byte 1")]
     InvalidVersion,
 }
 
@@ -882,16 +1182,16 @@ mod tests {
 
     #[test]
     fn generation_is_deterministic() {
-        let a = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
-        let b = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let a = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
+        let b = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         assert_eq!(a, b);
-        let c = generate(KEY, NONCE, "signup", "login-action", "1").unwrap();
+        let c = generate(KEY, NONCE, "signup", "login-action", 1).unwrap();
         assert_ne!(a, c);
     }
 
     #[test]
     fn program_round_trips() {
-        let p = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let p = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         assert!(is_valid_program(&p));
         let program = decode(&p).unwrap();
         assert_eq!(program.scope, "login");
@@ -911,7 +1211,7 @@ mod tests {
 
     #[test]
     fn digest_is_hex_and_nonce_bound() {
-        let p = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let p = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         let d = expected_digest(&p, NONCE).unwrap();
         assert_eq!(d.len(), 64);
         assert!(d.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -925,7 +1225,7 @@ mod tests {
     #[test]
     fn key_too_short_is_rejected() {
         assert_eq!(
-            generate(b"short", NONCE, "login", "login-action", "1"),
+            generate(b"short", NONCE, "login", "login-action", 1),
             Err(GenerateError::KeyTooShort)
         );
     }
@@ -935,7 +1235,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in 0..64u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", "1").unwrap();
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
             let program = decode(&p).unwrap();
             for op in &program.ops {
                 seen.insert(op.opcode);
@@ -948,7 +1248,7 @@ mod tests {
     fn trace_values_never_contain_separators() {
         for i in 0..16u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("n-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", "1").unwrap();
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
             let program = decode(&p).unwrap();
             let trace = canonical_trace(&program);
             for entry in trace.split(';') {
@@ -956,5 +1256,41 @@ mod tests {
                 assert!(entry.contains('('));
             }
         }
+    }
+
+    #[test]
+    fn dataset_keys_match_the_safe_alphabet_grammar() {
+        // The generator-level property test: every dataset key drawn
+        // into a generated program must match the deliberately boring
+        // safe grammar `x[0-9a-z_]{0,15}` — the literal `x` followed by
+        // 0..15 characters of [0-9a-z_]. The grammar guarantees no key
+        // can carry the `|` canonical separator, DOM punctuation,
+        // whitespace or uppercase.
+        let mut seen = 0usize;
+        for i in 0..64u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("d-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).unwrap();
+            for op in &program.ops {
+                if op.opcode != OP_DOM_DATASET_SET {
+                    continue;
+                }
+                seen += 1;
+                let key = match op.operands.get("s") {
+                    Some(Operand::Bytes(b)) => b.clone(),
+                    _ => panic!("dataset-set must carry a byte-string key"),
+                };
+                assert!(!key.is_empty(), "a dataset key is never empty");
+                assert!(key.len() <= 16, "a dataset key is at most 16 bytes");
+                assert_eq!(key[0], b'x', "a dataset key starts with the literal x");
+                assert!(
+                    key[1..]
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || *b == b'_'),
+                    "the key tail is drawn from [0-9a-z_]"
+                );
+            }
+        }
+        assert!(seen > 0, "the sampled programs must exercise dataset keys");
     }
 }

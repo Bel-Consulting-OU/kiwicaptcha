@@ -68,7 +68,7 @@ These invariants are pinned by cross-language tests; see [the claims registry](p
 - Adaptive risk engine: self-hosted, privacy-first scoring that adapts the challenge or denies issuance per source, with post-solve reassessment and optional chained step-up.
 - Provider-compatible migration: a `/siteverify` surface and an `api.js` compat loader for reCAPTCHA, hCaptcha, and Turnstile pages.
 
-The full per-feature documentation (protocol v2 signing, clock policy, attempt accounting, key rotation, revocation) is in [the Rust core documentation](packages/kiwicaptcha/README.md).
+The full per-feature documentation (protocol v2 signing, the v3 decoy and v4 execution-canonical extensions, clock policy, attempt accounting, key rotation, revocation) is in [the Rust core documentation](packages/kiwicaptcha/README.md).
 
 ## Architecture
 

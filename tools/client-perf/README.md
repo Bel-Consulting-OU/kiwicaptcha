@@ -2,9 +2,11 @@
 
 A Playwright-based client benchmark that drives the browser fixture
 (`tests/browser/router.php`) and measures the widget's real browser
-costs per difficulty tier: SHA-256 at 16/18/20 leading zero bits and
-Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), in
-both asset modes (inline and files). This is the calibration lab
+costs per difficulty tier: SHA-256 at 16/18/20 leading zero bits,
+Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), and
+the four ExecutionChallengeV1 cells (execvm, execsha18, execargon,
+execchain — see the execution-cells section), in both asset modes
+(inline and files). This is the calibration lab
 referenced by the `RiskProfileResolver` calibration note: the highest
 Argon rung and the SHA ladder must be measured on the throttled tiers,
 never assumed from desktop estimates.
@@ -45,6 +47,7 @@ else. Each control is described in detail below.
 | `resourceCount` | resource entries observed for the load |
 | `runtimeLazyFetchStartMs` | files-mode Argon2id: when the lazy wasm runtime fetch starts relative to navigation (the fetch happens only when a memory-hard challenge arrives) |
 | `driverFetchStartMs` | files mode: when the external driver asset starts loading relative to navigation |
+| `executionFetchStartMs` / `executionFetchDurationMs` | execution cells: when the lazy `execution.<sha256>.js` interpreter fetch starts relative to navigation and how long it takes. The fetch happens inside the driver's sandboxed ephemeral iframe, which is removed after the run, so the top document's resource timing never sees it; the harness captures it from the network layer (request start anchored to `performance.timeOrigin`, duration from `requestfinished`) |
 | `longTaskCount` / `longTaskTotalMs` | Long Task API: main-thread blocks > 50 ms |
 | `peakHeapMb` / `finalHeapMb` | `performance.memory.usedJSHeapSize` sampled every 50 ms plus the final sample |
 | `domContentLoadedMs` / `loadMs` | Navigation Timing |
@@ -79,6 +82,33 @@ throttled tiers). Warm cells pre-warm the context with one discarded
 navigation, so every recorded warm rep is a cache-hit load, not the
 populating one.
 
+## The ExecutionChallengeV1 cells
+
+The fixture arms the execution dimension with `?execution=1` (the
+mirror of the bundle's `risk.execution_challenge` gate): the challenge
+response then carries an execution program the driver runs in a
+sandboxed ephemeral iframe (the lazy `execution.<sha256>.js`
+interpreter asset) and the execution digest rides the solution token.
+The interpreter asset exists only in the files tier (the fixture emits
+its SRI-linked `data-kiwi-execution-src` only in the `?assets=files`
+variant), so the execution cells are files-only by design — an inline
+page never arms the dimension.
+
+| difficulty key | what it measures |
+|---|---|
+| `execvm` | the execution VM on an ordinary fixture-default SHA challenge (no PoW change): interpreter fetch + iframe creation + VM run + digest, isolated from difficulty cost |
+| `execsha18` | the execution dimension on the ordinary 18-bit SHA rung |
+| `execargon` | the execution dimension on the real-ladder Argon2id rung (m=16384 KiB, target 8) |
+| `execchain` | the execution dimension on the chained-escalation path: the driver requests SHA-256 and the server issues the memory-hard rung at the real ladder (the lazy runtime fetch and worker startup are paid too) |
+
+The execution cells inherit the rep count of their PoW profile:
+`execvm` and `execsha18` use the SHA count (default 50, `--reps`),
+`execargon` and `execchain` the Argon count (default 20,
+`--argon-reps`). Every cell records the ordinary solve/parse/wasm/
+worker/fixed-work metrics plus the interpreter fetch start and
+duration, so the execution marginal cost is separable from the
+difficulty cost in the same file.
+
 ## Device tiers
 
 All seven tiers run in Chromium today. They are emulation tiers, not
@@ -99,10 +129,11 @@ device evidence (see the note above the table of what is measured).
 n=5 (SHA) / n=3 (Argon) cannot support a p95/p99 claim. The harness
 defaults to 50 SHA-256 repetitions and 20 Argon2id repetitions per
 configuration, and the documented ranges are 50-100 for SHA and 20-30
-for Argon. `--samples N` raises both at once for a specific
-measurement, and `--quick` lowers them for iteration. The results keep
-every repetition and the aggregated percentiles, so a percentile's
-sample is visible in the same file.
+for Argon. The execution cells inherit the count of their PoW profile
+(SHA-profile cells 50, Argon-profile cells 20). `--samples N` raises
+both at once for a specific measurement, and `--quick` lowers them for
+iteration. The results keep every repetition and the aggregated
+percentiles, so a percentile's sample is visible in the same file.
 
 A percentile is only as good as its sample: with 50 samples the p95 is
 the 48th of 50 ordered points and the p99 is the maximum, so treat the
@@ -182,20 +213,23 @@ node tools/client-perf/client-perf.mjs --promote-baseline FILE
 
 The loader refuses, with the reasons, any results file that lacks the
 completion marker or that does not cover the full default matrix (all
-seven tiers, all four difficulties, cold and warm, inline and files).
-It also refuses runs recorded below the default sample sizes (50 SHA
-and 20 Argon repetitions) or with a non-real argon ladder (m=16384
-KiB, target 8). Only a clean full run can replace
-`results/baseline.json`, so the committed baseline is never
-overwritten by an interrupted or partial run.
+seven tiers, all eight difficulties — the four ordinary cells plus the
+four execution cells — cold and warm, inline and files, with the
+execution cells files-only by design). It also refuses runs recorded
+below the default sample sizes (50 SHA and 20 Argon repetitions) or
+with a non-real argon ladder (m=16384 KiB, target 8). Only a clean
+full run can replace `results/baseline.json`, so the committed
+baseline is never overwritten by an interrupted or partial run.
 
 ## Running
 
 ```sh
-# Default: all seven tiers, sha16+sha18+sha20+argon2id at the real
-# ladder (16 MiB, target 8), cold and warm, inline and files, plus the
-# 3-widget page scenario. SHA cells run 50 reps, Argon cells 20. The
-# committed run took about 3 hours on the recording Mac.
+# Default: all seven tiers, sha16+sha18+sha20+argon2id plus the four
+# execution cells (execvm, execsha18, execargon, execchain) at the real
+# ladder (16 MiB, target 8), cold and warm, inline and files (the
+# execution cells files-only), plus the 3-widget page scenario. SHA
+# cells run 50 reps, Argon cells 20. A committed full run takes many
+# hours on the recording Mac.
 node tools/client-perf/client-perf.mjs
 
 # Iteration mode (two tiers, 3 SHA / 2 Argon reps, both asset modes):
@@ -232,10 +266,13 @@ Chromium build from `npx playwright install chromium` if the fixture's
 bundled engine is absent.
 
 Fixture knobs used by the harness (opt-in, defaults byte-identical to
-the historical fixture): `?bits=`, `?argon_bits=`, `?m_kib=` on the
-challenge endpoint and `?assets=files` plus `?widgets=N` on the widget
-page. The fixture clamps argon bits to 1..10 and the memory envelope
-to 8..65536 KiB, so the real ladder (8 bits, 16384 KiB) is permitted.
+the historical fixture): `?bits=`, `?argon_bits=`, `?m_kib=` and
+`?execution=1` (the execution arm) plus `?escalate=argon` (the chained
+escalation arm) on the challenge endpoint, and `?assets=files` plus
+`?widgets=N` on the widget page. The fixture clamps argon bits to
+1..10 and the memory envelope to 8..65536 KiB, so the real ladder (8
+bits, 16384 KiB) is permitted. The execution cells pass the real
+ladder knobs to the escalated challenge exactly like the argon cell.
 
 ## Physical-run procedure (the release boundary)
 
@@ -278,8 +315,9 @@ widget, or the difficulty ladder, run the same matrix on real devices:
   schema `kiwicaptcha.client-perf/3`, environment + methodology +
   completion marker + tiers + options + per-cell aggregates and
   per-repetition samples). The payload records the served client
-  assets (driver, glue, worker) with their sizes and sha256 prefixes,
-  so a run is attributable to the exact bytes measured.
+  assets (driver, glue, worker, execution interpreter) with their
+  sizes and sha256 prefixes, so a run is attributable to the exact
+  bytes measured.
 - `results/results-<date>-partial-<time>.json` is a crashed or
   interrupted run, written without the completion marker. It is
   evidence only and can never be promoted to baseline.
@@ -298,12 +336,14 @@ The committed `results/baseline.json` is still the legacy pre-matrix
 recording (schema 1, labelled legacy in the file itself). No clean
 controlled full-matrix run has completed on this machine: the real
 ladder costs tens of seconds per Argon solve even unthrottled, the
-throttled tiers cost more, and a full run is a multi-hour job that has
-crashed before finishing. The baseline stays legacy-labelled until a
-clean full run completes and is promoted with the loader above. The
-physical-device procedure remains the release boundary: emulation
-numbers, with or without a fresh full run, are calibration signals,
-never mobile claims.
+throttled tiers cost more, a full run is a multi-hour job that has
+crashed before finishing, and the default matrix now also carries the
+four files-tier execution cells. The baseline stays legacy-labelled
+until a clean full run completes and is promoted with the loader above
+(the loader requires the execution cells, so a run recorded against an
+earlier matrix can never be promoted). The physical-device procedure
+remains the release boundary: emulation numbers, with or without a
+fresh full run, are calibration signals, never mobile claims.
 
 ## Notes and caveats
 
@@ -338,3 +378,10 @@ never mobile claims.
   page whose CSP forbids Blob workers cannot host the probe; the lab
   fixture page has no CSP, and the probe is a lab measurement, not
   part of the widget.
+- The execution interpreter fetch happens inside the driver's
+  sandboxed ephemeral iframe, so it never appears in the top
+  document's `transferredBytes`/`cacheHitCount` accounting; the cell
+  records it explicitly via `executionFetchStartMs`/`DurationMs`
+  (network layer), and its wire size is budgeted separately in
+  `packages/kiwicaptcha/tools/perf-baselines.json`
+  (`budgets.widget_execution`, enforced by perf-budget.sh).

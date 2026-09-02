@@ -13,15 +13,16 @@
 //! held by one language refuses the other, and the loser's recovery
 //! resolves the winner's committed outcome.
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use kiwicaptcha::verify::{
     solve_for_test, verify_solution, RequestBindingExpectation, VerifyContext, VerifyError,
     VerifyOutcome,
 };
 
 /// The shared cross-language signing secret (kid 1) both language
-/// harnesses configure. Held here so the v3 interop cases never repeat
-/// the literal.
-#[cfg(feature = "redis")]
+/// harnesses configure. Held here so the interop cases never repeat the
+/// literal.
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
 #[cfg(feature = "redis")]
@@ -71,6 +72,7 @@ fn rust_verifies_php_issued_record() {
         expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: None,
+        execution_trace: None,
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -105,6 +107,7 @@ fn rust_verifies_php_issued_record() {
         expected_policy_version: None,
         client_ip: Some("9.9.9.9"),
         execution_digest: None,
+        execution_trace: None,
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -912,6 +915,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
         execution_digest: None,
+        execution_trace: None,
     }
     .encode()
 }
@@ -987,6 +991,158 @@ fn php_script_with_input(
         ));
     }
     Ok(stdout)
+}
+
+#[test]
+fn rust_verifies_php_issued_v4_record() {
+    // The v4 direction: PHP issues an execution-armed
+    // (protocol v4) record. Rust must reconstruct the byte-exact
+    // canonical (the `|execution_version|execution_commitment` segments
+    // inside the HMAC input), verify the commitment equivalence
+    // `SHA256(stored program) == signed commitment`, and verify the
+    // solved token with the recomputed execution digest.
+    let Ok(path) = std::env::var("KC_PHP_RECORD") else {
+        eprintln!("KC_PHP_RECORD unset — v4 cross-language test skipped");
+        return;
+    };
+    let json = std::fs::read_to_string(&path).expect("KC_PHP_RECORD file");
+    let record: kiwicaptcha::ChallengeRecord =
+        serde_json::from_str(&json).expect("PHP JSON must deserialize into the Rust record");
+    if record.protocol_version != 4 {
+        eprintln!("KC_PHP_RECORD is not a v4 record — v4 cross-language test skipped");
+        return;
+    }
+    assert_eq!(record.scope, "login");
+    assert!(record.execution_program.is_some());
+    assert_eq!(record.execution_version, Some(1), "execution_version is the canonical byte 1");
+    let program = record.execution_program.as_deref().expect("armed");
+    let commitment = record.execution_commitment.as_deref().expect("armed");
+    assert_eq!(commitment.len(), 64);
+    assert_eq!(
+        kiwicaptcha::challenge::execution_commitment(program),
+        commitment,
+        "the PHP-written commitment must equal the Rust recomputed SHA-256 of the stored program"
+    );
+    // The canonical reconstruction is byte-exact: the signed challenge
+    // string is base64(canonical).signature, and the Rust reconstruction
+    // must reproduce the exact bytes PHP signed.
+    let canonical_from_challenge = {
+        let dot = record.challenge.find('.').expect("challenge separator");
+        B64.decode(&record.challenge[..dot]).expect("canonical base64")
+    };
+    let canonical_reconstructed = kiwicaptcha::challenge::canonical_signing_input_v2(&record);
+    assert_eq!(
+        canonical_reconstructed.as_bytes(),
+        canonical_from_challenge,
+        "the Rust canonical reconstruction must be byte-exact against the PHP-signed canonical"
+    );
+    assert!(canonical_reconstructed.ends_with(&format!("|1|{commitment}")));
+
+    let digest = kiwicaptcha::execution::expected_digest(program, &record.nonce)
+        .expect("the PHP-issued program must parse in Rust");
+    let counter = solve_for_test(&record).expect("Rust solver finds a counter");
+    let mut rec = record;
+    let now_ns = rec.issued_at_ns + 1_000_000;
+    let mut ctx = VerifyContext {
+        record: &mut rec,
+        secret_key: SECRET,
+        secrets_by_kid: None,
+        revoked_kids: None,
+        counter,
+        duration_ms: 5000,
+        now_unix: Some(&mut || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        }),
+        now_ns,
+        min_duration_ms: 0,
+        expected_scope: Some("login"),
+        expected_request_binding: RequestBindingExpectation::Unenforced,
+        expected_region: None,
+        expected_issuer: None,
+        expected_policy_version: None,
+        client_ip: Some("198.51.100.7"),
+        execution_digest: Some(&digest),
+        execution_trace: None,
+        telemetry: None,
+        enforce_telemetry: false,
+        max_attempts: 0,
+        accept_legacy_v1: false,
+    };
+    assert!(
+        matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+        "Rust must accept a PHP-issued protocol v4 challenge"
+    );
+    println!("RUST_VERIFIES_PHP_V4: OK (counter={counter})");
+}
+
+#[test]
+fn rust_issues_v4_record_for_php() {
+    // Reverse direction: Rust issues an execution-armed (protocol v4)
+    // record with the decoy surface armed too and writes the
+    // language-neutral JSON for the PHP job to solve + verify. Skips
+    // when the output env var is unset.
+    let Ok(path) = std::env::var("KC_RUST_RECORD") else {
+        eprintln!("KC_RUST_RECORD unset — reverse v4 cross-language test skipped");
+        return;
+    };
+    let config = kiwicaptcha::challenge::ChallengeConfig {
+        secret_key: SECRET.into(),
+        kid: 1,
+        execution_key: Some(SECRET.into()),
+        algorithm: kiwicaptcha::challenge::PoWAlgorithm::Sha256,
+        m_kib: 0,
+        t: 1,
+        p: 1,
+        target_bits: 8,
+        argon2_target_bits: 8,
+        ttl_secs: 120,
+        min_duration_ms: Some(0),
+        auto_tune: false,
+        auto_tune_min_bits: 8,
+        auto_tune_max_bits: 20,
+        binding_mode: kiwicaptcha::challenge::BindingMode::Bound,
+        region: None,
+        issuer: None,
+        policy_version: 1,
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    let issued = kiwicaptcha::challenge::issue_challenge_with_execution(
+        &config,
+        "login",
+        "198.51.100.7",
+        now_unix,
+        now_ns,
+        0,
+        None,
+        true,
+        Some("login-action"),
+        Some(1),
+        true,
+    )
+    .expect("v4 issue");
+    assert_eq!(issued.record.protocol_version, 4);
+    assert!(issued.record.decoy_field.is_some(), "the v4 record carries the decoy segment");
+    assert_eq!(issued.record.execution_version, Some(1));
+    assert_eq!(
+        kiwicaptcha::challenge::execution_commitment(issued.record.execution_program.as_deref().unwrap()),
+        issued.record.execution_commitment.as_deref().unwrap()
+    );
+    std::fs::write(
+        &path,
+        serde_json::to_string(&issued.record).expect("serialize"),
+    )
+    .expect("write");
+    println!("RUST_ISSUED v4");
 }
 
 #[cfg(feature = "redis")]

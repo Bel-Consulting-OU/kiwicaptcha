@@ -144,7 +144,7 @@ Scope checklist (the audit must attack all of these):
   transition guards and the security-epoch monitor.
 - SiteVerify migration: the idempotency and metadata stores across
   the cutover.
-- Mixed v2/v3 fleets: protocol interop during a versioned rollout.
+- Mixed v2/v3/v4 fleets: protocol interop during a versioned rollout.
 - Chained challenge state: the chained tickets and their transactional
   stores.
 - Risk-state poisoning: the risk-v1 Lua state machine under

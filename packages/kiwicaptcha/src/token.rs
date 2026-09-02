@@ -118,6 +118,7 @@ pub struct SolutionToken {
     /// digest from the stored program and rejects a mismatch with the
     /// deterministic `ExecutionMismatch` outcome.
     pub execution_digest: Option<String>,
+    pub execution_trace: Option<String>,
 }
 
 impl SolutionToken {
@@ -176,12 +177,27 @@ impl SolutionToken {
         let duration_str = parts[2];
         let last = parts[parts.len() - 1];
         let execution_digest;
+        let execution_trace;
         let telemetry_str;
-        if parts.len() >= 5 && last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
-            execution_digest = Some(last.to_string());
+        let digest_only = last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit());
+        let digest_with_trace = last.len() > 65 && last.bytes().nth(64) == Some(b':');
+        if parts.len() >= 5 && (digest_only || digest_with_trace) {
+            let (digest, trace) = last.split_at(64);
+            if digest.bytes().all(|b| b.is_ascii_hexdigit())
+                && (trace.is_empty()
+                    || (trace.len() <= 10924
+                        && trace.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')))
+            {
+                execution_digest = Some(digest.to_string());
+                execution_trace = if trace.is_empty() { None } else { Some(trace.to_string()) };
+            } else {
+                execution_digest = None;
+                execution_trace = None;
+            }
             telemetry_str = parts[3..parts.len() - 1].join(".");
         } else {
             execution_digest = None;
+            execution_trace = None;
             telemetry_str = parts[3..].join(".");
         }
 
@@ -233,6 +249,7 @@ impl SolutionToken {
             duration_ms,
             telemetry,
             execution_digest,
+            execution_trace,
         })
     }
 }
@@ -269,6 +286,7 @@ mod tests {
             duration_ms: 850,
             telemetry: serde_json::json!({"wd": true, "hc": 8}),
             execution_digest: None,
+            execution_trace: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -293,6 +311,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
             execution_digest: None,
+            execution_trace: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -344,6 +363,7 @@ mod tests {
             duration_ms: 2,
             telemetry,
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(
             matches!(
@@ -370,6 +390,7 @@ mod tests {
                 duration_ms: 2,
                 telemetry: serde_json::json!({}),
                 execution_digest: None,
+                execution_trace: None,
             };
             assert!(
                 matches!(
@@ -389,6 +410,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(SolutionToken::decode(&token.encode()).is_ok());
     }
@@ -410,6 +432,7 @@ mod tests {
                 duration_ms: 2,
                 telemetry: bad,
                 execution_digest: None,
+                execution_trace: None,
             };
             assert!(
                 matches!(
@@ -429,6 +452,7 @@ mod tests {
             duration_ms: MAX_DURATION_MS + 1,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(
             matches!(
@@ -443,6 +467,7 @@ mod tests {
             duration_ms: MAX_DURATION_MS,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(SolutionToken::decode(&ok.encode()).is_ok());
     }
@@ -455,6 +480,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(
             matches!(
@@ -476,6 +502,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(
             matches!(
@@ -499,6 +526,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         };
         assert!(
             matches!(
@@ -526,6 +554,7 @@ mod tests {
             duration_ms: 850,
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: None,
+            execution_trace: None,
         }
     }
 
@@ -563,6 +592,7 @@ mod tests {
             duration_ms: 850,
             telemetry: serde_json::json!({"a": 1}),
             execution_digest: None,
+            execution_trace: None,
         };
         let encoded = token.encode();
         assert_eq!(encoded.len() % 4, 0);
@@ -586,6 +616,7 @@ mod tests {
             duration_ms: 850,
             telemetry: serde_json::json!({"a": 1}),
             execution_digest: None,
+            execution_trace: None,
         };
         let encoded = token.encode();
         assert!(encoded.ends_with('='));
@@ -654,6 +685,7 @@ mod tests {
             duration_ms: 850,
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: Some(digest.clone()),
+            execution_trace: None,
         };
         let encoded = token.encode();
         let plain = B64.decode(&encoded).unwrap();
@@ -675,6 +707,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
             execution_digest: Some(digest.clone()),
+            execution_trace: None,
         };
         let decoded = SolutionToken::decode(&token.encode()).unwrap();
         assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
@@ -692,6 +725,7 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: Some("XYZ".to_string()),
+            execution_trace: None,
         };
         assert!(matches!(
             SolutionToken::decode(&token.encode()),
