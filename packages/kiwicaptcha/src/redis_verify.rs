@@ -2387,7 +2387,6 @@ impl ProductionVerifier {
                 RuntimeState::Pending(record) | RuntimeState::Cancelled(record) => record,
                 RuntimeState::Consumed(consumed) => &consumed.record,
             };
-
             // 3. Cheap validation on the peeked record. Per the shared
             //    cross-language consumption table (PHP mirrors this), terminal
             //    cheap failures consume the record: malformed stored record,
@@ -2410,6 +2409,7 @@ impl ProductionVerifier {
             //    the one-shot cheap-failure delete.
             if let Err(e) = self.check_cheap(
                 peek,
+                &token.nonce,
                 scope,
                 client_ip,
                 now_ns,
@@ -2473,7 +2473,12 @@ impl ProductionVerifier {
                             // `with_pool_size(1)` must never contend with a
                             // held checkout.
                             drop(conn);
-                            return self.resolve_consumed(*state, operation_identity, now_ns);
+                            return self.resolve_consumed(
+                                *state,
+                                &token.nonce,
+                                operation_identity,
+                                now_ns,
+                            );
                         }
                         // A hard security verdict on a consumed record: the
                         // fused transition kept the evidence and the failure
@@ -2533,7 +2538,7 @@ impl ProductionVerifier {
                     // path): resolve_consumed may re-establish the
                     // replication fence on its own checkout.
                     drop(conn);
-                    return self.resolve_consumed(*state, operation_identity, now_ns);
+                    return self.resolve_consumed(*state, &token.nonce, operation_identity, now_ns);
                 }
                 RuntimeState::Pending(record) => record,
             };
@@ -2611,6 +2616,7 @@ impl ProductionVerifier {
                         stored_result: consumed.stored_result,
                         operation_identity: consumed.operation_identity,
                     },
+                    &token.nonce,
                     operation_identity,
                     now_ns,
                 );
@@ -2630,6 +2636,7 @@ impl ProductionVerifier {
         }
         if let Err(e) = self.check_cheap(
             &record,
+            &token.nonce,
             scope,
             client_ip,
             now_ns,
@@ -2798,7 +2805,7 @@ impl ProductionVerifier {
                 return VerifyOutcome::Invalid(e);
             }
 
-            return self.resolve_consumed(state, Some(operation_identity), now_ns);
+            return self.resolve_consumed(state, &token.nonce, Some(operation_identity), now_ns);
         }
 
         // 5. The full cheap phase — the same invariants as normal
@@ -2810,6 +2817,7 @@ impl ProductionVerifier {
         //    verification mode than the operation it recovers.
         if let Err(e) = self.check_cheap(
             &state.record,
+            &token.nonce,
             scope,
             client_ip,
             now_ns,
@@ -2833,9 +2841,13 @@ impl ProductionVerifier {
             Ok(Some(owner)) => owner,
             Ok(None) => {
                 return match self.store.consumed_state(&token.nonce) {
-                    Ok(Some(loser_state)) if loser_state.stored_result.is_some() => {
-                        self.resolve_consumed(loser_state, Some(operation_identity), now_ns)
-                    }
+                    Ok(Some(loser_state)) if loser_state.stored_result.is_some() => self
+                        .resolve_consumed(
+                            loser_state,
+                            &token.nonce,
+                            Some(operation_identity),
+                            now_ns,
+                        ),
                     _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
                 };
             }
@@ -2941,9 +2953,13 @@ impl ProductionVerifier {
                 // Refused (ownership lost, or the record was no longer
                 // resultless): never the computed outcome — reread.
                 match self.store.consumed_state(&token.nonce) {
-                    Ok(Some(new_state)) if new_state.stored_result.is_some() => {
-                        self.resolve_consumed(new_state, Some(operation_identity), now_ns)
-                    }
+                    Ok(Some(new_state)) if new_state.stored_result.is_some() => self
+                        .resolve_consumed(
+                            new_state,
+                            &token.nonce,
+                            Some(operation_identity),
+                            now_ns,
+                        ),
                     _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
                 }
             }
@@ -2955,9 +2971,13 @@ impl ProductionVerifier {
                 // closed to StorageUnavailable when the replicas cannot
                 // be reached); otherwise the retry stays indeterminate.
                 match self.store.consumed_state(&token.nonce) {
-                    Ok(Some(new_state)) if new_state.stored_result.is_some() => {
-                        self.resolve_consumed(new_state, Some(operation_identity), now_ns)
-                    }
+                    Ok(Some(new_state)) if new_state.stored_result.is_some() => self
+                        .resolve_consumed(
+                            new_state,
+                            &token.nonce,
+                            Some(operation_identity),
+                            now_ns,
+                        ),
                     Ok(_) => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
                     Err(_) => VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
                 }
@@ -2999,9 +3019,18 @@ impl ProductionVerifier {
     fn resolve_consumed(
         &self,
         state: ConsumedState,
+        token_nonce: &str,
         operation_identity: Option<&str>,
         _now_ns: u64,
     ) -> VerifyOutcome {
+        // The consumed envelope was loaded by the token's nonce (the
+        // storage key); a stored nonce field that differs is an
+        // impossible key-value pair and never replays the retained
+        // result — the deterministic MalformedRecord, with the
+        // envelope preserved.
+        if state.record.nonce != token_nonce {
+            return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+        }
         match state.stored_result {
             Some(result) if !result.valid => VerifyOutcome::Invalid(VerifyError::InsufficientWork),
             Some(result) => {
@@ -3075,6 +3104,7 @@ impl ProductionVerifier {
     fn check_cheap(
         &self,
         record: &ChallengeRecord,
+        token_nonce: &str,
         scope: &str,
         client_ip: &str,
         now_ns: u64,
@@ -3082,6 +3112,16 @@ impl ProductionVerifier {
         execution_digest: Option<&str>,
         execution_trace: Option<&str>,
     ) -> Result<(), VerifyError> {
+        // The record must carry the nonce it was loaded under: a stored
+        // nonce that differs from the lookup key is impossible in a
+        // correct store, and a corrupted key-value pair is the
+        // deterministic MalformedRecord before any processing (never
+        // consumed as this challenge; the caller's failure policy burns
+        // the pending record and preserves the consumed evidence,
+        // exactly like the other terminal verdicts).
+        if record.nonce != token_nonce {
+            return Err(VerifyError::MalformedRecord);
+        }
         self.check_authenticated_shape(record)?;
         self.check_ttl(record)?;
         self.check_scope(record, scope)?;
@@ -3521,6 +3561,7 @@ mod tests {
                 verifier
                     .check_cheap(
                         &issued.record,
+                        &issued.record.nonce,
                         "login",
                         IP,
                         issued.record.issued_at_ns + 1_000_000,
@@ -4668,5 +4709,136 @@ mod tests {
                 "the fenced commit rejects before any Redis interaction"
             );
         }
+    }
+
+    #[test]
+    fn verify_rejects_a_key_value_nonce_mismatch_with_malformed_record() {
+        // A storage key whose value carries a different record nonce is
+        // an impossible key-value pair in a correct store; the
+        // production verifier answers the deterministic MalformedRecord
+        // before any processing and never consumes the foreign record
+        // as this challenge.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nonce-key-a:{}:", std::process::id());
+        let client = redis::Client::open(url.clone()).unwrap();
+        let store = RedisChallengeStore::new(client.clone(), prefix.clone());
+
+        let base = now_unix();
+        let issued_a =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        let issued_b =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        store.store(&issued_a.record).unwrap();
+        store.store(&issued_b.record).unwrap();
+
+        // Corrupt the key-value identity: serve record B's value under
+        // record A's key (the token still names A).
+        let key_a = format!("{}{}", prefix, issued_a.record.nonce);
+        let key_b = format!("{}{}", prefix, issued_b.record.nonce);
+        let value_b: String = redis::cmd("GET")
+            .arg(&key_b)
+            .query(&mut client.get_connection().unwrap())
+            .unwrap();
+        redis::cmd("SET")
+            .arg(&key_a)
+            .arg(&value_b)
+            .exec(&mut client.get_connection().unwrap())
+            .unwrap();
+
+        let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+        let token_a = encode_token(&issued_a.record.nonce, counter_a);
+        let verifier = ProductionVerifier::new(store, SECRET);
+        let outcome = verifier.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+            "a key-value nonce mismatch is the deterministic MalformedRecord"
+        );
+        // Nothing was consumed or deleted: the verdict repeats.
+        let outcome2 = verifier.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(outcome2, outcome, "the mismatched pair is never consumed");
+    }
+
+    #[test]
+    fn consumed_envelope_with_a_foreign_nonce_never_replays_the_stored_result() {
+        // A consumed envelope under the token's key whose record nonce
+        // differs (key-value corruption after the original consume) must
+        // never replay the retained committed result.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nonce-key-b:{}:", std::process::id());
+        let client = redis::Client::open(url.clone()).unwrap();
+        let store = RedisChallengeStore::new(client.clone(), prefix.clone());
+
+        let base = now_unix();
+        let issued_a =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        let issued_b =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        store.store(&issued_a.record).unwrap();
+        store.store(&issued_b.record).unwrap();
+
+        // Consume B with a committed valid result (the corrupted value).
+        let counter_b = solve_for_test(&issued_b.record).expect("4-bit sha solves");
+        let token_b = encode_token(&issued_b.record.nonce, counter_b);
+        let verifier_b = ProductionVerifier::new(
+            RedisChallengeStore::new(client.clone(), prefix.clone()),
+            SECRET,
+        );
+        let ok = verifier_b.verify(
+            &token_b,
+            "login",
+            IP,
+            issued_b.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(ok, VerifyOutcome::Valid { .. }),
+            "record B verifies first"
+        );
+
+        // Rename B's consumed envelope onto A's key; the token names A.
+        let key_a = format!("{}{}", prefix, issued_a.record.nonce);
+        let key_b = format!("{}{}", prefix, issued_b.record.nonce);
+        let value_b: String = redis::cmd("GET")
+            .arg(&key_b)
+            .query(&mut client.get_connection().unwrap())
+            .unwrap();
+        redis::cmd("SET")
+            .arg(&key_a)
+            .arg(&value_b)
+            .exec(&mut client.get_connection().unwrap())
+            .unwrap();
+
+        let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+        let token_a = encode_token(&issued_a.record.nonce, counter_a);
+        let verifier_a = ProductionVerifier::new(store, SECRET);
+        let outcome = verifier_a.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+            "a consumed envelope with a foreign nonce never replays the stored result"
+        );
     }
 }

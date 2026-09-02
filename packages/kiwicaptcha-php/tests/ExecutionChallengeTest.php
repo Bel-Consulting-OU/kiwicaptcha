@@ -239,6 +239,27 @@ final class ExecutionChallengeTest extends TestCase
         new Config(secretKey: self::KEY, executionKey: 'short');
     }
 
+    public function testGenerateRejectsInvalidScopes(): void
+    {
+        foreach (['', ' ', 'login action', 'login|action', 'h\u00e9llo', str_repeat('a', 129), str_repeat('a', 256)] as $scope) {
+            try {
+                ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, 1);
+                self::fail('scope '.json_encode($scope).' must be rejected');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('execution scope must be 1-128', $e->getMessage());
+            }
+        }
+    }
+
+    public function testGenerateAcceptsTheBoundary128ByteScope(): void
+    {
+        $scope = str_repeat('a', 128);
+        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, 1);
+        $decoded = ExecutionChallengeGenerator::decode($program);
+        self::assertNotNull($decoded);
+        self::assertSame($scope, $decoded['scope']);
+    }
+
     public function testArmedEndToEndVerifyWithCorrectDigest(): void
     {
         $storage = new ArrayStorage();

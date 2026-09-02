@@ -214,6 +214,16 @@ final class ExecutionChallengeGenerator
                 'execution version must be exactly 1 (the canonical numeric byte; no other interpreter exists)'
             );
         }
+        if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
+            // The decoder's scope grammar is 1-128 bytes of the same
+            // alphabet; see decode(). A scope outside it would mint a
+            // blob the module itself refuses to decode, and a scope
+            // above 255 bytes would wrap the length byte — refused
+            // here, before any stream work.
+            throw new \InvalidArgumentException(
+                'execution scope must be 1-128 characters of [A-Za-z0-9._:-]'
+            );
+        }
         $stream = self::prfStream($executionKey, $nonce, $scope, $action, (string) $version);
 
         $program = '';

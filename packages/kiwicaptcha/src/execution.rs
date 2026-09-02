@@ -345,6 +345,14 @@ pub fn generate(
     if version != PROTOCOL_VERSION {
         return Err(GenerateError::InvalidVersion);
     }
+    if !is_identifier(scope, 128) {
+        // The decoder's scope grammar is 1-128 bytes of the same
+        // alphabet (see `decode`): a scope outside it would mint a
+        // blob the module itself refuses to decode, and a scope above
+        // 255 bytes would wrap the length byte — refused here, before
+        // any stream work.
+        return Err(GenerateError::InvalidScope);
+    }
 
     let mut cursor = Cursor::new(prf_stream(
         execution_key,
@@ -1265,6 +1273,8 @@ pub enum GenerateError {
     InvalidAction,
     #[error("execution version must be the canonical numeric byte 1")]
     InvalidVersion,
+    #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
+    InvalidScope,
 }
 
 #[cfg(test)]
@@ -1274,6 +1284,33 @@ mod tests {
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
+
+    #[test]
+    fn invalid_scopes_are_rejected_before_any_stream_work() {
+        for scope in [
+            "",
+            " ",
+            "login action",
+            "login|action",
+            "héllo",
+            &"a".repeat(129),
+            &"a".repeat(300),
+        ] {
+            let err = generate(KEY, NONCE, scope, "login-action", 1).unwrap_err();
+            assert_eq!(
+                err,
+                GenerateError::InvalidScope,
+                "scope {scope:?} must be InvalidScope"
+            );
+        }
+        // A valid scope still generates and the blob decodes with the
+        // identical scope (the boundary of the decoder grammar).
+        let scope = "a".repeat(128);
+        let program =
+            generate(KEY, NONCE, &scope, "login-action", 1).expect("boundary scope must generate");
+        let decoded = decode(&program).expect("the generated blob must parse");
+        assert_eq!(decoded.scope, scope);
+    }
 
     #[test]
     fn generation_is_deterministic() {

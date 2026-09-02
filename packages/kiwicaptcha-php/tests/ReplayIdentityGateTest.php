@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
@@ -728,6 +729,86 @@ final class ReplayIdentityGateTest extends TestCase
         --$counter;
 
         return [$storage, $record, SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode()];
+    }
+
+    public function testRecordWhoseStoredNonceDiffersFromTheLookupKeyIsMalformedAndBurnsThePendingRecord(): void
+    {
+        // A storage key that does not carry its record's own nonce is an
+        // impossible key-value pair in a correct store; the verifier
+        // answers the deterministic MalformedRecord before any
+        // processing — the one-shot policy burns the pending record
+        // under the key (exactly the terminal-verdict delete), and the
+        // foreign record under its own key stays untouched.
+        $base = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0),
+            $base,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $record = $base->find($challenge->nonce);
+        self::assertNotNull($record);
+        $foreign = $issuer->issue('login', '198.51.100.7');
+        $foreignRecord = $base->find($foreign->nonce);
+        self::assertNotNull($foreignRecord);
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+
+        // The corrupting wrapper serves the foreign record under the
+        // token's nonce key (a storage whose key and record identity
+        // diverged).
+        $storage = new class ($base, $record, $foreignRecord) implements \KiwiCaptcha\StorageInterface {
+            public function __construct(private ArrayStorage $inner, private \KiwiCaptcha\ChallengeRecord $record, private \KiwiCaptcha\ChallengeRecord $foreign)
+            {
+            }
+
+            public function store(ChallengeRecord $r): void
+            {
+                $this->inner->store($r);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                if ($nonce === $this->record->nonce) {
+                    return $this->foreign;
+                }
+
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return null;
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a key-value nonce mismatch is the deterministic MalformedRecord');
+        self::assertNull($base->find($record->nonce), 'the pending record under the token key is burned by the terminal verdict');
+        self::assertNotNull($base->find($foreignRecord->nonce), 'the foreign record under its own key must stay untouched');
     }
 
     public function testPendingExpiredReplayDeletesTheRecord(): void

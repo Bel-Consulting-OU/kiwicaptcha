@@ -565,7 +565,8 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, ExecutionEvidence::fromToken($token));
+        //
+        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, ExecutionEvidence::fromToken($token));
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -750,7 +751,7 @@ final class Verifier
                 // that produced the peek: resolve it directly, never a
                 // second read.
                 if ($runtime->consumed !== null) {
-                    return $this->resolveConsumedRecord($runtime->consumed, $operationIdentity, $receiptNs);
+                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs);
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
@@ -764,7 +765,7 @@ final class Verifier
                         return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                     }
                     if ($retained !== null) {
-                        return $this->resolveConsumedRecord($retained, $operationIdentity, $receiptNs);
+                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs);
                     }
                 }
             }
@@ -831,7 +832,7 @@ final class Verifier
                 // {@see self::resolveConsumedRecord()}, used by both this
                 // consume path and the pre-admission terminal-state
                 // check, so the two can never diverge.
-                return $this->resolveConsumedRecord($consumed, $operationIdentity, $receiptNs);
+                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs);
             }
             $record = $consumed->record;
 
@@ -985,8 +986,16 @@ final class Verifier
      * StorageUnavailable, never a generic exception escaping the
      * verifier.
      */
-    private function resolveConsumedRecord(ConsumedRecord $consumed, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
+    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
     {
+        if ($consumed->record->nonce !== $tokenNonce) {
+            // The consumed envelope was loaded by the token's nonce (the
+            // storage key); a stored nonce field that differs is an
+            // impossible key-value pair and never replays the retained
+            // result — the deterministic MalformedRecord, with the
+            // envelope preserved.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         if ($consumed->consumedResult === null) {
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
         }
@@ -1177,6 +1186,13 @@ final class Verifier
         } catch (\Throwable) {
             return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
         }
+        if ($consumed !== null && $consumed->record->nonce !== $token->nonce) {
+            // The retained envelope was loaded by the token's nonce; a
+            // stored nonce that differs is an impossible key-value pair
+            // and the deterministic MalformedRecord, never the stored
+            // result.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
 
         // The identity gate: only a consumed record carrying exactly this
         // operation identity may have its derivation resumed. The identity
@@ -1282,7 +1298,7 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, ExecutionEvidence::fromToken($token));
+        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, ExecutionEvidence::fromToken($token));
         if ($failure !== null) {
             if ($failure->isReplayExempt()
                 && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null
@@ -1773,6 +1789,7 @@ final class Verifier
      */
     private function cheapPhaseCheck(
         ChallengeRecord $record,
+        string $tokenNonce,
         string $secretKey,
         ?string $expectedScope,
         ?string $clientIp,
@@ -1781,6 +1798,16 @@ final class Verifier
         RequestBindingExpectation $expectation,
         ExecutionEvidence $executionEvidence,
     ): ?VerifyError {
+        // 0. The record must carry the nonce it was loaded under: a
+        //    stored nonce that differs from the lookup key is impossible
+        //    in a correct store, and a corrupted key-value pair is the
+        //    deterministic MalformedRecord before any processing (never
+        //    consumed as this challenge; the caller's failure policy
+        //    burns the pending record and preserves the consumed
+        //    evidence, exactly like the other terminal verdicts).
+        if ($record->nonce !== $tokenNonce) {
+            return VerifyError::MalformedRecord;
+        }
         // 1-2b. The authenticated hard core: structure, protocol gate,
         //       kid revocation/resolution, signature, Argon ceilings.
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {

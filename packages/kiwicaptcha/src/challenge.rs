@@ -1680,6 +1680,9 @@ fn issue_challenge_inner(
                         crate::execution::GenerateError::InvalidVersion => {
                             SignError::InvalidIdentifier
                         }
+                        crate::execution::GenerateError::InvalidScope => {
+                            SignError::InvalidIdentifier
+                        }
                     })?,
                 )
             }
