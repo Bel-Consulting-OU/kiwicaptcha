@@ -180,7 +180,7 @@ impl SolutionToken {
         let execution_trace;
         let telemetry_str;
         let digest_only = last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit());
-        let digest_with_trace = last.len() > 65 && last.bytes().nth(64) == Some(b':');
+        let digest_with_trace = last.len() > 65 && last.as_bytes().get(64).copied() == Some(b':');
         if parts.len() >= 5 && (digest_only || digest_with_trace) {
             let (digest, trace) = last.split_at(64);
             if digest.bytes().all(|b| b.is_ascii_hexdigit())

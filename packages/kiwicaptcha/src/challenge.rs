@@ -662,6 +662,7 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   in both directions; execution-armed records are protocol v4 and
 ///   require a v4-capable verifier (an old verifier rejects version 4 as
 ///   unknown).
+///
 /// The canonical signing input of a record — public so cross-language
 /// tests and integrations can pin the byte-exact reconstruction against
 /// the client-visible challenge string (the PHP mirror exposes the same
