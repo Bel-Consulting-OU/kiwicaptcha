@@ -9,11 +9,15 @@ import { fileURLToPath } from 'node:url';
 // a deterministic bytecode blob). The driver lazily loads the fixed
 // audited interpreter asset (execution.<sha256>.js, served by the
 // existing immutable content-addressed asset route with SRI), runs the
-// program in a sandboxed ephemeral iframe (srcdoc, per challenge,
-// removed after), and appends the resulting execution digest (64 hex)
-// to the solution token. The fixture /verify recomputes the expected
-// digest from the stored program and rejects a mismatch with the
-// deterministic execution_mismatch outcome.
+// program in a short-lived sandboxed iframe (srcdoc with the sandbox
+// flags allow-scripts allow-same-origin; per challenge, removed after),
+// and appends the resulting execution digest (64 hex) to the solution
+// token. The sandbox is DOM and execution isolation for the
+// first-party interpreter, whose bytes the content-addressed URL and
+// the native SRI check pin; it is not a hostile-code security
+// boundary. The fixture /verify recomputes the expected digest from
+// the stored program and rejects a mismatch with the deterministic
+// execution_mismatch outcome.
 //
 // Lazy invariant: a SHA-only challenge without a program pays zero
 // bytes for the interpreter — the no-program spec asserts zero requests.
@@ -177,12 +181,13 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(armed[0].resourceType(), 'the interpreter load is the iframe script (the driver performs no fetch of its own)').toBe('script');
   });
 
-  test('the op-count bound holds and the wall-clock stays far under the documented ~20 ms budget', async ({ page }) => {
-    // The documented budget: ~20 ms on low-end devices for the VM run.
-    // The measured span here is the whole armed lifecycle from the
+  test('the armed lifecycle completes well within the request-budget bound (execution timing is measured by the client-performance lab, not here)', async ({ page }) => {
+    // The measured span is the whole armed lifecycle from the
     // challenge response to the solved token, a deliberately loose
-    // wall-clock assertion; the deterministic proxy is the 8..24
-    // op-count bound the program parser enforces (asserted below).
+    // wall-clock bound on that lifecycle. The VM-run timing budget is
+    // measured by the client-performance lab, never asserted from this
+    // span; the deterministic proxy asserted below is the 8..24
+    // op-count bound the program parser enforces.
     const started = Date.now();
     await armedPage(page);
     expect(Date.now() - started).toBeLessThan(60_000);

@@ -313,9 +313,13 @@ the challenge stack. When armed, the challenge response carries an
 `execution_program`, a deterministic bytecode blob. The widget driver
 lazily loads the fixed audited interpreter asset,
 `execution.<sha256>.js`, served by the immutable content-addressed
-asset route with SRI. It runs the program in a sandboxed ephemeral
-iframe and appends the resulting execution digest to the solution
-token. The verifier recomputes the expected digest from the stored
+asset route with SRI. It runs the program in an ephemeral sandboxed
+iframe (srcdoc with the `allow-scripts` and `allow-same-origin`
+sandbox flags) and appends the resulting execution digest to the
+solution token. The sandbox is DOM and execution isolation for the
+first-party interpreter, whose bytes the content-addressed URL and
+the native SRI check pin; it is not a hostile-code security
+boundary. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
 
@@ -356,8 +360,11 @@ acceptance boundary: the proof-of-work proof and the record state
 machinery always gate, and a missing or wrong digest fails with the
 deterministic `execution_mismatch`, never a silent success. The
 interpreter is a fixed audited bytecode VM with no eval, no new
-Function and no fingerprinting; the DOM ops run in a sandboxed
-ephemeral iframe created per challenge and removed after the run. A
+Function and no fingerprinting; the DOM ops run in an ephemeral
+sandboxed iframe (srcdoc with the `allow-scripts` and
+`allow-same-origin` sandbox flags) created per challenge and removed
+after the run. The iframe is containment for the first-party pinned
+interpreter, not a hostile-code security boundary. A
 SHA-only challenge without a program pays zero bytes for the
 interpreter: the asset is fetched only when an armed challenge
 arrives.

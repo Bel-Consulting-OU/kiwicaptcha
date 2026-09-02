@@ -445,9 +445,12 @@ The protocol's fail-closed behavior is unchanged and documented by test.
 ExecutionChallengeV1 is a Cap-style supplementary evidence layer. When
 the risk.execution_challenge gate is on and a risk trigger passes, the
 issued challenge carries an execution program the widget driver runs in
-a sandboxed ephemeral iframe. The resulting execution digest rides the
-solution token. The verifier rejects a mismatch with the deterministic
-execution_mismatch outcome.
+an ephemeral sandboxed iframe (srcdoc with the `allow-scripts` and
+`allow-same-origin` sandbox flags). The sandbox is DOM isolation for
+the first-party interpreter the content-addressed URL and the SRI
+check pin, not a hostile-code boundary. The resulting execution digest
+rides the solution token. The verifier rejects a mismatch with the
+deterministic execution_mismatch outcome.
 
 The dimension is supplementary evidence only and is never the sole
 acceptance boundary. The proof-of-work proof and the record state

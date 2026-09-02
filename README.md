@@ -60,7 +60,7 @@ These invariants are pinned by cross-language tests; see [the claims registry](p
   A relay mitigation, not a guarantee.
 - Single-use with bounded verification cost: verification consumes the challenge; per-nonce attempt accounting bounds the cost of wrong candidates.
   Deployments must additionally rate-limit challenge issuance and cap aggregate Argon2id verification concurrency; the Symfony bundle ships both.
-- Widget: a modern, responsive browser widget with native dark mode and no external dependencies (no external JS, no iframes, no third-party hosts), with optional CSP nonce support.
+- Widget: a modern, responsive browser widget with native dark mode and no external dependencies (no third-party JS, no third-party iframes and no third-party hosts), with optional CSP nonce support. Ordinary SHA-only mode renders no iframe; the experimental ExecutionChallenge feature runs its local interpreter in a short-lived same-origin sandboxed iframe.
 - First-party behavioral telemetry, off by default: the widget collects no hardware-capability, device-memory, or screen signals unless the operator explicitly enables the coarse client-context opt-in.
   `minimal` and `full` modes are client-controlled and forgeable; they are supplements, never the boundary.
 - Key rotation and revocation: the verifier resolves a challenge by its key id against a ring of historical secrets, and a revoked key id is refused immediately.
