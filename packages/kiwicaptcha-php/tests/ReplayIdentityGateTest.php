@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\SolutionToken;
@@ -33,6 +34,12 @@ use PHPUnit\Framework\TestCase;
 final class ReplayIdentityGateTest extends TestCase
 {
     private const ISSUED_AT = 1_800_000_000;
+
+    private const EXECUTION_KEY = '0123456789abcdef0123456789abcdef';
+
+    private const CLIENT_IP = '198.51.100.7';
+
+    private const OTHER_IP = '203.0.113.9';
 
     private static function identityFor(string $key): string
     {
@@ -522,6 +529,177 @@ final class ReplayIdentityGateTest extends TestCase
         self::assertTrue($replay->isOk(), sprintf('the identity-proven telemetry-gate replay resolves through the consumed branch, got %s', $replay->code()));
         self::assertTrue($replay->fromStoredResult);
         self::assertNotNull($storage->find($record->nonce));
+    }
+
+    // ── the execution-armed v4 replay ───────────────────────────────────
+
+    /**
+     * Issues an execution-armed protocol-v4 challenge (the decoy
+     * surface armed alongside the execution dimension), solves its
+     * PoW, and builds the wire token carrying the executed trace and
+     * the digest over it.
+     *
+     * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
+     */
+    private function issueAndSolveArmed(): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0, executionKey: self::EXECUTION_KEY),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issueWithExecutionField('login', self::CLIENT_IP, true, executionAction: 'login-action', armDecoyField: true);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(4, $record->protocolVersion, 'the armed issuance writes protocol v4');
+
+        return [$storage, $record, self::armedToken($record, self::winningCounter($record))];
+    }
+
+    /** The armed wire token for a solved record (valid digest). */
+    private static function armedToken(ChallengeRecord $record, int $counter): string
+    {
+        $program = ExecutionChallengeGenerator::decode($record->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
+        self::assertNotNull($digest);
+
+        return SolutionToken::create($record->nonce, $counter, 5000, [], $digest, base64_encode($trace))->encode();
+    }
+
+    /** The armed wire token whose digest is flipped (trace still valid). */
+    private static function tamperedArmedToken(ChallengeRecord $record): string
+    {
+        $program = ExecutionChallengeGenerator::decode($record->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $wrong = str_repeat('0', 64);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
+        self::assertNotSame($wrong, $digest, 'precondition: the tampered digest differs from the expected one');
+
+        return SolutionToken::create($record->nonce, self::winningCounter($record), 5000, [], $wrong, base64_encode($trace))->encode();
+    }
+
+    /** The winning PoW counter of a stored record (8-bit SHA-256 solve). */
+    private static function winningCounter(ChallengeRecord $record): int
+    {
+        $saltBytes = base64_decode($record->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $record->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $record->targetBits);
+        --$counter;
+
+        return $counter;
+    }
+
+    public function testIdentityMatchingArmedRetryReplaysTheStoredSuccess(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $verifier = new Verifier($storage, now: self::clock());
+
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($first->isOk(), sprintf('the armed challenge verifies fresh, got %s', $first->code()));
+        self::assertFalse($first->fromStoredResult, 'the first verification is a fresh derivation');
+
+        // The exact same logical operation retries with the same
+        // execution evidence: the committed stored success replays
+        // without re-deriving.
+        $retry = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($retry->isOk(), sprintf('the armed retry must replay the stored success, got %s', $retry->code()));
+        self::assertTrue($retry->fromStoredResult, 'the armed retry comes from the stored result, never a second derivation');
+        self::assertSame($record->nonce, $retry->nonce());
+    }
+
+    public function testExpiredArmedReplayWithMatchingIdentityReplaysTheStoredSuccess(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $now = self::ISSUED_AT;
+        $verifier = new Verifier($storage, now: function () use (&$now): int {
+            return $now;
+        });
+
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($first->isOk());
+
+        // The signed expiry passes: the exempt expiry circumstance must
+        // route the consumed armed record through the replay gate, and
+        // the full execution evidence must clear it.
+        $now = self::ISSUED_AT + 121;
+
+        $replay = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($replay->isOk(), sprintf('the expired identity-proven armed replay must resolve the stored success, got %s', $replay->code()));
+        self::assertTrue($replay->fromStoredResult, 'the committed outcome is expiry-exempt on the armed record too');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed recovery evidence survives the expired armed replay');
+    }
+
+    public function testIpChangedArmedReplayWithMatchingIdentityReplaysTheStoredSuccess(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $verifier = new Verifier($storage, now: self::clock());
+
+        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A)->isOk());
+
+        // A legitimate retry from another address: the exempt IP
+        // circumstance routes the consumed armed record through the
+        // replay gate, and the execution evidence must clear it.
+        $replay = $verifier->verify($token, Vectors::SECRET, 'login', self::OTHER_IP, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($replay->isOk(), sprintf('the identity-proven IP-changed armed replay must resolve the stored success, got %s', $replay->code()));
+        self::assertTrue($replay->fromStoredResult);
+        self::assertNotNull($storage->find($record->nonce));
+    }
+
+    public function testMissingClientIpArmedReplayWithMatchingIdentityReplaysTheStoredSuccess(): void
+    {
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $verifier = new Verifier($storage, now: self::clock());
+
+        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A)->isOk());
+
+        $replay = $verifier->verify($token, Vectors::SECRET, 'login', null, operationIdentity: self::IDENTITY_A);
+        self::assertTrue($replay->isOk(), sprintf('the identity-proven missing-IP armed replay must resolve the stored success, got %s', $replay->code()));
+        self::assertTrue($replay->fromStoredResult);
+        self::assertNotNull($storage->find($record->nonce));
+    }
+
+    public function testATamperedDigestOnAnArmedReplayIsExecutionMismatch(): void
+    {
+        // The no-loosening assertion: a replay whose digest does not
+        // match the verified trace is a hard execution verdict even on
+        // the matching-identity replay of a consumed armed record.
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $tampered = self::tamperedArmedToken($record);
+
+        $verifier = new Verifier($storage, now: self::clock());
+        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A)->isOk());
+
+        $replay = $verifier->verify($tampered, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertSame(VerifyError::ExecutionMismatch, $replay->error, 'a tampered digest on the replay is ExecutionMismatch, never the stored success');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed evidence survives the hard execution refusal');
+    }
+
+    public function testATamperedDigestNeverHidesBehindAnExemptCircumstanceOnAnArmedReplay(): void
+    {
+        // The compositional replay gate on the armed record: an expired
+        // replay with a tampered digest must fail ExecutionMismatch, the
+        // exempt expiry circumstance may not mask the hard execution
+        // verdict.
+        [$storage, $record, $token] = $this->issueAndSolveArmed();
+        $tampered = self::tamperedArmedToken($record);
+
+        $now = self::ISSUED_AT;
+        $verifier = new Verifier($storage, now: function () use (&$now): int {
+            return $now;
+        });
+        self::assertTrue($verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A)->isOk());
+
+        $now = self::ISSUED_AT + 121;
+        $replay = $verifier->verify($tampered, Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: self::IDENTITY_A);
+        self::assertSame(VerifyError::ExecutionMismatch, $replay->error, 'the tampered digest must win over the exempt expiry');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed evidence survives the hard execution refusal');
     }
 
     // ── cheap-failure evidence preservation (the Rust core's parity) ────

@@ -565,7 +565,7 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $token->executionDigest, $token->executionTrace);
+        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, ExecutionEvidence::fromToken($token));
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -602,7 +602,7 @@ final class Verifier
                 // the evidence stays preserved by the fused transition,
                 // and only a clean pass falls through to the consumed
                 // branch.
-                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $token->executionDigest);
+                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
                 if ($hard !== null) {
                     return VerifyOutcome::invalid($hard);
                 }
@@ -644,7 +644,7 @@ final class Verifier
                     // that also applies to this request. Any hard failure
                     // wins with the evidence preserved; only a clean pass
                     // falls through to the consume branch below.
-                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $token->executionDigest);
+                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
                     if ($hard !== null) {
                         return VerifyOutcome::invalid($hard);
                     }
@@ -1220,7 +1220,7 @@ final class Verifier
         // expiry, and a same-operation recovery may legitimately come from
         // another backend network path.
         if ($consumed->consumedResult !== null) {
-            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, $token->executionDigest)) !== null) {
+            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null) {
                 return VerifyOutcome::invalid($failure);
             }
             // Failed-barrier replay guard: the committed result's writes
@@ -1282,10 +1282,10 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $token->executionDigest, $token->executionTrace);
+        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, ExecutionEvidence::fromToken($token));
         if ($failure !== null) {
             if ($failure->isReplayExempt()
-                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, $token->executionDigest)) !== null
+                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null
             ) {
                 return VerifyOutcome::invalid($hard);
             }
@@ -1768,8 +1768,8 @@ final class Verifier
      * @param string|null $expectedRequestBinding the application
      *                        transaction binding, or null to keep
      *                        the binding unenforced
-     * @param string|null $presentedExecutionDigest the execution digest
-     *                        the solution token carries
+     * @param ExecutionEvidence $executionEvidence the execution digest
+     *                        and trace the solution token carries
      */
     private function cheapPhaseCheck(
         ChallengeRecord $record,
@@ -1779,8 +1779,7 @@ final class Verifier
         bool $checkTiming,
         ?int $nowNs,
         RequestBindingExpectation $expectation,
-        ?string $presentedExecutionDigest = null,
-        ?string $presentedExecutionTrace = null,
+        ExecutionEvidence $executionEvidence,
     ): ?VerifyError {
         // 1-2b. The authenticated hard core: structure, protocol gate,
         //       kid revocation/resolution, signature, Argon ceilings.
@@ -1817,7 +1816,7 @@ final class Verifier
         //     missing or mismatched digest is the deterministic
         //     ExecutionMismatch. An unarmed record skips the check
         //     entirely (byte-identical current behavior).
-        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest, $presentedExecutionTrace)) !== null) {
+        if (($e = $this->checkExecutionBinding($record, $executionEvidence)) !== null) {
             return $e;
         }
 
@@ -1834,6 +1833,10 @@ final class Verifier
      * an execution program, the solution token MUST present an
      * execution digest, and it MUST equal (constant-time) the expected
      * digest recomputed from the stored program and the record's nonce.
+     *
+     * The evidence object carries the digest and the trace together:
+     * the armed binding checks both, so no call path can evaluate the
+     * digest with the trace missing.
      *
      * - An unarmed record (no stored program, no signed commitment)
      *   demands no digest: a presented digest is stray execution
@@ -1854,26 +1857,26 @@ final class Verifier
      *   challenge fails on the nonce-bound context. The digest binds
      *   the submission to this challenge's program.
      */
-    private function checkExecutionBinding(ChallengeRecord $record, ?string $presentedDigest, ?string $presentedTrace): ?VerifyError
+    private function checkExecutionBinding(ChallengeRecord $record, ExecutionEvidence $evidence): ?VerifyError
     {
         if ($record->executionProgram === null) {
             // Stray execution evidence: execution evidence presented
             // for a record whose signed canonical carries NO
             // commitment is deterministic invalid, never silently
             // ignored.
-            return ($presentedDigest !== null || $presentedTrace !== null) ? VerifyError::ExecutionMismatch : null;
+            return $evidence->isEmpty() ? null : VerifyError::ExecutionMismatch;
         }
-        if ($presentedDigest === null || $presentedTrace === null) {
+        if ($evidence->digest === null || $evidence->trace === null) {
             return VerifyError::ExecutionMismatch;
         }
         // The trace travels on the wire as base64url, unpadded (the
         // driver's format); translate back to canonical standard base64
         // before the strict decode.
-        $standard = strtr($presentedTrace, '-_', '+/');
+        $standard = strtr($evidence->trace, '-_', '+/');
         $standard = str_pad($standard, (int) ceil(\strlen($standard) / 4) * 4, '=');
         $traceBytes = base64_decode($standard, true);
         if ($traceBytes === false
-            || rtrim(strtr(base64_encode($traceBytes), '+/', '-_'), '=') !== $presentedTrace) {
+            || rtrim(strtr(base64_encode($traceBytes), '+/', '-_'), '=') !== $evidence->trace) {
             return VerifyError::ExecutionMismatch;
         }
         $trace = (string) $traceBytes;
@@ -1881,17 +1884,11 @@ final class Verifier
         if ($verifiedTrace === null) {
             return VerifyError::ExecutionMismatch;
         }
-        $bytes = base64_decode($record->executionProgram, true);
-        $program = ExecutionChallengeGenerator::decode($record->executionProgram);
-        if ($bytes === false || $program === null) {
+        $expected = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $verifiedTrace);
+        if ($expected === null) {
             return VerifyError::MalformedRecord;
         }
-        $expected = hash_hmac(
-            'sha256',
-            ExecutionChallengeGenerator::LABEL.'|'.$record->nonce.'|'.$program['scope'].'|'.$program['action'].'|'.$program['op_version'].'|'.$verifiedTrace,
-            $bytes,
-        );
-        if (!hash_equals($expected, $presentedDigest)) {
+        if (!hash_equals($expected, $evidence->digest)) {
             return VerifyError::ExecutionMismatch;
         }
 
@@ -1933,8 +1930,7 @@ final class Verifier
         string $secretKey,
         ?string $expectedScope,
         RequestBindingExpectation $expectation,
-        ?string $presentedExecutionDigest = null,
-        ?string $presentedExecutionTrace = null,
+        ExecutionEvidence $executionEvidence,
     ): ?VerifyError {
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
             return $e;
@@ -1945,7 +1941,7 @@ final class Verifier
         if (($e = $this->checkDeploymentExpectations($record)) !== null) {
             return $e;
         }
-        if (($e = $this->checkExecutionBinding($record, $presentedExecutionDigest, $presentedExecutionTrace)) !== null) {
+        if (($e = $this->checkExecutionBinding($record, $executionEvidence)) !== null) {
             return $e;
         }
         if (($e = $this->checkMinDuration($record, null)) !== null) {
