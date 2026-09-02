@@ -57,11 +57,22 @@ namespace KiwiCaptcha;
  * The canonical op trace is the deterministic execution trace of the
  * ops: one entry per op, `opname-result`, joined with ';'. Results are
  * canonical decimal integers, "1"/"0", or standard base64 of a string.
- * No result alphabet contains '(', ')' or ';', so the trace is
- * unambiguous. The server verifier and the browser interpreter
- * simulate the same deterministic state machine, a u8 array, a current
- * DOM node and an appended-id set. The trace is a pure function of the
- * program.
+ * The real-DOM readback entries (`QUERY_REAL`) carry canonical
+ * attribute pairs that may themselves contain ';' and parentheses, so
+ * the verifier walks the submitted trace entry by entry against the
+ * simulated op sequence and never splits it on a separator. The server
+ * verifier and the browser interpreter simulate the same deterministic
+ * state machine, a u8 array, a current DOM node and an appended-id
+ * set. The trace is a pure function of the program.
+ *
+ * Every issued program carries a guaranteed structure: a DOM
+ * construction block (create, mutate, append) followed by real-DOM
+ * probes whose ids reference the constructed node, so an armed
+ * challenge always exercises real browser DOM and layout work. The
+ * dimension remains experimental: the trace values are reproducible by
+ * a pure implementation of the public interpreter semantics, with no
+ * environment proof yet; the guaranteed probe structure is the first
+ * step toward environment-dependent semantics.
  *
  * The execution digest binds the program, the challenge context and the
  * trace:
@@ -215,10 +226,43 @@ final class ExecutionChallengeGenerator
         $opCount = 8 + (self::nextByte($stream) % 17);
         $program .= \chr($opCount);
 
-        for ($i = 0; $i < $opCount; $i++) {
-            $opcode = self::nextByte($stream) % self::OP_COUNT;
-            $program .= \chr($opcode);
-            $program .= self::drawOperands($stream, $opcode);
+        // The guaranteed structure of every armed program: a mandatory
+        // DOM construction block (createElement with a drawn id, a
+        // mutate op on that node, an append) followed by a mandatory
+        // real-probe block (one of the browser-observed id probes
+        // 28/29/31 plus 1..3 further real probes). The probe id
+        // operand is the constructed id bytes, drawn once and reused,
+        // so every probe reads a real constructed node after the
+        // append. The remaining op slots are filled from the other 28
+        // opcodes, so the count stays within MIN_OPS..MAX_OPS while
+        // every program exercises real DOM construction and probe
+        // reads against constructed nodes.
+        $ops = [];
+        $tag = self::drawBytes($stream, 1);
+        $idOperand = self::drawIdOperand($stream);
+        $ops[] = [self::OP_DOM_CREATE, $tag.$idOperand];
+        $mutates = [self::OP_DOM_SET_ATTR, self::OP_DOM_DATASET_SET, self::OP_DOM_CLASS_ADD];
+        $mutate = $mutates[self::nextByte($stream) % 3];
+        $ops[] = [$mutate, self::drawOperands($stream, $mutate)];
+        $ops[] = [self::OP_DOM_APPEND, ''];
+        $linkProbes = [self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL];
+        $ops[] = [$linkProbes[self::nextByte($stream) % 3], $idOperand];
+        $extraProbes = 1 + (self::nextByte($stream) % 3);
+        for ($i = 0; $i < $extraProbes; $i++) {
+            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % 5);
+            $probeOperand = match ($probe) {
+                self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL => $idOperand,
+                self::OP_DOM_POINT => self::drawBytes($stream, 2),
+                default => '',
+            };
+            $ops[] = [$probe, $probeOperand];
+        }
+        for ($i = \count($ops); $i < $opCount; $i++) {
+            $opcode = self::nextByte($stream) % 28;
+            $ops[] = [$opcode, self::drawOperands($stream, $opcode)];
+        }
+        foreach ($ops as [$opcode, $operand]) {
+            $program .= \chr($opcode).$operand;
         }
 
         return base64_encode($program);
@@ -341,6 +385,14 @@ final class ExecutionChallengeGenerator
      * construction order with height >= 1, and `POINT` matching the
      * expected topmost node per the construction order.
      *
+     * The trace is walked entry by entry against the simulated op
+     * sequence, anchored by each op name at its exact position. The
+     * readback values of the real-DOM probes legitimately contain ';'
+     * and parentheses (the canonical attribute pairs), so no entry is
+     * ever split on a separator. Every non-layout entry is compared as
+     * one byte string against its simulated value, and the layout
+     * entries are parsed from their digit shapes.
+     *
      * Returns the canonical trace used for the digest when the trace
      * verifies, null otherwise.
      */
@@ -351,23 +403,15 @@ final class ExecutionChallengeGenerator
         if ($bytes === false || $program === null || $trace === '') {
             return null;
         }
-        $submitted = explode(';', $trace);
-        if (\count($submitted) !== \count($program['ops'])) {
-            return null;
-        }
         $u8 = [];
         $cur = null;
         $docIds = [];
-        $expected = [];
         $construction = [];
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
             $operands = $record['operands'];
-            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
-            $expected[] = self::TRACE_NAMES[$op].'('.$sim.')';
-            if ($op === self::OP_DOM_GEOMETRY) {
-                $geom[] = $operands['id'];
-            } elseif ($op === self::OP_DOM_APPEND) {
+            self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            if ($op === self::OP_DOM_APPEND) {
                 $construction[] = $cur['id'] ?? '';
             }
         }
@@ -381,17 +425,20 @@ final class ExecutionChallengeGenerator
         $cur = null;
         $docIds = [];
         $prevTop = -1;
+        $pos = 0;
+        $traceLen = \strlen($trace);
+        $lastIndex = \count($program['ops']) - 1;
         foreach ($program['ops'] as $i => $record) {
             $op = $record['op'];
             $operands = $record['operands'];
             $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
             $name = self::TRACE_NAMES[$op];
-            if ($op === self::OP_DOM_QUERY_REAL || $op === self::OP_DOM_EVENT_REAL || $op === self::OP_DOM_SERIALIZE_REAL) {
-                if ($submitted[$i] !== $name.'('.$sim.')') {
-                    return null;
-                }
-            } elseif ($op === self::OP_DOM_GEOMETRY) {
-                if (!preg_match('/^geom\((\d+),(\d+)\)$/', $submitted[$i], $m)) {
+            if (substr($trace, $pos, \strlen($name) + 1) !== $name.'(') {
+                return null;
+            }
+            $pos += \strlen($name) + 1;
+            if ($op === self::OP_DOM_GEOMETRY) {
+                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
                     return null;
                 }
                 $top = (int) $m[1];
@@ -400,19 +447,32 @@ final class ExecutionChallengeGenerator
                     return null;
                 }
                 $prevTop = $top;
+                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_POINT) {
                 $topTag = $construction !== [] ? 'div' : 'none';
-                if ($submitted[$i] !== $name.'('.$topTag.')') {
+                if (substr($trace, $pos, \strlen($topTag) + 1) !== $topTag.')') {
                     return null;
                 }
+                $pos += \strlen($topTag) + 1;
             } else {
-                if ($submitted[$i] !== $expected[$i]) {
+                $simEntry = $sim.')';
+                if (substr($trace, $pos, \strlen($simEntry)) !== $simEntry) {
                     return null;
                 }
+                $pos += \strlen($simEntry);
+            }
+            if ($i < $lastIndex) {
+                if (substr($trace, $pos, 1) !== ';') {
+                    return null;
+                }
+                ++$pos;
             }
         }
+        if ($pos !== $traceLen) {
+            return null;
+        }
 
-        return implode(';', $submitted);
+        return $trace;
     }
 
     /**
@@ -422,12 +482,17 @@ final class ExecutionChallengeGenerator
      * 10; the point probe names the topmost constructed node). Lets a
      * test simulate a genuine browser execution.
      *
+     * The entries are built per op from the same state machine the
+     * canonical trace uses; only the layout entries are replaced, so
+     * readback values that contain ';' or parentheses travel intact.
+     *
      * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
      */
     public static function executedTraceFor(array $program): string
     {
-        $trace = self::canonicalTrace($program);
-        $entries = explode(';', $trace);
+        $u8 = [];
+        $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
+        $docIds = [];
         $top = 0;
         // The verifier's `POINT` probe accepts 'div' exactly when the
         // program constructs any node (its construction check is
@@ -441,12 +506,16 @@ final class ExecutionChallengeGenerator
                 break;
             }
         }
-        foreach ($entries as $i => $entry) {
-            if (str_starts_with($entry, 'geom(')) {
-                $entries[$i] = 'geom('.($top * 10).',10)';
+        $entries = [];
+        foreach ($program['ops'] as $record) {
+            $op = $record['op'];
+            if ($op === self::OP_DOM_GEOMETRY) {
+                $entries[] = 'geom('.($top * 10).',10)';
                 ++$top;
-            } elseif (str_starts_with($entry, 'point(')) {
-                $entries[$i] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } elseif ($op === self::OP_DOM_POINT) {
+                $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } else {
+                $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds).')';
             }
         }
 

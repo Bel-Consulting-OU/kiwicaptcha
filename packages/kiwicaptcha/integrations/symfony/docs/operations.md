@@ -459,6 +459,14 @@ a program pays zero bytes for it. The privacy_strict profile forces the
 gate off; high_abuse arms it; balanced defaults it off. See
 configuration.md "ExecutionChallengeV1" for the operator contract.
 
+The V1 dimension is experimental: it binds execution evidence to the
+challenge, but the trace values stay reproducible by a pure
+implementation of the public interpreter semantics, with no environment
+proof yet. Every armed program now carries a guaranteed
+construction-to-probe structure (a DOM construction block followed by
+real probes of the constructed node), so a real browser always runs
+genuine DOM and layout work when it solves.
+
 ## Graceful shutdown sequence
 
 The deployment must drain verification work, not kill it mid-hash.

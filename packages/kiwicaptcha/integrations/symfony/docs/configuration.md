@@ -319,6 +319,16 @@ token. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
 
+Current status: the V1 dimension is experimental. It binds execution
+evidence to the challenge, but the trace values remain reproducible by
+a pure implementation of the public interpreter semantics, so it
+provides no environment proof yet. Every issued program carries a
+guaranteed construction-to-probe structure: a DOM construction block
+(createElement, a mutate op, an append) followed by real probes of the
+constructed node, so an armed challenge always exercises genuine
+browser DOM and layout work. The structure is the first step toward
+environment-dependent V2 semantics.
+
 Two knobs control the dimension:
 
 - `kiwi_captcha.execution_key` (string, default null): the keyed-PRF

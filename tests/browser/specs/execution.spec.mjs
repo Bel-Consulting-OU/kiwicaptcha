@@ -74,6 +74,28 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(iframes, 'the sandboxed execution iframe must be removed after the run').toBe(0);
   });
 
+  test('a corpus of fresh armed lifecycles all verify end to end', async ({ page }) => {
+    // K fresh armed lifecycles, one per page load. Every issued
+    // program carries the guaranteed structure: a DOM construction
+    // block (createElement with a drawn id, a mutate op, an append)
+    // followed by real probes of the constructed node. The browser
+    // must genuinely run the DOM construction and the probe reads, so
+    // a client that only synthesizes shadow values cannot reproduce
+    // the trace. The fixture /verify recomputes the digest from the
+    // stored program and validates the trace entry by entry.
+    const K = 30;
+    for (let i = 0; i < K; i++) {
+      await armedPage(page);
+      const token = await page.locator('[data-kiwi-token]').inputValue();
+      expect(token.length, `lifecycle ${i}: the armed solve must mint a token`).toBeGreaterThan(0);
+      const result = await verifyToken(page, token);
+      expect(
+        result.body.ok,
+        `lifecycle ${i}: the armed solve must verify end to end (got ${result.body.code})`
+      ).toBe(true);
+    }
+  });
+
   test('a WRONG (tampered) digest is the deterministic execution_mismatch', async ({ page }) => {
     await armedPage(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();

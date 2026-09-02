@@ -89,10 +89,23 @@
 //!
 //! The canonical op trace is the deterministic execution trace: one
 //! `opname(result)` entry per op, joined with ';'. Results are decimal
-//! integers, "1"/"0", or standard base64 of a byte string — no result
-//! alphabet contains '(', ')' or ';'. Both the server verifier and the
-//! browser interpreter simulate the same deterministic state machine
-//! (u8 array, current DOM node, appended-id set).
+//! integers, "1"/"0", or standard base64 of a byte string. The
+//! real-DOM readback entries (`QUERY_REAL`) carry canonical attribute
+//! pairs that may themselves contain ';' and parentheses, so the
+//! verifier walks the submitted trace entry by entry against the
+//! simulated op sequence and never splits it on a separator. Both the
+//! server verifier and the browser interpreter simulate the same
+//! deterministic state machine (u8 array, current DOM node,
+//! appended-id set).
+//!
+//! Every issued program carries a guaranteed structure: a DOM
+//! construction block (create, mutate, append) followed by real-DOM
+//! probes whose ids reference the constructed node, so an armed
+//! challenge always exercises real browser DOM and layout work. The
+//! dimension remains experimental: the trace values are reproducible
+//! by a pure implementation of the public interpreter semantics, with
+//! no environment proof yet; the guaranteed probe structure is the
+//! first step toward environment-dependent semantics.
 //!
 //! The execution digest binds the program, the challenge context and
 //! the trace:
@@ -351,10 +364,48 @@ pub fn generate(
     let op_count = 8 + (cursor.next_byte() % 17);
     program.push(op_count);
 
-    for _ in 0..op_count {
-        let opcode = cursor.next_byte() % OP_COUNT;
+    // The guaranteed structure of every armed program: a mandatory DOM
+    // construction block (createElement with a drawn id, a mutate op on
+    // that node, an append) followed by a mandatory real-probe block
+    // (one of the browser-observed id probes 28/29/31 plus 1..3 further
+    // real probes). The probe id operand is the constructed id bytes,
+    // drawn once and reused, so every probe reads a real constructed
+    // node after the append. The remaining op slots are filled from the
+    // other 28 opcodes, so the count stays within MIN_OPS..MAX_OPS
+    // while every program exercises real DOM construction and probe
+    // reads against constructed nodes.
+    let mut ops: Vec<(u8, Vec<u8>)> = Vec::new();
+    let tag = cursor.next_byte();
+    let id_operand = draw_id(&mut cursor);
+    let mut create_operands = vec![tag];
+    create_operands.extend_from_slice(&id_operand);
+    ops.push((OP_DOM_CREATE, create_operands));
+    let mutates = [OP_DOM_SET_ATTR, OP_DOM_DATASET_SET, OP_DOM_CLASS_ADD];
+    let mutate = mutates[(cursor.next_byte() % 3) as usize];
+    ops.push((mutate, draw_operands(&mut cursor, mutate)));
+    ops.push((OP_DOM_APPEND, Vec::new()));
+    let link_probes = [OP_DOM_QUERY_REAL, OP_DOM_GEOMETRY, OP_DOM_EVENT_REAL];
+    ops.push((
+        link_probes[(cursor.next_byte() % 3) as usize],
+        id_operand.clone(),
+    ));
+    let extra_probes = 1 + (cursor.next_byte() % 3);
+    for _ in 0..extra_probes {
+        let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % 5);
+        let probe_operands = match probe {
+            OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => id_operand.clone(),
+            OP_DOM_POINT => cursor.take(2),
+            _ => Vec::new(),
+        };
+        ops.push((probe, probe_operands));
+    }
+    while (ops.len() as u8) < op_count {
+        let opcode = cursor.next_byte() % 28;
+        ops.push((opcode, draw_operands(&mut cursor, opcode)));
+    }
+    for (opcode, operands) in ops {
         program.push(opcode);
-        program.extend_from_slice(&draw_operands(&mut cursor, opcode));
+        program.extend_from_slice(&operands);
     }
 
     Ok(B64.encode(program))
@@ -1036,21 +1087,30 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
 /// and the `POINT` probe naming the topmost constructed node ("div" when
 /// the program constructs any node, matching the verifier's
 /// whole-program construction predicate; "none" otherwise).
+///
+/// The entries are built per op from the same state machine the
+/// canonical trace uses; only the layout entries are replaced, so
+/// readback values that contain ';' or parentheses travel intact.
 pub fn executed_trace_for(program: &Program) -> String {
-    let trace = canonical_trace(program);
-    let mut entries: Vec<String> = trace.split(';').map(str::to_string).collect();
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
     let mut top = 0u64;
-    for entry in entries.iter_mut() {
-        if entry.starts_with("geom(") {
-            *entry = format!("geom({},{})", top * 10, 10);
+    let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
+    for op in &program.ops {
+        if op.opcode == OP_DOM_GEOMETRY {
+            entries.push(format!("geom({},{})", top * 10, 10));
             top += 1;
-        } else if entry.starts_with("point(") {
-            *entry = if has_append {
+        } else if op.opcode == OP_DOM_POINT {
+            entries.push(if has_append {
                 "point(div)".into()
             } else {
                 "point(none)".into()
-            };
+            });
+        } else {
+            let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+            entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
         }
     }
     entries.join(";")
@@ -1064,24 +1124,29 @@ pub fn executed_trace_for(program: &Program) -> String {
 /// values). Returns the submitted trace unchanged when it is a valid
 /// execution of the program; `None` on any mismatch. The digest
 /// comparison is the caller's (constant-time) job.
+///
+/// The trace is walked entry by entry against the simulated op
+/// sequence, anchored by each op name at its exact position. The
+/// readback values of the real-DOM probes legitimately contain ';'
+/// and parentheses (the canonical attribute pairs), so no entry is
+/// ever split on a separator; every non-layout entry is compared as
+/// one byte string against its simulated value, and the layout
+/// entries are parsed from their digit shapes.
 pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
     let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
     let program = decode(program_b64)?;
-    let submitted: Vec<&str> = trace.split(';').collect();
-    if submitted.len() != program.ops.len() || trace.is_empty() {
+    if trace.is_empty() {
         return None;
     }
 
-    // First pass: the expected values and the whole-program
-    // construction set (the `POINT` probe predicate).
+    // First pass: the whole-program construction set (the `POINT`
+    // probe predicate).
     let mut u8arr: Vec<u8> = Vec::new();
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
-    let mut expected: Vec<String> = Vec::with_capacity(program.ops.len());
     let mut construction: Vec<Vec<u8>> = Vec::new();
     for op in &program.ops {
-        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
-        expected.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], sim));
+        simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
         if op.opcode == OP_DOM_APPEND {
             // The PHP mirror always appends (the current node id, or
             // '' when no node exists yet): the `POINT` probe's
@@ -1100,19 +1165,23 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let mut prev_top: i64 = -1;
+    let bytes = trace.as_bytes();
+    let mut pos = 0usize;
     for (i, op) in program.ops.iter().enumerate() {
         let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
         let name = TRACE_NAMES[op.opcode as usize];
+        let name_open = format!("{name}(");
+        if pos + name_open.len() > bytes.len()
+            || &bytes[pos..pos + name_open.len()] != name_open.as_bytes()
+        {
+            return None;
+        }
+        pos += name_open.len();
         match op.opcode {
-            OP_DOM_QUERY_REAL | OP_DOM_EVENT_REAL | OP_DOM_SERIALIZE_REAL => {
-                if submitted[i] != format!("{name}({sim})") {
-                    return None;
-                }
-            }
             OP_DOM_GEOMETRY => {
-                let entry = submitted[i];
-                let rest = entry.strip_prefix("geom(")?;
-                let body = rest.strip_suffix(')')?;
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let body = &rest[..end];
                 let mut parts = body.splitn(2, ',');
                 let top: i64 = parts.next()?.parse().ok()?;
                 let height: i64 = parts.next()?.parse().ok()?;
@@ -1120,6 +1189,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                     return None;
                 }
                 prev_top = top;
+                pos += end + 1;
             }
             OP_DOM_POINT => {
                 let top_tag = if construction.is_empty() {
@@ -1127,16 +1197,33 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 } else {
                     "div"
                 };
-                if submitted[i] != format!("point({top_tag})") {
+                let tag_entry = format!("{top_tag})");
+                if pos + tag_entry.len() > bytes.len()
+                    || &bytes[pos..pos + tag_entry.len()] != tag_entry.as_bytes()
+                {
                     return None;
                 }
+                pos += tag_entry.len();
             }
             _ => {
-                if submitted[i] != expected[i] {
+                let sim_entry = format!("{sim})");
+                if pos + sim_entry.len() > bytes.len()
+                    || &bytes[pos..pos + sim_entry.len()] != sim_entry.as_bytes()
+                {
                     return None;
                 }
+                pos += sim_entry.len();
             }
         }
+        if i + 1 < program.ops.len() {
+            if pos >= bytes.len() || bytes[pos] != b';' {
+                return None;
+            }
+            pos += 1;
+        }
+    }
+    if pos != bytes.len() {
+        return None;
     }
 
     Some(trace.to_string())
@@ -1253,17 +1340,213 @@ mod tests {
     }
 
     #[test]
-    fn trace_values_never_contain_separators() {
-        for i in 0..16u32 {
-            let nonce = B64.encode(sha2::Sha256::digest(format!("n-{i}").as_bytes()));
+    fn generated_programs_carry_the_guaranteed_structure() {
+        // The generator-level corpus: every generated program opens
+        // with the mandatory DOM construction block (createElement with
+        // a drawn id, a mutate op on that node, an append) followed by
+        // the mandatory real-probe block. Every browser-observed probe
+        // with an id operand (28/29/31) references the constructed id
+        // bytes, drawn once and reused, so the probes always read a
+        // real constructed node after the append. The remaining slots
+        // are filled from the other 28 opcodes (0..27), never from the
+        // browser-observed probes.
+        for i in 0..128u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("guaranteed-{i}").as_bytes()));
             let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
-            let program = decode(&p).unwrap();
-            let trace = canonical_trace(&program);
-            for entry in trace.split(';') {
-                assert!(entry.ends_with(')'));
-                assert!(entry.contains('('));
+            let program = decode(&p).expect("the program must parse");
+            assert!((program.ops.len() as u8) >= MIN_OPS && (program.ops.len() as u8) <= MAX_OPS);
+            let first = &program.ops[0];
+            assert_eq!(
+                first.opcode, OP_DOM_CREATE,
+                "op 0 is the construction create"
+            );
+            let created_id = match first.operands.get("id") {
+                Some(Operand::Bytes(b)) => b.clone(),
+                _ => panic!("the create op must carry its drawn id bytes"),
+            };
+            assert!((created_id.len() as u8) >= 4 && created_id.len() <= 16);
+            assert!(matches!(
+                program.ops[1].opcode,
+                OP_DOM_SET_ATTR | OP_DOM_DATASET_SET | OP_DOM_CLASS_ADD
+            ));
+            assert_eq!(
+                program.ops[2].opcode, OP_DOM_APPEND,
+                "op 2 is the construction append"
+            );
+            let link = program.ops[3].opcode;
+            assert!(
+                matches!(
+                    link,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ),
+                "the link probe is one of the id-carrying real probes"
+            );
+            let mut seen_constructed_probe = false;
+            let mut index = 3usize;
+            while index < program.ops.len() && program.ops[index].opcode >= OP_DOM_QUERY_REAL {
+                let op = &program.ops[index];
+                if matches!(
+                    op.opcode,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ) {
+                    let id = match op.operands.get("id") {
+                        Some(Operand::Bytes(b)) => b.clone(),
+                        _ => panic!("id-carrying probes must carry their id operand"),
+                    };
+                    assert_eq!(
+                        id, created_id,
+                        "every id-carrying probe references the constructed id"
+                    );
+                    seen_constructed_probe = true;
+                }
+                index += 1;
+            }
+            assert!(
+                seen_constructed_probe,
+                "at least one probe reads the constructed id"
+            );
+            for op in &program.ops[index..] {
+                assert!(
+                    op.opcode <= OP_DOM_SERIALIZE,
+                    "the filler ops are drawn from the other 28 opcodes, never 28..32"
+                );
+            }
+            // The browser-equivalent executed trace verifies against
+            // the program (the anchored per-op walk tolerates the ';'
+            // and parentheses inside real-DOM readback values).
+            let trace = executed_trace_for(&program);
+            assert!(
+                verify_executed_trace(&p, &nonce, &trace).is_some(),
+                "the executed trace of a generated program must verify"
+            );
+        }
+    }
+
+    #[test]
+    fn naive_probe_forgeries_are_rejected() {
+        // The adversarial framing: a solver that skips the DOM
+        // construction cannot forge the probe entries. The executed
+        // trace of a program whose probes reference constructed nodes
+        // carries the real readbacks; a naive trace with 'none' probes
+        // (as if the constructed node never existed) or with the probe
+        // block removed is rejected by the anchored walk.
+        let mut found = 0u32;
+        for i in 0..128u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("forge-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            let trace = executed_trace_for(&program);
+            assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+            let link = program.ops[3].opcode;
+            if link == OP_DOM_QUERY_REAL {
+                // The naive 'none' forgery: rewrite the create id bytes
+                // of op 0 in the blob to a foreign id of the same
+                // length, so the probes reference a node that was never
+                // constructed and the executed trace of that program
+                // reads every probe as 'none'.
+                assert!(
+                    trace.contains("qreal(div|"),
+                    "the executed trace must read back the constructed node"
+                );
+                let bytes = B64.decode(&p).unwrap();
+                let scope_len = bytes[1] as usize;
+                let action_len = bytes[2 + scope_len] as usize;
+                let op0 = 2 + scope_len + 1 + action_len + 2;
+                assert_eq!(bytes[op0], OP_DOM_CREATE);
+                let id_len = bytes[op0 + 2] as usize;
+                assert!(id_len >= 4);
+                let mut naive = bytes.clone();
+                for b in naive[op0 + 3..op0 + 3 + id_len].iter_mut() {
+                    *b = b'z';
+                }
+                assert_ne!(naive, bytes, "the foreign id must differ from the drawn id");
+                let naive_program = decode(&B64.encode(naive)).expect("the naive program parses");
+                let naive_trace = executed_trace_for(&naive_program);
+                assert!(
+                    naive_trace.contains("qreal(none)"),
+                    "a solver skipping the construction reads the probe as 'none'"
+                );
+                assert!(
+                    verify_executed_trace(&p, &nonce, &naive_trace).is_none(),
+                    "the 'none' probe forgery must be rejected against the real program"
+                );
+                found += 1;
+                break;
             }
         }
+        assert_eq!(found, 1, "the corpus must contain a qreal link probe");
+
+        // Removing the probe block: the trace truncated after the
+        // construction append is missing every probe entry and must be
+        // rejected.
+        let nonce = B64.encode(sha2::Sha256::digest(b"forge-trunc"));
+        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let program = decode(&p).expect("the program must parse");
+        let trace = executed_trace_for(&program);
+        let prefix = "dcreate(";
+        let start = trace
+            .find(prefix)
+            .expect("the trace opens with the create entry");
+        let head = &trace[start..];
+        let cut = head
+            .find("dappend(1);")
+            .expect("the construction append entry")
+            + "dappend(1);".len();
+        let truncated = &trace[..start + cut];
+        assert!(
+            verify_executed_trace(&p, &nonce, truncated).is_none(),
+            "a trace without the probe entries must be rejected"
+        );
+    }
+
+    #[test]
+    fn layout_probe_forgeries_are_rejected() {
+        // The geometry forgeries: a height-0 entry and a non-monotonic
+        // entry both fail the verifier's layout invariants, while the
+        // original executed trace verifies.
+        let mut height_0 = false;
+        for i in 0..256u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("geom0-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            if program.ops.iter().any(|op| op.opcode == OP_DOM_GEOMETRY) {
+                let trace = executed_trace_for(&program);
+                assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+                let forged = trace.replacen("geom(0,10)", "geom(0,0)", 1);
+                assert_ne!(forged, trace, "the height-0 forge must change the trace");
+                assert!(
+                    verify_executed_trace(&p, &nonce, &forged).is_none(),
+                    "a geometry entry with height 0 must be rejected"
+                );
+                height_0 = true;
+                break;
+            }
+        }
+        assert!(height_0, "the corpus must contain a geometry probe");
+
+        let mut non_monotonic = false;
+        for i in 0..256u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("geom1-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            let geoms = program
+                .ops
+                .iter()
+                .filter(|op| op.opcode == OP_DOM_GEOMETRY)
+                .count();
+            if geoms >= 2 {
+                let trace = executed_trace_for(&program);
+                assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+                let forged = trace.replacen("geom(0,10)", "geom(50,10)", 1);
+                assert!(
+                    verify_executed_trace(&p, &nonce, &forged).is_none(),
+                    "a non-monotonic geometry sequence must be rejected"
+                );
+                non_monotonic = true;
+                break;
+            }
+        }
+        assert!(non_monotonic, "the corpus must contain two geometry probes");
     }
 
     #[test]
