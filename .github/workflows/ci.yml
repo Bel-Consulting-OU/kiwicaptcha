@@ -1456,3 +1456,20 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
+      - name: Rust issues the v4 execution record and serializes the digest:trace token (reverse direction)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+        run: cargo test --features redis --test cross_language rust_issues_v4_execution_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued v4 execution record (digest:trace recomputed from the stored program)
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+        run: php tests/CrossLanguageVerify.php
+      - name: PHP rejects the tampered digest on the Rust-issued v4 execution record (deterministic rejection)
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+          KC_RUST_EXPECT_TAMPER: '1'
+        run: php tests/CrossLanguageVerify.php
