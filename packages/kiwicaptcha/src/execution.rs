@@ -224,9 +224,11 @@ pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
 pub const OP_DOM_OBSERVE: u8 = 33;
 pub const OP_COUNT: u8 = 34;
 
-/// The fabricated observed height (px) the browser-equivalent trace
-/// and the interpreter's CSSOM-styled probe agree on: the verifier
-/// replays the reported value, it never predicts it.
+/// The fabricated reference height the browser-equivalent trace
+/// synthesizes: the real observed value is the engine's own text
+/// metrics (never predictable by the mirrors), so the synthesizer
+/// uses this constant and the verifier replays whatever the trace
+/// reports.
 const OBSERVED_HEIGHT: u8 = 10;
 
 /// The trace entry names, one per opcode (index = opcode).
@@ -1173,7 +1175,7 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
 /// the program constructs any node, matching the verifier's
 /// whole-program construction predicate; "none" otherwise).
 ///
-/// The causal `OBSERVE` readback reports the fabricated observed
+/// The causal `OBSERVE` readback reports the observed text-metric
 /// height (10) and writes it through into the u8 state, so the
 /// following checksum and read entries of this synthesized trace are
 /// computed over the observed byte.
@@ -1200,12 +1202,13 @@ pub fn executed_trace_for(program: &Program) -> String {
                 "point(none)".into()
             });
         } else if op.opcode == OP_DOM_OBSERVE {
-            // The browser-equivalent observe: the fabricated height
-            // (the CSSOM-styled probe observes exactly this value in
-            // every engine) is written through into the replay state.
-            // The following checksum/read entries in this synthesized
-            // trace are then computed over the observed byte, the full
-            // causal-graph semantics, never a placeholder.
+            // The browser-equivalent observe: the fabricated reference
+            // height (the real value is the engine's own text metrics,
+            // never predictable here) is written through into the
+            // replay state. The following checksum/read entries in this
+            // synthesized trace are then computed over the observed
+            // byte, the full causal-graph semantics, never a
+            // placeholder.
             let idx = operand_int(op, "idx") as usize;
             entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
             if idx < u8arr.len() {

@@ -57,11 +57,13 @@
  * crate::execution): one `opname(result)` entry per op joined with ';',
  * results being decimal integers, "1"/"0", or standard base64 of a
  * byte string. The single browser-observed entry is 'obs(<dst>,<h>)':
- * the height h is measured from the real layout of the constructed
- * node, written into the VM u8 state at dst, and replayed by the
- * verifier from the trace itself. The mirrors never predict the
- * observed height; their browser-equivalent traces carry the same
- * entry shape over the fabricated value. The digest is hex
+ * the height h is the real text-metric layout measurement of the
+ * constructed node (a fixed-width block rendering a canonical text
+ * line in the engine's default font), written into the VM u8 state at
+ * dst, and replayed by the verifier from the trace itself. The
+ * mirrors never predict the observed height: the value is engine and
+ * platform specific, so their browser-equivalent traces carry the
+ * same entry shape over a fabricated reference value. The digest is hex
  * HMAC-SHA256 keyed by the PROGRAM
  * BYTES (the content-derived key; the secret execution_key never
  * leaves the server) over
@@ -705,19 +707,24 @@
           break;
         }
         case 33: {
-          // OBSERVE: the measured real height of the constructed
+          // OBSERVE: the measured real layout height of the constructed
           // node, written into the u8 state like U8_WRITE. The probe
-          // pins the layout first (inline display block, height 10px),
-          // so the observed value is deterministic in every engine and
-          // the verifier replays this entry from the trace itself, it
-          // never predicts the height. An absent node reports 1.
+          // pins the layout to a fixed-width block that renders a
+          // canonical text line, so the measurement is the engine's own
+          // text metrics (its default font and line height): a value a
+          // pure function of the program cannot compute, since it
+          // varies across engines and platforms. The verifier replays
+          // this entry from the trace itself; it never predicts the
+          // height. An absent node reports 1.
           var obsId = bytesToAscii(opValue(ops, "id"));
           var obsIdx = opValue(ops, "idx");
           var obsEl = doc.getElementById(obsId);
           var obsH = 1;
           if (obsEl) {
             obsEl.style.display = "block";
-            obsEl.style.height = "10px";
+            obsEl.style.width = "240px";
+            obsEl.style.height = "auto";
+            obsEl.textContent = "kiwicaptcha-observe";
             obsH = obsEl.offsetHeight;
           }
           if (obsH < 1) obsH = 1;

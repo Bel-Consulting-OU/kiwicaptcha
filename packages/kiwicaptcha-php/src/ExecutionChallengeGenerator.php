@@ -171,9 +171,11 @@ final class ExecutionChallengeGenerator
     public const OP_COUNT = 34;
 
     /**
-     * The fabricated observed height (px) the browser-equivalent trace
-     * and the interpreter's CSSOM-styled probe agree on: the verifier
-     * replays the reported value, it never predicts it.
+     * The fabricated reference height the browser-equivalent trace
+     * synthesizes: the real observed value is the engine's own text
+     * metrics (never predictable by the mirrors), so the synthesizer
+     * uses this constant and the verifier replays whatever the trace
+     * reports.
      */
     private const OBSERVED_HEIGHT = 10;
 
@@ -572,9 +574,10 @@ final class ExecutionChallengeGenerator
             } elseif ($op === self::OP_DOM_POINT) {
                 $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
             } elseif ($op === self::OP_DOM_OBSERVE) {
-                // The browser-equivalent observe: the fabricated height
-                // (the CSSOM-styled probe observes exactly this value in
-                // every engine) is written through into the replay state,
+                // The browser-equivalent observe: the fabricated reference
+                // height (the real value is the engine's own text
+                // metrics, never predictable here) is written through
+                // into the replay state,
                 // so the following checksum/read entries in this
                 // synthesized trace are computed over the observed byte —
                 // the full causal-graph semantics, never a placeholder.

@@ -462,15 +462,16 @@ a program pays zero bytes for it. The privacy_strict profile forces the
 gate off; high_abuse arms it; balanced defaults it off. See
 configuration.md "ExecutionChallengeV1" for the operator contract.
 
-The dimension is experimental and carries the V2 causal-consistency
-semantics: every armed program opens with a guaranteed causal graph
-(DOM construction, a u8 array, an observe op reading the layout height
-of the constructed node, then a byte read-back). The verifier replays the graph forward from the reported value.
+The V2 causal-consistency semantics are experimental: every armed
+program opens with a guaranteed causal graph (DOM construction, a u8
+array, an observe op reading the real text metrics of the constructed
+node, then a byte read-back). The verifier replays the graph forward
+from the reported value.
 A valid trace therefore requires the full causal semantics; a short
-pure synthesis that skips the write-through is rejected. A solver that
-implements the full public semantics can still fabricate a coherent
-trace: the values are evidence, not a cryptographic proof of a
-browser.
+pure synthesis that skips the write-through is rejected. A solver
+implementing the complete public semantics can still emit a coherent
+trace, because the values are evidence, not a cryptographic proof of
+a browser.
 
 ## Graceful shutdown sequence
 

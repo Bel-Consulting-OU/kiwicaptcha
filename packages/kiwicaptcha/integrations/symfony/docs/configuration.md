@@ -333,13 +333,14 @@ exact entries and the final digest depend on the browser-observed
 value. The verifier replays the whole graph
 forward from the reported value, checking bounds, structure and
 whole-trace coherence; a short pure synthesis that skips the
-write-through is rejected. The observed height is cross-engine
-deterministic: the interpreter styles the probed node to a fixed
-pixel height before measuring, so browsers and the fabricated
-reference trace agree. The boundary that remains: a solver that
-implements the full public semantics can still fabricate a coherent
-trace, since the values are evidence, not a cryptographic proof of a
-browser.
+write-through is rejected. The observed height is a genuine browser
+measurement: the interpreter styles the probed node as a fixed-width
+block rendering a canonical text line, so the value is the engine's
+own default-font metrics. The mirrors never predict it; their
+browser-equivalent traces use a fabricated reference value. A solver
+that implements the full public semantics can still fabricate a
+coherent trace: the values are evidence, not a cryptographic proof of
+a browser.
 
 Two knobs control the dimension:
 
