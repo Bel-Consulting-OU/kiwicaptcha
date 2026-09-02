@@ -542,14 +542,19 @@ final class ExecutionChallengeTest extends TestCase
 
     public function testAllOpcodesExecuteDeterministically(): void
     {
-        // Every opcode of the fixed set appears across a small sample of
-        // programs, and every trace entry is a valid value (decimal,
+        // Every opcode of the fixed set appears across a deterministic
+        // corpus (nonces derived from sha256 over a label, so the same
+        // programs run on every PHP version and every CI cell — the
+        // corpus is large enough that the rarest filler opcodes
+        // (uniform over 0..27 in the filler slots) are certainly
+        // drawn), and every trace entry is a valid value (decimal,
         // "1"/"0", or base64 — never containing the ';' separator).
         $seen = [];
-        for ($i = 0; $i < 24; $i++) {
-            $nonce = base64_encode(random_bytes(32));
+        for ($i = 0; $i < 96; $i++) {
+            $nonce = base64_encode(hash('sha256', 'opcode-coverage-'.$i, true));
             $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, self::VERSION);
             $decoded = ExecutionChallengeGenerator::decode($program);
+            self::assertNotNull($decoded);
             $trace = ExecutionChallengeGenerator::canonicalTrace($decoded);
             self::assertStringNotContainsString("\0", $trace);
             foreach ($decoded['ops'] as $op) {
