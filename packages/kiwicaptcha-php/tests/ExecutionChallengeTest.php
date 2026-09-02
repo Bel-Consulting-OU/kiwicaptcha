@@ -571,14 +571,20 @@ final class ExecutionChallengeTest extends TestCase
         // both mirrors pin the same bytes.
         $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, 'login', 'login-action', 1);
         self::assertSame(
-            'AQVsb2dpbgxsb2dpbi1hY3Rpb24BFhA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEh8PclZwc2VUeXZNVHhMbXMrHA9yVnBzZVR5dk1UeExtcysdD3JWcHNlVHl2TVR4TG1zKyAXCzJBcUxDOXNKQjR2BZbLHEPX1bDYB/KirhATuo0oGxILsBkQUA8xV2JFc3cvWGFsSkdSUlAJt5MaEOAQZFNIazI0RkFsM1diODVDMxQkFgVySmkjWQdwo5mMcPosjwLkcZPOX9oyWQ==',
+            'AQVsb2dpbgxsb2dpbi1hY3Rpb24BFhA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEggUIQ9yVnBzZVR5dk1UeExtcysKCgoLYB8PclZwc2VUeXZNVHhMbXMrHw9yVnBzZVR5dk1UeExtcysaEOoOQzlzSkI0dnRXTGNEWFYI2Afyoq4QE7qNKBsSC7AZEFAPMVdiRXN3L1hhbEpHUlJQCbeTGhDgEGRTSGsyNEZBbDNXYjg1QzMUJA==',
             $program,
             'the PHP generator must reproduce the Rust program byte-for-byte',
         );
+        $decoded = ExecutionChallengeGenerator::decode($program);
+        self::assertNotNull($decoded);
         self::assertSame(
-            '1795beb470b3a6605bfbba67b5b9eb2619f1ad76a05b73a07038e509afe360e9',
-            ExecutionChallengeGenerator::expectedDigest($program, self::NONCE),
-            'the PHP digest must reproduce the Rust digest',
+            '595d6df929e025c559ac3393c3a006283574d33f366dbdb70501ae88f177a1b9',
+            ExecutionChallengeGenerator::digestOverTrace(
+                $program,
+                self::NONCE,
+                ExecutionChallengeGenerator::executedTraceFor($decoded),
+            ),
+            'the PHP executed-trace digest must reproduce the Rust digest',
         );
     }
 

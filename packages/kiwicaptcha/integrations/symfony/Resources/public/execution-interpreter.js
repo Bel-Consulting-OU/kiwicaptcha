@@ -31,13 +31,16 @@
  * functions of their operands, no DOM) and the DOM SUBSET (opcodes
  * 16-27: createElement/setAttribute/appendChild/querySelector/
  * getAttribute/dataset/classList/parent/dispatch/serialize against the
- * sandboxed iframe document; opcodes 28-32: the real-DOM evidence
+ * sandboxed iframe document; opcodes 28-33: the real-DOM evidence
  * probes — real query readback, layout geometry, the topmost-node
- * point probe, a real event dispatch readback and the canonical
- * serialization digest — validated by the verifier's invariants
- * (exact for QUERY_REAL/EVENT_REAL/SERIALIZE_REAL, monotonic
- * geometry with height >= 1, and the point probe naming the topmost
- * constructed node)). The compute subset is worker-portable by
+ * point probe, a real event dispatch readback, the canonical
+ * serialization digest and the causal observe probe (the measured
+ * height of the constructed node, written into the u8 state) —
+ * validated by the verifier's invariants (exact for
+ * QUERY_REAL/EVENT_REAL/SERIALIZE_REAL, monotonic geometry with
+ * height >= 1, the point probe naming the topmost constructed node,
+ * and the observe entry replaying the reported height). The compute
+ * subset is worker-portable by
  * design: it never touches the document, so it can move into the
  * existing worker architecture (kiwi-worker.js) without any protocol
  * change. In THIS implementation the whole VM runs inside the ephemeral
@@ -53,7 +56,13 @@
  * server mirrors (PHP KiwiCaptcha\ExecutionChallengeGenerator, Rust
  * crate::execution): one `opname(result)` entry per op joined with ';',
  * results being decimal integers, "1"/"0", or standard base64 of a
- * byte string. The digest is hex HMAC-SHA256 keyed by the PROGRAM
+ * byte string. The single browser-observed entry is 'obs(<dst>,<h>)':
+ * the height h is measured from the real layout of the constructed
+ * node, written into the VM u8 state at dst, and replayed by the
+ * verifier from the trace itself. The mirrors never predict the
+ * observed height; their browser-equivalent traces carry the same
+ * entry shape over the fabricated value. The digest is hex
+ * HMAC-SHA256 keyed by the PROGRAM
  * BYTES (the content-derived key; the secret execution_key never
  * leaves the server) over
  * `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`
@@ -78,7 +87,7 @@
 
   var MIN_OPS = 8;
   var MAX_OPS = 24;
-  var OP_COUNT = 33;
+  var OP_COUNT = 34;
   var FORMAT_VERSION = 1;
 
   var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -92,7 +101,7 @@
     "slen", "schar", "scode", "sslice",
     "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
     "cadd", "ccont", "dparent", "ddispatch", "dserialize",
-    "qreal", "geom", "point", "evreal", "sreal"
+    "qreal", "geom", "point", "evreal", "sreal", "obs"
   ];
 
   // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
@@ -412,6 +421,17 @@
         }
         case 32:
           break;
+        case 33: {
+          // OBSERVE: the constructed id (4..16 bytes, like the real
+          // probes) then one raw byte for the u8 destination index.
+          var obsId = readLenBytes(16);
+          if (!obsId || obsId.length < 4) return null;
+          var obsByte = byte();
+          if (obsByte === null) return null;
+          operands.push({ k: "id", v: obsId });
+          operands.push({ k: "idx", v: obsByte % 64 });
+          break;
+        }
         default:
           return null;
       }
@@ -682,6 +702,28 @@
           // own sha256 keeps the digest deterministic).
           var srParts = (cur && cur.appended) ? serializeAttrs(cur) : "";
           value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
+          break;
+        }
+        case 33: {
+          // OBSERVE: the measured real height of the constructed
+          // node, written into the u8 state like U8_WRITE. The probe
+          // pins the layout first (inline display block, height 10px),
+          // so the observed value is deterministic in every engine and
+          // the verifier replays this entry from the trace itself, it
+          // never predicts the height. An absent node reports 1.
+          var obsId = bytesToAscii(opValue(ops, "id"));
+          var obsIdx = opValue(ops, "idx");
+          var obsEl = doc.getElementById(obsId);
+          var obsH = 1;
+          if (obsEl) {
+            obsEl.style.display = "block";
+            obsEl.style.height = "10px";
+            obsH = obsEl.offsetHeight;
+          }
+          if (obsH < 1) obsH = 1;
+          if (obsH > 255) obsH = 255;
+          if (obsIdx < u8.length) u8[obsIdx] = obsH;
+          value = obsIdx + "," + obsH;
           break;
         }
         default:

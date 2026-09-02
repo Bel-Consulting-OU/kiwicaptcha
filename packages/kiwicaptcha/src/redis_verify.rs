@@ -4761,7 +4761,8 @@ mod tests {
             VerifyOutcome::Invalid(VerifyError::MalformedRecord),
             "a key-value nonce mismatch is the deterministic MalformedRecord"
         );
-        // Nothing was consumed or deleted: the verdict repeats.
+        // The terminal verdict burns the pending record under the key
+        // (the one-shot policy, PHP parity): a replay sees no record.
         let outcome2 = verifier.verify(
             &token_a,
             "login",
@@ -4770,7 +4771,11 @@ mod tests {
             None,
             RequestBindingExpectation::Unenforced,
         );
-        assert_eq!(outcome2, outcome, "the mismatched pair is never consumed");
+        assert_eq!(
+            outcome2,
+            VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            "the pending record is burned by the terminal verdict"
+        );
     }
 
     #[test]

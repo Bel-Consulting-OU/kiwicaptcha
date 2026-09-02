@@ -31,6 +31,70 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
     private const ACTION = 'login-action';
     private const VERSION = 1;
 
+    public function testCausalObserveForgeriesAreRejected(): void
+    {
+        // The V2 adversarial framing: the observed height is written
+        // through into the replay state, so a trace that reports a
+        // value but does not carry it coherently through the later
+        // checksum/read entries is rejected by the anchored walk.
+        $label = 'obsforge';
+        $nonce = $this->nonceFor($label);
+        $programB64 = $this->blobFor($label);
+        $decoded = ExecutionChallengeGenerator::decode($programB64);
+        self::assertNotNull($decoded);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+        self::assertNotNull(ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $trace));
+
+        $obsEntry = null;
+        foreach (explode(';', $trace) as $entry) {
+            if (str_starts_with($entry, 'obs(')) {
+                $obsEntry = $entry;
+                break;
+            }
+        }
+        self::assertNotNull($obsEntry, 'the executed trace carries the observe entry');
+
+        // Bounds: heights 0 and 256 are rejected.
+        self::assertNull(
+            ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, str_replace($obsEntry, 'obs(0,0)', $trace)),
+            'an observe height of 0 must be rejected',
+        );
+        self::assertNull(
+            ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, str_replace($obsEntry, 'obs(0,256)', $trace)),
+            'an observe height of 256 must be rejected',
+        );
+
+        // A destination index that differs from the program operand is
+        // rejected.
+        self::assertNull(
+            ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, str_replace($obsEntry, 'obs(63,10)', $trace)),
+            'an observe destination that differs from the operand must be rejected',
+        );
+
+        // The write-through contradiction: report the observed value
+        // but read the observed index back as if the write never
+        // happened.
+        $readEntry = null;
+        foreach (explode(';', $trace) as $entry) {
+            if (str_starts_with($entry, 'u8r(')) {
+                $readEntry = $entry;
+                break;
+            }
+        }
+        self::assertNotNull($readEntry, 'the executed trace reads the observed byte back');
+        self::assertNull(
+            ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, str_replace($readEntry, 'u8r(0)', $trace)),
+            'a trace that reports the observe but drops the write-through is rejected',
+        );
+
+        // Removing the observe entry breaks the anchored walk.
+        $obsRemoved = implode(';', array_values(array_filter(explode(';', $trace), static fn (string $e): bool => !str_starts_with($e, 'obs('))));
+        self::assertNull(
+            ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $obsRemoved),
+            'a trace without the observe entry must be rejected',
+        );
+    }
+
     private function nonceFor(string $label): string
     {
         return base64_encode(hash('sha256', $label, true));
@@ -125,15 +189,31 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
             ], 'op 1 is a mutate op on the created node');
             self::assertSame(ExecutionChallengeGenerator::OP_DOM_APPEND, $ops[2]['op'], 'op 2 is the construction append');
 
+            // The causal u8 chain: create the array, observe the real
+            // height of the constructed node into it, read the observed
+            // byte back, checksum or rotate over it.
+            self::assertSame(ExecutionChallengeGenerator::OP_U8_CREATE, $ops[3]['op'], 'op 3 creates the u8 array');
+            $u8cLen = $ops[3]['operands']['len'];
+            $obs = $ops[4];
+            self::assertSame(ExecutionChallengeGenerator::OP_DOM_OBSERVE, $obs['op'], 'op 4 observes the constructed node');
+            self::assertSame($createdId, $obs['operands']['id'], 'the observe op references the constructed id');
+            self::assertLessThan($u8cLen, $obs['operands']['idx'], 'the observed byte lands inside the created array');
+            self::assertSame(ExecutionChallengeGenerator::OP_U8_READ, $ops[5]['op'], 'op 5 reads the observed byte back');
+            self::assertSame($obs['operands']['idx'], $ops[5]['operands']['idx'], 'the read targets the observed index');
+            self::assertContains($ops[6]['op'], [
+                ExecutionChallengeGenerator::OP_U8_WRITE,
+                ExecutionChallengeGenerator::OP_U8_ROTATE,
+            ], 'op 6 checksums or rotates over the observed byte');
+
             // The real-probe block: every probe op references the
             // constructed id bytes; the filler after it never draws
             // the browser-observed probes.
-            self::assertContains($ops[3]['op'], [
+            self::assertContains($ops[7]['op'], [
                 ExecutionChallengeGenerator::OP_DOM_QUERY_REAL,
                 ExecutionChallengeGenerator::OP_DOM_GEOMETRY,
                 ExecutionChallengeGenerator::OP_DOM_EVENT_REAL,
             ], 'the link probe is one of the id-carrying real probes');
-            $probeEnd = 3;
+            $probeEnd = 7;
             $seenConstructedProbe = false;
             while ($probeEnd < $count && $ops[$probeEnd]['op'] >= ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
                 $probe = $ops[$probeEnd];
@@ -184,7 +264,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         for ($i = 0; $i < 128; $i++) {
             $label = sprintf('readback-%03d', $i);
             $decoded = $this->programFor($label);
-            if ($decoded['ops'][3]['op'] !== ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
+            if ($decoded['ops'][7]['op'] !== ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
                 continue;
             }
             $seenQreal = true;
@@ -199,7 +279,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         for ($i = 0; $i < 128; $i++) {
             $label = sprintf('readback-event-%03d', $i);
             $decoded = $this->programFor($label);
-            if ($decoded['ops'][3]['op'] !== ExecutionChallengeGenerator::OP_DOM_EVENT_REAL) {
+            if ($decoded['ops'][7]['op'] !== ExecutionChallengeGenerator::OP_DOM_EVENT_REAL) {
                 continue;
             }
             $seenEvent = true;
@@ -224,7 +304,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         for ($i = 0; $i < 128; $i++) {
             $label = sprintf('forger-%03d', $i);
             $decoded = $this->programFor($label);
-            if ($decoded['ops'][3]['op'] === ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
+            if ($decoded['ops'][7]['op'] === ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
                 $nonce = $this->nonceFor($label);
                 $programB64 = $this->blobFor($label);
                 break;

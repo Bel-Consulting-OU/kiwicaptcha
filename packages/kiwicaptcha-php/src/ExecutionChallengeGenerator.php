@@ -167,7 +167,15 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_EVENT_REAL = 31;
     /** Browser-observed: real DOM readback canonical-serialization digest. */
     public const OP_DOM_SERIALIZE_REAL = 32;
-    public const OP_COUNT = 33;
+    public const OP_DOM_OBSERVE = 33;
+    public const OP_COUNT = 34;
+
+    /**
+     * The fabricated observed height (px) the browser-equivalent trace
+     * and the interpreter's CSSOM-styled probe agree on: the verifier
+     * replays the reported value, it never predicts it.
+     */
+    private const OBSERVED_HEIGHT = 10;
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -179,7 +187,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs',
     ];
 
     private function __construct()
@@ -233,20 +241,28 @@ final class ExecutionChallengeGenerator
         $program .= \chr(\strlen($action));
         $program .= $action;
         $program .= \chr($version);
-        $opCount = 8 + (self::nextByte($stream) % 17);
+        // The V2 causal chain needs 11 ops at minimum: the fixed
+        // skeleton (construction, the u8 create/observe/read/rotate
+        // block and the link probe) plus the drawn 1..3 extra probes —
+        // so the floor rises to 11 and every stamped count always fits
+        // its emitted records; the grammar bounds 8..24 are unchanged.
+        $opCount = 11 + (self::nextByte($stream) % 14);
         $program .= \chr($opCount);
 
         // The guaranteed structure of every armed program: a mandatory
         // DOM construction block (createElement with a drawn id, a
-        // mutate op on that node, an append) followed by a mandatory
-        // real-probe block (one of the browser-observed id probes
-        // 28/29/31 plus 1..3 further real probes). The probe id
-        // operand is the constructed id bytes, drawn once and reused,
-        // so every probe reads a real constructed node after the
-        // append. The remaining op slots are filled from the other 28
-        // opcodes, so the count stays within MIN_OPS..MAX_OPS while
-        // every program exercises real DOM construction and probe
-        // reads against constructed nodes.
+        // mutate op on that node, an append), a mandatory causal u8
+        // chain (create the array, observe the real height of the
+        // constructed node into it, read the observed byte back,
+        // checksum/rotate over it) and a mandatory real-probe block
+        // (one of the browser-observed id probes 28/29/31 plus 1..3
+        // further real probes). The probe and observe id operand is
+        // the constructed id bytes, drawn once and reused, so every
+        // probe reads a real constructed node after the append. The
+        // remaining op slots are filled from the other 28 opcodes, so
+        // the count stays within MIN_OPS..MAX_OPS while every program
+        // exercises real DOM construction, real layout observation and
+        // probe reads against constructed nodes.
         $ops = [];
         $tag = self::drawBytes($stream, 1);
         $idOperand = self::drawIdOperand($stream);
@@ -255,6 +271,19 @@ final class ExecutionChallengeGenerator
         $mutate = $mutates[self::nextByte($stream) % 3];
         $ops[] = [$mutate, self::drawOperands($stream, $mutate)];
         $ops[] = [self::OP_DOM_APPEND, ''];
+        // The causal chain: U8_CREATE(len) then the observe op writes the
+        // browser-observed height at a drawn index inside the array,
+        // U8_READ reads that same byte back (its exact entry must equal
+        // the observed value), and the checksum/rotate consumer runs
+        // over the array still carrying the observed byte.
+        $u8cByte = self::nextByte($stream);
+        $ops[] = [self::OP_U8_CREATE, \chr($u8cByte)];
+        $u8Len = 8 + ($u8cByte % 57);
+        $obsIdxByte = \chr(self::nextByte($stream) % $u8Len);
+        $ops[] = [self::OP_DOM_OBSERVE, $idOperand.$obsIdxByte];
+        $ops[] = [self::OP_U8_READ, $obsIdxByte];
+        $u8Consumer = [self::OP_U8_WRITE, self::OP_U8_ROTATE][self::nextByte($stream) % 2];
+        $ops[] = [$u8Consumer, self::drawOperands($stream, $u8Consumer)];
         $linkProbes = [self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL];
         $ops[] = [$linkProbes[self::nextByte($stream) % 3], $idOperand];
         $extraProbes = 1 + (self::nextByte($stream) % 3);
@@ -464,6 +493,24 @@ final class ExecutionChallengeGenerator
                     return null;
                 }
                 $pos += \strlen($topTag) + 1;
+            } elseif ($op === self::OP_DOM_OBSERVE) {
+                                // validates the grammar and the bounds, requires the
+                // probed id to be an appended node at this point, then
+                // replays the reported height into its own u8 state so
+                // every later checksum/read entry is exact-compared
+                // against the observed byte (whole-trace coherence).
+                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                $dst = (int) $m[1];
+                $observed = (int) $m[2];
+                if (!isset($docIds[$operands['id']]) || $dst !== $operands['idx'] || $observed < 1 || $observed > 255) {
+                    return null;
+                }
+                if ($dst < \count($u8)) {
+                    $u8[$dst] = $observed;
+                }
+                $pos += \strlen($m[0]);
             } else {
                 $simEntry = $sim.')';
                 if (substr($trace, $pos, \strlen($simEntry)) !== $simEntry) {
@@ -524,6 +571,18 @@ final class ExecutionChallengeGenerator
                 ++$top;
             } elseif ($op === self::OP_DOM_POINT) {
                 $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } elseif ($op === self::OP_DOM_OBSERVE) {
+                // The browser-equivalent observe: the fabricated height
+                // (the CSSOM-styled probe observes exactly this value in
+                // every engine) is written through into the replay state,
+                // so the following checksum/read entries in this
+                // synthesized trace are computed over the observed byte —
+                // the full causal-graph semantics, never a placeholder.
+                $idx = $record['operands']['idx'];
+                $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.self::OBSERVED_HEIGHT.')';
+                if ($idx < \count($u8)) {
+                    $u8[$idx] = self::OBSERVED_HEIGHT;
+                }
             } else {
                 $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds).')';
             }
@@ -667,6 +726,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_GEOMETRY => self::drawIdOperand($stream),
             self::OP_DOM_POINT => self::drawBytes($stream, 2),
             self::OP_DOM_EVENT_REAL => self::drawIdOperand($stream),
+            // The causal observe op: the probed id (reused constructed
+            // id on issued programs) plus one raw byte for the u8
+            // destination index.
+            self::OP_DOM_OBSERVE => self::drawIdOperand($stream).self::drawBytes($stream, 1),
             default => '',
         };
     }
@@ -799,8 +862,30 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_GEOMETRY => $readIdKeyed(),
             self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],
             self::OP_DOM_EVENT_REAL => $readIdKeyed(),
+            self::OP_DOM_OBSERVE => self::readObserve($read, $readByte, $readIdKeyed),
             default => null,
         };
+    }
+
+    /**
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, idx: int}|null
+     */
+    private static function readObserve(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $idx = $readByte();
+        if ($idx === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'idx' => $idx % 64];
     }
 
     /**
@@ -1104,6 +1189,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_POINT => 'point',
             self::OP_DOM_EVENT_REAL => self::opEventRealExpected($operands, $cur, $docIds),
             self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur),
+            // The observed height is browser-only: the pure sim emits the
+            // placeholder; the verifier replays the value the submitted
+            // trace reports (see verifyExecutedTrace).
+            self::OP_DOM_OBSERVE => 'obs',
             default => '0',
         };
     }

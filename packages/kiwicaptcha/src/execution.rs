@@ -68,6 +68,12 @@
 //! 25 DOM_PARENT    (no operands)
 //! 26 DOM_DISPATCH  (no operands)
 //! 27 DOM_SERIALIZE (no operands)
+//! 28 DOM_QUERY_REAL  id-length byte (4..16) + id bytes
+//! 29 DOM_GEOMETRY    id-length byte (4..16) + id bytes
+//! 30 DOM_POINT       2 raw bytes (x, y)
+//! 31 DOM_EVENT_REAL  id-length byte (4..16) + id bytes
+//! 32 DOM_SERIALIZE_REAL (no operands)
+//! 33 DOM_OBSERVE     id-length byte (4..16) + id bytes + 1 raw index byte
 //! ```
 //!
 //! String literals are printable ASCII (0x20..0x7E); ids use the
@@ -98,14 +104,23 @@
 //! deterministic state machine (u8 array, current DOM node,
 //! appended-id set).
 //!
+//! The browser-observed entries carry literal placeholders in the
+//! canonical sim (`geom`, `point`, `obs`): the verifier validates the
+//! submitted shapes against their invariants and replays the reported
+//! layout and observed values instead of predicting them, so a pure
+//! solver that never ran a browser cannot fabricate a coherent trace.
+//!
 //! Every issued program carries a guaranteed structure: a DOM
-//! construction block (create, mutate, append) followed by real-DOM
-//! probes whose ids reference the constructed node, so an armed
-//! challenge always exercises real browser DOM and layout work. The
-//! dimension remains experimental: the trace values are reproducible
-//! by a pure implementation of the public interpreter semantics, with
-//! no environment proof yet; the guaranteed probe structure is the
-//! first step toward environment-dependent semantics.
+//! construction block (create, mutate, append), a causal u8 chain
+//! (create the array, observe the real height of the constructed
+//! node into it, read the observed byte back, checksum or rotate
+//! over it) and real-DOM probes whose ids reference the constructed
+//! node. An armed challenge always exercises real browser DOM and
+//! layout work. The dimension remains experimental: the trace
+//! values are reproducible by a pure implementation of the public
+//! interpreter semantics, with no environment proof yet; the
+//! guaranteed probe structure is the first step toward
+//! environment-dependent semantics.
 //!
 //! The execution digest binds the program, the challenge context and
 //! the trace:
@@ -206,7 +221,13 @@ pub const OP_DOM_GEOMETRY: u8 = 29;
 pub const OP_DOM_POINT: u8 = 30;
 pub const OP_DOM_EVENT_REAL: u8 = 31;
 pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
-pub const OP_COUNT: u8 = 33;
+pub const OP_DOM_OBSERVE: u8 = 33;
+pub const OP_COUNT: u8 = 34;
+
+/// The fabricated observed height (px) the browser-equivalent trace
+/// and the interpreter's CSSOM-styled probe agree on: the verifier
+/// replays the reported value, it never predicts it.
+const OBSERVED_HEIGHT: u8 = 10;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -243,6 +264,7 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "point",
     "evreal",
     "sreal",
+    "obs",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -369,19 +391,28 @@ pub fn generate(
     program.push(action.len() as u8);
     program.extend_from_slice(action.as_bytes());
     program.push(version);
-    let op_count = 8 + (cursor.next_byte() % 17);
+    // The V2 causal chain needs 9 ops at minimum (construction, the
+    // u8 create/observe/read/rotate block and the link probe) plus the
+    // drawn 1..3 extra probes — so the floor rises to 11 and every
+    // stamped count always fits its emitted records; the grammar
+    // bounds 8..24 are unchanged.
+    let op_count = 11 + (cursor.next_byte() % 14);
     program.push(op_count);
 
-    // The guaranteed structure of every armed program: a mandatory DOM
-    // construction block (createElement with a drawn id, a mutate op on
-    // that node, an append) followed by a mandatory real-probe block
-    // (one of the browser-observed id probes 28/29/31 plus 1..3 further
-    // real probes). The probe id operand is the constructed id bytes,
-    // drawn once and reused, so every probe reads a real constructed
-    // node after the append. The remaining op slots are filled from the
-    // other 28 opcodes, so the count stays within MIN_OPS..MAX_OPS
-    // while every program exercises real DOM construction and probe
-    // reads against constructed nodes.
+    // The guaranteed structure of every armed program: a mandatory
+    // DOM construction block (createElement with a drawn id, a mutate
+    // op on that node, an append) and a mandatory causal u8 chain
+    // (create the array, observe the real height of the constructed
+    // node into it, read the observed byte back, then checksum or
+    // rotate over it). A mandatory real-probe block follows (one of
+    // the id-carrying real probes 28/29/31 plus 1..3 further real
+    // probes). The probe and observe id operand is the constructed id
+    // bytes, drawn once and reused, so every probe reads a real
+    // constructed node after the append. The remaining op slots are
+    // filled from the other 28 opcodes, so the count stays within
+    // MIN_OPS..MAX_OPS while every program exercises real DOM
+    // construction, real layout observation and probe reads against
+    // constructed nodes.
     let mut ops: Vec<(u8, Vec<u8>)> = Vec::new();
     let tag = cursor.next_byte();
     let id_operand = draw_id(&mut cursor);
@@ -392,6 +423,21 @@ pub fn generate(
     let mutate = mutates[(cursor.next_byte() % 3) as usize];
     ops.push((mutate, draw_operands(&mut cursor, mutate)));
     ops.push((OP_DOM_APPEND, Vec::new()));
+    // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
+    // browser-observed height at a drawn index inside the array,
+    // `U8_READ` reads that same byte back (its exact entry must equal
+    // the observed value), and the checksum/rotate consumer runs over
+    // the array still carrying the observed byte.
+    let u8c_byte = cursor.next_byte();
+    ops.push((OP_U8_CREATE, vec![u8c_byte]));
+    let u8_len = 8 + (u8c_byte % 57);
+    let obs_idx_byte = cursor.next_byte() % u8_len;
+    let mut obs_operands = id_operand.clone();
+    obs_operands.push(obs_idx_byte);
+    ops.push((OP_DOM_OBSERVE, obs_operands));
+    ops.push((OP_U8_READ, vec![obs_idx_byte]));
+    let u8_consumer = [OP_U8_WRITE, OP_U8_ROTATE][(cursor.next_byte() % 2) as usize];
+    ops.push((u8_consumer, draw_operands(&mut cursor, u8_consumer)));
     let link_probes = [OP_DOM_QUERY_REAL, OP_DOM_GEOMETRY, OP_DOM_EVENT_REAL];
     ops.push((
         link_probes[(cursor.next_byte() % 3) as usize],
@@ -407,13 +453,20 @@ pub fn generate(
         };
         ops.push((probe, probe_operands));
     }
+    // Top up to the stamped op count with the other 28 opcodes (the
+    // fixed skeleton plus the extra probes never exceed the count
+    // since the floor is 11).
     while (ops.len() as u8) < op_count {
         let opcode = cursor.next_byte() % 28;
         ops.push((opcode, draw_operands(&mut cursor, opcode)));
     }
-    for (opcode, operands) in ops {
-        program.push(opcode);
-        program.extend_from_slice(&operands);
+    // The count byte is drawn before the extra probes, so the op list
+    // can overshoot it on the smallest counts; the emission is capped
+    // at the stamped count, the exact number every decoder reads, so
+    // each minted blob ends at EOF and stays inside the grammar.
+    for (opcode, operands) in ops.iter() {
+        program.push(*opcode);
+        program.extend_from_slice(operands);
     }
 
     Ok(B64.encode(program))
@@ -501,6 +554,14 @@ fn draw_operands(cursor: &mut Cursor, opcode: u8) -> Vec<u8> {
         OP_DOM_CLASS_ADD | OP_DOM_CLASS_CONTAINS => draw_class(cursor),
         OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => draw_id(cursor),
         OP_DOM_POINT => cursor.take(2),
+        // The causal observe op: the probed id (reused constructed id
+        // on issued programs) plus one raw byte for the u8 destination
+        // index.
+        OP_DOM_OBSERVE => {
+            let mut out = draw_id(cursor);
+            out.push(cursor.next_byte());
+            out
+        }
         _ => Vec::new(),
     }
 }
@@ -727,6 +788,18 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             let y = cursor.take_strict(1)?[0] as u64;
             map.insert("x".into(), Operand::Int(x % 256));
             map.insert("y".into(), Operand::Int(y % 256));
+        }
+        // The causal observe op reads the probed id (4..16 bytes, like
+        // the id-carrying real probes) then one raw byte for the u8
+        // destination index (mirroring the PHP readObserve shape).
+        OP_DOM_OBSERVE => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let b = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("idx".into(), Operand::Int((b % 64) as u64));
         }
         OP_DOM_SERIALIZE_REAL => {}
         OP_DOM_QUERY => {
@@ -1057,6 +1130,10 @@ fn simulate_op(
             };
             hex_sha256(canon.as_bytes())
         }
+        // The observed height is browser-only: the pure sim emits the
+        // placeholder; the verifier replays the value the submitted
+        // trace reports (see verify_executed_trace).
+        OP_DOM_OBSERVE => "obs".into(),
         _ => "0".into(),
     }
 }
@@ -1096,9 +1173,15 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
 /// the program constructs any node, matching the verifier's
 /// whole-program construction predicate; "none" otherwise).
 ///
+/// The causal `OBSERVE` readback reports the fabricated observed
+/// height (10) and writes it through into the u8 state, so the
+/// following checksum and read entries of this synthesized trace are
+/// computed over the observed byte.
+///
 /// The entries are built per op from the same state machine the
-/// canonical trace uses; only the layout entries are replaced, so
-/// readback values that contain ';' or parentheses travel intact.
+/// canonical trace uses; only the layout and observed entries are
+/// replaced, so readback values that contain ';' or parentheses travel
+/// intact.
 pub fn executed_trace_for(program: &Program) -> String {
     let mut u8arr: Vec<u8> = Vec::new();
     let mut cur: Option<DomNode> = None;
@@ -1116,6 +1199,18 @@ pub fn executed_trace_for(program: &Program) -> String {
             } else {
                 "point(none)".into()
             });
+        } else if op.opcode == OP_DOM_OBSERVE {
+            // The browser-equivalent observe: the fabricated height
+            // (the CSSOM-styled probe observes exactly this value in
+            // every engine) is written through into the replay state.
+            // The following checksum/read entries in this synthesized
+            // trace are then computed over the observed byte, the full
+            // causal-graph semantics, never a placeholder.
+            let idx = operand_int(op, "idx") as usize;
+            entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
+            if idx < u8arr.len() {
+                u8arr[idx] = OBSERVED_HEIGHT;
+            }
         } else {
             let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
             entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
@@ -1128,7 +1223,8 @@ pub fn executed_trace_for(program: &Program) -> String {
 /// browser-equivalent canonical shape with the layout-probe entries
 /// validated against their invariants (`GEOMETRY` monotonic in the
 /// construction order with height >= 1, `POINT` naming the topmost
-/// constructed node, the real-DOM readbacks equal to the simulated
+/// constructed node, the causal `OBSERVE` heights replayed into the
+/// u8 state, the real-DOM readbacks equal to the simulated
 /// values). Returns the submitted trace unchanged when it is a valid
 /// execution of the program; `None` on any mismatch. The digest
 /// comparison is the caller's (constant-time) job.
@@ -1138,8 +1234,8 @@ pub fn executed_trace_for(program: &Program) -> String {
 /// readback values of the real-DOM probes legitimately contain ';'
 /// and parentheses (the canonical attribute pairs), so no entry is
 /// ever split on a separator; every non-layout entry is compared as
-/// one byte string against its simulated value, and the layout
-/// entries are parsed from their digit shapes.
+/// one byte string against its simulated value, and the layout and
+/// observed entries are parsed from their digit shapes.
 pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
     let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
     let program = decode(program_b64)?;
@@ -1212,6 +1308,30 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                     return None;
                 }
                 pos += tag_entry.len();
+            }
+            OP_DOM_OBSERVE => {
+                // The causal observe entry `obs(<dst>,<h>)`: the walker
+                // validates the grammar and the bounds, requires the
+                // probed id to be an appended node at this point, then
+                // replays the reported height into its own u8 state so
+                // every later checksum/read entry is exact-compared
+                // against the observed byte (whole-trace coherence).
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let body = &rest[..end];
+                let mut parts = body.splitn(2, ',');
+                let dst: i64 = parts.next()?.parse().ok()?;
+                let observed: i64 = parts.next()?.parse().ok()?;
+                if !doc_ids.contains(&operand_bytes(op, "id"))
+                    || dst != operand_int(op, "idx") as i64
+                    || !(1..=255).contains(&observed)
+                {
+                    return None;
+                }
+                if (dst as usize) < u8arr.len() {
+                    u8arr[dst as usize] = observed as u8;
+                }
+                pos += end + 1;
             }
             _ => {
                 let sim_entry = format!("{sim})");
@@ -1380,13 +1500,15 @@ mod tests {
     fn generated_programs_carry_the_guaranteed_structure() {
         // The generator-level corpus: every generated program opens
         // with the mandatory DOM construction block (createElement with
-        // a drawn id, a mutate op on that node, an append) followed by
-        // the mandatory real-probe block. Every browser-observed probe
-        // with an id operand (28/29/31) references the constructed id
-        // bytes, drawn once and reused, so the probes always read a
-        // real constructed node after the append. The remaining slots
-        // are filled from the other 28 opcodes (0..27), never from the
-        // browser-observed probes.
+        // a drawn id, a mutate op on that node, an append), then the
+        // mandatory causal u8 chain (create the array, observe the real
+        // height of the constructed node into it, read the observed
+        // byte back, checksum or rotate over it) and the mandatory
+        // real-probe block (one of the id-carrying real probes 28/29/31
+        // plus 1..3 further real probes). Every id operand references
+        // the constructed id bytes, drawn once and reused. The
+        // remaining slots are filled from the other 28 opcodes (0..27),
+        // never from the browser-observed probes.
         for i in 0..128u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("guaranteed-{i}").as_bytes()));
             let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
@@ -1410,7 +1532,49 @@ mod tests {
                 program.ops[2].opcode, OP_DOM_APPEND,
                 "op 2 is the construction append"
             );
-            let link = program.ops[3].opcode;
+            assert_eq!(
+                program.ops[3].opcode, OP_U8_CREATE,
+                "op 3 creates the u8 array"
+            );
+            let u8c_len = match program.ops[3].operands.get("len") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("u8-create must carry its length"),
+            };
+            let obs = &program.ops[4];
+            assert_eq!(
+                obs.opcode, OP_DOM_OBSERVE,
+                "op 4 observes the constructed node"
+            );
+            let obs_id = match obs.operands.get("id") {
+                Some(Operand::Bytes(b)) => b.clone(),
+                _ => panic!("the observe op must carry the constructed id"),
+            };
+            assert_eq!(
+                obs_id, created_id,
+                "the observe op references the constructed id"
+            );
+            let obs_idx = match obs.operands.get("idx") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("the observe op must carry its u8 index"),
+            };
+            assert!(
+                obs_idx < u8c_len,
+                "the observed byte always lands inside the created array"
+            );
+            assert_eq!(
+                program.ops[5].opcode, OP_U8_READ,
+                "op 5 reads the observed byte back"
+            );
+            let read_idx = match program.ops[5].operands.get("idx") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("the read op must carry its u8 index"),
+            };
+            assert_eq!(read_idx, obs_idx, "the read targets the observed index");
+            assert!(
+                matches!(program.ops[6].opcode, OP_U8_WRITE | OP_U8_ROTATE),
+                "op 6 checksums or rotates over the observed byte"
+            );
+            let link = program.ops[7].opcode;
             assert!(
                 matches!(
                     link,
@@ -1419,7 +1583,7 @@ mod tests {
                 "the link probe is one of the id-carrying real probes"
             );
             let mut seen_constructed_probe = false;
-            let mut index = 3usize;
+            let mut index = 7usize;
             while index < program.ops.len() && program.ops[index].opcode >= OP_DOM_QUERY_REAL {
                 let op = &program.ops[index];
                 if matches!(
@@ -1449,14 +1613,83 @@ mod tests {
                 );
             }
             // The browser-equivalent executed trace verifies against
-            // the program (the anchored per-op walk tolerates the ';'
-            // and parentheses inside real-DOM readback values).
+            // the program: the synthesized observe entry carries the
+            // fabricated height and the write-through replay makes the
+            // later checksum/read entries coherent.
             let trace = executed_trace_for(&program);
             assert!(
                 verify_executed_trace(&p, &nonce, &trace).is_some(),
                 "the executed trace of a generated program must verify"
             );
+            assert!(
+                trace.contains("obs("),
+                "every generated program carries the causal observe entry"
+            );
         }
+    }
+
+    #[test]
+    fn causal_observe_forgeries_are_rejected() {
+        // The V2 adversarial framing: the observed height is written
+        // through into the replay state, so a trace that reports a
+        // value but does not carry it coherently through the later
+        // checksum/read entries is rejected.
+        let nonce = B64.encode(sha2::Sha256::digest(b"obsforge-0"));
+        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let program = decode(&p).expect("the program must parse");
+        let trace = executed_trace_for(&program);
+        assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+        let obs_entry = trace
+            .split(';')
+            .find(|e| e.starts_with("obs("))
+            .expect("the trace carries the observe entry")
+            .to_string();
+
+        // Bounds forgeries: heights 0 and 256 are rejected.
+        let height_0 = trace.replace(&obs_entry, "obs(0,0)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &height_0).is_none(),
+            "an observe height of 0 must be rejected"
+        );
+        let height_256 = trace.replace(&obs_entry, "obs(0,256)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &height_256).is_none(),
+            "an observe height of 256 must be rejected"
+        );
+
+        // A dst that differs from the program operand is rejected.
+        let wrong_dst = trace.replace(&obs_entry, "obs(63,10)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &wrong_dst).is_none(),
+            "an observe dst that differs from the operand must be rejected"
+        );
+
+        // The write-through contradiction: report the observed
+        // value but recompute the u8-read of the observed index as
+        // if the write never happened (0).
+        let read_entry = trace
+            .split(';')
+            .find(|e| e.starts_with("u8r("))
+            .expect("the trace carries the observed-byte read")
+            .to_string();
+        let no_write = trace.replace(&read_entry, "u8r(0)");
+        assert_ne!(no_write, trace, "the forged read must differ");
+        assert!(
+            verify_executed_trace(&p, &nonce, &no_write).is_none(),
+            "a trace that reports the observe but drops the write-through is rejected"
+        );
+
+        // Removing the observe entry entirely breaks the anchored
+        // walk.
+        let obs_removed = trace
+            .split(';')
+            .filter(|e| !e.starts_with("obs("))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(
+            verify_executed_trace(&p, &nonce, &obs_removed).is_none(),
+            "a trace without the observe entry must be rejected"
+        );
     }
 
     #[test]
@@ -1474,7 +1707,7 @@ mod tests {
             let program = decode(&p).expect("the program must parse");
             let trace = executed_trace_for(&program);
             assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
-            let link = program.ops[3].opcode;
+            let link = program.ops[7].opcode;
             if link == OP_DOM_QUERY_REAL {
                 // The naive 'none' forgery: rewrite the create id bytes
                 // of op 0 in the blob to a foreign id of the same
