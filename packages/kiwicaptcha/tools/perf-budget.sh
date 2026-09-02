@@ -20,9 +20,8 @@
 # raw_bytes equal the current measured bytes — a stale record describes
 # bytes the caps no longer gate, so a drift is a hard failure, never
 # just cap-compliance. The recorded sizes are re-measured by hand on a
-# clean local machine (the eager-import removal regenerated them against
-# the current assets; the widget_execution section was recorded against
-# the current execution interpreter).
+# clean local machine against the current assets, and the challenge
+# budgets against the current php-core issuance.
 #
 # Compressed budgets: the same three copies must stay under a gzip cap
 # and a brotli cap, so a regression that bloats the wire bytes the
@@ -35,9 +34,12 @@
 #
 # The challenge-response JSON is measured by issuing real challenges
 # through the PHP core (sha256 and argon2id, decoy armed) and encoding
-# the wire shape of the bundle's /challenge response. Its cap is read
-# from the budgets section too. The php-core vendor must be installed
-# before this script runs (the CI job installs it).
+# the wire shape of the bundle's /challenge response. The
+# execution-armed protocol-v4 response, where the authenticated decoy
+# rides along (the largest wire shape the bundle emits), is measured
+# the same way in both algorithms. Each cap is read from the budgets
+# section too. The php-core vendor must be installed before this
+# script runs (the CI job installs it).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -77,6 +79,7 @@ WIDGET_EXECUTION_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_
 WIDGET_EXECUTION_GZIP_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_cap_bytes")
 WIDGET_EXECUTION_BROTLI_CAP=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_cap_bytes")
 CHALLENGE_JSON_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json.cap_bytes")
+CHALLENGE_JSON_V4_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json_v4.cap_bytes")
 
 brotli_size() {
   local file="$1"
@@ -214,6 +217,35 @@ challenge_size() {
   ' "packages/kiwicaptcha-php" "$1"
 }
 
+# The protocol-v4 armed issuance: the execution dimension plus the
+# authenticated decoy, the full decoy-capable canonical the bundle
+# emits when both arms are on. Arming needs the configured
+# execution_key; the program and the decoy name vary per issuance.
+challenge_size_v4() {
+  "$PHP_BIN" -r '
+    require $argv[1]."/vendor/autoload.php";
+    use KiwiCaptcha\Config;
+    use KiwiCaptcha\Issuer;
+    use KiwiCaptcha\PoWAlgorithm;
+    use KiwiCaptcha\Storage\ArrayStorage;
+    $algo = $argv[2] === "argon2id" ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    $config = new Config(
+        secretKey: "0123456789abcdef0123456789abcdef",
+        executionKey: "fedcba9876543210fedcba9876543210",
+        algorithm: $algo,
+        ttlSecs: 120,
+        mKib: $algo === PoWAlgorithm::Argon2id ? 64 : 0,
+        t: $algo === PoWAlgorithm::Argon2id ? 3 : 1,
+        p: 1,
+        targetBits: 8,
+        argon2TargetBits: 4,
+        minDurationMs: 0,
+    );
+    $challenge = (new Issuer($config, new ArrayStorage()))->issueWithExecutionField("login", "198.51.100.7", true, null, null, null, 1, true);
+    echo strlen(json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES));
+  ' "packages/kiwicaptcha-php" "$1"
+}
+
 largest=0
 for algo in sha256 argon2id; do
   size=$(challenge_size "$algo")
@@ -227,12 +259,25 @@ if [ "$largest" -gt "$CHALLENGE_JSON_CAP" ]; then
   FAILED=1
 fi
 
+largest_v4=0
+for algo in sha256 argon2id; do
+  size=$(challenge_size_v4 "$algo")
+  echo "challenge-response v4 budget ($algo): $size bytes (cap $CHALLENGE_JSON_V4_CAP)"
+  if [ "$size" -gt "$largest_v4" ]; then
+    largest_v4=$size
+  fi
+done
+if [ "$largest_v4" -gt "$CHALLENGE_JSON_V4_CAP" ]; then
+  echo "perf budget FAILED: the v4 execution-armed challenge-response JSON is $largest_v4 bytes (cap $CHALLENGE_JSON_V4_CAP)" >&2
+  FAILED=1
+fi
+
 if [ "$FAILED" = "1" ]; then
   echo "perf-budget: byte budget exceeded — a regression or an intentional growth that needs a re-baselined cap" >&2
   exit 1
 fi
 if [ "$BROTLI_AVAILABLE" = "0" ]; then
-  echo "perf-budget: OK (all widget-driver and widget-execution copies raw and gzip, and the challenge response, within their caps; brotli not enforced — no brotli on this machine)"
+  echo "perf-budget: OK (all widget-driver and widget-execution copies raw and gzip, and the challenge responses, within their caps; brotli not enforced — no brotli on this machine)"
   exit 0
 fi
-echo "perf-budget: OK (all widget-driver and widget-execution copies raw/gzip/brotli and the challenge response within their caps)"
+echo "perf-budget: OK (all widget-driver and widget-execution copies raw/gzip/brotli and the challenge responses within their caps)"
