@@ -687,6 +687,7 @@ test.describe('KiwiCaptcha narrow request shape', () => {
       'reqBody.client_context',
       'reqBody.decoy_field',
       'reqBody.honeypot',
+      'reqBody.execution_max_version',
       'reqBody.action',
       'reqBody.cdata',
       'reqBody.sitekey',
