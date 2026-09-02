@@ -332,14 +332,17 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * Verify a submitted execution trace for a program and nonce: the
-     * deterministic op entries must equal the canonical simulation
-     * exactly; the browser-observed entries must satisfy their rules
-     * (QUERY_REAL/EVENT_REAL/SERIALIZE_REAL exact vs the expected
-     * construction-determined values; GEOMETRY monotonic in the
-     * construction order with height >= 1; POINT matching the expected
-     * topmost node per the construction order). Returns the canonical
-     * trace used for the digest when the trace verifies, null otherwise.
+     * Verify a submitted execution trace against a program.
+     *
+     * The deterministic op entries must equal the canonical simulation
+     * exactly. The browser-observed entries must satisfy their rules:
+     * `QUERY_REAL`/`EVENT_REAL`/`SERIALIZE_REAL` exact vs the expected
+     * construction-determined values, `GEOMETRY` monotonic in the
+     * construction order with height >= 1, and `POINT` matching the
+     * expected topmost node per the construction order.
+     *
+     * Returns the canonical trace used for the digest when the trace
+     * verifies, null otherwise.
      */
     public static function verifyExecutedTrace(string $programB64, string $nonce, string $trace): ?string
     {
@@ -416,8 +419,8 @@ final class ExecutionChallengeGenerator
      * The browser-equivalent executed trace of a program: the canonical
      * trace with the layout-probe placeholders replaced by valid
      * browser-observed values (monotonic geometry offsets with height
-     * 10 and the point probe naming the topmost constructed node), so
-     * a test can simulate a genuine browser execution.
+     * 10; the point probe names the topmost constructed node). Lets a
+     * test simulate a genuine browser execution.
      *
      * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
      */
@@ -426,7 +429,7 @@ final class ExecutionChallengeGenerator
         $trace = self::canonicalTrace($program);
         $entries = explode(';', $trace);
         $top = 0;
-        // The verifier's POINT probe accepts 'div' exactly when the
+        // The verifier's `POINT` probe accepts 'div' exactly when the
         // program constructs any node (its construction check is
         // whole-program), so the browser-equivalent trace must use the
         // same predicate — 'point(none)' on a program with no DOM_APPEND
@@ -451,7 +454,7 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * The execution digest over a SUBMITTED trace (the V2 evidence
+     * The execution digest over a `SUBMITTED` trace (the V2 evidence
      * path): the same content-derived HMAC as the expected digest, but
      * over the trace the client actually executed, so the verifier can
      * bind the browser-observed entries. Null when the program is
@@ -1009,11 +1012,11 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DISPATCH => '1',
             self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds),
             // Browser-observed entries: the expected values are
-            // construction-determined for QUERY_REAL/EVENT_REAL/
-            // SERIALIZE_REAL (the interpreter must read the real DOM
+            // construction-determined for `QUERY_REAL`/`EVENT_REAL`/
+            // `SERIALIZE_REAL` (the interpreter must read the real DOM
             // back to these exact values), while the layout probes
-            // (GEOMETRY/POINT) carry the literal placeholders 'geom'/
-            // 'point' here — the verifier validates the SUBMITTED trace
+            // (`GEOMETRY`/`POINT`) carry the literal placeholders 'geom'/
+            // 'point' here — the verifier validates the `SUBMITTED` trace
             // entries against their invariants separately (see
             // verifyExecutedTrace), so a pure non-browser solver cannot
             // reproduce a valid trace without emulating layout.
@@ -1028,7 +1031,7 @@ final class ExecutionChallengeGenerator
 
     /**
      * Expected real querySelectorById readback: tag|sortedAttrPairs of
-     * the appended node (the interpreter reads the REAL DOM and must
+     * the appended node (the interpreter reads the real DOM and must
      * return exactly these values).
      *
      * @param array<string, mixed> $operands
@@ -1059,7 +1062,7 @@ final class ExecutionChallengeGenerator
     /**
      * Canonical real-DOM readback digest: the shadow's current node's
      * sorted canonical attribute pairs hashed — the interpreter builds
-     * the same canonical string from the REAL node's sorted attributes.
+     * the same canonical string from the real node's sorted attributes.
      *
      * @param array<string, true> $docIds
      * @param array|null          $cur

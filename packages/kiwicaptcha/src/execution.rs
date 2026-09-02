@@ -929,10 +929,10 @@ fn simulate_op(
             B64.encode(serialized.into_bytes())
         }
         // Browser-observed entries: the expected values are
-        // construction-determined for QUERY_REAL/EVENT_REAL/
-        // SERIALIZE_REAL, while the layout probes carry the literal
+        // construction-determined for `QUERY_REAL`/`EVENT_REAL`/
+        // `SERIALIZE_REAL`, while the layout probes carry the literal
         // placeholders 'geom'/'point' here — the verifier validates the
-        // SUBMITTED trace entries against their invariants separately
+        // `SUBMITTED` trace entries against their invariants separately
         // (see verify_executed_trace), so a pure non-browser solver
         // cannot reproduce a valid trace without emulating layout.
         OP_DOM_QUERY_REAL => {
@@ -1032,8 +1032,8 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
 
 /// The browser-equivalent executed trace of a program: the canonical
 /// trace with the layout-probe placeholders replaced by valid
-/// browser-observed values — monotonic GEOMETRY offsets with height 10
-/// and the POINT probe naming the topmost constructed node ("div" when
+/// browser-observed values — monotonic `GEOMETRY` offsets with height 10
+/// and the `POINT` probe naming the topmost constructed node ("div" when
 /// the program constructs any node, matching the verifier's
 /// whole-program construction predicate; "none" otherwise).
 pub fn executed_trace_for(program: &Program) -> String {
@@ -1056,10 +1056,10 @@ pub fn executed_trace_for(program: &Program) -> String {
     entries.join(";")
 }
 
-/// Validate a SUBMITTED execution trace against a program: the
+/// Validate a `SUBMITTED` execution trace against a program: the
 /// browser-equivalent canonical shape with the layout-probe entries
-/// validated against their invariants (GEOMETRY monotonic in the
-/// construction order with height >= 1, POINT naming the topmost
+/// validated against their invariants (`GEOMETRY` monotonic in the
+/// construction order with height >= 1, `POINT` naming the topmost
 /// constructed node, the real-DOM readbacks equal to the simulated
 /// values). Returns the submitted trace unchanged when it is a valid
 /// execution of the program; `None` on any mismatch. The digest
@@ -1073,7 +1073,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     }
 
     // First pass: the expected values and the whole-program
-    // construction set (the POINT probe predicate).
+    // construction set (the `POINT` probe predicate).
     let mut u8arr: Vec<u8> = Vec::new();
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
@@ -1084,14 +1084,14 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
         expected.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], sim));
         if op.opcode == OP_DOM_APPEND {
             // The PHP mirror always appends (the current node id, or
-            // '' when no node exists yet): the POINT probe's
+            // '' when no node exists yet): the `POINT` probe's
             // whole-program predicate is "any DOM_APPEND op", so the
             // list must be non-empty exactly when an append exists.
             construction.push(cur.as_ref().map(|n| n.id.clone()).unwrap_or_default());
         }
     }
 
-    // Second pass from a FRESH state: the first pass left the mutable
+    // Second pass from a fresh state: the first pass left the mutable
     // simulation at its end state, and re-running on it would produce
     // different values for stateful ops (u8w checksums, real-DOM
     // readbacks) — the deterministic trace replays from the same
@@ -1142,7 +1142,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     Some(trace.to_string())
 }
 
-/// The digest over a SUBMITTED trace (the V2 evidence path): the same
+/// The digest over a `SUBMITTED` trace (the V2 evidence path): the same
 /// content-derived HMAC as [`expected_digest`], but over the trace the
 /// client actually executed, so the verifier can bind the
 /// browser-observed entries. `None` when the program is malformed.
