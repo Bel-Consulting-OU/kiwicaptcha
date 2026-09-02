@@ -158,7 +158,7 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SERIALIZE_REAL = 32;
     public const OP_COUNT = 33;
 
-    /** The round-109 safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
+    /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
 
     /** The trace entry names, one per opcode (index = opcode). */
@@ -930,7 +930,7 @@ final class ExecutionChallengeGenerator
     /** 1 byte length + K digit-first key bytes + 1 byte length + V value bytes. */
     private static function drawDatasetOperand(string &$stream): string
     {
-        // The round-109 safe-alphabet grammar: the length byte carries
+        // The canonical safe-alphabet grammar: the length byte carries
         // the real key length (1..16): the literal 'x' followed by
         // 0..15 of [0-9a-z_], a canonical subset that round-trips
         // through DOMStringMap without any browser throw.

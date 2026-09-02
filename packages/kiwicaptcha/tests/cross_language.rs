@@ -1014,7 +1014,11 @@ fn rust_verifies_php_issued_v4_record() {
     }
     assert_eq!(record.scope, "login");
     assert!(record.execution_program.is_some());
-    assert_eq!(record.execution_version, Some(1), "execution_version is the canonical byte 1");
+    assert_eq!(
+        record.execution_version,
+        Some(1),
+        "execution_version is the canonical byte 1"
+    );
     let program = record.execution_program.as_deref().expect("armed");
     let commitment = record.execution_commitment.as_deref().expect("armed");
     assert_eq!(commitment.len(), 64);
@@ -1028,7 +1032,8 @@ fn rust_verifies_php_issued_v4_record() {
     // must reproduce the exact bytes PHP signed.
     let canonical_from_challenge = {
         let dot = record.challenge.find('.').expect("challenge separator");
-        B64.decode(&record.challenge[..dot]).expect("canonical base64")
+        B64.decode(&record.challenge[..dot])
+            .expect("canonical base64")
     };
     let canonical_reconstructed = kiwicaptcha::challenge::canonical_signing_input_v2(&record);
     assert_eq!(
@@ -1131,10 +1136,15 @@ fn rust_issues_v4_record_for_php() {
     )
     .expect("v4 issue");
     assert_eq!(issued.record.protocol_version, 4);
-    assert!(issued.record.decoy_field.is_some(), "the v4 record carries the decoy segment");
+    assert!(
+        issued.record.decoy_field.is_some(),
+        "the v4 record carries the decoy segment"
+    );
     assert_eq!(issued.record.execution_version, Some(1));
     assert_eq!(
-        kiwicaptcha::challenge::execution_commitment(issued.record.execution_program.as_deref().unwrap()),
+        kiwicaptcha::challenge::execution_commitment(
+            issued.record.execution_program.as_deref().unwrap()
+        ),
         issued.record.execution_commitment.as_deref().unwrap()
     );
     std::fs::write(

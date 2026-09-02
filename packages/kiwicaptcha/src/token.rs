@@ -186,10 +186,16 @@ impl SolutionToken {
             if digest.bytes().all(|b| b.is_ascii_hexdigit())
                 && (trace.is_empty()
                     || (trace.len() <= 10924
-                        && trace.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')))
+                        && trace
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')))
             {
                 execution_digest = Some(digest.to_string());
-                execution_trace = if trace.is_empty() { None } else { Some(trace.to_string()) };
+                execution_trace = if trace.is_empty() {
+                    None
+                } else {
+                    Some(trace.to_string())
+                };
             } else {
                 execution_digest = None;
                 execution_trace = None;

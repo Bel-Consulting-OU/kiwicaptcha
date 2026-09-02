@@ -268,12 +268,9 @@ fn v4_execution_armed_record_verifies_current_and_fails_both_older_generations()
     let decoded = kiwicaptcha::execution::decode(program).expect("program parses");
     let trace = kiwicaptcha::execution::executed_trace_for(&decoded);
     let trace_b64: String = kiwicaptcha_verify_base64(&trace);
-    let digest = kiwicaptcha::execution::expected_digest_over_trace(
-        program,
-        &issued.record.nonce,
-        &trace,
-    )
-    .expect("digest");
+    let digest =
+        kiwicaptcha::execution::expected_digest_over_trace(program, &issued.record.nonce, &trace)
+            .expect("digest");
     let counter = solve_for_test(&issued.record).expect("solver finds a counter");
     let mut rec = issued.record.clone();
     let mut clock = || NOW_UNIX;

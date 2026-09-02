@@ -1733,7 +1733,9 @@ fn issue_challenge_inner(
         // (never recomputed), so the equivalence between the signed
         // canonical and the stored program is preserved byte-for-byte
         // through storage round-trips.
-        execution_version: execution_program.as_ref().map(|_| execution_version.unwrap_or(1)),
+        execution_version: execution_program
+            .as_ref()
+            .map(|_| execution_version.unwrap_or(1)),
         execution_commitment: execution_commitment.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);

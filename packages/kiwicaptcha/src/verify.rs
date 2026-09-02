@@ -1041,9 +1041,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     (ct_eq).
     match ctx.record.execution_program.as_deref() {
         Some(program) => match (&ctx.execution_digest, &ctx.execution_trace) {
-            (None, _) | (_, None) => {
-                return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch)
-            }
+            (None, _) | (_, None) => return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
             (Some(presented), Some(trace_b64)) => {
                 // The trace travels on the wire as base64url, unpadded
                 // (the driver's format); translate back to canonical
@@ -1074,7 +1072,9 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
                     _ => None,
                 };
                 let verified = match trace {
-                    Some(t) => crate::execution::verify_executed_trace(program, &ctx.record.nonce, &t),
+                    Some(t) => {
+                        crate::execution::verify_executed_trace(program, &ctx.record.nonce, &t)
+                    }
                     None => None,
                 };
                 let verified = match verified {

@@ -1046,7 +1046,11 @@ pub fn executed_trace_for(program: &Program) -> String {
             *entry = format!("geom({},{})", top * 10, 10);
             top += 1;
         } else if entry.starts_with("point(") {
-            *entry = if has_append { "point(div)".into() } else { "point(none)".into() };
+            *entry = if has_append {
+                "point(div)".into()
+            } else {
+                "point(none)".into()
+            };
         }
     }
     entries.join(";")
@@ -1118,7 +1122,11 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 prev_top = top;
             }
             OP_DOM_POINT => {
-                let top_tag = if construction.is_empty() { "none" } else { "div" };
+                let top_tag = if construction.is_empty() {
+                    "none"
+                } else {
+                    "div"
+                };
                 if submitted[i] != format!("point({top_tag})") {
                     return None;
                 }
