@@ -323,15 +323,23 @@ boundary. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
 
-Current status: the V1 dimension is experimental. It binds execution
-evidence to the challenge, but the trace values remain reproducible by
-a pure implementation of the public interpreter semantics, so it
-provides no environment proof yet. Every issued program carries a
-guaranteed construction-to-probe structure: a DOM construction block
-(createElement, a mutate op, an append) followed by real probes of the
-constructed node, so an armed challenge always exercises genuine
-browser DOM and layout work. The structure is the first step toward
-environment-dependent V2 semantics.
+Current status: the dimension is experimental and now carries the
+V2 causal-consistency semantics. Every issued program opens with a
+guaranteed causal graph: DOM construction (createElement, a mutate op,
+an append), a u8 array, and an observe op measuring the real layout
+height of the constructed node. The observed byte lands in the u8
+state, is read back, and is checksummed or rotated over, so later
+exact entries and the final digest depend on the browser-observed
+value. The verifier replays the whole graph
+forward from the reported value, checking bounds, structure and
+whole-trace coherence; a short pure synthesis that skips the
+write-through is rejected. The observed height is cross-engine
+deterministic: the interpreter styles the probed node to a fixed
+pixel height before measuring, so browsers and the fabricated
+reference trace agree. The boundary that remains: a solver that
+implements the full public semantics can still fabricate a coherent
+trace, since the values are evidence, not a cryptographic proof of a
+browser.
 
 Two knobs control the dimension:
 

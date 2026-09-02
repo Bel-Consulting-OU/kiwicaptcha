@@ -55,6 +55,13 @@ test.describe('ExecutionChallengeV1 (portable three-engine corpus)', () => {
       const origin = await fixtureOrigin(page);
       const token = await page.locator('[data-kiwi-token]').inputValue();
       expect(token.length, `lifecycle ${i}: the armed solve must mint a token`).toBeGreaterThan(0);
+      if (i === 0) {
+        const plain = Buffer.from(token, 'base64').toString('utf8');
+        const evidence = plain.split('.').at(-1).split(':');
+        const standard = evidence[1].replace(/-/g, '+').replace(/_/g, '/');
+        const trace = Buffer.from(standard, 'base64').toString('utf8');
+        expect(trace.includes('obs('), 'the causal observe entry must be present').toBe(true);
+      }
       const result = await verifyToken(page, origin, token);
       expect(
         result.body.ok,

@@ -51,6 +51,12 @@ async function verifyToken(page, token) {
   return { status: resp.status(), body: await resp.json() };
 }
 
+
+function decodeTrace(base64url) {
+  const standard = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(standard, 'base64').toString('utf8');
+}
+
 test.describe('ExecutionChallengeV1 (browser)', () => {
   test('an armed challenge executes in the sandboxed interpreter and verifies end to end', async ({ page }) => {
     await armedPage(page);
@@ -67,6 +73,15 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
     expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
     expect(evidence[1].length, 'the base64url trace must be non-empty').toBeGreaterThan(0);
+    const trace = decodeTrace(evidence[1]);
+    expect(
+      trace.includes('obs('),
+      'the causal observe entry must appear in every armed trace'
+    ).toBe(true);
+    expect(
+      trace.includes('u8r(') && trace.includes('u8c('),
+      'the observed byte must be read back from the u8 state'
+    ).toBe(true);
 
     const result = await verifyToken(page, token);
     expect(result.body.ok, `the armed solve must verify (got ${result.body.code})`).toBe(true);
