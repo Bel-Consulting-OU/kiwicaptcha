@@ -28,7 +28,7 @@ It is client-controlled and forgeable.
 ## Privacy properties
 
 Privacy is a product property, not an option.
-The default posture is strict: telemetry off, no fingerprinting (no canvas, audio, font, or GPU signals exist anywhere in the product), no raw IPs in any stored state, and no stable identifiers.
+The default posture is strict: telemetry off, no raw IPs in any stored state, and no stable identifiers. KiwiCaptcha does not construct or retain persistent device fingerprints, and no canvas, audio, or GPU signal exists anywhere in the product. The experimental execution dimension may transmit challenge-scoped, low-entropy browser-layout evidence: the observed height of a default-font text line, carried only in the armed execution trace. Privacy Strict disables that dimension entirely.
 The risk memory and the rate-limit memory are keyed pseudonyms that rotate on epochs, so old snapshots cannot correlate one source across time.
 Strict mode also refuses the coarse client-context opt-in; operators must deliberately enable it under the standard mode.
 The full privacy contract, including the strict-mode consequences, is in the [Symfony privacy document](packages/kiwicaptcha/integrations/symfony/docs/privacy.md).
