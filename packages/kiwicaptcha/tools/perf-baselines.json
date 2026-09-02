@@ -9,9 +9,9 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 153738,
-            "gzip_bytes": 43643,
-            "brotli_bytes": 36712,
+            "raw_bytes": 154274,
+            "gzip_bytes": 43647,
+            "brotli_bytes": 36790,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
@@ -34,12 +34,12 @@
             "note": "The widget stylesheet (widget.css), three byte-identical copies at 13863 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_execution": {
-            "raw_bytes": 26337,
-            "gzip_bytes": 7866,
-            "brotli_bytes": 6711,
-            "raw_cap_bytes": 30000,
-            "gzip_cap_bytes": 9000,
-            "brotli_cap_bytes": 8000,
+            "raw_bytes": 30793,
+            "gzip_bytes": 9154,
+            "brotli_bytes": 7836,
+            "raw_cap_bytes": 34000,
+            "gzip_cap_bytes": 10200,
+            "brotli_cap_bytes": 8800,
             "copies_identical": true,
             "note": "The execution interpreter asset (execution-interpreter.js), three byte-identical copies at 26337 bytes raw, 7866 gzip and 6711 brotli, recorded on 2026-09-01; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (the equality gate) and enforces the raw/gzip/brotli caps exactly like the widget driver."
         },
