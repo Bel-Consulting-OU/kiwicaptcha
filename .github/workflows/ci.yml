@@ -688,6 +688,46 @@ jobs:
         working-directory: tests/browser
         run: npx playwright test --config=playwright.a11y.config.mjs
 
+  n1-compat:
+    # N-1 compatibility evidence for the capability header: the lane
+    # adds the last revision that predates Kiwi-Execution-Max-Version
+    # (b32ec01e) as a git worktree and boots its own fixture server
+    # plus its real ChallengeController, then drives the current
+    # widget's request shapes against that frozen backend. The foreign
+    # capability header must be ignored (HTTP 200, op_version 1), a
+    # foreign body field must still answer 422 with error code
+    # `UNKNOWN_FIELDS` (the strict closed body set is why the
+    # capability rides a header, never a body field), and a headerless
+    # request must keep issuing version-1 programs. No Redis service is
+    # needed: the frozen fixture mints with ArrayStorage and temp
+    # files. The current backend's side of the rectangle stays owned
+    # by the browser and Symfony lanes.
+    name: N-1 compatibility (frozen previous release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # The lane adds the frozen revision as a git worktree, so
+          # this checkout must carry the full history.
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: add the frozen revision as a worktree
+        run: |
+          git -C "$GITHUB_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
+          git -C "$GITHUB_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
+      - name: N-1 compatibility (frozen previous release)
+        run: bash tools/ci/n1-compat.sh /tmp/kiwi-n1
+      - name: remove the frozen worktree
+        if: always()
+        run: git -C "$GITHUB_WORKSPACE" worktree remove --force /tmp/kiwi-n1
+
   repo-sanity:
     # Semantic repository/release sanity gate: a mechanically valid
     # release pipeline must never sign and attest the wrong product
