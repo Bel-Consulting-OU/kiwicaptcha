@@ -306,16 +306,22 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         --$counter;
 
         // An execution-armed (protocol v4) record demands the execution
-        // digest with the token; the digest is a pure function of the
-        // stored program and the nonce, recomputed here exactly like the
-        // driver computes it.
+        // digest and trace with the token; the digest is a pure
+        // function of the stored program and the nonce over the
+        // executed trace, recomputed here exactly like the driver
+        // computes it.
         $digest = null;
+        $traceB64 = null;
         if ($record->executionProgram !== null) {
-            $digest = ExecutionChallengeGenerator::expectedDigest($record->executionProgram, $record->nonce);
-            self::assertNotNull($digest, 'the walk-issued execution program must be parseable');
+            $program = ExecutionChallengeGenerator::decode($record->executionProgram);
+            self::assertNotNull($program, 'the walk-issued execution program must be parseable');
+            $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+            $traceB64 = base64_encode($trace);
+            $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
+            self::assertNotNull($digest, 'the walk-issued execution digest must compute');
         }
 
-        return SolutionToken::create($record->nonce, $counter, 5000, [], $digest)->encode();
+        return SolutionToken::create($record->nonce, $counter, 5000, [], $digest, $traceB64)->encode();
     }
 
     /**

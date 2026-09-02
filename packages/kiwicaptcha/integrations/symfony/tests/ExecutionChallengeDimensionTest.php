@@ -190,9 +190,12 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertNotNull($record);
         self::assertSame($payload['execution_program'], $record->executionProgram);
 
-        // Verify: correct digest -> valid; wrong digest -> the
+        // Verify: correct digest+trace -> valid; wrong digest -> the
         // deterministic execution_mismatch; missing digest -> mismatch.
-        $expected = ExecutionChallengeGenerator::expectedDigest($payload['execution_program'], $payload['nonce']);
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
         self::assertNotNull($expected);
 
         // The risk engine escalates the issued difficulty above the
@@ -204,7 +207,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
 
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
-        $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected)->encode();
+        $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1')->isOk());
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
