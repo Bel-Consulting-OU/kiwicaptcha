@@ -31,7 +31,13 @@
  * functions of their operands, no DOM) and the DOM SUBSET (opcodes
  * 16-27: createElement/setAttribute/appendChild/querySelector/
  * getAttribute/dataset/classList/parent/dispatch/serialize against the
- * sandboxed iframe document). The compute subset is worker-portable by
+ * sandboxed iframe document; opcodes 28-32: the real-DOM evidence
+ * probes — real query readback, layout geometry, the topmost-node
+ * point probe, a real event dispatch readback and the canonical
+ * serialization digest — validated by the verifier's invariants
+ * (exact for QUERY_REAL/EVENT_REAL/SERIALIZE_REAL, monotonic
+ * geometry with height >= 1, and the point probe naming the topmost
+ * constructed node)). The compute subset is worker-portable by
  * design: it never touches the document, so it can move into the
  * existing worker architecture (kiwi-worker.js) without any protocol
  * change. In THIS implementation the whole VM runs inside the ephemeral
@@ -72,7 +78,7 @@
 
   var MIN_OPS = 8;
   var MAX_OPS = 24;
-  var OP_COUNT = 28;
+  var OP_COUNT = 33;
   var FORMAT_VERSION = 1;
 
   var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -85,7 +91,8 @@
     "u8c", "u8w", "u8r", "u8rot",
     "slen", "schar", "scode", "sslice",
     "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
-    "cadd", "ccont", "dparent", "ddispatch", "dserialize"
+    "cadd", "ccont", "dparent", "ddispatch", "dserialize",
+    "qreal", "geom", "point", "evreal", "sreal"
   ];
 
   // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
@@ -255,6 +262,9 @@
     var actionBytes = take(actionLen);
     if (actionBytes === null) return null;
     var opVersion = byte();
+    // The op version is the canonical numeric byte, exactly 1 — no
+    // arbitrary byte (the mirrors reject any other value).
+    if (opVersion !== 1) return null;
     var opCount = byte();
     if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
 
@@ -384,11 +394,33 @@
           operands.push({ k: "s", v: s23 });
           break;
         }
+        case 28: case 29: case 31: {
+          // Real-DOM probes: QUERY_REAL/GEOMETRY/EVENT_REAL carry a
+          // constructed id (4..16 bytes, like the plain query op).
+          var idReal = readLenBytes(16);
+          if (!idReal || idReal.length < 4) return null;
+          operands.push({ k: "id", v: idReal });
+          break;
+        }
+        case 30: {
+          // POINT: two raw probe bytes (x, y), never length-prefixed.
+          var px = byte(), py = byte();
+          if (px === null || py === null) return null;
+          operands.push({ k: "x", v: px % 256 });
+          operands.push({ k: "y", v: py % 256 });
+          break;
+        }
+        case 32:
+          break;
         default:
           return null;
       }
       ops.push({ opcode: opcode, operands: operands });
     }
+
+    // Exact EOF: the op list must consume the whole blob (the mirrors'
+    // strict-parser parity — a trailing byte is a foreign blob).
+    if (pos !== bytes.length) return null;
 
     return {
       scope: bytesToAscii(scopeBytes),
@@ -422,6 +454,17 @@
     var cur = null; // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
     var docIds = {}; // id -> true for appended nodes
     var entries = [];
+    // The POINT probe's whole-program predicate (the verifier checks
+    // "any DOM_APPEND op", never the probe's position): the browser
+    // answers 'div' exactly when the program constructs a node.
+    var hasAppend = false;
+    for (var pre = 0; pre < program.ops.length; pre++) {
+      if (program.ops[pre].opcode === 18) { hasAppend = true; break; }
+    }
+    // GEOMETRY tops must be monotonic across the whole trace (the
+    // verifier's invariant); a real layout offset can never decrease,
+    // and an absent probe reports the previous top.
+    var geomTop = -1;
 
     function checksum() {
       var sum = 0;
@@ -583,6 +626,62 @@
           }
           var serialized = cur ? serializeAttrs(cur) : "";
           value = b64Encode(asciiBytes(serialized));
+          break;
+        }
+        case 28: {
+          // Real querySelectorById readback: 'none' unless the probed
+          // id is the current appended node, then the canonical
+          // 'div|name=value;...' attribute pairs (the dataset writes
+          // never leak into the canonical record).
+          var qrId = bytesToAscii(opValue(ops, "id"));
+          if (!docIds[qrId]) {
+            value = "none";
+          } else if (cur && cur.id === qrId) {
+            value = "div|" + serializeAttrs(cur);
+          } else {
+            value = "none";
+          }
+          break;
+        }
+        case 29: {
+          // Layout geometry of the constructed node: real offsetTop /
+          // offsetHeight (clamped to the verifier invariants: height
+          // >= 1, tops never decreasing). A probe of a node that is
+          // not (yet) in the document reports the previous top.
+          var gmEl = doc.getElementById(bytesToAscii(opValue(ops, "id")));
+          var gmTop = gmEl ? gmEl.offsetTop : 0;
+          if (gmTop < geomTop) gmTop = geomTop;
+          geomTop = gmTop;
+          var gmHeight = gmEl ? gmEl.offsetHeight : 1;
+          if (gmHeight < 1) gmHeight = 1;
+          value = gmTop + "," + gmHeight;
+          break;
+        }
+        case 30: {
+          // The topmost-node point probe: 'div' when the program
+          // constructs any node, 'none' otherwise (the verifier's
+          // whole-program predicate; x/y are the probe coordinates).
+          value = hasAppend ? "div" : "none";
+          break;
+        }
+        case 31: {
+          // Real event readback: the canonical 'kiwi-ev:tag' for the
+          // current appended node, 'none' for a foreign id.
+          var evId = bytesToAscii(opValue(ops, "id"));
+          if (!docIds[evId]) {
+            value = "none";
+          } else {
+            value = "kiwi-ev:" + (cur && cur.id === evId ? "div" : "span");
+          }
+          break;
+        }
+        case 32: {
+          // Canonical real serialization digest: hex SHA-256 of the
+          // current node's sorted canonical attribute pairs, or of the
+          // empty string when nothing is appended (the interpreter's
+          // own sha256 keeps the digest deterministic).
+          var srParts = (cur && cur.appended) ? serializeAttrs(cur) : "";
+          value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
           break;
         }
         default:

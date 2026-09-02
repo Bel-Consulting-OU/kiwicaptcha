@@ -53,11 +53,16 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
 
-    // The token carries the 5th execution-digest segment: 64 lowercase hex.
+    // The token carries the 5th execution segment: the 64-lowercase-hex
+    // digest, optionally followed by ':trace' (the driver's base64url
+    // trace evidence).
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
-    expect(parts.length, 'an armed token must carry the execution digest as the final segment').toBe(5);
-    expect(parts[4], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    expect(evidence[1].length, 'the base64url trace must be non-empty').toBeGreaterThan(0);
 
     const result = await verifyToken(page, token);
     expect(result.body.ok, `the armed solve must verify (got ${result.body.code})`).toBe(true);
@@ -75,10 +80,13 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
     expect(parts.length).toBe(5);
-    // Flip the first hex character of the digest.
-    const tamperedDigest = (parts[4][0] === '0' ? '1' : '0') + parts[4].slice(1);
-    expect(tamperedDigest).not.toBe(parts[4]);
-    parts[4] = tamperedDigest;
+    // Flip the first hex character of the digest (the trace after the
+    // ':' is left intact — only the digest changes).
+    const digestPart = parts[4].split(':')[0];
+    const tracePart = parts[4].slice(digestPart.length);
+    const tamperedDigest = (digestPart[0] === '0' ? '1' : '0') + digestPart.slice(1);
+    expect(tamperedDigest).not.toBe(digestPart);
+    parts[4] = tamperedDigest + tracePart;
     const tamperedToken = Buffer.from(parts.join('.')).toString('base64');
 
     const result = await verifyToken(page, tamperedToken);
