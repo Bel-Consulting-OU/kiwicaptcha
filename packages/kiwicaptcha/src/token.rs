@@ -118,6 +118,13 @@ pub struct SolutionToken {
     /// digest from the stored program and rejects a mismatch with the
     /// deterministic `ExecutionMismatch` outcome.
     pub execution_digest: Option<String>,
+    /// The base64url (unpadded) executed-trace wire string presented
+    /// behind the digest (`digest:trace`) for an execution-armed
+    /// challenge; `None` on the digest-only and unarmed shapes. The
+    /// field holds the wire form verbatim (the caller passes the
+    /// driver's base64url encoding), so [`SolutionToken::encode`]
+    /// appends it unchanged and [`SolutionToken::decode`] returns it
+    /// unchanged.
     pub execution_trace: Option<String>,
 }
 
@@ -130,10 +137,17 @@ impl SolutionToken {
             self.nonce, self.counter, self.duration_ms, telemetry_str
         );
         // The execution digest is an optional fifth segment: an unarmed
-        // token stays byte-identical to the four-segment shape.
+        // token stays byte-identical to the four-segment shape. The
+        // trace rides behind the digest as `digest:trace` — the field
+        // already holds the base64url (unpadded) wire form, so it is
+        // appended verbatim after the colon, never re-encoded.
         if let Some(digest) = &self.execution_digest {
             plain.push('.');
             plain.push_str(digest);
+            if let Some(trace) = &self.execution_trace {
+                plain.push(':');
+                plain.push_str(trace);
+            }
         }
         B64.encode(plain)
     }
@@ -161,13 +175,14 @@ impl SolutionToken {
 
         // The wire grammar splits on ALL dots: the first three segments
         // are nonce/counter/duration, and the final segment is the
-        // execution digest exactly when it is 64 lowercase hex characters
-        // (the shape the driver's interpreter produces) — the telemetry
-        // is everything between. A JSON telemetry object can never end
-        // with a 64-hex tail (it must close with '}'), so the
-        // discriminator is unambiguous (PHP parity), and a malformed
-        // digest tail on an armed token fails the telemetry JSON parse
-        // below (fail closed).
+        // execution segment exactly when it is `digest` or `digest:trace`
+        // (the digest is 64 lowercase hex and the trace is canonical
+        // unpadded base64url, whose alphabet carries neither '.' nor
+        // ':'), so the split on the first colon is total and the
+        // discriminator is unambiguous. A JSON telemetry object can
+        // never end with a 64-hex tail (it must close with '}'), so a
+        // non-matching tail is telemetry and fails the JSON parse below
+        // (fail closed, PHP parity).
         let parts: Vec<&str> = plain.split('.').collect();
         if parts.len() < 4 {
             return Err(DecodeError::Malformed);
@@ -179,28 +194,48 @@ impl SolutionToken {
         let execution_digest;
         let execution_trace;
         let telemetry_str;
-        let digest_only = last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit());
-        let digest_with_trace = last.len() > 65 && last.as_bytes().get(64).copied() == Some(b':');
-        if parts.len() >= 5 && (digest_only || digest_with_trace) {
-            let (digest, trace) = last.split_at(64);
-            if digest.bytes().all(|b| b.is_ascii_hexdigit())
-                && (trace.is_empty()
-                    || (trace.len() <= 10924
-                        && trace
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')))
-            {
-                execution_digest = Some(digest.to_string());
-                execution_trace = if trace.is_empty() {
-                    None
-                } else {
-                    Some(trace.to_string())
+        if parts.len() >= 5 {
+            // The optional fifth segment is `digest` or `digest:trace`:
+            // the digest is exactly 64 lowercase hex characters (the
+            // shape the driver's interpreter produces) and the trace is
+            // canonical unpadded base64url ([A-Za-z0-9_-], non-empty,
+            // at most 10924 characters — the base64 of an 8 KiB trace).
+            // A malformed trace on an armed token is rejected outright,
+            // exactly like the PHP decoder throws for the same shape;
+            // a tail that is not digest-shaped falls through to the
+            // telemetry JSON parse below (fail closed).
+            let colon = last.find(':');
+            let digest_part = match colon {
+                Some(i) => &last[..i],
+                None => last,
+            };
+            let digest_ok = digest_part.len() == 64
+                && digest_part
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            if digest_ok {
+                execution_digest = Some(digest_part.to_string());
+                execution_trace = match colon {
+                    Some(i) => {
+                        let trace = &last[i + 1..];
+                        let trace_ok = !trace.is_empty()
+                            && trace.len() <= 10924
+                            && trace
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                        if !trace_ok {
+                            return Err(DecodeError::Malformed);
+                        }
+                        Some(trace.to_string())
+                    }
+                    None => None,
                 };
+                telemetry_str = parts[3..parts.len() - 1].join(".");
             } else {
                 execution_digest = None;
                 execution_trace = None;
+                telemetry_str = parts[3..].join(".");
             }
-            telemetry_str = parts[3..parts.len() - 1].join(".");
         } else {
             execution_digest = None;
             execution_trace = None;
@@ -731,6 +766,187 @@ mod tests {
             duration_ms: 2,
             telemetry: serde_json::json!({}),
             execution_digest: Some("XYZ".to_string()),
+            execution_trace: None,
+        };
+        assert!(matches!(
+            SolutionToken::decode(&token.encode()),
+            Err(DecodeError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn execution_digest_only_round_trips_with_no_trace() {
+        // The digest-only shape: the fifth segment is exactly the 64
+        // lowercase hex digest with no colon tail, and the decode
+        // recovers the digest with execution_trace = None (PHP parity
+        // for the unarmed-trace form).
+        let digest = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"wd": true}),
+            execution_digest: Some(digest.to_string()),
+            execution_trace: None,
+        };
+        let encoded = token.encode();
+        let decoded = SolutionToken::decode(&encoded).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest));
+        assert_eq!(
+            decoded.execution_trace, None,
+            "a digest-only token carries no trace"
+        );
+        // The plain payload ends with the digest and nothing else.
+        let plain = String::from_utf8(B64.decode(&encoded).unwrap()).unwrap();
+        assert!(plain.ends_with(&format!(".{digest}")));
+    }
+
+    #[test]
+    fn execution_digest_with_trace_round_trips_both_fields() {
+        // The digest:trace shape: the trace is appended verbatim after
+        // the colon (the field already holds the unpadded base64url
+        // wire form) and the decode recovers both fields, byte-exact.
+        let digest = "f".repeat(64);
+        let trace_b64 = "Y2hlY2stdHJhY2Uta2V5XzEyMzQ1Ng";
+        assert!(trace_b64
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"wd": true}),
+            execution_digest: Some(digest.clone()),
+            execution_trace: Some(trace_b64.to_string()),
+        };
+        let encoded = token.encode();
+        let plain = String::from_utf8(B64.decode(&encoded).unwrap()).unwrap();
+        assert_eq!(
+            plain,
+            format!(
+                "{}.42.850.{{\"wd\":true}}.{digest}:{trace_b64}",
+                valid_token().nonce
+            ),
+            "the trace rides behind the digest, colon-joined, verbatim"
+        );
+        let decoded = SolutionToken::decode(&encoded).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            decoded.execution_trace.as_deref(),
+            Some(trace_b64),
+            "the base64url trace survives byte-exact"
+        );
+    }
+
+    #[test]
+    fn execution_digest_with_trace_survives_dotted_telemetry() {
+        // The dotted-telemetry discrimination holds with a trace too:
+        // only the final segment is examined, and the digest:trace
+        // shape keeps the telemetry between the third dot and the
+        // digest whole.
+        let digest = "0".repeat(64);
+        let trace_b64 = "ZG90dGVkX3RyYWNlX3dpdGhfdW5kZXJzY29yZXM";
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+            execution_digest: Some(digest.clone()),
+            execution_trace: Some(trace_b64.to_string()),
+        };
+        let decoded = SolutionToken::decode(&token.encode()).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(decoded.execution_trace.as_deref(), Some(trace_b64));
+        assert_eq!(decoded.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
+    }
+
+    #[test]
+    fn execution_trace_with_bad_charset_fails_the_decode_closed() {
+        // A tampered trace charset is fail closed: the token is
+        // rejected outright with the DecodeError::Malformed variant, so
+        // no execution evidence and no telemetry can ever be claimed
+        // from it. PHP throws DecodeError::malformed for the same
+        // shape.
+        let digest = "e".repeat(64);
+        for bad_trace in ["aGk=", "aGk+", "aGk/", "a:b", "ab.cd", "a b"] {
+            let token = SolutionToken {
+                nonce: valid_token().nonce,
+                counter: 1,
+                duration_ms: 2,
+                telemetry: serde_json::json!({}),
+                execution_digest: Some(digest.clone()),
+                execution_trace: Some(bad_trace.to_string()),
+            };
+            assert!(
+                matches!(
+                    SolutionToken::decode(&token.encode()),
+                    Err(DecodeError::Malformed)
+                ),
+                "a trace with characters outside [A-Za-z0-9_-] must fail the decode: {bad_trace:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_trace_over_the_length_cap_fails_the_decode() {
+        // The trace cap is 10924 characters (the unpadded base64url of
+        // an 8 KiB plain trace); a longer tail is rejected with
+        // Malformed before any further processing.
+        let digest = "d".repeat(64);
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some(digest.clone()),
+            execution_trace: Some("a".repeat(10925)),
+        };
+        assert!(matches!(
+            SolutionToken::decode(&token.encode()),
+            Err(DecodeError::Malformed)
+        ));
+        // Exactly at the cap: accepted (the charset is valid).
+        let at_cap = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some(digest),
+            execution_trace: Some("a".repeat(10924)),
+        };
+        assert!(SolutionToken::decode(&at_cap.encode()).is_ok());
+    }
+
+    #[test]
+    fn execution_digest_with_empty_trace_after_colon_fails_the_decode() {
+        // `digest:` with nothing after the colon is not the wire
+        // language: PHP throws for an empty trace, so the Rust decode
+        // rejects the shape with Malformed instead of accepting a
+        // half-armed token.
+        let plain = format!("{}.1.2.{{}}.{}:", valid_token().nonce, "0".repeat(64));
+        let wrapped = B64.encode(plain);
+        assert!(matches!(
+            SolutionToken::decode(&wrapped),
+            Err(DecodeError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn execution_digest_in_uppercase_hex_fails_the_decode() {
+        // The digest is 64 lowercase hex in both implementations: an
+        // uppercase tail is not digest-shaped and falls through to the
+        // telemetry parse, which rejects it (PHP parity — its
+        // /^[0-9a-f]{64}$/D gate refuses the same token).
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some("A".repeat(64)),
             execution_trace: None,
         };
         assert!(matches!(

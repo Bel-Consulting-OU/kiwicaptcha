@@ -182,8 +182,8 @@ use crate::challenge::{
 use crate::keys::DerivedKeys;
 use crate::token::SolutionToken;
 use crate::verify::{
-    check_request_binding, ct_eq, derive_hash, final_revalidate, leading_zero_bits,
-    measurable_solve_duration_ms, signature_from_challenge, validate_record,
+    check_execution_binding, check_request_binding, ct_eq, derive_hash, final_revalidate,
+    leading_zero_bits, measurable_solve_duration_ms, signature_from_challenge, validate_record,
     RequestBindingExpectation, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
@@ -2408,9 +2408,15 @@ impl ProductionVerifier {
             //    TTL, so it routes to the identity-gated consumed branch
             //    instead of being deleted. Pending (and missing) records keep
             //    the one-shot cheap-failure delete.
-            if let Err(e) =
-                self.check_cheap(peek, scope, client_ip, now_ns, expected_request_binding)
-            {
+            if let Err(e) = self.check_cheap(
+                peek,
+                scope,
+                client_ip,
+                now_ns,
+                expected_request_binding,
+                token.execution_digest.as_deref(),
+                token.execution_trace.as_deref(),
+            ) {
                 // The replay-exemption split (VerifyError::is_replay_exempt):
                 // only the narrow set of failures that describe the original
                 // redemption's circumstances — expiry, the IP binding, the
@@ -2452,6 +2458,8 @@ impl ProductionVerifier {
                                 scope,
                                 now_ns,
                                 expected_request_binding,
+                                token.execution_digest.as_deref(),
+                                token.execution_trace.as_deref(),
                             ) {
                                 // A hard verdict masked by the exempt
                                 // circumstance: the evidence stays preserved
@@ -2620,9 +2628,15 @@ impl ProductionVerifier {
         if !ct_eq(record.challenge.as_bytes(), peek.challenge.as_bytes()) {
             return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
         }
-        if let Err(e) =
-            self.check_cheap(&record, scope, client_ip, now_ns, expected_request_binding)
-        {
+        if let Err(e) = self.check_cheap(
+            &record,
+            scope,
+            client_ip,
+            now_ns,
+            expected_request_binding,
+            token.execution_digest.as_deref(),
+            token.execution_trace.as_deref(),
+        ) {
             return VerifyOutcome::Invalid(e);
         }
 
@@ -2706,7 +2720,8 @@ impl ProductionVerifier {
     /// structural integrity, protocol gate, revoked/future kid,
     /// signature, Argon ceilings; check_ttl, check_scope,
     /// check_deployment_expectations, check_request_binding,
-    /// check_ip_binding, check_min_duration), so an emergency-revoked
+    /// check_ip_binding, the execution binding, check_min_duration), so
+    /// an emergency-revoked
     /// key or a bumped policy epoch rejects the recovery exactly as it
     /// rejects a fresh verification.
     ///
@@ -2772,9 +2787,14 @@ impl ProductionVerifier {
         //    (the committed outcome was durably recorded after the
         //    original IP checks passed).
         if state.stored_result.is_some() {
-            if let Err(e) =
-                self.replay_security_check(&state.record, scope, now_ns, expected_request_binding)
-            {
+            if let Err(e) = self.replay_security_check(
+                &state.record,
+                scope,
+                now_ns,
+                expected_request_binding,
+                token.execution_digest.as_deref(),
+                token.execution_trace.as_deref(),
+            ) {
                 return VerifyOutcome::Invalid(e);
             }
 
@@ -2785,7 +2805,8 @@ impl ProductionVerifier {
         //    verification (authenticated shape incl. revocation,
         //    signature and Argon ceilings; TTL; scope; region/policy/
         //    issuer deployment expectations; request binding; IP
-        //    binding; minimum duration). Recovery is never a weaker
+        //    binding; execution binding; minimum duration). Recovery is
+        //    never a weaker
         //    verification mode than the operation it recovers.
         if let Err(e) = self.check_cheap(
             &state.record,
@@ -2793,6 +2814,8 @@ impl ProductionVerifier {
             client_ip,
             now_ns,
             expected_request_binding,
+            token.execution_digest.as_deref(),
+            token.execution_trace.as_deref(),
         ) {
             return VerifyOutcome::Invalid(e);
         }
@@ -3029,17 +3052,26 @@ impl ProductionVerifier {
 
     /// The cheap validation phase: structural validation, the protocol-v1
     /// gate, the signature re-check, TTL, scope, the expected request
-    /// binding, IP binding, region, policy epoch, issuer, and the
-    /// server-measured minimum duration — the checks PHP runs against the
+    /// binding, IP binding, region, policy epoch, issuer, the
+    /// ExecutionChallengeV1 binding, and the server-measured minimum
+    /// duration — the checks PHP runs against the
     /// peeked record before the Argon admission gate, in the same
     /// first-error precedence as the PHP `cheapPhaseCheck` (shape →
     /// TTL → scope+request-binding → IP binding → region/policy/issuer →
-    /// floor), so a record failing several invariants reports the same
-    /// error code in both languages. Run against the peeked record and
-    /// re-run against the consumed record (race guard). Each invariant
+    /// execution binding → floor), so a record failing several invariants
+    /// reports the same error code in both languages. Run against the
+    /// peeked record and re-run against the consumed record (race
+    /// guard). Each invariant
     /// lives in its own check method, shared verbatim with
     /// [`Self::replay_security_check`] so the two paths can never diverge
     /// on what an invariant means.
+    ///
+    /// `execution_digest` and `execution_trace` are the presented
+    /// execution fields of the decoded solution token (the optional
+    /// digest and digest:trace wire segments); the execution binding is
+    /// evaluated against the record's stored program exactly like the
+    /// [`crate::verify::verify_solution`] reference flow.
+    #[allow(clippy::too_many_arguments)]
     fn check_cheap(
         &self,
         record: &ChallengeRecord,
@@ -3047,6 +3079,8 @@ impl ProductionVerifier {
         client_ip: &str,
         now_ns: u64,
         expected_request_binding: RequestBindingExpectation<'_>,
+        execution_digest: Option<&str>,
+        execution_trace: Option<&str>,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_ttl(record)?;
@@ -3054,6 +3088,7 @@ impl ProductionVerifier {
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_ip_binding(record, client_ip)?;
         self.check_deployment_expectations(record)?;
+        check_execution_binding(record, execution_digest, execution_trace)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3066,7 +3101,8 @@ impl ProductionVerifier {
     /// A first-error routing lets an exempt failure that sits early in
     /// the cheap-phase order shadow every later hard verdict. The expiry
     /// sits before scope, the request binding and the IP binding; the IP
-    /// binding sits before the deployment expectations and the
+    /// binding sits before the deployment expectations, the execution
+    /// binding and the
     /// minimum-duration floor (the PHP `cheapPhaseCheck` order — the
     /// shadowed verdict would never run, and the retry would route into
     /// the identity-gated consumed branch, replaying the stored success
@@ -3077,7 +3113,9 @@ impl ProductionVerifier {
     /// clean pass lets the exempt circumstance route into the consumed
     /// branch. The check methods are the same ones
     /// [`Self::check_cheap`] composes, in the PHP `replaySecurityCheck`
-    /// order. The fresh-challenge path never calls this: the public
+    /// order (the execution binding included, so a tampered execution
+    /// tail can never replay a retained success around an exempt
+    /// expiry). The fresh-challenge path never calls this: the public
     /// first-error precedence for pending records is unchanged.
     fn replay_security_check(
         &self,
@@ -3085,6 +3123,8 @@ impl ProductionVerifier {
         scope: &str,
         now_ns: u64,
         expected_request_binding: RequestBindingExpectation<'_>,
+        execution_digest: Option<&str>,
+        execution_trace: Option<&str>,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
@@ -3094,6 +3134,7 @@ impl ProductionVerifier {
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_deployment_expectations(record)?;
+        check_execution_binding(record, execution_digest, execution_trace)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3473,7 +3514,8 @@ mod tests {
 
         // Repeated full cheap phases reuse the same allocations (each
         // check would re-derive twice without the cache — signature +
-        // IP binding).
+        // IP binding). The issued records are unarmed, so no execution
+        // evidence is presented.
         for issued in [&issued_1, &issued_2] {
             for _ in 0..5 {
                 verifier
@@ -3483,6 +3525,8 @@ mod tests {
                         IP,
                         issued.record.issued_at_ns + 1_000_000,
                         RequestBindingExpectation::Unenforced,
+                        None,
+                        None,
                     )
                     .expect("the issued record passes its own cheap phase");
             }

@@ -530,7 +530,8 @@ impl VerifyError {
     /// The exemption is deliberately narrow. Every security verdict —
     /// wrong scope, request-binding mismatch, policy epoch, region,
     /// issuer, kid revocation/resolution, signature, record shape, the
-    /// unsupported protocol/profile, and the receipt-timing floor —
+    /// execution binding, the unsupported protocol/profile, and the
+    /// receipt-timing floor —
     /// stands even when the operation identity matches: the stored
     /// success never replays around it (the record is kept intact and
     /// the failure is returned).
@@ -851,6 +852,95 @@ pub(crate) fn measurable_solve_duration_ms(
     Some((receipt_ns - record.issued_at_ns) / 1_000)
 }
 
+/// The ExecutionChallengeV1 binding (hard), shared verbatim by
+/// [`verify_solution`] and the Redis-backed production verifier (see
+/// `crate::redis_verify`): an armed record demands a presented execution
+/// digest that matches the expected digest recomputed from the stored
+/// program and the presented trace; a missing or mismatched digest is
+/// the deterministic [`VerifyError::ExecutionMismatch`]. An unarmed
+/// record (no stored program, no signed commitment) demands no
+/// evidence: a presented digest or trace is stray execution evidence
+/// and is rejected with the deterministic
+/// [`VerifyError::ExecutionMismatch`] — never silently ignored, because
+/// the signed canonical carries no commitment, so no digest can be
+/// legitimate for it. The expected digest is a pure function of
+/// (program, nonce): the program embeds the scope/action/version
+/// context and the trace is deterministic, so the verifier needs no
+/// secret to recompute it. The comparison is constant-time (ct_eq).
+pub(crate) fn check_execution_binding(
+    record: &ChallengeRecord,
+    execution_digest: Option<&str>,
+    execution_trace: Option<&str>,
+) -> Result<(), VerifyError> {
+    match record.execution_program.as_deref() {
+        Some(program) => match (execution_digest, execution_trace) {
+            (None, _) | (_, None) => Err(VerifyError::ExecutionMismatch),
+            (Some(presented), Some(trace_b64)) => {
+                // The trace travels on the wire as base64url, unpadded
+                // (the driver's format); translate back to canonical
+                // standard base64 (re-pad) before the strict decode.
+                let standard: String = trace_b64
+                    .chars()
+                    .map(|c| match c {
+                        '-' => '+',
+                        '_' => '/',
+                        c => c,
+                    })
+                    .collect();
+                let padded = format!("{}{}", standard, "=".repeat((4 - standard.len() % 4) % 4));
+                let trace = match B64.decode(padded) {
+                    Ok(bytes)
+                        if {
+                            let out: String = B64
+                                .encode(&bytes)
+                                .replace('+', "-")
+                                .replace('/', "_")
+                                .trim_end_matches('=')
+                                .to_string();
+                            out == *trace_b64
+                        } =>
+                    {
+                        String::from_utf8(bytes).ok()
+                    }
+                    _ => None,
+                };
+                let verified = match trace {
+                    Some(t) => crate::execution::verify_executed_trace(program, &record.nonce, &t),
+                    None => None,
+                };
+                let verified = match verified {
+                    Some(v) => v,
+                    None => return Err(VerifyError::ExecutionMismatch),
+                };
+                let expected = match crate::execution::expected_digest_over_trace(
+                    program,
+                    &record.nonce,
+                    &verified,
+                ) {
+                    Some(digest) => digest,
+                    // The record's program failed the parse
+                    // (validate_record already rejects this shape;
+                    // defense in depth).
+                    None => return Err(VerifyError::MalformedRecord),
+                };
+                if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
+                    return Err(VerifyError::ExecutionMismatch);
+                }
+                Ok(())
+            }
+        },
+        // Stray execution evidence: a digest presented for a record
+        // whose signed canonical carries NO commitment is deterministic
+        // invalid, never silently ignored.
+        None => {
+            if execution_digest.is_some() || execution_trace.is_some() {
+                return Err(VerifyError::ExecutionMismatch);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on every verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
@@ -1038,73 +1128,10 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     (program, nonce): the program embeds the scope/action/version
     //     context and the trace is deterministic, so the verifier needs
     //     no secret to recompute it. The comparison is constant-time
-    //     (ct_eq).
-    match ctx.record.execution_program.as_deref() {
-        Some(program) => match (&ctx.execution_digest, &ctx.execution_trace) {
-            (None, _) | (_, None) => return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
-            (Some(presented), Some(trace_b64)) => {
-                // The trace travels on the wire as base64url, unpadded
-                // (the driver's format); translate back to canonical
-                // standard base64 (re-pad) before the strict decode.
-                let standard: String = trace_b64
-                    .chars()
-                    .map(|c| match c {
-                        '-' => '+',
-                        '_' => '/',
-                        c => c,
-                    })
-                    .collect();
-                let padded = format!("{}{}", standard, "=".repeat((4 - standard.len() % 4) % 4));
-                let trace = match B64.decode(padded) {
-                    Ok(bytes)
-                        if {
-                            let out: String = B64
-                                .encode(&bytes)
-                                .replace('+', "-")
-                                .replace('/', "_")
-                                .trim_end_matches('=')
-                                .to_string();
-                            out == *trace_b64
-                        } =>
-                    {
-                        String::from_utf8(bytes).ok()
-                    }
-                    _ => None,
-                };
-                let verified = match trace {
-                    Some(t) => {
-                        crate::execution::verify_executed_trace(program, &ctx.record.nonce, &t)
-                    }
-                    None => None,
-                };
-                let verified = match verified {
-                    Some(v) => v,
-                    None => return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
-                };
-                let expected = match crate::execution::expected_digest_over_trace(
-                    program,
-                    &ctx.record.nonce,
-                    &verified,
-                ) {
-                    Some(digest) => digest,
-                    // The record's program failed the parse
-                    // (validate_record already rejects this shape;
-                    // defense in depth).
-                    None => return VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-                };
-                if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
-                    return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch);
-                }
-            }
-        },
-        // Stray execution evidence: a digest presented for a record
-        // whose signed canonical carries NO commitment is deterministic
-        // invalid, never silently ignored.
-        None => {
-            if ctx.execution_digest.is_some() || ctx.execution_trace.is_some() {
-                return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch);
-            }
-        }
+    //     (ct_eq). The shared [`check_execution_binding`] carries the
+    //     exact same semantics on the Redis-backed production path.
+    if let Err(e) = check_execution_binding(ctx.record, ctx.execution_digest, ctx.execution_trace) {
+        return VerifyOutcome::Invalid(e);
     }
 
     // 3. Minimum duration — server-measured. The client-reported duration_ms

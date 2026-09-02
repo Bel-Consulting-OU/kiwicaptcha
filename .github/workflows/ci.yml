@@ -1201,7 +1201,8 @@ jobs:
   perf-budget:
     # Deterministic performance budgets. The hard byte limits run first
     # and are gating: the three widget-driver copies (raw, gzip and
-    # brotli) and the challenge-response JSON must stay under their caps
+    # brotli) and the decoy-armed and v4 execution-armed
+    # challenge-response JSON must stay under their caps
     # or this job fails. The synthetic-load benchmark steps then measure
     # issuance and verification p50/p95 under fixed workloads — the
     # ArrayStorage SHA baseline, the real-Redis SHA path (a redis
@@ -1255,7 +1256,7 @@ jobs:
         # exist (the kiwicaptcha-php/risk-php dependencies ride along).
         working-directory: packages/kiwicaptcha/integrations/symfony
         run: composer install --no-interaction --no-scripts --prefer-dist
-      - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge response)
+      - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge responses)
         run: bash packages/kiwicaptcha/tools/perf-budget.sh
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
         continue-on-error: true
@@ -1450,3 +1451,8 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test --features redis --test cross_language redis_v3_decoy_interop_with_php -- --nocapture
+      - name: Protocol-v4 execution interoperability (PHP issues the real digest:trace token, Rust decodes and verifies through the production verifier)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
