@@ -272,6 +272,33 @@ if [ "$largest_v4" -gt "$CHALLENGE_JSON_V4_CAP" ]; then
   FAILED=1
 fi
 
+# The single-source-of-truth guard: the narrative performance
+# document (docs/performance-analysis.md) quotes the equality-gated
+# asset sizes. If those figures drift from the machine-readable
+# record, the check fails — human-readable prose must be regenerated
+# from the JSON, never copied by hand. The figures are matched as
+# plain digit strings with thousand separators exactly as the record
+# stores them.
+dr_raw=$(json_get "$BASELINES_FILE" "budgets.widget_driver.raw_bytes")
+dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes")
+dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
+ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
+ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes")
+ex_br=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_bytes")
+dr_fmt=$(printf "%'d" "$dr_raw"); dr_gz_fmt=$(printf "%'d" "$dr_gz"); dr_br_fmt=$(printf "%'d" "$dr_br")
+ex_fmt=$(printf "%'d" "$ex_raw"); ex_gz_fmt=$(printf "%'d" "$ex_gz"); ex_br_fmt=$(printf "%'d" "$ex_br")
+DOC=$(cat "docs/performance-analysis.md" 2>/dev/null || true)
+MISSING=""
+for fig in "$dr_fmt" "$dr_gz_fmt" "$dr_br_fmt" "$ex_fmt" "$ex_gz_fmt" "$ex_br_fmt"; do
+  if [ -n "$DOC" ] && ! printf '%s' "$DOC" | grep -qF "$fig"; then
+    MISSING="$MISSING $fig"
+  fi
+done
+if [ -n "$MISSING" ]; then
+  echo "perf-budget FAILED: docs/performance-analysis.md does not quote the recorded asset figures:$MISSING — regenerate the prose from perf-baselines.json" >&2
+  FAILED=1
+fi
+
 if [ "$FAILED" = "1" ]; then
   echo "perf-budget: byte budget exceeded — a regression or an intentional growth that needs a re-baselined cap" >&2
   exit 1

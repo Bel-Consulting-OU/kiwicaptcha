@@ -203,10 +203,10 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every widget-driver copy is
-154,274 bytes raw, 43,647 bytes gzip and 36,790 bytes brotli, against
+155,837 bytes raw, 44,229 bytes gzip and 37,147 bytes brotli, against
 caps of 160,000 / 50,000 / 45,000 bytes; every execution-interpreter
 copy (execution-interpreter.js, the lazy ExecutionChallengeV1 asset)
-is 33,181 bytes raw, 9,816 bytes gzip and 8,417 bytes brotli, against
+is 33,452 bytes raw, 9,933 bytes gzip and 8,518 bytes brotli, against
 caps of 34,000 / 10,200 / 8,800 bytes; the same budgets section also
 records the measured raw bytes of the other three widget assets (the
 Argon worker at 20,233 bytes, the wasm glue runtime at 93,093 bytes
@@ -237,17 +237,17 @@ inline compatibility tier; files mode fetches the versioned
 `worker.<hash>.js` asset lazily), so the ordinary bootstrap — the bytes a
 plain SHA-256 page downloads before any memory-hard challenge — targets
 **sub-30 KB compressed** (gzip or brotli). The current driver is still
-above that target: 154,274 bytes raw, 43,647 gzip and 36,790 brotli
+above that target: 155,837 bytes raw, 44,229 gzip and 37,147 brotli
 (the record's `budgets.widget_driver` section, equality-gated). The
 caps stay unchanged; closing the gap to the target is a lazy-split
 effort, not a cap change.
 
 The execution-orchestration delivery is a deliberate split, not eager
-bloat (the driver measures 154,274 raw / 43,647 gzip / 36,790
+bloat (the driver measures 155,837 raw / 44,229 gzip / 37,147
 brotli):
 
 - the execution interpreter itself is a separate lazy asset
-  (`execution.<sha256>.js`, 33,181 raw / 9,816 gzip / 8,417 brotli,
+  (`execution.<sha256>.js`, 33,452 raw / 9,933 gzip / 8,518 brotli,
   the `budgets.widget_execution` section): the driver's orchestration
   is the minimal seam that creates a sandboxed ephemeral iframe per
   armed challenge, loads the SRI-pinned interpreter inside it and
@@ -381,9 +381,9 @@ fact, not a statistic. The caps are
 defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
-authority that could drift. The recorded sizes (154,274 / 43,647 /
-36,790 bytes for the driver and 33,181 / 9,816 / 8,417 bytes for the
-execution interpreter) leave about 2-19% headroom under the widget
+authority that could drift. The recorded sizes (155,837 / 44,229 /
+37,147 bytes for the driver and 33,452 / 9,933 / 8,518 bytes for the
+execution interpreter) leave about 2-18% headroom under the widget
 caps, and the challenge-response budgets (1,014-1,046 bytes decoy
 armed, 1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte
 and 1,900-byte caps; a legitimate addition lands
