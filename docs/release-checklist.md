@@ -149,17 +149,18 @@ regressions.
 
 Status: not started.
 
-### Milestone B. Organization-admin bypass hardening
+### Milestone B. Scoped release/break-glass identity
 
-Narrow the protected-main and protected-tag `OrganizationAdmin`
-always-bypass to a scoped emergency break-glass identity, with
-hardware-backed authentication, audit-log coverage and bypass
-alerting, through the rulesets API. The current governance reality,
-the recommendation and the concrete narrowing steps are documented
-in the governance section of `SECURITY.md`.
+Status: the permanent OrganizationAdmin always-bypass is REMOVED from
+both rulesets (empty bypass-actor lists; protected main runs the full
+PR/approval/CI flow and protected tags block deletion and
+non-fast-forward updates for everyone). Remaining work: authorize a
+scoped release identity (a dedicated GitHub App) for v* tag creation,
+with hardware-backed authentication, audit-log coverage and bypass
+alerting, through the rulesets API.
 
 Pass criteria: no routine actor holds a permanent always-bypass, the
-break-glass identity is scoped and hardware-authenticated, and every
+release identity is scoped and hardware-authenticated, and every
 use is audited and alerted.
 
 Status: not started. This is a governance hardening recommendation,

@@ -1067,6 +1067,19 @@ final class Configuration implements ConfigurationInterface
                     && $v['argon2_max_concurrent_verifications'] > 0
                     && $v['argon2_max_per_tenant'] >= $v['argon2_max_concurrent_verifications'])
                 ->thenInvalid('kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap')
+            ->end()
+            // Cross-field execution-versioning invariant: the node's
+            // execution_version cap bounds the strongest grammar this
+            // deployment can ever emit, and the server-owned required
+            // tier refuses (never downgrades) a client below it, so a
+            // required tier above the cap can never be satisfied:
+            // every armed request would deterministically fail with
+            // `CLIENT_EXECUTION_VERSION_UNSUPPORTED`. Refused here at
+            // compile time instead of failing on the first request.
+            // The defaults (both 1) stay valid.
+            ->validate()
+                ->ifTrue(static fn (array $v): bool => $v['execution_required_version'] > $v['execution_version'])
+                ->thenInvalid('kiwi_captcha.execution_required_version must not exceed kiwi_captcha.execution_version (the node execution-program cap): the required tier is a solve mandate the node must be able to emit, and a client below it is refused with CLIENT_EXECUTION_VERSION_UNSUPPORTED, never downgraded — so a required tier above the cap makes every armed request deterministically fail. Raise kiwi_captcha.execution_version to at least the required tier (and confirm the fleet min_execution_version floor reaches it) or lower the required tier')
             ->end();
 
         return $treeBuilder;
