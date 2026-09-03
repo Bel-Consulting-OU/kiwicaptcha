@@ -55,7 +55,10 @@
             "type": "path",
             "url": "../../../kiwicaptcha-php",
             "options": {
-                "symlink": false
+                "symlink": false,
+                "versions": {
+                    "kiwicaptcha/kiwicaptcha-php": "1.0.0"
+                }
             }
         },
         {
