@@ -23,7 +23,7 @@ const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
 /// over the browser-equivalent executed trace of the program, the
 /// trace a real browser execution submits. It is computed as
 /// `digestOverTrace` over the trace built by the PHP test-fixture
-/// `KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor` on
+/// `KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor` on
 /// the decoded program, and re-derived here over the same trace.
 /// `PROGRAM`/`DIGEST` pin the version-2 pair (the causal observe
 /// grammar, opcode 33); `PROGRAM_V1`/`DIGEST_V1` pin the version-1

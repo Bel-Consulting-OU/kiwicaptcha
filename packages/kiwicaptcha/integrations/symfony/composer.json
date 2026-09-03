@@ -76,7 +76,8 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "BelConsulting\\KiwiCaptchaBundle\\Tests\\": "tests/"
+            "BelConsulting\\KiwiCaptchaBundle\\Tests\\": "tests/",
+            "KiwiCaptcha\\Tests\\Support\\": "vendor/kiwicaptcha/kiwicaptcha-php/tests/Support/"
         }
     },
     "extra": {

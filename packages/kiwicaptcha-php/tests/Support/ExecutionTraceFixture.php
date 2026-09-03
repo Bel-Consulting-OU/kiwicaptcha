@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace KiwiCaptcha\TestSupport;
+namespace KiwiCaptcha\Tests\Support;
 
 use KiwiCaptcha\ExecutionChallengeGenerator;
 
@@ -21,10 +21,12 @@ use KiwiCaptcha\ExecutionChallengeGenerator;
  * non-browser equivalent of a real execution. The former
  * `ExecutionChallengeGenerator::executedTraceFor` entry point is gone.
  * The fabrication lives here, behind the explicitly test-only
- * `KiwiCaptcha\TestSupport` namespace. Never call this class from a
- * production path. Test suites, cross-language fixtures and the
- * browser fixture router are its only callers. The verifier's own
- * machinery (`verifyExecutedTrace`, `digestOverTrace`,
+ * `KiwiCaptcha\Tests\Support` namespace (autoload-dev only: a
+ * production Composer install never ships this class, matching the
+ * Rust crate's default-off `test-fixtures` feature). Never call this
+ * class from a production path. Test suites, cross-language fixtures
+ * and the browser fixture router are its only callers. The verifier's
+ * own machinery (`verifyExecutedTrace`, `digestOverTrace`,
  * `expectedDigest`) stays on the generator and operates over
  * submitted evidence, replaying whatever the trace reports.
  *

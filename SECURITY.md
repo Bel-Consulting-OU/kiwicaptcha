@@ -39,10 +39,12 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
   All required security CI checks must pass (strict). The ruleset currently requires 25 check contexts, including the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job and the two stable matrix aggregators.
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
-  The trust model: organization admins retain an explicit
-  always-bypass on the protected branches and the protected tags.
-  This is operational protection, not mathematical impossibility.
-- `refs/tags/v*` are protected by an active tag ruleset: deletion and non-fast-forward updates are blocked, creation is restricted to organization admins (the same documented trust model).
+  No actor holds a ruleset bypass: both rulesets carry an empty
+  bypass-actor list, so every change to protected `main` and every
+  protected-tag operation goes through the enforced checks.
+- `refs/tags/v*` are protected by an active tag ruleset: deletion and
+  non-fast-forward updates are blocked; tag creation is open to the
+  normal protected flow (a future release identity may narrow it).
 - **GitHub Immutable Releases is enabled** (`PUT /repos/{owner}/{repo}/immutable-releases`; the setting is also available in Settings -> General -> Immutable Releases).
   It applies to future releases only: the release object locks its tag and assets after publication and carries a release-level attestation.
   `v1.6.10` and earlier were published while the setting was off and remain mutable; `v1.6.11` is the first release published under it.
@@ -66,24 +68,20 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 - **Tested bytes == released bytes**: the release pipeline rebuilds the assets under the strict pinned toolchain and fails unless `git diff --exit-code` shows they are byte-identical to the committed assets that the browser suite and Symfony byte-parity job tested.
 - Releases are published atomically (`gh release create` with the assets inline: draft → upload → publish); a failure never leaves a public partial release.
 
-### Organization-admin bypass
+### Governance bypass posture
 
-The current governance reality: both the branch ruleset and the tag
-ruleset carry an explicit `OrganizationAdmin` bypass actor with
-`bypass_mode: always`. An organization admin can push to protected
-`main` and can create protected `v*` tags without reviews, without
-checks and without the tag-creation restriction. That is the standard
-GitHub trust model for repository governance; it applies only to
-organization admins, never to a routine actor, and it is documented
-here rather than hidden.
+Both rulesets now carry an empty bypass-actor list: there is no
+organization-admin always-bypass. Protected `main` requires pull
+requests with two approving reviews, stale-review dismissal, code
+owner review, strict required checks, signed commits and linear
+history; protected `v*` tags block deletion and non-fast-forward
+updates for everyone.
 
-The recommendation: no routine actor should hold a permanent bypass.
-The bypass should narrow to a scoped emergency break-glass identity,
-used only when the normal path is blocked. The break-glass identity
-should be a custom repository role or a dedicated GitHub App, should
-authenticate with hardware-backed credentials (security keys), and
-every use should land in the organization audit log with alerting on
-bypass events.
+The remaining recommendation: narrow release-tag creation to a scoped
+break-glass or release identity (a dedicated GitHub App with
+hardware-backed credentials), and keep the empty-bypass posture for
+routine actors. Every bypass or release action should land in the
+organization audit log with alerting.
 
 Signed release tags stay mandatory regardless. The release workflow
 independently verifies that the exact tag commit is GitHub-verified
