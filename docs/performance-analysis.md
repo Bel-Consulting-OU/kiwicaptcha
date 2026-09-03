@@ -206,7 +206,7 @@ perf-budget.sh): every widget-driver copy is
 155,837 bytes raw, 44,229 bytes gzip and 37,147 bytes brotli, against
 caps of 160,000 / 50,000 / 45,000 bytes; every execution-interpreter
 copy (execution-interpreter.js, the lazy ExecutionChallengeV1 asset)
-is 31,676 bytes raw, 9,994 bytes gzip and 8,599 bytes brotli, against
+is 33,259 bytes raw, 10,343 bytes gzip and 8,913 bytes brotli, against
 caps of 34,000 / 10,200 / 8,800 bytes; the same budgets section also
 records the measured raw bytes of the other three widget assets (the
 Argon worker at 20,233 bytes, the wasm glue runtime at 93,093 bytes
@@ -247,7 +247,7 @@ bloat (the driver measures 155,837 raw / 44,229 gzip / 37,147
 brotli):
 
 - the execution interpreter itself is a separate lazy asset
-  (`execution.<sha256>.js`, 31,676 raw / 9,994 gzip / 8,599 brotli,
+  (`execution.<sha256>.js`, 33,259 raw / 10,343 gzip / 8,913 brotli,
   the `budgets.widget_execution` section): the driver's orchestration
   is the minimal seam that creates a sandboxed ephemeral iframe per
   armed challenge, loads the SRI-pinned interpreter inside it and
@@ -382,7 +382,7 @@ defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
 authority that could drift. The recorded sizes (155,837 / 44,229 /
-37,147 bytes for the driver and 31,676 / 9,994 / 8,599 bytes for the
+37,147 bytes for the driver and 33,259 / 10,343 / 8,913 bytes for the
 execution interpreter) leave about 2-18% headroom under the widget
 caps, and the challenge-response budgets (1,014-1,046 bytes decoy
 armed, 1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte
