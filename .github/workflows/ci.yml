@@ -103,7 +103,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           php-version: ${{ matrix.php }}
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer validate
         run: composer validate --strict
@@ -154,7 +154,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           php-version: 'nightly'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer validate
         run: composer validate --strict
@@ -236,7 +236,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: ${{ matrix.php }}
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer install
         run: composer install --no-interaction --prefer-dist
@@ -332,7 +332,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer install
         run: composer install --no-interaction --prefer-dist
@@ -529,7 +529,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: risk PHP real-Redis suite on Redis 8
         working-directory: packages/kiwicaptcha-risk-php
@@ -580,7 +580,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer install
         run: composer install --no-interaction --prefer-dist
@@ -601,7 +601,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: PHP fixture hash
         working-directory: packages/kiwicaptcha-risk-php
@@ -628,7 +628,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
         with:
@@ -668,7 +668,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
         with:
@@ -716,7 +716,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: add the frozen revision as a worktree
         run: |
@@ -993,7 +993,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: clean-room install outside the monorepo
         run: |
@@ -1278,7 +1278,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: install brotli (compressed widget-driver budgets)
         # The ubuntu runners ship gzip but no brotli; the compressed
@@ -1359,7 +1359,7 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: install PHP core (the benchmarks issue real challenges)
         working-directory: packages/kiwicaptcha-php
@@ -1432,7 +1432,7 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: json, openssl, sodium
+          extensions: gmp, json, openssl, sodium
           coverage: none
       - name: composer install (PHP core)
         working-directory: packages/kiwicaptcha-php
@@ -1481,6 +1481,27 @@ jobs:
         env:
           KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
         run: php tests/CrossLanguageVerify.php
+      - name: PHP issues an rsw challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_rsw.json
+          KC_PHP_ALGO: rsw
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued rsw challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RSW_RECORD: /tmp/kc_php_record_rsw.json
+        run: cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture
+      - name: Rust issues an rsw challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RSW_RECORD: /tmp/kc_rust_record_rsw.json
+        run: cargo test --test cross_language rust_issues_rsw_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued rsw challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_rsw.json
+        run: php tests/CrossLanguageVerify.php
       - name: Redis runtime-state interoperability (PHP/Rust consume, commit, recovery claims)
         working-directory: packages/kiwicaptcha
         env:
@@ -1496,6 +1517,11 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
+      - name: RSW time-lock interoperability (PHP issues and solves into Redis, Rust verifies through the production verifier, and the reverse direction)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_rsw_interop_with_php -- --nocapture
       - name: Rust issues the v4 execution record and serializes the digest:trace token (reverse direction)
         working-directory: packages/kiwicaptcha
         env:
