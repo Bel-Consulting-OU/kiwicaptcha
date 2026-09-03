@@ -285,12 +285,13 @@ dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
 ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
 ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes")
 ex_br=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_bytes")
-dr_fmt=$(printf "%'d" "$dr_raw"); dr_gz_fmt=$(printf "%'d" "$dr_gz"); dr_br_fmt=$(printf "%'d" "$dr_br")
-ex_fmt=$(printf "%'d" "$ex_raw"); ex_gz_fmt=$(printf "%'d" "$ex_gz"); ex_br_fmt=$(printf "%'d" "$ex_br")
-DOC=$(cat "docs/performance-analysis.md" 2>/dev/null || true)
+DOC_NORM=$(cat "docs/performance-analysis.md" 2>/dev/null | tr -d ',' || true)
 MISSING=""
-for fig in "$dr_fmt" "$dr_gz_fmt" "$dr_br_fmt" "$ex_fmt" "$ex_gz_fmt" "$ex_br_fmt"; do
-  if [ -n "$DOC" ] && ! printf '%s' "$DOC" | grep -qF "$fig"; then
+# The locale-independent comparison: the doc may format the figures
+# with or without thousand separators, so the guard strips the commas
+# and matches the bare digit strings from the record.
+for fig in "$dr_raw" "$dr_gz" "$dr_br" "$ex_raw" "$ex_gz" "$ex_br"; do
+  if [ -n "$DOC_NORM" ] && ! printf '%s' "$DOC_NORM" | grep -qF "$fig"; then
     MISSING="$MISSING $fig"
   fi
 done
