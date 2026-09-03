@@ -28,8 +28,8 @@ final class PackageAutoloadDevIsolationTest extends TestCase
         self::assertSame('src/', $autoload['KiwiCaptcha\\'], 'the production map must be exactly the src/ tree');
 
         // No production prefix may resolve (or even name) the fixture:
-        // the old src/TestSupport mapping and any KiwiCaptcha\TestSupport
-        // prefix would leak the synthesizer into a --no-dev install.
+        // any KiwiCaptcha\TestSupport prefix would leak the synthesizer
+        // into a --no-dev install.
         self::assertArrayNotHasKey('KiwiCaptcha\\TestSupport', $autoload);
         foreach ($autoload as $prefix => $dir) {
             self::assertStringNotContainsString('TestSupport', (string) $dir, sprintf('the production prefix %s must not map a TestSupport directory', $prefix));
