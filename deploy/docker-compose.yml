@@ -1,0 +1,33 @@
+# The KiwiCaptcha reference deployment: the quick-start server plus
+# Valkey (the Redis-compatible store the core targets). The fixture
+# server mirrors the bundle's /challenge and /verify semantics with the
+# exact library code paths; production Symfony deployment is the
+# published bundle + recipe.
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  captcha:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      KC_REDIS_URL: redis://valkey:6379
+      TEST_REDIS_URL: redis://valkey:6379
+    depends_on:
+      valkey:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  valkey-data:
