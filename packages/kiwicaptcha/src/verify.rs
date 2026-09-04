@@ -6072,4 +6072,210 @@ mod tests {
             );
         }
     }
+
+    // ── the rsw + execution composition and the algorithm-total proof
+    //    vocabulary (the token matrix's verifier rows) ──────────────────
+
+    /// An rsw record armed with the ExecutionChallengeV1 dimension
+    /// (protocol v4, algorithm rsw): the issuance shape whose solution
+    /// token carries the digest:trace evidence AND the rsw final value.
+    fn make_rsw_execution_record() -> ChallengeRecord {
+        let config = ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
+            execution_key: Some("0123456789abcdef0123456789abcdef".into()),
+            rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
+            rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
+            rsw_t: crate::challenge::MIN_RSW_T,
+            algorithm: PoWAlgorithm::Rsw,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: Some(0),
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        crate::challenge::issue_challenge_with_execution(
+            &config,
+            "login",
+            "1.2.3.4",
+            NOW_UNIX,
+            NOW_NS,
+            0,
+            None,
+            true,
+            Some("login-action"),
+            Some(1),
+            false,
+        )
+        .expect("the rsw + execution issuance must succeed")
+        .record
+    }
+
+    /// The real execution evidence of an armed record, built exactly
+    /// like the interpreter: the executed trace of the stored program
+    /// and the digest over it, with the trace in its base64url wire
+    /// form.
+    fn execution_evidence(record: &ChallengeRecord) -> (String, String) {
+        use base64::Engine;
+        let program = record
+            .execution_program
+            .as_deref()
+            .expect("the armed record carries the program");
+        let decoded = crate::execution::decode(program).expect("the issued program parses");
+        let trace = crate::execution::fixtures::executed_trace_for(&decoded);
+        let trace_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(trace.as_bytes());
+        let digest = crate::execution::expected_digest_over_trace(program, &record.nonce, &trace)
+            .expect("the digest over the executed trace computes");
+        (digest, trace_b64)
+    }
+
+    /// Verify through the full `verify_solution` flow with full control
+    /// of every token field, the rsw + execution composition row
+    /// helper.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_composed(
+        record: &mut ChallengeRecord,
+        counter: u64,
+        proof: Option<&str>,
+        digest: Option<&str>,
+        trace_b64: Option<&str>,
+    ) -> VerifyOutcome {
+        let mut ctx = VerifyContext {
+            record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: Some("login"),
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            rsw_proof: proof,
+            rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64),
+            rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64),
+            execution_digest: digest,
+            execution_trace: trace_b64,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        verify_solution(&mut ctx)
+    }
+
+    #[test]
+    fn rsw_and_execution_compose_end_to_end() {
+        // The positive composition: an rsw + execution armed record is
+        // solved with the real digest:trace evidence AND the sequential
+        // final value, and the full token round-trips the wire decode
+        // (the fifth and sixth segments) and verifies. This is the
+        // acceptance the mutually-exclusive decoder used to break.
+        let mut record = make_rsw_execution_record();
+        assert_eq!(record.protocol_version, 4);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        let (digest, trace_b64) = execution_evidence(&record);
+
+        let wire = crate::token::SolutionToken {
+            nonce: record.nonce.clone(),
+            counter: 0,
+            duration_ms: 5000,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some(digest.clone()),
+            execution_trace: Some(trace_b64.clone()),
+            rsw_proof: Some(proof.clone()),
+        }
+        .encode();
+        let decoded = crate::token::SolutionToken::decode(&wire)
+            .expect("the composed token must decode on one wire");
+        assert_eq!(decoded.rsw_proof.as_deref(), Some(proof.as_str()));
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(decoded.execution_trace.as_deref(), Some(trace_b64.as_str()));
+
+        assert!(
+            matches!(
+                verify_composed(
+                    &mut record,
+                    0,
+                    Some(&proof),
+                    Some(&digest),
+                    Some(&trace_b64)
+                ),
+                VerifyOutcome::Valid { .. }
+            ),
+            "the rsw + execution composition must verify end to end"
+        );
+    }
+
+    #[test]
+    fn rsw_record_with_a_nonzero_counter_is_insufficient_work() {
+        // The verifier matrix row: an rsw record demands counter 0 —
+        // even a cryptographically correct final value under a nonzero
+        // counter is rejected outright, never compared.
+        let mut record = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        assert_eq!(
+            verify_composed(&mut record, 1, Some(&proof), None, None),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+            "an rsw token with a nonzero counter must be rejected"
+        );
+        // The composition shape: the correct execution evidence does not
+        // excuse a nonzero counter either.
+        let mut composed = make_rsw_execution_record();
+        let proof = crate::rsw::fixtures::sequential_proof(
+            &composed.prefix,
+            &composed.nonce,
+            composed.t as u64,
+        );
+        let (digest, trace_b64) = execution_evidence(&composed);
+        assert_eq!(
+            verify_composed(&mut composed, 7, Some(&proof), Some(&digest), Some(&trace_b64)),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+            "an rsw + execution token with a nonzero counter must be rejected"
+        );
+    }
+
+    #[test]
+    fn sha_and_argon_records_reject_a_presented_rsw_proof() {
+        // The verifier matrix rows: a 512-hex rsw final value is rsw
+        // evidence only, so a sha256/argon2id record presented with one
+        // is rejected outright — with the winning hash counter, so the
+        // rejection can only be the proof-vocabulary gate, never the
+        // difficulty check.
+        let mut sha = make_record(8);
+        let sha_counter = solve_for_test(&sha).expect("the sha challenge solves");
+        assert!(
+            matches!(
+                verify_composed(&mut sha, sha_counter, Some(&"a".repeat(512)), None, None),
+                VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+            ),
+            "a sha256 record must reject a presented rsw proof"
+        );
+
+        let mut argon = make_argon2_record(4, 64);
+        let argon_counter = solve_for_test(&argon).expect("the argon challenge solves");
+        assert!(
+            matches!(
+                verify_composed(&mut argon, argon_counter, Some(&"a".repeat(512)), None, None),
+                VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+            ),
+            "an argon2id record must reject a presented rsw proof"
+        );
+    }
 }
