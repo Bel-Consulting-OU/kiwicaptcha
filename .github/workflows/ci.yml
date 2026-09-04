@@ -208,14 +208,15 @@ jobs:
 
   php-no-gmp:
     # The GMP optionality proof: this lane installs PHP without ext-gmp
-    # (extensions: json, openssl, sodium — no gmp), proves the premise
-    # with a dedicated step, and then runs tools/ci/no-gmp-verify.php,
-    # which exercises the whole non-RSW surface through the public API
-    # (sha256 issue+verify, argon2id issue+verify, execution issue+verify
-    # at the live grammar maximum) and asserts an rsw configuration
-    # refuses cleanly with the documented missing-extension error. The
-    # script prints one pass line per check and exits non-zero on any
-    # failure.
+    # (the distro php-cli carries openssl and sodium as built-ins; the
+    # Ubuntu 24.04 distro ships no separate php-openssl or php-sodium
+    # packages), proves the premise with a dedicated step, and then
+    # runs tools/ci/no-gmp-verify.php, which exercises the whole
+    # non-RSW surface through the public API (sha256 issue+verify,
+    # argon2id issue+verify, execution issue+verify at the live grammar
+    # maximum) and asserts an rsw configuration refuses cleanly with
+    # the documented missing-extension error. The script prints one
+    # pass line per check and exits non-zero on any failure.
     name: PHP core no-GMP
     runs-on: ubuntu-latest
     defaults:
@@ -226,11 +227,28 @@ jobs:
       - name: install the distro php without ext-gmp
         run: >-
           sudo apt-get update -qq &&
-          sudo apt-get install -y -qq php-cli php-openssl php-sodium
-          php-mbstring php-xml php-zip php-curl php-bcmath composer
-      - name: prove ext-gmp is absent
-        run: >-
-          php -r "exit(extension_loaded('gmp') ? 1 : 0);"
+          sudo apt-get install -y -qq
+          php-cli
+          php-mbstring
+          php-xml
+          php-zip
+          php-curl
+          php-bcmath
+          composer
+      - name: prove required built-ins are loaded and ext-gmp is absent
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '
+            foreach (["openssl", "sodium"] as $extension) {
+                if (!extension_loaded($extension)) {
+                    fwrite(STDERR, "$extension missing\n");
+                    exit(1);
+                }
+            }
+          '
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
       - name: composer validate
         run: composer validate --strict
       - name: composer install
@@ -456,7 +474,177 @@ jobs:
           curl -fsS -X POST -H 'Content-Type: application/json' \
             -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
             http://127.0.0.1:8080/verify | tee /tmp/replay.json
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
           php -r '$d = json_decode(file_get_contents("/tmp/replay.json"), true); exit($d["ok"] === false && $d["code"] === "already_consumed" ? 0 : 1);'
+      - name: F1 algorithm-ownership table (sha256 profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          challenge_row() {  # $1 = request body; asserts a 200 challenge
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+              -d "$1" http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+          }
+          challenge_row '{"scope":"login"}'
+          grep -q '"algorithm":"sha256"' /tmp/f1-challenge.json
+          challenge_row '{"scope":"login","algorithm":"sha256"}'
+          grep -q '"algorithm":"sha256"' /tmp/f1-challenge.json
+          # The field stays accepted but only validated: a nonsense value
+          # is refused with a 422 before any issuance.
+          STATUS="$(curl -sS -o /tmp/f1-invalid.json -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"scope":"login","algorithm":"nonsense"}' \
+            http://127.0.0.1:8080/challenge)"
+          test "$STATUS" = "422"
+          grep -q '"code":"INVALID_ALGORITHM"' /tmp/f1-invalid.json
+      - name: F1 algorithm-ownership table (argon2id profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          test -n "$SECRET"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'KIWI_ALGORITHM=argon2id\n'
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt under the argon2id profile"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+          for body in '{"scope":"login"}' '{"scope":"login","algorithm":"argon2id"}' \
+            '{"scope":"login","algorithm":"sha256"}'; do
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+            grep -q '"algorithm":"argon2id"' /tmp/f1-challenge.json
+          done
+      - name: F1 algorithm-ownership table (rsw profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          test -n "$SECRET"
+          # The committed rsw fixture pair (packages/kiwicaptcha-php
+          # tests/Support/RswFixture.php) supplies the trapdoor values
+          # for the CI-only profile rows; the container's php reads them.
+          docker compose cp ../packages/kiwicaptcha-php/tests/Support/RswFixture.php \
+            captcha:/tmp/RswFixture.php
+          MODULUS_N="$(docker compose exec -T captcha php -r \
+            'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
+          LAMBDA="$(docker compose exec -T captcha php -r \
+            'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
+          test -n "$MODULUS_N"
+          test -n "$LAMBDA"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'KIWI_ALGORITHM=rsw\n'
+            printf 'KIWI_RSW_MODULUS_N=%s\n' "$MODULUS_N"
+            printf 'KIWI_RSW_LAMBDA=%s\n' "$LAMBDA"
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt under the rsw profile"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+          for body in '{"scope":"login","algorithm":"sha256"}' \
+            '{"scope":"login","algorithm":"argon2id"}'; do
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+            grep -q '"algorithm":"rsw"' /tmp/f1-challenge.json
+          done
+      - name: "F1 table done: restore the default sha256 profile"
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt after the profile restore"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      - name: F2 request-binding table (real /verify, one challenge per row)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          issue() {  # $1 = issue binding (empty = unbound)
+            local body='{"scope":"login"}'
+            if [ -n "$1" ]; then
+              body="{\"scope\":\"login\",\"request_binding\":\"$1\"}"
+            fi
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f2-challenge.json
+            docker compose cp /tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
+            docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \
+              /tmp/f2-challenge.json > /tmp/f2-token.txt
+            test -s /tmp/f2-token.txt
+            tr -d '\r\n' < /tmp/f2-token.txt > /tmp/f2-token-clean.txt
+            sleep 0.15
+          }
+          verify() {  # $1 = presented binding (empty = absent)
+            local token
+            token="$(cat /tmp/f2-token-clean.txt)"
+            local body="{\"token\":\"$token\",\"scope\":\"login\"}"
+            if [ -n "$1" ]; then
+              body="{\"token\":\"$token\",\"scope\":\"login\",\"request_binding\":\"$1\"}"
+            fi
+            curl -sS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/verify > /tmp/f2-verify.json
+          }
+          # Issue bound to txn-A, verify with txn-A -> success.
+          issue txn-A
+          verify txn-A
+          grep -q '"ok":true' /tmp/f2-verify.json
+          # Issue bound to txn-A, verify with txn-B -> request_binding_mismatch.
+          issue txn-A
+          verify txn-B
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          # Issue bound to txn-A, verify with no binding -> request_binding_mismatch.
+          issue txn-A
+          verify ''
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          # Issue unbound, verify with no binding -> success.
+          issue ''
+          verify ''
+          grep -q '"ok":true' /tmp/f2-verify.json
+          # Issue unbound, verify with txn-A -> request_binding_mismatch.
+          issue ''
+          verify txn-A
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          # Correct binding, second redemption -> already_consumed.
+          issue txn-A
+          verify txn-A
+          grep -q '"ok":true' /tmp/f2-verify.json
+          verify txn-A
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"already_consumed"' /tmp/f2-verify.json
+          # One-shot row: a wrong binding attempt leaves the record
+          # intact, so the correct redemption still succeeds afterwards.
+          issue txn-A
+          verify txn-B
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          verify txn-A
+          grep -q '"ok":true' /tmp/f2-verify.json
       - name: restart the captcha container
         working-directory: deploy
         run: docker compose restart captcha

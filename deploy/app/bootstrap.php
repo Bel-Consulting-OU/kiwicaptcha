@@ -235,9 +235,10 @@ function kiwiDeployment(): array
 /**
  * Build the Config of a deployment profile: the configured algorithm
  * plus the shared difficulty/lifetime knobs of $deployment. Issuance
- * is server-owned, so a client request for another algorithm is a
- * profile switch on the SAME key material and storage, exactly the way
- * a server-side risk decision can escalate an issuance.
+ * is server-owned: kiwiDeployment() builds exactly one config from the
+ * environment, and the request endpoints always issue under it — a
+ * client `algorithm` advertisement is compatibility metadata only and
+ * never rebuilds the config.
  *
  * @param array<string, mixed> $deployment a kiwiDeployment() result
  */
