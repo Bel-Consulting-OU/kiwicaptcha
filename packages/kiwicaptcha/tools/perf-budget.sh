@@ -104,12 +104,21 @@ with open(sys.argv[1], "rb") as f:
   fi
 }
 
-# gzip_size <file> — the deterministic gzip byte count. The -n strips
-# the timestamp and stored-name header fields and -9 selects the
-# maximum compression, so the count is reproducible across machines
-# and runs.
+# gzip_size <file> — the deterministic gzip byte count. The count is
+# produced by python3's zlib at level 9 with the gzip container (wbits
+# 31, no mtime), NOT by the gzip binary: gzip >= 1.12 links zlib-ng,
+# whose deflate output differs from the classic zlib encoder, so a
+# gzip-binary measurement is not reproducible across machines. The
+# zlib encoder's deflate output is stable across zlib 1.2.x/1.3.x
+# builds, which makes python3's zlib the cross-platform authority.
 gzip_size() {
-  gzip -n -9 -c "$1" | wc -c | tr -d ' '
+  python3 -c '
+import sys, zlib
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+c = zlib.compressobj(9, zlib.DEFLATED, 31)
+print(len(c.compress(data) + c.flush()))
+' "$1"
 }
 
 # budget_asset <budgets key> <label> — enforce the raw/gzip/brotli caps

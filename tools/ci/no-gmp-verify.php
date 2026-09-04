@@ -181,7 +181,11 @@ check('an rsw configuration refuses cleanly with the documented error', static f
         );
         throw new \RuntimeException('the rsw configuration must refuse without gmp');
     } catch (\InvalidArgumentException $e) {
-        $expected = 'the rsw algorithm requires the gmp extension for its modular arithmetic';
+        // Config wraps every Rsw configuration error with its trapdoor
+        // prefix, so the user-facing message at this entry point is the
+        // prefixed documented sentence (the direct Rsw construction
+        // below asserts the bare documented sentence).
+        $expected = 'invalid rsw trapdoor configuration: the rsw algorithm requires the gmp extension for its modular arithmetic';
         if ($e->getMessage() !== $expected) {
             throw new \RuntimeException(sprintf(
                 'the missing-extension error must be the documented one, got: %s',
