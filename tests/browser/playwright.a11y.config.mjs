@@ -30,11 +30,17 @@ import { defineConfig } from '@playwright/test';
 // the ephemeral-iframe teardown. The execution-CSP suite
 // (execution-csp.spec.mjs) drives the same lifecycle under real
 // Content-Security-Policy response headers (the documented strict
-// profile and an interpreter-blocking policy). The engine-specific
+// profile and an interpreter-blocking policy). The locale-CSP suite
+// (locale-csp.spec.mjs) drives the lazy widget-locales.js module under
+// the same real headers: the strict files-tier profile permits the
+// same-origin SRI-pinned module load, a missing or tampered module
+// fails closed into the English fallback, two widgets share one
+// request, and destroy or reset during the pending fetch leaves the
+// settled language to the current generation only. The engine-specific
 // torture cases stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp|locale-csp)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },
