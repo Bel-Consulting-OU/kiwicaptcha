@@ -42,7 +42,7 @@ jobs:
           cp packages/kiwicaptcha/resources/kiwicaptcha-wasm.js packages/kiwicaptcha/resources/widget-driver.js packages/kiwicaptcha/resources/widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js packages/kiwicaptcha/resources/widget.css /tmp/refreshed/packages/kiwicaptcha/resources/
           cp packages/kiwicaptcha/integrations/symfony/Resources/public/kiwicaptcha-wasm.js packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js packages/kiwicaptcha/integrations/symfony/Resources/public/widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js packages/kiwicaptcha/integrations/symfony/Resources/public/widget.css /tmp/refreshed/packages/kiwicaptcha/integrations/symfony/Resources/public/
           echo "refreshed assets staged at /tmp/refreshed"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: refreshed-assets
           path: /tmp/refreshed
