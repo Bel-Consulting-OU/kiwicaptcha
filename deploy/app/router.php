@@ -28,11 +28,15 @@ declare(strict_types=1);
  *   POST /verify   -> 200 {"ok":true,"code":""} for a fresh valid
  *                    redemption; {"ok":false,"code":"<error>"} for
  *                    every failure. The presented `request_binding` is
- *                    the independent expected transaction binding: a
- *                    mismatch is refused without burning the record, so
- *                    the correct redemption still succeeds afterwards.
- *                    A replayed token answers code "already_consumed":
- *                    the consumed marker in the core storage rejects it.
+ *                    the independent expected transaction binding: it
+ *                    is handed to the core verifier, which retires the
+ *                    pending record on a hard cheap-phase verdict — a
+ *                    binding mismatch included (the one-shot
+ *                    anti-oracle semantics) — so the same token can
+ *                    never be re-tried against a corrected binding (it
+ *                    answers code "record_not_found"). A replayed token
+ *                    answers code "already_consumed": the consumed
+ *                    marker in the core storage rejects it.
  *
  * The POST surfaces enforce a strict framing contract before any body
  * byte is read: no query parameters, a canonical bounded
@@ -232,16 +236,17 @@ function kiwiReadBody(array $accepted): ?array
 /**
  * Whether a strict-decode JsonException is the JSON depth breach.
  *
- * json_last_error() is unreliable after a JSON_THROW_ON_ERROR decode
- * failure (it reports the previous decode), so the deterministic depth
- * marker is the parser's own depth error text, stable across the PHP
- * lines this image runs; the JSON_ERROR_DEPTH constant is kept as a
- * belt-and-braces alternative.
+ * The JsonException thrown by a JSON_THROW_ON_ERROR decode failure
+ * carries the parser's own error code, and only the depth breach ever
+ * carries JSON_ERROR_DEPTH (1): every other parse failure (state
+ * mismatch, control character, syntax, UTF-8/UTF-16, recursion,
+ * unsupported values) reports a different code. json_last_error() is
+ * unreliable after the throwing decode (it can report a stale decode),
+ * so the exception code is the sole deterministic marker.
  */
 function kiwiIsJsonDepthError(\JsonException $e): bool
 {
-    return str_contains($e->getMessage(), 'Maximum stack depth exceeded')
-        || json_last_error() === JSON_ERROR_DEPTH;
+    return $e->getCode() === JSON_ERROR_DEPTH;
 }
 
 /**
@@ -549,13 +554,16 @@ function kiwiChallenge(): void
  * The expected transaction binding is INDEPENDENT: it is parsed from
  * the request `request_binding` field, never read back from the
  * stored record (a challenge minted bound to a transaction redeems
- * only against the binding the verifier is told to expect). A
- * mismatching binding is refused up front without touching the stored
- * record — the one-shot core burns a pending record on a hard cheap
- * verdict, and a mislabeled-but-recoverable redemption must not
- * destroy the challenge — so the correct redemption still succeeds
- * afterwards; single-use consumption, already_consumed and
- * record-not-found all stay in the verifier below.
+ * only against the binding the verifier is told to expect), and it is
+ * enforced by the core verifier alone — this surface performs no
+ * record lookup of its own. A mismatching binding is a hard
+ * cheap-phase verdict of the core, and the core's one-shot model
+ * retires the pending record on it: the challenge dies with the failed
+ * attempt, so a mislabeled redemption cannot be re-tried against a
+ * corrected binding (the same token then answers "record_not_found"),
+ * and an attacker gets exactly one guess per issued challenge instead
+ * of a free binding oracle. Single-use consumption, already_consumed
+ * and record-not-found all stay in the verifier below.
  */
 function kiwiVerify(): void
 {
@@ -599,24 +607,11 @@ function kiwiVerify(): void
     try {
         $storage = kiwiStorage($deployment['redisUrl']);
 
-        // The mismatch short-circuit: when the stored record's own
-        // signed binding differs from the request-derived expectation,
-        // the refusal is answered here and the record is left intact
-        // (a cheap-failure burn would destroy a challenge whose owner
-        // simply presented the wrong transaction once). The nonce is
-        // extracted the way the fixture does — the strict decode of
-        // the solution token stays the verifier's own verdict.
-        $plain = base64_decode($token, true);
-        $nonce = $plain !== false ? (string) (explode('.', $plain, 2)[0] ?? '') : '';
-        if ($nonce !== '') {
-            $stored = $storage->find($nonce);
-            if ($stored !== null && $stored->requestBinding !== $expectedRequestBinding) {
-                kiwiJson(['ok' => false, 'code' => 'request_binding_mismatch']);
-
-                return;
-            }
-        }
-
+        // The route is exactly the core verifier: the expected binding
+        // is enforced inside verify() (never through a manual record
+        // lookup here), so the core's one-shot cheap-phase retirement
+        // decides every mismatch verdict and no adapter-level pre-read
+        // ever turns a mismatch into a free retry oracle.
         $verifier = new Verifier(
             $storage,
             rswModulusN: $deployment['rswModulusN'],

@@ -235,6 +235,20 @@ jobs:
           php-curl
           php-bcmath
           composer
+      - name: disable ext-gmp for no-GMP proof
+        # The ubuntu-latest runner image preinstalls a PHP that already
+        # enables ext-gmp, which would shadow the distro install and
+        # silently defeat the lane's premise. The distro php-cli has no
+        # gmp loaded by default, but the guard is required defense:
+        # phpdismod turns the extension off for the cli sapi (it also
+        # reports a non-zero exit when no ini enables it, hence the
+        # `|| true`), and the probe then fails the lane loudly if gmp
+        # is still loaded.
+        run: |
+          set -euo pipefail
+          sudo phpdismod -s cli gmp || true
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r 'if (extension_loaded("gmp")) { fwrite(STDERR, "ext-gmp is still loaded after phpdismod\n"); exit(1); }'
       - name: prove required built-ins are loaded and ext-gmp is absent
         run: |
           set -euo pipefail
@@ -626,10 +640,16 @@ jobs:
           verify ''
           grep -q '"ok":true' /tmp/f2-verify.json
           # Issue unbound, verify with txn-A -> request_binding_mismatch.
+          # The mismatch is the core verifier's own hard cheap-phase
+          # verdict, which retires the pending record (one-shot
+          # anti-oracle semantics): the same token is then gone.
           issue ''
           verify txn-A
           grep -q '"ok":false' /tmp/f2-verify.json
           grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          verify ''
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"record_not_found"' /tmp/f2-verify.json
           # Correct binding, second redemption -> already_consumed.
           issue txn-A
           verify txn-A
@@ -637,14 +657,21 @@ jobs:
           verify txn-A
           grep -q '"ok":false' /tmp/f2-verify.json
           grep -q '"code":"already_consumed"' /tmp/f2-verify.json
-          # One-shot row: a wrong binding attempt leaves the record
-          # intact, so the correct redemption still succeeds afterwards.
+          # One-shot row: a wrong-binding attempt is a hard cheap-phase
+          # verdict that retires the pending record, so the same token
+          # can never be re-tried against the correct binding. The
+          # pinned core outcome of the corrected retry is
+          # record_not_found (verified locally against the real core on
+          # PHP 8.5: the mismatch answers first, then the record is
+          # gone). No adapter-level preflight may keep the record
+          # alive for a free retry oracle.
           issue txn-A
           verify txn-B
           grep -q '"ok":false' /tmp/f2-verify.json
           grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
           verify txn-A
-          grep -q '"ok":true' /tmp/f2-verify.json
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"record_not_found"' /tmp/f2-verify.json
       - name: restart the captcha container
         working-directory: deploy
         run: docker compose restart captcha

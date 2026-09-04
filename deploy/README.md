@@ -52,12 +52,26 @@ profile it expects), and the issued `algorithm` always equals the
 `{"ok":true,"code":""}` for a fresh valid redemption and
 `{"ok":false,"code":"<error>"}` for every failure; the verify POST
 accepts `token`, `scope` and `request_binding`, where the presented
-`request_binding` is the expected transaction binding of the
-redemption (a challenge minted bound to a transaction redeems only
-under that binding, and a mismatch is refused without consuming the
-record, so the correct redemption still succeeds afterwards); a second
-POST with the same token answers `code: "already_consumed"` because
-the core storage consumed the record. `/healthz` answers 200 only
+`request_binding` is the independent expected transaction binding of
+the redemption. The binding is enforced by the core verifier alone:
+verification is one-shot, so a mismatch is a hard cheap-phase verdict
+that retires the pending record (a mismatched token is refused, and
+the same token can never be re-tried against a corrected binding — it
+answers `record_not_found`); a second POST with the same token after a
+successful redemption answers `code: "already_consumed"` because the
+core storage consumed the record. The full redemption matrix, one
+fresh challenge per row:
+
+- issue bound to txn-A, verify with txn-A: `ok: true`
+- issue bound to txn-A, verify with txn-B: `request_binding_mismatch`,
+  then a retry of the same token with txn-A answers `record_not_found`
+- issue bound to txn-A, verify with no binding: `request_binding_mismatch`
+- issue unbound, verify with no binding: `ok: true`
+- issue unbound, verify with txn-A: `request_binding_mismatch`, then a
+  retry of the same token without a binding answers `record_not_found`
+- a second redemption of a consumed token answers `already_consumed`
+
+`/healthz` answers 200 only
 after a real store round trip (write, read, delete-if-pending) and
 503 with `{"ok":false,"code":"storage_probe_failed"}` otherwise (the
 backend detail of a failed probe stays in the server log); the
