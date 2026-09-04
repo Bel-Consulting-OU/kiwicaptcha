@@ -113,10 +113,10 @@ final class ExecutionChallengeTest extends TestCase
     public function testGenerationRefusesANoncanonicalVersionByte(): void
     {
         // The version argument during generation is a canonical
-        // numeric byte, exactly 1, 2 or 3: any other byte is refused
-        // before any program is minted (the strict parser would reject
-        // the blob anyway, so issuance never produces an unparseable
-        // program). No string-cast ever reaches the blob.
+        // numeric byte, 1..MAX_EXECUTION_VERSION (4): any other byte is
+        // refused before any program is minted (the strict parser would
+        // reject the blob anyway, so issuance never produces an
+        // unparseable program). No string-cast ever reaches the blob.
         foreach ([0, 5, 255] as $bad) {
             try {
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $bad);
@@ -125,9 +125,10 @@ final class ExecutionChallengeTest extends TestCase
                 self::assertStringContainsString('execution version must be', $e->getMessage());
             }
         }
-        // Both canonical bytes generate and stamp their own version:
+        // The canonical bytes generate and stamp their own version:
         // 1 (the legacy construction-to-probe grammar) and 2 (the
-        // causal observe grammar).
+        // causal observe grammar) are sampled here; versions 3 and 4
+        // are covered by the version-ladder suites.
         foreach ([1, 2] as $version) {
             $decoded = ExecutionChallengeGenerator::decode(
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $version)
@@ -708,12 +709,12 @@ final class ExecutionChallengeTest extends TestCase
     public function testStrictParserRejectsTrailingBytesAndBadContextBytes(): void
     {
         // The parser strictness: exact EOF after the op list
-        // (a trailing byte is invalid), the version byte exactly 1 or 2
-        // (both canonical grammar versions parse, no other byte), and
-        // the embedded scope/action must match the canonical identifier
-        // grammar. A version-1 blob never carries the version-2 observe
-        // opcode (33): the parser rejects a newer grammar by the
-        // declared version byte alone.
+        // (a trailing byte is invalid), the version byte within the
+        // canonical set 1..4 (each grammar version parses; a byte
+        // outside the set does not), and the embedded scope/action must
+        // match the canonical identifier grammar. A version-1 blob never
+        // carries the version-2 observe opcode (33): the parser rejects a
+        // newer grammar by the declared version byte alone.
         $v1B64 = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, 1);
         $good = ExecutionChallengeGenerator::decode($v1B64);
         self::assertNotNull($good);
@@ -725,14 +726,14 @@ final class ExecutionChallengeTest extends TestCase
         self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($goodBytes."\x00")), 'a trailing byte after the op list must be rejected');
         self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($goodBytes."\x00")));
 
-        // A version byte other than 1|2 (index scopeLen + actionLen +
-        // 2 after the format/scopeLen prefix): a blob whose version
-        // byte is not 1..3 must be rejected.
+        // A version byte outside the canonical set (index scopeLen +
+        // actionLen + 2 after the format/scopeLen prefix): a blob whose
+        // version byte is not within 1..4 must be rejected.
         $scopeLen = \ord($goodBytes[1]);
         $actionLen = \ord($goodBytes[2 + $scopeLen]);
         $badVersion = $goodBytes;
         $badVersion[2 + $scopeLen + $actionLen + 1] = "\x09";
-        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badVersion)), 'a version byte outside 1..3 must be rejected');
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badVersion)), 'a version byte outside 1..4 must be rejected');
         self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($badVersion)));
 
         // Scope with an out-of-grammar byte (a space): the embedded

@@ -206,6 +206,39 @@ jobs:
               ;;
           esac
 
+  php-no-gmp:
+    # The GMP optionality proof: this lane installs PHP without ext-gmp
+    # (extensions: json, openssl, sodium — no gmp), proves the premise
+    # with a dedicated step, and then runs tools/ci/no-gmp-verify.php,
+    # which exercises the whole non-RSW surface through the public API
+    # (sha256 issue+verify, argon2id issue+verify, execution issue+verify
+    # at the live grammar maximum) and asserts an rsw configuration
+    # refuses cleanly with the documented missing-extension error. The
+    # script prints one pass line per check and exits non-zero on any
+    # failure.
+    name: PHP core no-GMP
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.5'
+          extensions: json, openssl, sodium
+          coverage: none
+      - name: prove ext-gmp is absent
+        run: php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install
+        run: composer install --no-interaction --prefer-dist
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+      - name: no-GMP surface proof
+        run: php ../../tools/ci/no-gmp-verify.php
+
   symfony:
     name: Symfony bundle (container + KernelBrowser)
     runs-on: ubuntu-latest

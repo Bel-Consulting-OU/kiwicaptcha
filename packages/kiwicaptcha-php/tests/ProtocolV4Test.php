@@ -420,10 +420,11 @@ final class ProtocolV4Test extends TestCase
 
     public function testNonCanonicalExecutionVersionIsMalformed(): void
     {
-        // execution_version is the canonical numeric byte 1, 2 or 3
-        // (the compat window). A hand-rolled record carrying a version
-        // outside that set is corrupt and fails the verifier's record
-        // gate as MalformedRecord.
+        // execution_version is the canonical numeric byte carrying the
+        // armed program's execution grammar version, 1..MAX_EXECUTION_VERSION
+        // (the record register's accepted set). A hand-rolled record
+        // carrying a version outside that set is corrupt and fails the
+        // verifier's record gate as MalformedRecord.
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'a');
@@ -464,7 +465,7 @@ final class ProtocolV4Test extends TestCase
             'login',
             '198.51.100.7',
         );
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must be one of the canonical versions 1, 2 or 3');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must be one of the canonical execution-dimension versions');
     }
 
     public function testV4AcceptedByTheCurrentVerifierAndRejectedByOldGenerations(): void

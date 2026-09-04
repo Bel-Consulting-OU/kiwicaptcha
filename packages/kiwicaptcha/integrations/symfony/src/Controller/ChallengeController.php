@@ -1528,11 +1528,12 @@ final class ChallengeController
             // rides the program (bounded 1..32 chars, already validated
             // above) so the digest binds the action. The grammar
             // version of the program is the effective execution version
-            // of this issuance, {@see self::effectiveExecutionVersion()}
-            // — version 2 (the causal observe grammar) only when the
-            // client advertised it, the node's execution_version cap is
-            // >= 2 and the confirmed central min_execution_version
-            // floor is >= 2; every other issuance stamps version 1.
+            // of this issuance, {@see self::effectiveExecutionVersion()}:
+            // the client's advertised capability capped by the
+            // deployment tier (the node's execution_version cap, the
+            // confirmed central min_execution_version floor and the
+            // generator maximum). An older client never advertises and
+            // receives version 1.
             $armExecution = $this->executionArmingEnabled($executionRiskDecision);
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             // The server-owned required execution tier: the client

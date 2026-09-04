@@ -160,7 +160,9 @@ pub const PROTOCOL_VERSION: u8 = 1;
 
 /// The highest execution version this generator can emit. Version 2
 /// adds the observe opcode and the causal u8 chain; version 3 adds a
-/// second constructed node and the sibling-index traversal probe.
+/// second constructed node and the sibling-index traversal probe;
+/// version 4 adds the nested tree (DOM_CHILD) and its ancestor-depth
+/// walk (DOM_DEPTH).
 pub const MAX_EXECUTION_VERSION: u8 = 4;
 
 /// The deterministic op-count bounds of every issued program.
@@ -352,11 +354,12 @@ fn is_identifier(value: &str, max: usize) -> bool {
 ///
 /// Mirrors `KiwiCaptcha\ExecutionChallengeGenerator::generate()`
 /// byte-for-byte: the same PRF stream, the same op draw sequence, the
-/// same blob layout. `version` is the canonical numeric byte, exactly 1
-/// — the only op-version of the wire contract (the parser rejects any
-/// other byte, so issuance never mints a program the verifier would
-/// refuse). It is passed as a `u8` and stamped as the raw numeric
-/// byte; no string-cast ever reaches the blob.
+/// same blob layout. `version` is the canonical numeric byte carrying
+/// the grammar rung, the live range 1..=MAX_EXECUTION_VERSION (the
+/// parser bounds its own opcode space per version, so issuance never
+/// mints a program the verifier would refuse). It is passed as a `u8`
+/// and stamped as the raw numeric byte; no string-cast ever reaches
+/// the blob.
 pub fn generate(
     execution_key: &[u8],
     nonce: &str,
@@ -689,8 +692,9 @@ fn draw_class(cursor: &mut Cursor) -> Vec<u8> {
 ///
 /// The parser is deliberately strict, the two-language mirror of the
 /// PHP `ExecutionChallengeGenerator::decode()`:
-/// - the op version must be exactly 1 (no arbitrary byte — only the one
-///   canonical version of the wire contract exists);
+/// - the op version must be one of the canonical grammar versions
+///   1..=MAX_EXECUTION_VERSION (no arbitrary byte — each version
+///   bounds its own opcode space below);
 /// - the embedded scope/action must match the canonical identifier
 ///   grammar of the rest of Kiwi (`[A-Za-z0-9._:-]` with the issuance
 ///   length caps), so a foreign blob can never smuggle canonical or
@@ -738,9 +742,9 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         return None;
     }
     let op_version = cursor.take_strict(1)?[0];
-    // Execution versions 1, 2 and 3 are accepted (the compat window:
-    // old challenges stay verifiable for their whole TTL); each
-    // version bounds its own opcode space below.
+    // Execution versions 1..=MAX_EXECUTION_VERSION are accepted (the
+    // compat window: old challenges stay verifiable for their whole
+    // TTL); each version bounds its own opcode space below.
     if !(1..=MAX_EXECUTION_VERSION).contains(&op_version) {
         return None;
     }
@@ -1459,19 +1463,24 @@ pub mod fixtures {
 
     /// The mirror of the PHP BrowserlessForgerySolver class: a pure
     /// shadow solver that forges verifier-accepted executed traces for
-    /// the v1, v2 and v3 grammars without a browser. The observe
+    /// every live grammar version without a browser, through the
+    /// generator maximum [`MAX_EXECUTION_VERSION`] (the version-4
+    /// DOM_CHILD/DOM_DEPTH nested-tree grammar included). The observe
     /// choice is the explicit parameter, any value 1..=255 works, and
     /// every other trace entry reuses the shared state machine above,
     /// so the solver carries no second copy of the VM.
     ///
     /// The oracle is the forgeability regression benchmark, preserved
-    /// on purpose: the tests sweep 100 generated programs of each
-    /// version and assert every forged trace verifies and digests. A
-    /// future version-4 object-graph grammar tests real Web Platform
-    /// semantics (classList, selectors, traversal, fragments, clone
-    /// and reparent, event ordering). Extending this solver to that
-    /// grammar must fail until those semantics are implemented, so
-    /// the future gate is real semantics, never a shadow-model fix.
+    /// on purpose: the tests sweep 100 generated programs of each live
+    /// version through the generator maximum and assert every forged
+    /// trace verifies and digests. The trace is supplementary
+    /// evidence, reproducible by a pure implementation of the public
+    /// semantics. A future object-graph grammar beyond the live
+    /// maximum tests real Web Platform semantics (classList, selectors,
+    /// traversal, fragments, clone and reparent, event ordering).
+    /// Extending this solver to that grammar must fail until those
+    /// semantics are implemented, so the future gate is real
+    /// semantics, never a shadow-model fix.
     pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
         assert!(
             (1..=255).contains(&observed_height),
@@ -1704,7 +1713,7 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
-    #[error("execution version must be the canonical numeric byte 1")]
+    #[error("execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)")]
     InvalidVersion,
     #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
     InvalidScope,
@@ -1802,13 +1811,17 @@ mod tests {
 
     #[test]
     fn fixed_opcode_set_is_fully_reachable() {
-        // Both canonical execution versions are sampled: a version-1
-        // program draws its fillers from the other 28 opcodes (0..27)
-        // and its probe block from 28..32, so the version-1 corpus
-        // reaches exactly 33 opcodes — the observe opcode (33) is a
-        // version-2 extension and must never appear in a version-1
-        // program. The version-2 causal grammar always stamps the
-        // observe op, so its corpus reaches all 34 fixed opcodes.
+        // Every canonical execution version is sampled and must reach
+        // exactly its own opcode space: a version-1 program draws its
+        // fillers from the other 28 opcodes (0..27) and its probe block
+        // from 28..32, so the version-1 corpus reaches exactly 33
+        // opcodes — the observe opcode (33) is a version-2 extension
+        // and must never appear in a version-1 program. The version-2
+        // causal grammar always stamps the observe op, so its corpus
+        // reaches 34 of the 37 fixed opcodes; version 3 adds the
+        // sibling-index opcode (34), reaching 35; version 4 adds the
+        // nested-tree child/depth opcodes (35/36), reaching the full
+        // fixed set.
         let mut seen_v1 = std::collections::HashSet::new();
         for i in 0..64u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v1-{i}").as_bytes()));
@@ -1838,7 +1851,7 @@ mod tests {
         assert_eq!(
             seen_v2.len(),
             (OP_COUNT - 3) as usize,
-            "the version-2 corpus reaches 34 of the 35 fixed opcodes"
+            "the version-2 corpus reaches 34 of the 37 fixed opcodes"
         );
         assert!(seen_v2.contains(&OP_DOM_OBSERVE));
         assert!(!seen_v2.contains(&OP_DOM_SIBLING_INDEX));
@@ -1855,7 +1868,7 @@ mod tests {
         assert_eq!(
             seen_v3.len(),
             (OP_COUNT - 2) as usize,
-            "the version-3 corpus reaches the full fixed opcode set"
+            "the version-3 corpus reaches 35 of the 37 fixed opcodes"
         );
         assert!(seen_v3.contains(&OP_DOM_SIBLING_INDEX));
         assert!(seen_v3.contains(&OP_DOM_OBSERVE));
@@ -2290,17 +2303,18 @@ mod tests {
             "opcode 33 inside a version-1 blob must be rejected"
         );
 
-        // A version byte outside the canonical set 1|2|3 is refused at
-        // the decode fence, never interpreted as any grammar, and the
-        // fences are one-way: a version-3 program rewritten to version
-        // 2 must decode to null (its sibling-index opcode 34 is a
-        // version-3 extension), and a version-2 program rewritten to
-        // version 3 must decode to null too (version 3 requires the
-        // second constructed node in its fixed skeleton? no — decode
-        // does not enforce the skeleton, but the opcode bound does: a
-        // version-3 rewrite of a version-2 blob is structurally legal
-        // only if no opcode 34 appears — the fence test pins the
-        // downward direction, which is the fleet-relevant one).
+        // A version byte outside the canonical set 1..=MAX_EXECUTION_VERSION
+        // is refused at the decode fence, never interpreted as any
+        // grammar, and the fences are one-way: a version-3 program
+        // rewritten to version 2 must decode to null (its sibling-index
+        // opcode 34 is a version-3 extension), and a version-2 program
+        // rewritten to version 3 must decode to null too (version 3
+        // requires the second constructed node in its fixed skeleton?
+        // no — decode does not enforce the skeleton, but the opcode
+        // bound does: a version-3 rewrite of a version-2 blob is
+        // structurally legal only if no opcode 34 appears — the fence
+        // test pins the downward direction, which is the
+        // fleet-relevant one).
         let v3_b64 = generate(KEY, NONCE, "login", "login-action", 3).unwrap();
         let mut v3_down = B64.decode(&v3_b64).unwrap();
         assert_eq!(v3_down[version_at], 3);
@@ -2313,7 +2327,7 @@ mod tests {
         foreign_version[version_at] = 9;
         assert!(
             decode(&B64.encode(foreign_version)).is_none(),
-            "a version byte outside 1..3 must decode to null"
+            "a version byte outside the canonical set 1..=MAX_EXECUTION_VERSION must decode to null"
         );
     }
 
@@ -2500,19 +2514,22 @@ mod tests {
     }
 
     #[test]
-    fn browserless_shadow_solver_forges_v1_v2_v3_traces() {
+    fn browserless_shadow_solver_forges_every_live_version_trace() {
         // The adversarial regression oracle: a pure shadow solver must
-        // forge verifier-accepted traces for the v1, v2 and v3
-        // grammars at several chosen observed heights. The future
-        // version-4 gate sits on this test: an object-graph grammar
-        // tests real Web Platform semantics (classList, selectors,
-        // traversal, fragments, clone and reparent, event ordering),
-        // so extending this solver to version 4 must fail until those
-        // semantics are implemented. The mirror test lives in the PHP
-        // suite as testBrowserlessShadowSolverForgesV1V2V3Traces.
+        // forge verifier-accepted traces for every live grammar, versions
+        // 1 through MAX_EXECUTION_VERSION (the version-4 DOM_CHILD/
+        // DOM_DEPTH nested-tree grammar included), at several chosen
+        // observed heights. The trace is supplementary evidence,
+        // reproducible by a pure implementation of the public semantics.
+        // A future object-graph grammar beyond the live maximum tests
+        // real Web Platform semantics (classList, selectors, traversal,
+        // fragments, clone and reparent, event ordering), so extending
+        // this solver to that grammar must fail until those semantics are
+        // implemented. The mirror test lives in the PHP suite as
+        // testBrowserlessShadowSolverForgesEveryLiveVersionTrace.
         let heights = [1u8, 10, 17, 255];
         let mut solved = 0u64;
-        for version in [1u8, 2, 3] {
+        for version in 1..=MAX_EXECUTION_VERSION {
             for i in 0..100u32 {
                 let nonce = B64.encode(sha2::Sha256::digest(
                     format!("browserless-solver-v{version}-{i}").as_bytes(),
@@ -2565,8 +2582,9 @@ mod tests {
             }
         }
         assert_eq!(
-            solved, 1200,
-            "the oracle solves 100 programs of 3 versions at 4 heights"
+            solved,
+            100 * heights.len() as u64 * MAX_EXECUTION_VERSION as u64,
+            "the oracle solves 100 programs of every live version at every observed height"
         );
     }
 }

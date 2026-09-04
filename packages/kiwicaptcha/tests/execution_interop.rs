@@ -154,8 +154,8 @@ fn rust_mirror_reproduces_the_php_version_one_vector() {
 #[test]
 fn generation_refuses_a_noncanonical_version_byte() {
     // The version argument during generation is a canonical numeric
-    // byte, exactly 1, 2 or 3: any other byte is refused before any
-    // program is minted (the strict parser would reject the blob
+    // byte, 1..=MAX_EXECUTION_VERSION: any other byte is refused before
+    // any program is minted (the strict parser would reject the blob
     // anyway, so issuance never produces an unparseable program).
     assert_eq!(
         execution::generate(KEY, NONCE, "signup", "other-action", 9),
@@ -165,7 +165,9 @@ fn generation_refuses_a_noncanonical_version_byte() {
         execution::generate(KEY, NONCE, "signup", "other-action", 0),
         Err(execution::GenerateError::InvalidVersion)
     );
-    // Both canonical bytes generate and stamp their own grammar.
+    // The canonical bytes generate and stamp their own grammar: the
+    // first two rungs are sampled here (1 and 2); the higher rungs are
+    // covered by the version-ladder suites.
     for version in [1u8, 2u8] {
         let p = execution::generate(KEY, NONCE, "signup", "other-action", version).unwrap();
         assert_eq!(
