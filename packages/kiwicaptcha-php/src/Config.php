@@ -298,6 +298,23 @@ final class Config
     }
 
     /**
+     * Debug inspection must never surface the configured secrets. The
+     * full property shape stays visible under the exact property names,
+     * with the secret-bearing values (the HMAC secret key, the execution
+     * PRF key and the rsw trapdoor lambda) replaced by a redaction
+     * marker. The rsw modulus is public by design and stays inspectable.
+     */
+    public function __debugInfo(): array
+    {
+        $shape = get_object_vars($this);
+        $shape['secretKey'] = '<redacted>';
+        $shape['executionKey'] = $shape['executionKey'] === null ? null : '<redacted>';
+        $shape['rswLambda'] = $shape['rswLambda'] === null ? null : '<redacted>';
+
+        return $shape;
+    }
+
+    /**
      * The narrow security-identifier alphabet: the deployment-
      * bound identifiers (issuer, region, request_binding, scope) must match
      * `[A-Za-z0-9._:-]+` so no identifier can smuggle canonical separators

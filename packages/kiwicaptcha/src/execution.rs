@@ -352,9 +352,9 @@ fn is_identifier(value: &str, max: usize) -> bool {
 ///
 /// Mirrors `KiwiCaptcha\ExecutionChallengeGenerator::generate()`
 /// byte-for-byte: the same PRF stream, the same op draw sequence, the
-/// same blob layout. `version` is the canonical numeric byte, exactly 1
-/// — the only op-version of the wire contract (the parser rejects any
-/// other byte, so issuance never mints a program the verifier would
+/// same blob layout. `version` is the canonical numeric byte within the
+/// register 1..=MAX_EXECUTION_VERSION (the parser accepts exactly that
+/// register, so issuance never mints a program the verifier would
 /// refuse). It is passed as a `u8` and stamped as the raw numeric
 /// byte; no string-cast ever reaches the blob.
 pub fn generate(
@@ -689,8 +689,9 @@ fn draw_class(cursor: &mut Cursor) -> Vec<u8> {
 ///
 /// The parser is deliberately strict, the two-language mirror of the
 /// PHP `ExecutionChallengeGenerator::decode()`:
-/// - the op version must be exactly 1 (no arbitrary byte — only the one
-///   canonical version of the wire contract exists);
+/// - the op version must be within the canonical register
+///   1..=MAX_EXECUTION_VERSION (no arbitrary byte — only the register
+///   versions of the wire contract exist);
 /// - the embedded scope/action must match the canonical identifier
 ///   grammar of the rest of Kiwi (`[A-Za-z0-9._:-]` with the issuance
 ///   length caps), so a foreign blob can never smuggle canonical or
@@ -738,9 +739,9 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         return None;
     }
     let op_version = cursor.take_strict(1)?[0];
-    // Execution versions 1, 2 and 3 are accepted (the compat window:
-    // old challenges stay verifiable for their whole TTL); each
-    // version bounds its own opcode space below.
+    // Execution versions 1..=MAX_EXECUTION_VERSION are accepted (the
+    // canonical register); each version bounds its own opcode space
+    // below.
     if !(1..=MAX_EXECUTION_VERSION).contains(&op_version) {
         return None;
     }
@@ -1704,7 +1705,10 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
-    #[error("execution version must be the canonical numeric byte 1")]
+    #[error(
+        "execution version must be the canonical numeric byte within 1..={}",
+        MAX_EXECUTION_VERSION
+    )]
     InvalidVersion,
     #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
     InvalidScope,

@@ -605,9 +605,10 @@ impl VerifyError {
 /// - the protocol-vs-decoy-vs-execution grammar: v2 => no decoy, v3 =>
 ///   decoy present, v2/v3 => no execution, v4 => execution present (the
 ///   exact armed/unarmed equivalence: signed commitment absent <=> stored
-///   program absent, present <=> present, `execution_version` exactly 1,
-///   commitment exactly 64 lowercase hex, and SHA256(stored program) ==
-///   the signed commitment, constant-time).
+///   program absent, present <=> present, `execution_version` within the
+///   canonical register 1..=MAX_EXECUTION_VERSION, commitment exactly 64
+///   lowercase hex, and SHA256(stored program) == the signed commitment,
+///   constant-time).
 ///
 /// Argon2id memory/time/parallelism are deliberately NOT bounded here —
 /// the absolute process ceilings apply to the signed parameters after
@@ -664,8 +665,15 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // record — stripping, substituting or injecting a program always
     // invalidates the challenge. The commitment compare is constant-time
     // (ct_eq).
+    // The record's `execution_version` register is the canonical
+    // execution-version set 1..=MAX_EXECUTION_VERSION — the exact set the
+    // PHP record/verifier gate accepts, so a PHP-issued armed record at
+    // the current maximum verifies here — anything else is corrupt or
+    // foreign.
     if execution_present {
-        if !matches!(record.execution_version, Some(1) | Some(2))
+        if !record
+            .execution_version
+            .is_some_and(|v| (1..=crate::execution::MAX_EXECUTION_VERSION).contains(&v))
             || record.execution_commitment.is_none()
         {
             return Err(VerifyError::MalformedRecord);

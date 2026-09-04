@@ -24,9 +24,10 @@
 //! simulated trace is caught by the digest binding: the expected digest
 //! of the mutated program must differ from the digest of the original.
 //!
-//! The record-level corpus rides the canonical record register (1..=2,
-//! the set `validate_record` accepts in the current register); the
-//! fixture-level corpus spans the full execution-version range. The last section pins the
+//! The record-level corpus rides the canonical record register (1..=
+//! MAX_EXECUTION_VERSION, the set `validate_record` accepts — the exact
+//! set of the PHP record/verifier gate); the fixture-level corpus spans
+//! the full execution-version range. The last section pins the
 //! cross-language differential corpus shared with the PHP suite: the
 //! classifications of 16 adversarial program/trace cases must match
 //! `ExecutionDifferentialCorpusTest` case for case.
@@ -684,9 +685,10 @@ fn trace_mutations_never_panic_and_reject_deterministically() {
 }
 
 /// One armed record probe for the record-level mutation classes. The
-/// record register currently accepts execution versions 1..=2, so the
-/// full-path corpus rides those versions (the fixture-level corpus
-/// above spans the whole 1..=MAX range).
+/// record register accepts execution versions 1..=MAX_EXECUTION_VERSION
+/// (the exact set of the PHP record/verifier gate), so the full-path
+/// corpus rides the whole register; the fixture-level corpus above spans
+/// the same 1..=MAX range.
 struct ArmedProbe {
     record: ChallengeRecord,
     trace_b64: String,
@@ -813,7 +815,7 @@ fn assert_invalid(what: &str, outcome: VerifyOutcome) {
 #[test]
 fn record_evidence_mutations_never_panic_and_reject_deterministically() {
     let mut cases = 0usize;
-    for version in [1u8, 2] {
+    for version in 1..=execution::MAX_EXECUTION_VERSION {
         let probe = issue_probe(version);
         let what = |label: String| format!("v{version} {label}");
 
@@ -949,9 +951,9 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
         base["execution_commitment"] = serde_json::Value::String(original_commitment);
 
         // The record execution-version mutations: values outside the
-        // canonical register are malformed, and a value inside the
-        // register but different from the signed one breaks the
-        // signature binding.
+        // canonical register (1..=MAX_EXECUTION_VERSION) are malformed,
+        // and a value inside the register but different from the signed
+        // one breaks the signature binding.
         for version_value in [0u8, 1, 2, 3, 4, 9] {
             if version_value == version {
                 continue;
@@ -960,11 +962,17 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
             record.execution_version = Some(version_value);
             let label = what(format!("record execution version {version_value}"));
             let validated = guarded(&label, || validate_record(&record));
-            if !matches!(version_value, 1 | 2) {
+            if !(1..=execution::MAX_EXECUTION_VERSION).contains(&version_value) {
                 assert_eq!(
                     validated,
                     Err(VerifyError::MalformedRecord),
                     "{label} must fail the record gate"
+                );
+            } else {
+                assert_eq!(
+                    validated,
+                    Ok(()),
+                    "{label} rides the canonical register and must pass the record gate"
                 );
             }
             let outcome = guarded(&label, || {
@@ -999,6 +1007,89 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
     }
     eprintln!("record evidence mutation corpus: {cases} cases, all deterministic");
     assert!(cases > 40, "the record corpus must stay substantial");
+}
+
+/// The record execution-version register parity sweep: the record gate
+/// accepts exactly 1..=MAX_EXECUTION_VERSION, the exact set of the PHP
+/// record/verifier gate (the same 0..=9 sweep runs in the PHP suite's
+/// `ProtocolV4Test::testExecutionVersionRegisterGateSweepMatchesTheRustSuite`
+/// and must land on the same verdicts case for case).
+#[test]
+fn record_execution_version_register_matches_the_php_gate_sweep() {
+    let register = |v: u8| (1..=execution::MAX_EXECUTION_VERSION).contains(&v);
+
+    // A record armed at the current maximum issues and verifies end to
+    // end: the widened register accepts the full canonical set.
+    let max_probe = issue_probe(execution::MAX_EXECUTION_VERSION);
+    let label = format!(
+        "record armed at the register maximum {}",
+        execution::MAX_EXECUTION_VERSION
+    );
+    assert_eq!(
+        guarded(&label, || validate_record(&max_probe.record)),
+        Ok(()),
+        "{label} must pass the record gate"
+    );
+    let mut max_control = max_probe.record.clone();
+    let outcome = guarded(&label, || {
+        verify_probe(
+            &max_probe,
+            &mut max_control,
+            Some(&max_probe.digest),
+            Some(&max_probe.trace_b64),
+        )
+    });
+    assert!(
+        matches!(outcome, VerifyOutcome::Valid { .. }),
+        "{label} must verify end to end"
+    );
+
+    // The full 0..=9 sweep on one signed-at-1 armed record: rows inside
+    // the register pass the record gate (and, when they differ from the
+    // signed version, fail the signature binding instead), rows outside
+    // it are MalformedRecord before any signature work.
+    let probe = issue_probe(1);
+    for value in 0..=9u8 {
+        let mut record = probe.record.clone();
+        record.execution_version = Some(value);
+        let label = format!("record execution version register row {value}");
+        let validated = guarded(&label, || validate_record(&record));
+        if register(value) {
+            assert_eq!(
+                validated,
+                Ok(()),
+                "{label} rides the canonical register and must pass the record gate"
+            );
+        } else {
+            assert_eq!(
+                validated,
+                Err(VerifyError::MalformedRecord),
+                "{label} is outside the canonical register and must fail the record gate"
+            );
+        }
+        let outcome = guarded(&label, || {
+            verify_probe(
+                &probe,
+                &mut record,
+                Some(&probe.digest),
+                Some(&probe.trace_b64),
+            )
+        });
+        let matches_sweep_expectation = match (&outcome, value) {
+            (VerifyOutcome::Valid { .. }, 1) => true,
+            (VerifyOutcome::Invalid(VerifyError::BadSignature), v) if register(v) => true,
+            (VerifyOutcome::Invalid(VerifyError::MalformedRecord), v) if !register(v) => true,
+            _ => false,
+        };
+        assert!(
+            matches_sweep_expectation,
+            "{label}: the full-path verdict {outcome:?} must mirror the PHP gate sweep"
+        );
+    }
+    eprintln!(
+        "record execution version register sweep: 0..=9 verdicts mirror the PHP gate (register 1..={})",
+        execution::MAX_EXECUTION_VERSION
+    );
 }
 
 /// The differential corpus shared with the PHP suite. Each case pins a

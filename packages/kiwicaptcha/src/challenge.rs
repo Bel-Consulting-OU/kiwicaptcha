@@ -304,10 +304,11 @@ pub struct ChallengeRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_program: Option<String>,
     /// The execution-dimension protocol version: the canonical numeric
-    /// byte 1 (u8 on the wire, rendered as decimal in the canonical
-    /// input). Authenticated as the `|execution_version` protocol v4
-    /// canonical segment. Present iff the record carries an execution
-    /// program; the JSON key is absent when `None`.
+    /// byte within the register 1..=MAX_EXECUTION_VERSION (u8 on the
+    /// wire, rendered as decimal in the canonical input). Authenticated
+    /// as the `|execution_version` protocol v4 canonical segment. Present
+    /// iff the record carries an execution program; the JSON key is
+    /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_version: Option<u8>,
     /// The authenticated mirror of the stored execution program: hex
@@ -684,9 +685,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid[|decoy_field]|execution_version|execution_commitment
 /// ```
 ///
-/// - `execution_version` is the canonical numeric byte 1 or 2 (decimal
-///   on the
-///   wire; never `|`-capable).
+/// - `execution_version` is the canonical numeric byte within the
+///   register 1..=MAX_EXECUTION_VERSION (decimal on the wire; never
+///   `|`-capable).
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never
 ///   `|`-capable.
@@ -1535,8 +1536,8 @@ pub fn issue_challenge_with_decoy(
 /// with [`SignError::ExecutionKeyNotConfigured`]. `execution_action` is
 /// the provider-style action of the request (1..32 chars of
 /// `[A-Za-z0-9._:-]`, default "default") and `execution_version` the
-/// dimension protocol version, the canonical numeric byte (default 1,
-/// exactly 1 — the only version of the wire contract; passed as a u8,
+/// dimension protocol version, the canonical numeric byte within the
+/// register 1..=MAX_EXECUTION_VERSION (default 1; passed as a u8,
 /// never a string that is parsed). Both are embedded in the program and
 /// bound by the commitment.
 ///

@@ -257,9 +257,9 @@ final class StrictParserTest extends TestCase
             'must be an integer',
         ];
 
-        yield 'execution_version outside the canonical set 1|2|3 rejected' => [
+        yield 'execution_version outside the canonical register 1..MAX rejected' => [
             self::mutate('protocol_version', 4) + ['execution_program' => $program, 'execution_version' => 9, 'execution_commitment' => hash('sha256', $program)],
-            'must be one of the canonical execution-dimension versions 1, 2 or 3',
+            sprintf('must be one of the canonical execution-dimension versions 1..%d', \KiwiCaptcha\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
         ];
 
 
