@@ -1796,7 +1796,13 @@ if ($path === '/' || $path === '/index.html') {
     // script). frame-src 'none' stays: about:srcdoc iframes are not
     // governed by frame-src in any engine, so the execution iframe still
     // loads and its interpreter <script src> rides the inherited
-    // script-src.
+    // script-src. The strict files-tier 'self' sources are the
+    // restrictive-but-allowing profile for the lazy same-origin
+    // SRI-pinned module loads (the widget-locales.js packs): the
+    // injected script src and its fetch are same-origin, so the locale
+    // module runs under this header while the hash-only
+    // execution-blocked variant would refuse it. The locale-csp spec
+    // asserts that contract end to end.
     $cspHeader = null;
     $cspKnob = (string) ($_GET['csp'] ?? '');
     if ($filesMode && $cspKnob === 'strict') {
