@@ -13,6 +13,12 @@ declare(strict_types=1);
  * probe expires on its own short TTL. Success means the same storage
  * API the Symfony bundle uses for challenge records accepted a write,
  * a read and a delete.
+ *
+ * The unauthenticated response never carries backend detail: on any
+ * probe failure the one-line detail goes to the server log and the
+ * answer is the fixed 503 document {"ok":false,"code":
+ * "storage_probe_failed"} — no hostname, port, credentials, DSN or
+ * driver text ever reaches the body.
  */
 
 use KiwiCaptcha\ChallengeRecord;
@@ -23,7 +29,7 @@ use KiwiCaptcha\Storage\RedisStorage;
  * Run one storage round trip and report the outcome.
  *
  * @return array{ok: bool, detail: string} the probe verdict and a
- *                                         one-line human detail
+ *                                         one-line server-side detail
  */
 function kiwiHealthProbe(RedisStorage $storage): array
 {
@@ -73,29 +79,27 @@ function kiwiHealthProbe(RedisStorage $storage): array
 
 /**
  * The /healthz request handler: answers 200 only when the configured
- * store completed the round trip, 503 otherwise.
+ * store completed the round trip, 503 otherwise. The detail of a
+ * failed probe (or of a configuration/storage failure while probing)
+ * is logged server-side and never serialized into the unauthenticated
+ * response.
  */
 function kiwiHealthz(): void
 {
-    header('Content-Type: application/json');
-    header('Cache-Control: no-store, private, max-age=0');
+    $ok = false;
+    $detail = '';
     try {
         $deployment = kiwiDeployment();
         $storage = kiwiStorage($deployment['redisUrl']);
         [$ok, $detail] = kiwiHealthProbe($storage);
     } catch (\Throwable $e) {
-        $ok = false;
         $detail = $e->getMessage();
     }
     if (!$ok) {
-        http_response_code(503);
-        echo json_encode([
-            'ok' => false,
-            'code' => 'storage_probe_failed',
-            'message' => $detail,
-        ], JSON_UNESCAPED_SLASHES);
+        error_log('kiwicaptcha healthz probe failed: '.$detail);
+        kiwiJson(['ok' => false, 'code' => 'storage_probe_failed'], 503);
 
         return;
     }
-    echo json_encode(['ok' => true], JSON_UNESCAPED_SLASHES);
+    kiwiJson(['ok' => true]);
 }

@@ -45,12 +45,23 @@ The challenge document is the canonical widget wire shape: `nonce`,
 `challenge`, `salt`, `algorithm`, `mKib`, `t`, `p`, `targetBits`,
 `ttlSecs`, `minDurationMs`, `prefix`, plus `execution_program` when
 the execution key is set and `rsw_modulus` for rsw challenges. The
-verify answer is `{"ok":true,"code":""}` for a fresh valid redemption
-and `{"ok":false,"code":"<error>"}` for every failure; a second POST
-with the same token answers `code: "already_consumed"` because the
-core storage consumed the record. `/healthz` answers 200 only after a
-real store round trip (write, read, delete-if-pending) and 503
-otherwise; the container HEALTHCHECK requires the 200.
+challenge POST accepts `scope`, `request_binding` and `algorithm`;
+the last is compatibility metadata only (the widget advertises the
+profile it expects), and the issued `algorithm` always equals the
+`KIWI_ALGORITHM` profile. The verify answer is
+`{"ok":true,"code":""}` for a fresh valid redemption and
+`{"ok":false,"code":"<error>"}` for every failure; the verify POST
+accepts `token`, `scope` and `request_binding`, where the presented
+`request_binding` is the expected transaction binding of the
+redemption (a challenge minted bound to a transaction redeems only
+under that binding, and a mismatch is refused without consuming the
+record, so the correct redemption still succeeds afterwards); a second
+POST with the same token answers `code: "already_consumed"` because
+the core storage consumed the record. `/healthz` answers 200 only
+after a real store round trip (write, read, delete-if-pending) and
+503 with `{"ok":false,"code":"storage_probe_failed"}` otherwise (the
+backend detail of a failed probe stays in the server log); the
+container HEALTHCHECK requires the 200.
 
 ## Environment variables
 
@@ -72,13 +83,15 @@ Optional:
   trapdoor pair. Both must be configured together; setting exactly one
   refuses startup with
   `KIWI_RSW_MODULUS_N and KIWI_RSW_LAMBDA must be configured
-  together`. When both are set, the rsw algorithm is issuable on
-  request (`{"algorithm":"rsw"}`); the modulus is public, lambda is
-  the secret trapdoor.
-- `KIWI_ALGORITHM` — the server-owned default issuance algorithm
-  (`sha256`, `argon2id` or `rsw`; default `sha256`). A client
-  `algorithm` request is a hint the server owns: sha256 and argon2id
-  are always issuable, rsw only when the trapdoor pair is configured.
+  together`. When both are set, `KIWI_ALGORITHM=rsw` is the selectable
+  issuance profile; the modulus is public, lambda is the secret
+  trapdoor.
+- `KIWI_ALGORITHM` — selects the issuance profile (`sha256`,
+  `argon2id` or `rsw`; default `sha256`). The browser may advertise
+  the profile it expects in the challenge request, but request input
+  never changes the server-selected algorithm: the issued challenge
+  always carries the configured profile, and a deployment stays on its
+  configured algorithm regardless of what a caller asks for.
 - `KIWI_SHA_TARGET_BITS` — SHA-256 difficulty, 1..20 (default 18, the
   bundle baseline; the CI e2e runs 8 for a low-cost solve).
 - `KIWI_ARGON2_TARGET_BITS` — Argon2id difficulty, 1..10 (default 8).
