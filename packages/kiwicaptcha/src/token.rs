@@ -93,7 +93,11 @@ pub struct IssuedChallenge {
 
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.
 ///
-/// The wire format is `base64(nonce || "." || counter || "." || duration_ms || "." || telemetry_json)`.
+/// The wire format is `base64(nonce || "." || counter || "." || duration_ms
+/// || "." || telemetry_json || ["." digest[":" trace]] || ["." rsw_proof])`.
+/// The telemetry segment may itself contain dots; the optional suffix
+/// segments (execution evidence, then the rsw final value) are peeled
+/// right-to-left, so an armed rsw challenge carries both independently.
 /// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
 pub const MAX_DURATION_MS: u64 = 3_600_000;
 
@@ -161,8 +165,8 @@ impl SolutionToken {
             }
         }
         // The rsw final value rides as the final segment, after the
-        // execution evidence: an rsw challenge never carries execution
-        // evidence, and the 512-hex discriminator reads the last part.
+        // execution evidence: an armed rsw challenge carries both, and
+        // the 512-hex discriminator reads the last part.
         if let Some(proof) = &self.rsw_proof {
             plain.push('.');
             plain.push_str(proof);
@@ -192,14 +196,19 @@ impl SolutionToken {
         let plain = String::from_utf8(plain).map_err(|_| DecodeError::InvalidUtf8)?;
 
         // The wire grammar splits on ALL dots: the first three segments
-        // are nonce/counter/duration, and the final segment is the
-        // execution segment exactly when it is `digest` or `digest:trace`
-        // (the digest is 64 lowercase hex and the trace is canonical
-        // unpadded base64url, whose alphabet carries neither '.' nor
-        // ':'), so the split on the first colon is total and the
-        // discriminator is unambiguous. A JSON telemetry object can
-        // never end with a 64-hex tail (it must close with '}'), so a
-        // non-matching tail is telemetry and fails the JSON parse below
+        // are nonce/counter/duration, and everything from the fourth
+        // segment onward is telemetry plus — at the tail — the optional
+        // execution-evidence segment and the optional rsw final value.
+        // The suffix peels run independently, right-to-left: the rsw
+        // final value is peeled first exactly when the last segment is
+        // 512 lowercase hex (the shape the sequential solver produces),
+        // then the execution-evidence segment (`digest` or
+        // `digest:trace`) is peeled from the segment that precedes it,
+        // so an armed rsw challenge carrying both stays one
+        // unambiguous grammar. A JSON telemetry object can never end
+        // with a hex tail (it must close with '}'), so each
+        // discriminator is unambiguous, and a tail matching neither
+        // stays part of the telemetry and fails the JSON parse below
         // (fail closed, PHP parity).
         let parts: Vec<&str> = plain.split('.').collect();
         if parts.len() < 4 {
@@ -208,80 +217,71 @@ impl SolutionToken {
         let nonce = parts[0];
         let counter_str = parts[1];
         let duration_str = parts[2];
-        let last = parts[parts.len() - 1];
-        let execution_digest;
-        let execution_trace;
-        let rsw_proof;
-        let telemetry_str;
-        if parts.len() >= 5 {
+        let mut end = parts.len();
+        let mut execution_digest = None;
+        let mut execution_trace = None;
+        let mut rsw_proof = None;
+        if end >= 5 {
             // The rsw final value is the last segment exactly when it is
             // 512 lowercase hex (the shape the sequential solver
             // produces): the wire discriminator reads the last part, and
             // a JSON telemetry object can never end with a hex tail (it
             // must close with '}'), so the split is unambiguous.
+            let last = parts[end - 1];
             let rsw_ok = last.len() == 512
                 && last
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
             if rsw_ok {
                 rsw_proof = Some(last.to_string());
-                execution_digest = None;
-                execution_trace = None;
-                telemetry_str = parts[3..parts.len() - 1].join(".");
-            } else {
-                // The optional fifth segment is `digest` or
-                // `digest:trace`: the digest is exactly 64 lowercase hex
-                // characters (the shape the driver's interpreter
-                // produces) and the trace is canonical unpadded base64url
-                // ([A-Za-z0-9_-], non-empty, at most 10924 characters —
-                // the base64 of an 8 KiB trace, and byte-exact with the
-                // re-encode of its own decoded bytes, the PHP trace
-                // gate). A malformed trace on an armed token is rejected
-                // outright, exactly like the PHP decoder throws for the
-                // same shape; a tail that is not digest-shaped falls
-                // through to the telemetry JSON parse below (fail
-                // closed).
-                rsw_proof = None;
-                let colon = last.find(':');
-                let digest_part = match colon {
-                    Some(i) => &last[..i],
-                    None => last,
-                };
-                let digest_ok = digest_part.len() == 64
-                    && digest_part
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-                if digest_ok {
-                    execution_digest = Some(digest_part.to_string());
-                    execution_trace = match colon {
-                        Some(i) => {
-                            let trace = &last[i + 1..];
-                            let trace_ok = !trace.is_empty()
-                                && trace.len() <= 10924
-                                && trace
-                                    .bytes()
-                                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                                && trace_is_canonical_base64url(trace);
-                            if !trace_ok {
-                                return Err(DecodeError::Malformed);
-                            }
-                            Some(trace.to_string())
-                        }
-                        None => None,
-                    };
-                    telemetry_str = parts[3..parts.len() - 1].join(".");
-                } else {
-                    execution_digest = None;
-                    execution_trace = None;
-                    telemetry_str = parts[3..].join(".");
-                }
+                end -= 1;
             }
-        } else {
-            execution_digest = None;
-            execution_trace = None;
-            rsw_proof = None;
-            telemetry_str = parts[3..].join(".");
         }
+        if end >= 5 {
+            // The segment preceding the (optional) rsw final value is
+            // `digest` or `digest:trace`: the digest is exactly 64
+            // lowercase hex characters (the shape the driver's
+            // interpreter produces) and the trace is canonical unpadded
+            // base64url ([A-Za-z0-9_-], non-empty, at most 10924
+            // characters — the base64 of an 8 KiB trace, and byte-exact
+            // with the re-encode of its own decoded bytes, the PHP trace
+            // gate). A malformed trace on an armed token is rejected
+            // outright, exactly like the PHP decoder throws for the same
+            // shape; a segment whose digest part is not 64 lowercase
+            // hex is not execution evidence and stays in the telemetry
+            // (fail closed).
+            let segment = parts[end - 1];
+            let colon = segment.find(':');
+            let digest_part = match colon {
+                Some(i) => &segment[..i],
+                None => segment,
+            };
+            let digest_ok = digest_part.len() == 64
+                && digest_part
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            if digest_ok {
+                execution_digest = Some(digest_part.to_string());
+                execution_trace = match colon {
+                    Some(i) => {
+                        let trace = &segment[i + 1..];
+                        let trace_ok = !trace.is_empty()
+                            && trace.len() <= 10924
+                            && trace
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                            && trace_is_canonical_base64url(trace);
+                        if !trace_ok {
+                            return Err(DecodeError::Malformed);
+                        }
+                        Some(trace.to_string())
+                    }
+                    None => None,
+                };
+                end -= 1;
+            }
+        }
+        let telemetry_str = parts[3..end].join(".");
 
         // The nonce must be exactly the standard-base64 encoding of 32 bytes
         // (44 characters): a well-formed nonce is what the issuer mints, so

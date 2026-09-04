@@ -820,9 +820,12 @@ pub(crate) fn check_rsw_params(record: &ChallengeRecord) -> Result<(), VerifyErr
 /// record. SHA-256 and Argon2id re-derive the hash and compare the
 /// leading zero bits; an rsw record compares the presented final value
 /// (the optional final token segment) against the trapdoor expectation
-/// in constant time over the fixed 512-hex wire form. `trapdoor` is the
-/// verifier's configured rsw pair, `None` when the deployment does not
-/// verify rsw records (an rsw record then yields
+/// in constant time over the fixed 512-hex wire form. The proof
+/// vocabulary is algorithm-total: an rsw record demands counter 0 AND a
+/// presented final value (any other token shape is InsufficientWork),
+/// and a non-rsw record rejects a presented rsw final value outright.
+/// `trapdoor` is the verifier's configured rsw pair, `None` when the
+/// deployment does not verify rsw records (an rsw record then yields
 /// [`VerifyError::UnsupportedRswParams`], the authentic-but-unsupported
 /// semantics the PHP core mirrors). Returns
 /// [`VerifyError::UnsupportedArgon2Params`] for an Argon2id parameter
@@ -838,6 +841,13 @@ pub(crate) fn proof_is_valid(
             let Some(trapdoor) = trapdoor else {
                 return Err(VerifyError::UnsupportedRswParams);
             };
+            // The rsw composition invariant: an rsw record's solution
+            // must carry counter 0 (a time-lock proof has no search
+            // counter) AND a non-null rsw final value — any other token
+            // shape is rejected outright, never compared.
+            if counter != 0 {
+                return Ok(false);
+            }
             let Some(proof) = rsw_proof else {
                 return Ok(false);
             };
@@ -846,6 +856,13 @@ pub(crate) fn proof_is_valid(
             Ok(ct_eq(expected.as_bytes(), proof.as_bytes()))
         }
         PoWAlgorithm::Sha256 | PoWAlgorithm::Argon2id => {
+            // The mirror invariant for every non-rsw algorithm: an rsw
+            // final value is rsw evidence only, so a sha256/argon2id
+            // record presented with a token carrying one is rejected
+            // outright — the hash is never derived for it.
+            if rsw_proof.is_some() {
+                return Ok(false);
+            }
             let hash = derive_hash(record, counter)?;
             Ok(leading_zero_bits(&hash) >= record.target_bits)
         }
