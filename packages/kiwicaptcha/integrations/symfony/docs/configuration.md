@@ -589,8 +589,9 @@ kiwi_captcha:
 
 ### Asset delivery (`asset_mode`)
 
-The widget assets (the CSS, the WASM runtime, the driver and the Argon
-worker) ship in two delivery tiers, selected with `asset_mode`:
+The widget assets (the CSS, the WASM runtime, the driver core, the
+Argon worker and the driver's lazy widget modules) ship in two delivery
+tiers, selected with `asset_mode`:
 
 ```yaml
 kiwi_captcha:
@@ -599,7 +600,9 @@ kiwi_captcha:
 
 `files` (default) emits versioned immutable first-party asset URLs under
 `{prefix}/assets/` (`widget.<sha256-64>.css`, `runtime.<sha256-64>.js`,
-`driver.<sha256-64>.js`, `worker.<sha256-64>.js`), served by the bundle
+`driver.<sha256-64>.js`, `worker.<sha256-64>.js`,
+`execution.<sha256-64>.js`, `risk.<sha256-64>.js`,
+`telemetry.<sha256-64>.js`), served by the bundle
 with a long immutable cache lifetime
 (`Cache-Control: public, max-age=31536000, immutable`), the exact content
 hash in the URL and the content-hash ETag. Each asset is emitted once per
@@ -629,6 +632,23 @@ for the worker asset, and the worker's importScripts for its WASM glue.
 No Blob URL is created, so the worker download is deduplicated across
 widgets like the runtime.
 
+The driver itself is split the same way (the P1-8 driver split): the
+always-loaded eager core (`widget-driver.js`) carries the bootstrap,
+the challenge request, the SHA-256 solve, the state machine and the
+lazy-module loader. The adaptive-risk solve tier and the armed-evidence
+machinery (the Argon2id/rsw worker solve, the ExecutionChallengeV1
+runner, the decoy rendering and the coarse client-context descriptor)
+live in `widget-risk.js`. The core loads that module lazily when a
+memory-hard challenge, an armed response or the risk-context opt-in
+needs it. The telemetry session lives in `widget-telemetry.js`, loaded
+only when the widget enables a session. The incumbent compatibility
+loader lives in `widget-compat.js`, delivered inside the `/api.js`
+loader response and never fetched elsewhere. The files tier
+carries `data-kiwi-risk-src` + `data-kiwi-risk-integrity` and
+`data-kiwi-telemetry-src` + `data-kiwi-telemetry-integrity` on the
+container, and the core injects the same-origin SRI-pinned module
+script only on trigger, mirroring the worker asset's lazy fetch.
+
 Why immutable caching: the URL contains the content hash, so the bytes
 for a URL can never change. A browser or CDN may keep the response
 forever, and a deployment upgrade simply emits new hashed URLs. Unknown
@@ -645,8 +665,12 @@ CSP per mode:
 - `inline` (compatibility / zero-request tier): the CSS, the WASM
   runtime and the driver are embedded into the page at render time
   (the historical zero-request behavior for the ordinary surface, no
-  static asset handling). The worker is built from a Blob URL, so
-  this tier needs `worker-src blob:`.
+  static asset handling). The `widget-risk.js` module is embedded the
+  same way, so a memory-hard or armed challenge never needs an
+  external fetch under a CSP that allows inline scripts but not
+  `'self'`; `widget-telemetry.js` is embedded only when telemetry is
+  enabled. The worker is built from a Blob URL, so this tier needs
+  `worker-src blob:`.
 
 The execution dimension needs no extra directive in either tier. The
 interpreter is a lazy first-party content-addressed asset in both
@@ -658,27 +682,26 @@ govern the about:srcdoc document, so a strict `frame-src 'none'`
 profile stays compatible with execution challenges.
 
 `inline` is the documented compatibility tier for ordinary
-zero-request deployments. It embeds the CSS, the WASM runtime and the
-driver into the page at render time, and only an execution-armed
-lifecycle fetches the interpreter asset (the lazy invariant of the
-ExecutionChallengeV1 section). A deployment that cannot serve or cache
-the versioned asset URLs selects it explicitly.
+zero-request deployments. It embeds the CSS, the WASM runtime, the
+driver core and the `widget-risk.js` module into the page at render
+time. It embeds `widget-telemetry.js` when a session is enabled. Only
+an execution-armed lifecycle fetches the interpreter asset (the lazy
+invariant of the ExecutionChallengeV1 section). A deployment that
+cannot serve or cache the versioned asset URLs selects it explicitly.
 
 #### Ordinary-bootstrap size target
 
-The 160,000-byte widget-driver raw cap (with the gzip and brotli caps of
-50,000 / 45,000 bytes, see `packages/kiwicaptcha/tools/perf-budget.sh`)
-is the guardrail, not the goal. After the Argon worker split the driver
-no longer embeds the worker source (the glue carries it for inline mode;
-files mode fetches the versioned worker asset). The ordinary bootstrap,
-the bytes a plain SHA-256 page downloads before any memory-hard
-challenge, targets **sub-30 KB compressed** (gzip or brotli). Remaining
-lazy candidates, not yet split, would shrink the bootstrap further.
-The candidates are the provider-migration compatibility loader (the
-external `/api.js` path ships the full glue and driver eagerly) and the
-advanced risk-triggered modules (the decoy/polymorphism and
-client-context evidence machinery, loaded only when a risk-elevated
-challenge arrives).
+The hard byte budgets live in `packages/kiwicaptcha/tools/perf-budget.sh`
+and its baselines record (`perf-baselines.json`), enforced in CI. The
+eager core (`widget-driver.js`) carries the raw 160,000-byte cap
+forward, now with compressed caps of 30,720 gzip / 28,000 brotli
+bytes; the lazy module assets (`widget-risk.js`,
+`widget-telemetry.js`, `widget-compat.js`) carry their own recorded
+raw-bytes rows and raw caps. The ordinary bootstrap, the bytes a plain
+SHA-256 page downloads before any memory-hard or armed challenge,
+targets **sub-30 KB compressed** (gzip or brotli) for the eager core
+alone. The full browser suite, the asset-parity jobs and the perf
+budget gate the split, so the caps stay real.
 
 ### Redis (`redis_dsn`)
 

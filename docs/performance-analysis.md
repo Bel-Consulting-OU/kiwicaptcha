@@ -216,17 +216,25 @@ the ack-phase numbers are the production replication topology the
 single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
-perf-budget.sh): every widget-driver copy is
-159,751 bytes raw, 45,259 bytes gzip and 38,055 bytes brotli, against
-caps of 160,000 / 50,000 / 45,000 bytes; every execution-interpreter
-copy (execution-interpreter.js, the lazy ExecutionChallengeV1 asset)
-is 33,259 bytes raw, 10,343 bytes gzip and 8,913 bytes brotli, against
-caps of 36,000 / 11,200 / 9,500 bytes; the same budgets section also
-records the measured raw bytes of the other three widget assets (the
-worker at 23,547 bytes, the wasm glue runtime at 96,528 bytes
+perf-budget.sh): every eager-core driver copy is
+103,732 bytes raw, 30,326 bytes gzip and 25,564 bytes brotli, against
+caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
+onto the always-loaded core, the compressed caps the ordinary-
+bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
+module) is 47,649 bytes raw, 14,347 bytes gzip and 12,228 bytes
+brotli against caps of 49,152 / 20,000 / 16,000; every
+widget-telemetry.js copy is 2,922 bytes raw, 1,249 bytes gzip and 992
+bytes brotli against caps of 8,192 / 2,500 / 2,000; every
+widget-compat.js copy is 25,460 bytes raw, 8,160 bytes gzip and 6,969
+bytes brotli against caps of 32,768 / 12,000 / 10,000; every
+execution-interpreter copy (execution-interpreter.js, the lazy
+ExecutionChallengeV1 asset) is 33,259 bytes raw, 10,343 bytes gzip
+and 8,913 bytes brotli, against caps of 36,000 / 11,200 / 9,500
+bytes; the same budgets section also records the measured raw bytes
+of the worker at 23,547 bytes, the wasm glue runtime at 96,528 bytes
 and the widget stylesheet at 13,863 bytes, each byte-identical across
 the three copies, with the optional rsw sequential solver living
-inside the worker asset); the decoy-armed challenge-response JSON (the
+inside the worker asset; the decoy-armed challenge-response JSON (the
 wire shape of the bundle's /challenge response) is
 1,014-1,045 bytes for sha256 and 1,025-1,046 bytes for argon2id (the
 grammar-composed name length varies the size between issuances),
@@ -234,32 +242,46 @@ against the 4,096-byte cap, and the v4 execution-armed response (the
 same wire shape carrying `execution_program`, the authenticated decoy
 riding along) is 1,293-1,667 bytes for sha256 and 1,301-1,633 bytes
 for argon2id, against the 1,900-byte cap. The byte fields of the
-budgets section were re-recorded on 2026-09-03 against the current
-widget assets (the driver, worker and glue grew with the optional rsw
-rung), and perf-budget.sh
-verifies the recorded raw_bytes EQUAL the current measured bytes (an
-equality gate, not just cap compliance), so a drifted record fails the
-budget job. The caps are read by the shell from the record at run
-time; the record is the single hard-budget authority.
+budgets section were re-recorded on 2026-09-04 after the P1-8 driver
+split, and perf-budget.sh verifies the recorded raw_bytes EQUAL the
+current measured bytes (an equality gate, not just cap compliance),
+so a drifted record fails the budget job. The caps are read by the
+shell from the record at run time; the record is the single hard-
+budget authority.
 
 ## Ordinary-bootstrap target
 
-The widget-driver byte caps (160,000 raw / 50,000 gzip / 45,000 brotli,
+The eager-core caps (160,000 raw / 30,720 gzip / 28,000 brotli bytes,
 perf-budget.sh) are the guardrail: a regression there fails the perf
-budget job. They are not the goal. The Argon worker split removed the
-embedded worker source from the driver (the wasm glue carries it for the
-inline compatibility tier; files mode fetches the versioned
-`worker.<hash>.js` asset lazily), so the ordinary bootstrap — the bytes a
-plain SHA-256 page downloads before any memory-hard challenge — targets
-**sub-30 KB compressed** (gzip or brotli). The current driver is still
-above that target: 159,751 bytes raw, 45,259 gzip and 38,055 brotli
-(the record's `budgets.widget_driver` section, equality-gated). The
-caps stay unchanged; closing the gap to the target is a lazy-split
-effort, not a cap change.
+budget job. They are not the goal. The P1-8 driver split moved the
+server-armed and configuration-armed machinery out of the always-
+loaded file, so the ordinary bootstrap — the bytes a plain SHA-256
+page downloads before any memory-hard challenge — is the eager core
+alone: 103,732 bytes raw, 30,326 gzip and 25,564 brotli (the record's
+`budgets.widget_driver` section, equality-gated). The compressed
+numbers are inside the **sub-30 KB compressed** target with margin;
+the raw 160,000 cap is carried forward unchanged.
+
+The driver surface is now four files with one eager core (the
+record's budget rows, equality-gated):
+
+- `widget-driver.js`, the eager core: bootstrap, challenge request,
+  the SHA-256 solve, the state/token lifecycle, retry/reset and the
+  lazy-module loader (103,732 raw / 30,326 gzip / 25,564 brotli);
+- `widget-risk.js`, the lazy adaptive-risk module: the argon2id/rsw
+  worker solve tier (construction plus the files-mode versioned
+  worker/runtime asset fetches), the ExecutionChallengeV1 runner, the
+  decoy/honeypot rendering and the coarse client-context descriptor.
+  The core loads it on a memory-hard challenge, an armed response or
+  the risk-context opt-in (47,649 raw / 14,347 gzip / 12,228 brotli);
+- `widget-telemetry.js`, the lazy telemetry session, loaded only when
+  a widget enables one (2,922 raw / 1,249 gzip / 992 brotli);
+- `widget-compat.js`, the incumbent compatibility loader, delivered
+  inside the `/api.js` loader response and never fetched elsewhere
+  (25,460 raw / 8,160 gzip / 6,969 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
-bloat (the driver measures 159,751 raw / 45,259 gzip / 38,055
-brotli):
+bloat:
 
 - the execution interpreter itself is a separate lazy asset
   (`execution.<sha256>.js`, 33,259 raw / 10,343 gzip / 8,913 brotli,
@@ -273,22 +295,7 @@ brotli):
 - the runtime (the wasm glue, 96,528 raw / 36,553 gzip) and the
   worker (23,547 raw / 7,632 gzip, the Argon2id and rsw solver asset)
   are already lazy in the files tier: a memory-hard or sequential
-  challenge fetches the runtime once, a SHA page never does. The
-  driver's own 45.3 KB gzip therefore still bundles the
-  eager parts of the migration-compat loader, the risk-v2 evidence
-  machinery (decoy presentation, polymorphism, client-context
-  collection), and the telemetry hooks.
-
-Remaining lazy candidates that would shrink the bootstrap further, not
-yet split:
-
-- the provider-migration compatibility loader — the external `/api.js`
-  path ships the full glue and driver eagerly for migrated pages;
-- the telemetry hooks — the driver's observation/beacon plumbing is
-  always loaded even on pages that never enable it;
-- the advanced risk-triggered modules — the decoy/polymorphism and
-  client-context evidence presentation, loaded only when a
-  risk-elevated challenge arrives.
+  challenge fetches the runtime once, a SHA page never does.
 
 ## Hot paths per lifecycle
 

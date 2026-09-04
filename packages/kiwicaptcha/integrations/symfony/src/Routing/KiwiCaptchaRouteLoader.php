@@ -108,14 +108,16 @@ final class KiwiCaptchaRouteLoader extends Loader
         // validated before any bytes are served; an unknown hash is a 404.
         // The `name` constraint is the complete asset set: the widget css,
         // the driver js, the lazy WASM runtime js, the same-origin worker
-        // js and the lazy execution interpreter js. A Twig-emitted URL
-        // must always match this route (the KernelBrowser invariant test
-        // asserts every rendered URL is routable), so the constraint is
-        // the five names, never a subset.
+        // js, the lazy execution interpreter js and the lazy widget-module
+        // js assets (widget-risk.js / widget-telemetry.js, loaded by the
+        // driver on trigger). A Twig-emitted URL must always match this
+        // route (the KernelBrowser invariant test asserts every rendered
+        // URL is routable), so the constraint is the seven names, never a
+        // subset.
         $routes->add('kiwicaptcha_asset', new Route(
             $prefix.'/assets/{name}.{hash}.{extension}',
             ['_controller' => [AssetController::class, 'asset']],
-            ['name' => 'execution|runtime|widget|driver|worker', 'hash' => '[0-9a-f]{64}', 'extension' => 'js|css'],
+            ['name' => 'execution|runtime|widget|driver|worker|risk|telemetry', 'hash' => '[0-9a-f]{64}', 'extension' => 'js|css'],
             [],
             '',
             [],

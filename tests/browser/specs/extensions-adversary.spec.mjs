@@ -149,6 +149,7 @@ const WIDGET_MARKUP = `
 async function serveWidgetPage(page, attrs) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const attrStr = Object.entries(attrs)
     .map(([k, v]) => ` ${k}="${v}"`)
     .join('');
@@ -157,7 +158,7 @@ async function serveWidgetPage(page, attrs) {
   <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
 ${WIDGET_MARKUP}
 </div>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
   await page.route('**/widget-test', (route) =>
     route.fulfill({ contentType: 'text/html', body: html })
   );

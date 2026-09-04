@@ -163,11 +163,11 @@ dedicated latency runner are tracked in the release checklist.
 
 ## Asset / protocol-id coupling
 
-The four browser assets in `packages/kiwicaptcha-wasm/assets/` are **version-locked as a set** — the widget driver, the worker, and the WASM glue/solver must come from the **same build**:
+The eight browser assets in `packages/kiwicaptcha-wasm/assets/` are **version-locked as a set** — the widget driver core, its lazy widget modules, the worker, and the WASM glue/solver must come from the **same build**:
 
-- `widget-driver.js` embeds `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-08-r2`) and embeds a copy of the worker source; the worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
+- `widget-driver.js`, the always-loaded eager core, declares `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-09-r1`). The memory-hard worker machinery and the build-id handshake live in the lazy `widget-risk.js` module (loaded when a memory-hard or armed challenge arrives), which declares the same constant; `widget-telemetry.js` and `widget-compat.js` are the other lazy modules. The worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
 - The worker declares the same constant and reports it in its handshake (`ready` / `done` messages).
-  The driver validates it; a mismatch enters the controlled `kiwi:solver-mismatch` state and the driver **never** accepts a solution from a mismatched worker.
+  The driver's worker machinery validates it; a mismatch enters the controlled `kiwi:solver-mismatch` state and the driver **never** accepts a solution from a mismatched worker.
 - The wasm glue (`kiwicaptcha-wasm.js`) is built by the release pipeline (`.github/workflows/release.yml` on every `v*` tag): strict deterministic build, SHA-256 + SRI manifests, SLSA provenance attestation, and asset upload to the GitHub release.
   The release publishes the immutable tag-bound JS/CSS artifacts plus the manifests; integrators who want content-addressed names (e.g. `argon-solver.<sha256>.wasm` extracted from the glue) apply that pattern at their CDN layer (see `packages/kiwicaptcha-wasm/SECURITY.md`).
   The glue and the driver/worker of the same protocol id must be paired.

@@ -1558,8 +1558,10 @@ $assetSpecs = [
     'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
     'worker' => ['file' => 'kiwi-worker.js', 'type' => 'application/javascript; charset=UTF-8'],
     'execution' => ['file' => 'execution-interpreter.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'risk' => ['file' => 'widget-risk.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'telemetry' => ['file' => 'widget-telemetry.js', 'type' => 'application/javascript; charset=UTF-8'],
 ];
-if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution|risk|telemetry)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
     [, $assetName, $assetHash, $assetExt] = $m;
     $spec = $assetSpecs[$assetName];
     if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
@@ -1722,6 +1724,7 @@ if ($path === '/' || $path === '/index.html') {
     $assetTags = '';
     $runtimeAttr = '';
     $workerAttrFiles = '';
+    $moduleAttrs = '';
     // The ExecutionChallengeV1 interpreter asset is delivered in both
     // asset tiers, the mirror of the bundle theme: KiwiCaptchaRuntime's
     // executionSrc/executionIntegrity are asset-mode independent, the
@@ -1743,6 +1746,8 @@ if ($path === '/' || $path === '/index.html') {
             'driver' => 'widget-driver.js',
             'worker' => 'kiwi-worker.js',
             'execution' => 'execution-interpreter.js',
+            'risk' => 'widget-risk.js',
+            'telemetry' => 'widget-telemetry.js',
         ];
         $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
             $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
@@ -1757,10 +1762,14 @@ if ($path === '/' || $path === '/index.html') {
         $driverAsset = $assetLink('driver', 'js');
         $runtimeAsset = $assetLink('runtime', 'js');
         $workerAsset = $assetLink('worker', 'js');
+        $riskAsset = $assetLink('risk', 'js');
+        $telemetryAsset = $assetLink('telemetry', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
             .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
         $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
+        $moduleAttrs = ' data-kiwi-risk-src="'.$riskAsset['url'].'" data-kiwi-risk-integrity="'.$riskAsset['sri'].'"'
+            .' data-kiwi-telemetry-src="'.$telemetryAsset['url'].'" data-kiwi-telemetry-integrity="'.$telemetryAsset['sri'].'"';
     }
     // Real Content-Security-Policy header qualification (?csp=strict and
     // ?csp=execution-blocked): a genuine response header, never a <meta>
@@ -1798,7 +1807,7 @@ if ($path === '/' || $path === '/index.html') {
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
@@ -1811,7 +1820,12 @@ if ($path === '/' || $path === '/index.html') {
 </div>
 ";
     }
-    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>';
+    $riskEmbed = '';
+    if (!$filesMode) {
+        $riskBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/widget-risk.js');
+        $riskEmbed = '<script>'.$riskBody.'</script>';
+    }
+    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>'.$riskEmbed;
     echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$assetTags}</head><body>
 {$containers}{$inlineScripts}</body></html>";
 

@@ -59,6 +59,8 @@ final class KiwiCaptchaRuntime
         'driver' => ['driver', 'js'],
         'worker' => ['worker', 'js'],
         'execution' => ['execution', 'js'],
+        'risk' => ['risk', 'js'],
+        'telemetry' => ['telemetry', 'js'],
     ];
 
     private readonly string $css;
@@ -66,6 +68,8 @@ final class KiwiCaptchaRuntime
     private readonly string $driver;
     private readonly string $worker;
     private readonly string $execution;
+    private readonly string $risk;
+    private readonly string $telemetryAsset;
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -90,6 +94,8 @@ final class KiwiCaptchaRuntime
         $this->driver = $this->readAsset($assetDir, 'widget-driver.js');
         $this->worker = $this->readAsset($assetDir, 'kiwi-worker.js');
         $this->execution = $this->readAsset($assetDir, 'execution-interpreter.js');
+        $this->risk = $this->readAsset($assetDir, 'widget-risk.js');
+        $this->telemetryAsset = $this->readAsset($assetDir, 'widget-telemetry.js');
     }
 
     private function readAsset(string $dir, string $name): string
@@ -128,6 +134,16 @@ final class KiwiCaptchaRuntime
         return $this->execution;
     }
 
+    public function risk(): string
+    {
+        return $this->risk;
+    }
+
+    public function telemetry(): string
+    {
+        return $this->telemetryAsset;
+    }
+
     public function assetMode(): string
     {
         return $this->assetMode;
@@ -161,7 +177,7 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution];
+        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution, 'risk' => $this->risk, 'telemetry' => $this->telemetryAsset];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
             $content = $contents[$key];
@@ -294,6 +310,66 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The driver's data-kiwi-risk-src value (files mode): the versioned
+     * widget-risk.js asset URL the driver loads lazily when the
+     * adaptive-risk tier is triggered (a memory-hard challenge, an armed
+     * response or the coarse risk-context opt-in). The inline tier
+     * embeds the module instead, so no URL rides the container there.
+     * Empty in inline mode.
+     */
+    public function riskSrc(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['risk']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-risk-integrity value (files mode): the SRI
+     * digest of the widget-risk.js asset, verified by the browser's
+     * native SRI check when the core injects the module script. Empty in
+     * inline mode.
+     */
+    public function riskIntegrity(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['risk']['sri'];
+    }
+
+    /**
+     * The driver's data-kiwi-telemetry-src value (files mode): the
+     * versioned widget-telemetry.js asset URL the driver loads lazily
+     * when a widget enables a telemetry session. Empty in inline mode
+     * (the inline tier embeds the module when telemetry is enabled).
+     */
+    public function telemetrySrc(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['telemetry']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-telemetry-integrity value (files mode): the
+     * SRI digest of the widget-telemetry.js asset. Empty in inline mode.
+     */
+    public function telemetryIntegrity(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['telemetry']['sri'];
+    }
+
+    /**
      * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist), always explicit, never
@@ -355,6 +431,19 @@ final class KiwiCaptchaRuntime
             'kiwi_css' => $this->css,
             'kiwi_wasm' => $this->wasm,
             'kiwi_driver' => $this->driver,
+            // The lazy widget modules (see the driver split docs): the
+            // inline tier embeds widget-risk.js (the adaptive-risk solve
+            // tier + armed-evidence machinery, always: a decoy or
+            // memory-hard challenge can be armed per response) and
+            // widget-telemetry.js (only when a session is enabled); the
+            // files tier renders their versioned URLs + SRI digests as
+            // container attributes for the driver's lazy fetch.
+            'kiwi_risk' => $this->risk,
+            'kiwi_telemetry' => $this->telemetryAsset,
+            'risk_src' => $this->riskSrc(),
+            'risk_integrity' => $this->riskIntegrity(),
+            'telemetry_src' => $this->telemetrySrc(),
+            'telemetry_integrity' => $this->telemetryIntegrity(),
             // Files-mode delivery state (asset_mode + the request-scoped
             // emission registry + the driver's lazy runtime and worker
             // URLs and SRI digests).

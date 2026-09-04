@@ -1712,7 +1712,7 @@ function environment() {
  */
 function clientAssets() {
   const assetsDir = join(REPO_ROOT, 'packages', 'kiwicaptcha-wasm', 'assets');
-  const names = ['widget-driver.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js', 'execution-interpreter.js'];
+  const names = ['widget-driver.js', 'widget-risk.js', 'widget-telemetry.js', 'widget-compat.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js', 'execution-interpreter.js'];
   const out = {};
   for (const name of names) {
     const file = join(assetsDir, name);
