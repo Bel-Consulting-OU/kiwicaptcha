@@ -229,7 +229,8 @@ jobs:
           extensions: json, openssl, sodium
           coverage: none
       - name: prove ext-gmp is absent
-        run: php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
+        run: >-
+          php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
       - name: composer validate
         run: composer validate --strict
       - name: composer install
