@@ -411,6 +411,26 @@ final class Verifier
     }
 
     /**
+     * Debug inspection must never surface the signing secrets: the full
+     * property shape stays visible under the exact property names, with
+     * the secret-bearing values replaced by a redaction marker. The
+     * secretsByKid map values and the rsw lambda are secrets; the map
+     * keys (kid ids) are identifiers and stay intact, and the rsw
+     * modulus is public by design.
+     */
+    public function __debugInfo(): array
+    {
+        $shape = get_object_vars($this);
+        $shape['secretsByKid'] = array_map(
+            static fn (string $secret): string => '<redacted>',
+            $this->secretsByKid
+        );
+        $shape['rswLambda'] = $shape['rswLambda'] === null ? null : '<redacted>';
+
+        return $shape;
+    }
+
+    /**
      * @param string      $rawToken        base64 solution token from the widget.
      * @param string      $secretKey       HMAC secret key.
      * @param string|null $expectedScope   required challenge scope (null = any).

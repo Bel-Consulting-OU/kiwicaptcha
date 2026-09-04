@@ -144,6 +144,22 @@ final class Rsw
         }
     }
 
+    /**
+     * Debug inspection must never surface the trapdoor's secret half:
+     * the full property shape stays visible under the exact property
+     * names, with the lambda base64 and the decoded lambda replaced by a
+     * redaction marker. The modulus is public by design and stays
+     * inspectable.
+     */
+    public function __debugInfo(): array
+    {
+        $shape = get_object_vars($this);
+        $shape['lambdaB64'] = '<redacted>';
+        $shape['lambda'] = '<redacted>';
+
+        return $shape;
+    }
+
     /** The decoded modulus n. */
     public function modulus(): \GMP
     {

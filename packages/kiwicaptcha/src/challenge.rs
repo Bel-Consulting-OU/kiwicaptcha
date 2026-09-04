@@ -305,10 +305,11 @@ pub struct ChallengeRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_program: Option<String>,
     /// The execution-dimension protocol version: the canonical numeric
-    /// byte 1 (u8 on the wire, rendered as decimal in the canonical
-    /// input). Authenticated as the `|execution_version` protocol v4
-    /// canonical segment. Present iff the record carries an execution
-    /// program; the JSON key is absent when `None`.
+    /// byte within the register 1..=MAX_EXECUTION_VERSION (u8 on the
+    /// wire, rendered as decimal in the canonical input). Authenticated
+    /// as the `|execution_version` protocol v4 canonical segment. Present
+    /// iff the record carries an execution program; the JSON key is
+    /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_version: Option<u8>,
     /// The authenticated mirror of the stored execution program: hex

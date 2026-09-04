@@ -1713,7 +1713,10 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
-    #[error("execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)")]
+    #[error(
+        "execution version must be the canonical numeric byte within 1..={}",
+        MAX_EXECUTION_VERSION
+    )]
     InvalidVersion,
     #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
     InvalidScope,

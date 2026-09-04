@@ -991,14 +991,14 @@ fn redis_v4_execution_interop_with_php() {
     // solved in pure PHP, and the token is serialized with the real
     // digest:trace evidence (executed trace, digest over the trace,
     // base64url unpadded).
-    let php_issue_armed = |tamper_digest: bool| -> String {
+    let php_issue_armed = |tamper_digest: bool, version_expr: &str| -> String {
         let tamper = if tamper_digest { "1" } else { "0" };
         format!(
             r#"
 $client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
 $storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
 $issuer = new KiwiCaptcha\Issuer(new KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8, ttlSecs: 120, minDurationMs: 0, executionKey: '0123456789abcdef0123456789abcdef'), $storage);
-$ch = $issuer->issueWithExecutionField('login', '127.0.0.1', true, executionAction: 'login-action');
+$ch = $issuer->issueWithExecutionField('login', '127.0.0.1', true, executionAction: 'login-action', executionVersion: {version_expr});
 $raw = $client->get(getenv('KC_INTEROP_PREFIX') . $ch->nonce);
 if (!str_contains($raw, '"protocol_version":4')) {{ fwrite(STDERR, 'the stored armed record must be protocol v4'); exit(2); }}
 if (!str_contains($raw, '"execution_program":')) {{ fwrite(STDERR, 'the stored armed record must carry the execution program'); exit(3); }}
@@ -1022,7 +1022,7 @@ echo $ch->nonce . "\n" . $token;
     //    real digest:trace token; Rust decodes it (the wire grammar)
     //    and verifies the stored record through the production
     //    verifier.
-    let issued = php_script(&php_issue_armed(false))
+    let issued = php_script(&php_issue_armed(false, "1"))
         .expect("PHP must issue and serialize the armed v4 token");
     let mut issued_lines = issued.lines();
     let nonce = issued_lines.next().expect("the armed nonce");
@@ -1043,6 +1043,22 @@ echo $ch->nonce . "\n" . $token;
     );
 
     let store = kiwicaptcha::redis_verify::RedisChallengeStore::new(client.clone(), prefix.clone());
+    let recompute_expected_digest = |program: &str, nonce: &str, trace_b64: &str| -> String {
+        let standard: String = trace_b64
+            .chars()
+            .map(|c| match c {
+                '-' => '+',
+                '_' => '/',
+                c => c,
+            })
+            .collect();
+        let padded = format!("{standard}{}", "=".repeat((4 - standard.len() % 4) % 4));
+        let trace = String::from_utf8(B64.decode(padded).expect("canonical base64url trace"))
+            .expect("the trace is UTF-8");
+        kiwicaptcha::execution::expected_digest_over_trace(program, nonce, &trace)
+            .expect("the digest over the executed trace recomputes")
+    };
+
     let state = into_pending(
         store
             .runtime_state(nonce)
@@ -1061,23 +1077,11 @@ echo $ch->nonce . "\n" . $token;
     // The recomputed expected digest over the decoded trace must equal
     // the digest the PHP side serialized (the decode preserved both
     // halves of the fifth segment).
-    let trace_b64 = decoded.execution_trace.as_deref().expect("trace");
-    let trace = {
-        let standard: String = trace_b64
-            .chars()
-            .map(|c| match c {
-                '-' => '+',
-                '_' => '/',
-                c => c,
-            })
-            .collect();
-        let padded = format!("{standard}{}", "=".repeat((4 - standard.len() % 4) % 4));
-        String::from_utf8(B64.decode(padded).expect("canonical base64url trace"))
-            .expect("the trace is UTF-8")
-    };
-    let expected =
-        kiwicaptcha::execution::expected_digest_over_trace(program, &state.nonce, &trace)
-            .expect("the digest over the executed trace recomputes");
+    let expected = recompute_expected_digest(
+        program,
+        &state.nonce,
+        decoded.execution_trace.as_deref().expect("trace"),
+    );
     assert_eq!(
         expected,
         decoded.execution_digest.as_deref().expect("digest"),
@@ -1117,11 +1121,71 @@ echo $ch->nonce . "\n" . $token;
     }
     println!("RUST_VERIFIES_PHP_ARMED_V4_EXECUTION: OK (digest={expected})");
 
+    // 1b. The current-register-maximum direction: PHP issues an armed
+    //    challenge at its MAX_EXECUTION_VERSION (the ceiling of the PHP
+    //    record/issuer gate, currently 4), solves it and serializes the
+    //    real digest:trace token. Rust must read the stored record,
+    //    accept its execution_version through the widened record
+    //    register and verify it end to end through the production
+    //    verifier — the PHP-to-Rust direction proof for the current
+    //    maximum grammar.
+    let issued_at_max = php_script(&php_issue_armed(
+        false,
+        "\\KiwiCaptcha\\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION",
+    ))
+    .expect("PHP must issue and serialize the max-register armed v4 token");
+    let mut max_lines = issued_at_max.lines();
+    let max_nonce = max_lines.next().expect("the max-register nonce");
+    let max_token = max_lines
+        .next()
+        .expect("the max-register digest:trace token");
+    let max_decoded = kiwicaptcha::token::SolutionToken::decode(max_token)
+        .expect("Rust must decode the max-register digest:trace token");
+    let max_state = into_pending(
+        store
+            .runtime_state(max_nonce)
+            .expect("Rust must read the PHP max-register record"),
+    )
+    .expect("the PHP max-register record is pending");
+    assert_eq!(
+        max_state.execution_version,
+        Some(kiwicaptcha::execution::MAX_EXECUTION_VERSION),
+        "the PHP issuance at its register maximum stamps the canonical maximum"
+    );
+    let max_program = max_state
+        .execution_program
+        .as_deref()
+        .expect("the max-register record carries the program");
+    let max_digest = recompute_expected_digest(
+        max_program,
+        &max_state.nonce,
+        max_decoded.execution_trace.as_deref().expect("trace"),
+    );
+    assert_eq!(
+        max_digest,
+        max_decoded.execution_digest.as_deref().expect("digest"),
+        "the PHP digest over the max-register executed trace must match the Rust recomputation"
+    );
+    match verifier.verify(
+        max_token,
+        "login",
+        "127.0.0.1",
+        max_state.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid { .. } => {}
+        other => panic!(
+            "Rust must verify a PHP-issued armed challenge at MAX_EXECUTION_VERSION through the production verifier, got {other:?}"
+        ),
+    }
+    println!("RUST_VERIFIES_PHP_ARMED_V4_EXECUTION_AT_MAX_REGISTER: OK (digest={max_digest})");
+
     // 2. The negative direction: a tampered digest on a second
     //    PHP-issued armed challenge decodes cleanly (it is still 64
     //    hex) but fails the execution binding with the deterministic
     //    ExecutionMismatch.
-    let tampered = php_script(&php_issue_armed(true))
+    let tampered = php_script(&php_issue_armed(true, "1"))
         .expect("PHP must issue and serialize the tampered armed v4 token");
     let mut tampered_lines = tampered.lines();
     let tampered_nonce = tampered_lines.next().expect("the tampered nonce");
