@@ -36,6 +36,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 /// The modulus is a 2048-bit composite: exactly 256 bytes.
 pub const MODULUS_BYTES: usize = 256;
@@ -48,10 +49,24 @@ pub const PROOF_HEX_LENGTH: usize = 512;
 
 /// A decoded and validated rsw trapdoor: the public 2048-bit composite
 /// modulus `n = p*q` and the secret `lambda = lcm(p-1, q-1)`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually: the derived formatter would print the
+/// secret `lambda` into logs, so the manual impl prints the same field set
+/// with only the lambda value replaced by `"<redacted>"` (the modulus `n`
+/// is public material — the client squares modulo `n`).
+#[derive(Clone)]
 pub struct RswTrapdoor {
     n: BigUint,
     lambda: BigUint,
+}
+
+impl fmt::Debug for RswTrapdoor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RswTrapdoor")
+            .field("n", &self.n)
+            .field("lambda", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Why an rsw trapdoor configuration is refused. Mirrors the PHP
@@ -197,5 +212,24 @@ pub mod fixtures {
             value = (&value * &value) % &modulus;
         }
         super::proof_hex(&value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trapdoor_debug_redacts_lambda_but_prints_the_public_modulus() {
+        let trapdoor = fixtures::trapdoor();
+        let debug = format!("{trapdoor:?}");
+        // The secret lambda never prints — the Debug shape shows the
+        // public modulus n (as its own decimal digits, like the derived
+        // formatter did) with the lambda slot replaced by the marker.
+        assert!(debug.starts_with("RswTrapdoor { n: "));
+        assert!(debug.ends_with("lambda: \"<redacted>\" }"));
+        assert!(!debug.contains(fixtures::LAMBDA_B64));
+        assert!(debug.contains(&format!("{}", trapdoor.modulus())));
+        assert_eq!(debug.matches("<redacted>").count(), 1);
     }
 }

@@ -11,6 +11,7 @@
 //! is responsible for storing the record keyed by nonce.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -346,7 +347,12 @@ fn default_protocol_version() -> u8 {
 /// Configuration for the challenge issuer. Mirrors the server config block but
 /// kept as a plain struct so this crate has no dependency on the api-server
 /// config types.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually: the derived formatter would print the
+/// live secrets (the HMAC `secret_key`, the execution `execution_key` and the
+/// rsw `rsw_lambda`) into logs, so the manual impl prints the same field set
+/// with only the secret values replaced by `"<redacted>"`.
+#[derive(Clone)]
 pub struct ChallengeConfig {
     /// HMAC secret key (server-side). Challenges signed with this key cannot
     /// be verified by a server using a different key.
@@ -439,6 +445,40 @@ pub struct ChallengeConfig {
     /// The client performs T sequential modular squarings; the server
     /// verifies instantly through lambda.
     pub rsw_t: u32,
+}
+
+impl fmt::Debug for ChallengeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChallengeConfig")
+            .field("secret_key", &"<redacted>")
+            .field("algorithm", &self.algorithm)
+            .field("m_kib", &self.m_kib)
+            .field("t", &self.t)
+            .field("p", &self.p)
+            .field("target_bits", &self.target_bits)
+            .field("argon2_target_bits", &self.argon2_target_bits)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("min_duration_ms", &self.min_duration_ms)
+            .field("auto_tune", &self.auto_tune)
+            .field("auto_tune_min_bits", &self.auto_tune_min_bits)
+            .field("auto_tune_max_bits", &self.auto_tune_max_bits)
+            .field("binding_mode", &self.binding_mode)
+            .field("policy_version", &self.policy_version)
+            .field("region", &self.region)
+            .field("issuer", &self.issuer)
+            .field("kid", &self.kid)
+            .field(
+                "execution_key",
+                &self.execution_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("rsw_modulus_n", &self.rsw_modulus_n)
+            .field(
+                "rsw_lambda",
+                &self.rsw_lambda.as_ref().map(|_| "<redacted>"),
+            )
+            .field("rsw_t", &self.rsw_t)
+            .finish()
+    }
 }
 
 impl ChallengeConfig {
@@ -4223,5 +4263,47 @@ mod tests {
                 "profile {profile:?} must be rejected"
             );
         }
+    }
+
+    // ── secret redaction in the Debug shape ─────────────────────────
+
+    #[test]
+    fn config_debug_redacts_secrets_but_keeps_the_public_shape() {
+        let secret = "debug-master-secret-0123456789abcdef";
+        let execution = "debug-execution-key-0123456789abcdef";
+        let mut config = rsw_config(MIN_RSW_T);
+        config.secret_key = secret.into();
+        config.execution_key = Some(execution.into());
+        let debug = format!("{config:?}");
+
+        // None of the live secret byte strings may print.
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains(execution));
+        assert!(!debug.contains(crate::rsw::fixtures::LAMBDA_B64));
+        // The rsw modulus is public material and prints as itself.
+        assert!(debug.contains(crate::rsw::fixtures::MODULUS_N_B64));
+        // Every secret slot prints the redaction marker, and the
+        // non-secret fields keep their exact values.
+        assert_eq!(debug.matches("<redacted>").count(), 3);
+        assert!(debug.contains("ChallengeConfig { secret_key: \"<redacted>\""));
+        assert!(debug.contains("execution_key: Some(\"<redacted>\")"));
+        assert!(debug.contains("rsw_lambda: Some(\"<redacted>\")"));
+        assert!(debug.contains("algorithm: Rsw"));
+        assert!(debug.contains("rsw_t: "));
+        assert!(debug.contains("kid: 1"));
+    }
+
+    #[test]
+    fn config_debug_none_variants_print_none_not_redacted() {
+        let secret = "debug-master-secret-0123456789abcdef";
+        let mut config = profile_base_config();
+        config.secret_key = secret.into();
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains(secret));
+        assert_eq!(debug.matches("<redacted>").count(), 1);
+        assert!(debug.contains("execution_key: None"));
+        assert!(debug.contains("rsw_lambda: None"));
+        assert!(debug.contains("rsw_modulus_n: None"));
     }
 }

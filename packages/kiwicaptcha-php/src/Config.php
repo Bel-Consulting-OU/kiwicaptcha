@@ -298,6 +298,44 @@ final class Config
     }
 
     /**
+     * Redacted dump shape: every field prints under its public name with
+     * its exact value. The secrets print '<redacted>' — `secretKey`
+     * always, `executionKey` and `rswLambda` only when set. Their null
+     * variants stay null, never a marker. `rswModulusN` is public
+     * material (the client squares modulo n) and prints as itself.
+     *
+     * The shape is the full constructor field set in declaration order,
+     * so var_dump/print_r shows the complete configuration with only the
+     * secret values replaced — the audit-mandated printability fix for
+     * the secret-bearing configuration object.
+     *
+     * @return array<string, mixed>
+     */
+    public function __debugInfo(): array
+    {
+        return [
+            'secretKey' => '<redacted>',
+            'algorithm' => $this->algorithm,
+            'mKib' => $this->mKib,
+            't' => $this->t,
+            'p' => $this->p,
+            'targetBits' => $this->targetBits,
+            'argon2TargetBits' => $this->argon2TargetBits,
+            'ttlSecs' => $this->ttlSecs,
+            'minDurationMs' => $this->minDurationMs,
+            'solverMaxHashes' => $this->solverMaxHashes,
+            'bindingMode' => $this->bindingMode,
+            'policyVersion' => $this->policyVersion,
+            'issuer' => $this->issuer,
+            'kid' => $this->kid,
+            'executionKey' => $this->executionKey !== null ? '<redacted>' : null,
+            'rswModulusN' => $this->rswModulusN,
+            'rswLambda' => $this->rswLambda !== null ? '<redacted>' : null,
+            'rswT' => $this->rswT,
+        ];
+    }
+
+    /**
      * The narrow security-identifier alphabet: the deployment-
      * bound identifiers (issuer, region, request_binding, scope) must match
      * `[A-Za-z0-9._:-]+` so no identifier can smuggle canonical separators

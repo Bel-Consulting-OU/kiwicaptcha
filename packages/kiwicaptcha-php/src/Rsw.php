@@ -63,6 +63,26 @@ final class Rsw
     private readonly \GMP $lambda;
 
     /**
+     * Redacted dump shape: the four constructor fields print under their
+     * property names, with the secret lambda material — the raw
+     * `lambdaB64` input and the decoded `lambda` — replaced by
+     * '<redacted>'. The modulus half (`modulusB64` and the decoded `n`)
+     * is public material (the client squares modulo n) and prints as
+     * itself.
+     *
+     * @return array<string, mixed>
+     */
+    public function __debugInfo(): array
+    {
+        return [
+            'modulusB64' => $this->modulusB64,
+            'lambdaB64' => '<redacted>',
+            'n' => $this->n,
+            'lambda' => '<redacted>',
+        ];
+    }
+
+    /**
      * @param string $modulusB64 canonical standard base64 of the
      *                           2048-bit composite n, exactly 256 bytes
      *                           with the top bit set and odd.
