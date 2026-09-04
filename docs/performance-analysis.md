@@ -94,14 +94,19 @@ recording machine changes.
   the replica is stopped.
 
 The browser-side lab is separate: `tools/client-perf/` drives the
-browser fixture over the real SHA-256 and Argon2id ladders, with the
-Argon rung measured at the real adaptive-risk envelope (m=16384 KiB,
-target 8), plus the four ExecutionChallengeV1 cells (execvm: the
+browser fixture over the real SHA-256, Argon2id and rsw ladders, with
+the Argon rung measured at the real adaptive-risk envelope (m=16384
+KiB,
+target 8) and the rsw rungs at T=75,000 / 150,000 / 300,000 squarings
+(the default rung, the midpoint and the protocol ceiling), plus the
+six ExecutionChallengeV1 cells (execvm: the
 execution VM on an ordinary challenge, execsha18: execution + SHA-256
 18 bits, execargon: execution + the real-ladder Argon rung, execchain:
 execution + chained escalation where the server issues the memory-hard
-rung against a SHA request). The execution cells are files-tier cells
-by design — the interpreter asset exists only in the files variant —
+rung against a SHA request, execvminline and execsha18inline: the
+VM-only and 18-bit profiles on the inline tier). The files-tier
+execution cells stay files-tier by design — the interpreter
+asset exists only in the files variant —
 and record the interpreter fetch start and duration alongside the
 ordinary solve metrics. The matrix spans inline/files and cold/warm,
 with per-cell transferred bytes, cache-hit loads, lazy runtime fetch
@@ -120,18 +125,27 @@ derivations/sec at the real envelope in a harness worker) as a
 solver-speed and drift probe. A completion marker is written only on a
 clean full run, and baseline promotion refuses any results file
 without it or without the full default matrix — which now includes the
+rsw rungs and the
 execution cells, so no run recorded against an earlier matrix can ever
 be promoted. The lab README documents the full procedure.
 
-The honest current status of the client lab: no clean controlled
-full-matrix run has completed on this machine. The real Argon ladder
-costs tens of seconds per solve even unthrottled, a full run is a
-multi-hour job that has crashed before finishing, and the execution
-cells add four more files-tier configurations to every tier. The
-committed `tools/client-perf/results/baseline.json` is therefore still
-the legacy-labelled recording, replaced only when a completed run is
-promoted. The physical-device tiers remain the release boundary for
-the widget and the difficulty ladder.
+The release gate over the client lab: `tools/client-perf/release-budgets.json`
+declares an explicit p95 budget row for every released solver mode x
+qualified tier x cold/warm (currently the unthrottled mainstream-desktop
+lab tier) plus a qualification block, and
+`tools/ci/validate-release-baseline.mjs` enforces it: coverage gaps and
+uncovered cells fail the run, CI mode prints the qualification status
+line without failing on it, and release mode (`--release`) refuses to
+certify unless `qualification.status` is `"physical"`. The current
+status is `lab`: the committed baseline rows for the mainstream-desktop
+tier were re-recorded at the real ladder on 2026-09-03/04 (the runs
+`results/run-2026-09-03.json` and
+`tools/client-perf/results/results-2026-09-04.json`, merged per cache
+across asset modes), and no physical-device data exists yet. The
+physical-device tiers remain the release boundary for
+the widget and the difficulty ladder, and the budget file's
+qualification block documents the outstanding physical-device
+requirement.
 
 ## Measured baselines
 

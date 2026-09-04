@@ -3,11 +3,13 @@
 A Playwright-based client benchmark that drives the browser fixture
 (`tests/browser/router.php`) and measures the widget's real browser
 costs per difficulty tier: SHA-256 at 16/18/20 leading zero bits,
-Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), and
-the six ExecutionChallengeV1 cells (execvm, execsha18, execargon,
-execchain, execvminline, execsha18inline — see the execution-cells
-section), across the asset tiers (inline and files). This is the
-calibration lab
+Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), the
+three rsw sequential time-lock rungs (T=75,000 / 150,000 / 300,000
+squarings: the default rung, the midpoint and the protocol ceiling of
+the 10,000..=300,000 range), and the six ExecutionChallengeV1 cells
+(execvm, execsha18, execargon, execchain, execvminline, execsha18inline —
+see the execution-cells section), across the asset tiers (inline and
+files). This is the calibration lab
 referenced by the `RiskProfileResolver` calibration note: the highest
 Argon rung and the SHA ladder must be measured on the throttled tiers,
 never assumed from desktop estimates.
@@ -88,6 +90,23 @@ throttled tiers). Warm cells pre-warm the context with one discarded
 navigation, so every recorded warm rep is a cache-hit load, not the
 populating one.
 
+## The rsw time-lock cells
+
+The fixture issues an rsw challenge only when asked
+(`?algorithm=rsw&rsw_t=<T>`, the mirror of an operator-armed
+deployment), and the driver dispatches it to the worker, which solves
+T sequential modular squarings in pure JS BigInt and reports the final
+value as the proof. The rsw cells ride the same asset tiers as
+Argon2id: inline mode builds the Blob worker from the glue-carried
+worker source, files mode fetches the versioned worker asset, so the
+matrix records the full worker solve path for both bootstraps, cold
+and warm, like every other cell. The cells inherit the SHA-256 rep
+count (default 50). The rungs are named `rsw75k`, `rsw150k` and
+`rsw300k` after their T value. A T below 10,000 or above 300,000 is
+rejected by the worker itself before any work starts
+(`unsupported_rsw_params`), so the measured rungs are the protocol
+ladder a deployment can actually issue.
+
 ## The ExecutionChallengeV1 cells
 
 The fixture arms the execution dimension with `?execution=1` (the
@@ -137,13 +156,21 @@ device evidence (see the note above the table of what is measured).
 | `low-desktop` | low-end desktop | 1280x720 | 4x |
 | `mainstream-desktop` | mainstream desktop | 1920x1080 | none |
 
+`mainstream-desktop` is the only tier with no CPU throttle: it
+represents the actual recording machine, the lab rig itself. It is
+therefore the tier the release gate budgets (see the release-gate
+section): emulation tiers are calibration signals, the unthrottled lab
+tier is the one piece of evidence that describes real hardware.
+
 ## Sample sizes and percentiles
 
 n=5 (SHA) / n=3 (Argon) cannot support a p95/p99 claim. The harness
 defaults to 50 SHA-256 repetitions and 20 Argon2id repetitions per
 configuration, and the documented ranges are 50-100 for SHA and 20-30
 for Argon. The execution cells inherit the count of their PoW profile
-(SHA-profile cells 50, Argon-profile cells 20). `--samples N` raises
+(SHA-profile cells 50, Argon-profile cells 20), and the rsw cells
+inherit the SHA count like every deterministic-work cell. `--samples
+N` raises
 both at once for a specific measurement, and `--quick` lowers them for
 iteration. The results keep every repetition and the aggregated
 percentiles, so a percentile's sample is visible in the same file.
@@ -151,7 +178,14 @@ percentiles, so a percentile's sample is visible in the same file.
 A percentile is only as good as its sample: with 50 samples the p95 is
 the 48th of 50 ordered points and the p99 is the maximum, so treat the
 p99 of a 50-sample cell as an upper envelope, not a sharp estimate.
-Raising to 100 narrows that. The physical procedure below matters more
+Raising to 100 narrows that. The committed real-ladder lab rows were
+recorded at 12 SHA / 6 Argon reps per mode on 2026-09-03 (24/12 merged
+across the asset modes; the files-only execution cells carry 12/6)
+and at 50 reps in the 2026-09-04 focused run (100 merged), which is
+why the budget file's minShaReps/minArgonReps floors are 12/6: the
+floors equal the lowest real-ladder evidence count, and a future full
+run at the harness defaults exceeds them. The physical procedure below
+matters more
 than any sample-size tweak: emulation noise is bounded, real-device
 noise is not.
 
@@ -226,10 +260,11 @@ node tools/client-perf/client-perf.mjs --promote-baseline FILE
 
 The loader refuses, with the reasons, any results file that lacks the
 completion marker or that does not cover the full default matrix (all
-seven tiers, all ten difficulties — the four ordinary cells plus the
-six execution cells — cold and warm across each cell's asset tiers:
-the files execution cells files-only and the inline execution cells
-inline-only by design). It also refuses runs recorded
+seven tiers, all thirteen difficulties — the four ordinary cells, the
+three rsw time-lock rungs, and the six execution cells — cold and
+warm across each cell's asset
+tiers: the files execution cells files-only and the inline execution
+cells inline-only by design). It also refuses runs recorded
 below the default sample sizes (50 SHA and 20 Argon repetitions) or
 with a non-real argon ladder (m=16384 KiB, target 8). Only a clean
 full run can replace `results/baseline.json`, so the committed
@@ -238,11 +273,12 @@ baseline is never overwritten by an interrupted or partial run.
 ## Running
 
 ```sh
-# Default: all seven tiers, sha16+sha18+sha20+argon2id plus the six
-# execution cells (execvm, execsha18, execargon, execchain — files —
+# Default: all seven tiers, sha16+sha18+sha20+argon2id plus the rsw
+# rungs (rsw75k, rsw150k, rsw300k) plus the six execution cells
+# (execvm, execsha18, execargon, execchain — files —
 # and execvminline, execsha18inline — inline) at the real
 # ladder (16 MiB, target 8), cold and warm, inline and files, plus the
-# 3-widget page scenario. SHA
+# 3-widget page scenario. SHA-profile
 # cells run 50 reps, Argon cells 20. A committed full run takes many
 # hours on the recording Mac.
 node tools/client-perf/client-perf.mjs
@@ -254,7 +290,7 @@ node tools/client-perf/client-perf.mjs --quick
 # that is already running (e.g. the playwright lane on 8085):
 node tools/client-perf/client-perf.mjs \
   --tiers low-android,mainstream-desktop \
-  --difficulties sha16,sha18,sha20,argon2id \
+  --difficulties sha16,sha18,sha20,argon2id,rsw75k,rsw150k,rsw300k \
   --reps 100 --argon-reps 30 \
   --no-fixture --fixture-port 8085
 
@@ -281,13 +317,16 @@ Chromium build from `npx playwright install chromium` if the fixture's
 bundled engine is absent.
 
 Fixture knobs used by the harness (opt-in, defaults byte-identical to
-the historical fixture): `?bits=`, `?argon_bits=`, `?m_kib=` and
+the historical fixture): `?bits=`, `?argon_bits=`, `?m_kib=`,
+`?algorithm=rsw&rsw_t=` (the rsw arm, T clamped to 10,000..300,000 by
+the fixture) and
 `?execution=1` (the execution arm) plus `?escalate=argon` (the chained
 escalation arm) on the challenge endpoint, and `?assets=files` plus
 `?widgets=N` on the widget page. The fixture clamps argon bits to
 1..10 and the memory envelope to 8..65536 KiB, so the real ladder (8
 bits, 16384 KiB) is permitted. The execution cells pass the real
-ladder knobs to the escalated challenge exactly like the argon cell.
+ladder knobs to the escalated challenge exactly like the argon cell,
+and the rsw cells pass their T the same way.
 
 ## Physical-run procedure (the release boundary)
 
@@ -324,6 +363,68 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    run notes section) with the device/browser/OS and date. The
    emulation numbers alone do not constitute a release qualification.
 
+## The release gate and the performance-qualification status
+
+The release gate is a separate authority from the harness: the harness
+only records, `tools/client-perf/release-budgets.json` declares, and
+`tools/ci/validate-release-baseline.mjs` enforces. The budget file
+carries an explicit p95 budget row (solveMsP95 and pageToVerifiedMsP95)
+for every released solver mode x every qualified tier x cold/warm, and
+a top-level `qualification` block:
+
+```json
+{
+  "status": "lab",
+  "qualified_at": null,
+  "harness_schema": "kiwicaptcha.client-perf/3",
+  "devices": [ { "id": "...", "kind": "lab", "role": "...", ... } ]
+}
+```
+
+`status` is one of `lab` or `physical`. `lab` means the budgets are
+desktop-lab evidence recorded by the harness on the rigs listed in
+`devices` (the current file names the recording Mac). `physical` means
+the budgets come from the physical-device procedure below, with
+`qualified_at` and the device rows recorded.
+
+The validator (`tools/ci/validate-release-baseline.mjs`) has two
+modes:
+
+- CI mode (the default; wired into the required "Performance budgets"
+  workflow check) runs against the committed
+  `results/baseline.json` on every push. It fails unless every
+  release-required cell has a measured p95 under budget: coverage gaps
+  and uncovered cells are hard failures, there is no notes escape for
+  any release-required cell. It prints the current qualification
+  status line (e.g. `performance qualification status=lab —
+  physical-device data required before release certification`) and
+  does not fail solely on the status.
+- Release mode (`--release` or `RELEASE_PERFORMANCE=1`) is the
+  release-certification gate. It refuses to certify unless
+  `qualification.status` is `"physical"` (with a qualified_at date and
+  recorded devices), and a current-harness (schema 3) payload must
+  additionally satisfy the completed-run guards (completion marker,
+  full default matrix, default sample sizes, real argon ladder). In
+  the committed state (status `lab`), release mode fails with the
+  qualification reason, which is the honest state: no physical-device
+  data exists yet, so no release can be performance-certified.
+
+```sh
+# CI mode (the every-push check):
+node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json
+
+# Release mode (must fail today with the qualification-status reason):
+node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
+```
+
+The outstanding requirement before any release can be
+performance-certified is the physical-device qualification: run the
+matrix on real devices (the procedure below), record the rows in a
+clean completed run, promote it, and re-record the budget rows and the
+qualification block (`status: "physical"`, `qualified_at`, the device
+rows) from the physical measurements. Until then the gate prints
+status `lab` in CI and refuses certification in release mode.
+
 ## Results store
 
 - `results/results-<date>.json` is a completed run (machine-readable,
@@ -338,27 +439,32 @@ widget, or the difficulty ladder, run the same matrix on real devices:
   evidence only and can never be promoted to baseline.
 - `results/baseline.json` is the committed baseline, replaced only
   through `--promote-baseline` from a completed full-matrix run. The
-  current file is the legacy-labelled pre-matrix recording (see the
-  honest-status section below).
+  current file is the maintenance file the release gate validates: it
+  started as the legacy-labelled pre-matrix recording and was
+  surgically extended on 2026-09-04 (see the honest-status section).
 
 Compare a run against the baseline by diffing the aggregated cells
 (`solveMs.p95`, `transferredBytes.p50`, `pageToVerifiedMs.p95`, ...).
-The harness itself never gates anything.
+The harness itself never gates anything; the validator above does.
 
 ## Honest status of the committed baseline
 
-The committed `results/baseline.json` is still the legacy pre-matrix
-recording (schema 1, labelled legacy in the file itself). No clean
-controlled full-matrix run has completed on this machine: the real
-ladder costs tens of seconds per Argon solve even unthrottled, the
-throttled tiers cost more, a full run is a multi-hour job that has
-crashed before finishing, and the default matrix now also carries the
-four files-tier execution cells. The baseline stays legacy-labelled
-until a clean full run completes and is promoted with the loader above
-(the loader requires the execution cells, so a run recorded against an
-earlier matrix can never be promoted). The physical-device procedure
-remains the release boundary: emulation numbers, with or without a
-fresh full run, are calibration signals, never mobile claims.
+The committed `results/baseline.json` carries the legacy pre-matrix
+recording (schema 1, labelled legacy in the file itself) for the
+emulation tiers, byte-for-byte. The mainstream-desktop rows were
+re-recorded at the real ladder and merged per cache across the inline
+and files asset modes on 2026-09-03/04: sha16/18/20 and argon2id from
+the completed run `results/run-2026-09-03.json` (12 SHA / 6 Argon
+reps per mode), and the execution cells plus the rsw75k/150k/300k
+rungs from the focused completed run
+`tools/client-perf/results/results-2026-09-04.json` (50 reps). The
+two runs and the merge procedure are documented inside the payload.
+This is lab evidence on the recording Mac (Apple M5 Pro, Chromium
+151), desktop-emulation tiers excluded from the qualified scope. The
+physical-device procedure remains the release boundary: emulation
+numbers, with or without a fresh full run, are calibration signals,
+never mobile claims, and the qualification status stays `lab` until
+physical-device data is recorded.
 
 ## Notes and caveats
 

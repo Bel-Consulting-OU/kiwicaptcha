@@ -1070,11 +1070,15 @@ pub const MAX_PARALLELISM: u32 = 4;
 /// so issuance refuses the value. Shared with the PHP core.
 pub const MIN_RSW_T: u32 = 10_000;
 
-/// The ceiling for the rsw sequential-squaring cost T. The browser
-/// BigInt solver completes 300,000 squarings in about a second on a
-/// mid-range device, so the ceiling keeps a legitimate solve inside
-/// the challenge lifetime while the sequential cost stays material.
-/// Shared with the PHP core.
+/// The ceiling for the rsw sequential-squaring cost T. The bound is a
+/// protocol ceiling, not a device-performance claim: it keeps a
+/// legitimate solve inside the challenge lifetime on the slowest
+/// supported device while the sequential cost stays material. The
+/// per-deployment T choice must be derived from measurements on the
+/// worst device a deployment supports, and the qualification state
+/// must be documented; the client-performance lab measures the rsw
+/// rungs and documents the release-gate procedure
+/// (tools/client-perf/README.md). Shared with the PHP core.
 pub const MAX_RSW_T: u32 = 300_000;
 
 /// The default rsw sequential-squaring cost T. Shared with the PHP core.

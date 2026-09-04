@@ -513,11 +513,15 @@ provenance and the fingerprint matter.
 ### The sequential cost T
 
 rsw_t is the number of modular squarings the client performs, the
-time-lock's difficulty knob. The default 75,000 completes in a
-fraction of a second in the worker's native BigInt solver on a
-mid-range device. The validated range is 10,000..300,000: below the
-floor the cost is immaterial, and above the ceiling a legitimate
-solve can approach the challenge lifetime. There is no target-bits
+time-lock's difficulty knob. The validated range is 10,000..300,000:
+below the floor the cost is immaterial, and the ceiling is a protocol
+bound, not a device-performance claim: it keeps a legitimate solve
+inside the challenge lifetime while the sequential cost stays
+material. The per-deployment T choice must be derived from
+measurements on the worst device the deployment supports, and the
+qualification state must be documented; the client-performance lab
+measures the real rsw rungs and documents the release-gate procedure
+(`tools/client-perf/README.md`). There is no target-bits
 concept: the proof is deterministic, so the signed canonical carries
 the pinned protocol-floor value in the difficulty slot, and the
 verifier checks the exact final value instead of leading zeros.
