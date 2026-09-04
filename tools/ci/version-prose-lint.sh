@@ -33,15 +33,28 @@
 #   - bare "versions? 1..3" describing the supported set,
 #   - "v1/v2/v3" describing the supported set.
 #
+# Group 6 bans stale claims that the driver's execution-capability
+# advertisement carries the value 2. The live widget driver sends the
+# `Kiwi-Execution-Max-Version` request header with its current driver
+# maximum (the generator's MAX_EXECUTION_VERSION, today 4), pinned by
+# an executable parity test (WidgetDriverCapabilityParityTest reads
+# the driver literal and asserts it equals the generator maximum), so
+# prose pairing the header name or the "execution capability" term
+# with "value 2" on the same line is the version-2-era stale claim:
+#
+#   - 'Kiwi-Execution-Max-Version ... value 2'
+#   - 'execution capability ... value 2'
+#
 # A file whose content carries the marker
 #   historical-compat fixture:
-# in any line comment is exempt from group 5: that marker is the
-# convention for deliberately frozen N-1 compatibility fixtures whose
-# prose must keep describing an older ladder (e.g. a fixture that pins
-# the v1..v3 decode fences). Historical narrative in CHANGELOGs is
-# excluded by the CHANGELOG glob above; past-tense history elsewhere
-# must stay clear of the group-5 phrases, which are reserved for
-# present-tense claims about the supported set.
+# in any line comment is exempt from groups 5 and 6: that marker is
+# the convention for deliberately frozen N-1 compatibility fixtures
+# whose prose must keep describing an older ladder (e.g. a fixture
+# that pins the v1..v3 decode fences). Historical narrative in
+# CHANGELOGs is excluded by the CHANGELOG glob above; past-tense
+# history elsewhere must stay clear of the group-5 and group-6
+# phrases, which are reserved for present-tense claims about the
+# supported set.
 #
 # The ratchet is calibrated to the exact stale strings the governance
 # review found, so any reintroduction anywhere in the scan roots fails
@@ -160,9 +173,26 @@ if [ -n "$ladder_matches" ]; then
   printf '%s\n' "$ladder_matches"
 fi
 
+# 6. the driver's execution-capability advertisement claimed as the
+# value 2 (the live driver sends Kiwi-Execution-Max-Version with its
+# current maximum, today 4, pinned by the executable
+# WidgetDriverCapabilityParityTest). Files carrying the
+# historical-compat marker are exempt, like group 5.
+capability_matches="$(
+  search \
+    -e 'Kiwi-Execution-Max-Version[^.!?\n]{0,100}value[[:space:]]+2' \
+    -e 'execution capability[^.!?\n]{0,100}value[[:space:]]+2' \
+    "${scan_roots[@]}"
+)"
+capability_matches="$(printf '%s\n' "$capability_matches" | drop_compat_files)"
+if [ -n "$capability_matches" ]; then
+  report "stale claim: the driver's execution-capability advertisement is described as value 2 (the live driver sends the header with its current maximum, today 4; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
+  printf '%s\n' "$capability_matches"
+fi
+
 if [ "$hits" -ne 0 ]; then
   echo "version prose lint FAILED: stale claims found (see above)" >&2
   exit 1
 fi
 
-echo "version prose lint PASS: no stale execution-version or bypass-governance claims in SECURITY.md, packages/, docs/"
+echo "version prose lint PASS: no stale execution-version, capability-header or bypass-governance claims in SECURITY.md, packages/, docs/"
