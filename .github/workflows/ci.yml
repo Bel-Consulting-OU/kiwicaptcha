@@ -347,6 +347,118 @@ jobs:
           KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
         run: vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
 
+  docker-reference-deployment:
+    # The deploy/ reference image must build and run as the audit
+    # demands. This lane builds the image, boots the compose stack
+    # (Valkey + captcha) and walks the full sequence against the real
+    # storage. The sequence: /healthz until 200, POST /challenge, a
+    # SHA-256 solve inside the container, POST /verify success and the
+    # replay rejection of the same token. Then a captcha restart,
+    # /healthz again and a second issue/solve/verify against the
+    # persistent Valkey volume. The secret is a fresh random value
+    # written to deploy/.env in the lane (gitignored), so the repo
+    # test credentials are never touched.
+    name: Docker reference deployment e2e
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: docker build the deploy image
+        run: docker build -f deploy/Dockerfile -t kiwicaptcha/reference-deployment .
+      - name: write a fresh random secret to deploy/.env
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'KIWI_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+          printf 'KIWI_SHA_TARGET_BITS=8\n' >> .env
+      - name: docker compose up (valkey + captcha)
+        working-directory: deploy
+        run: docker compose up -d
+      - name: retry /healthz until 200
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs captcha
+          echo "healthz never answered 200 within 120s" >&2
+          exit 1
+      - name: POST /challenge and capture the challenge document
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/challenge.json -X POST -H 'Content-Type: application/json' \
+            -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+      - name: solve the SHA-256 proof inside the captcha container
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          docker compose cp /tmp/challenge.json captcha:/tmp/challenge.json
+          docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge.json > /tmp/token.txt
+          test -s /tmp/token.txt
+          printf '%s' "$(tr -d '\r\n' < /tmp/token.txt)" > /tmp/token-clean.txt
+      - name: POST /verify with the solved token (success)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          TOKEN="$(cat /tmp/token-clean.txt)"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/verify1.json
+          php -r 'exit(json_decode(file_get_contents("/tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
+      - name: POST the same /verify again (replay rejection)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          TOKEN="$(cat /tmp/token-clean.txt)"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/replay.json
+          php -r '$d = json_decode(file_get_contents("/tmp/replay.json"), true); exit($d["ok"] === false && $d["code"] === "already_consumed" ? 0 : 1);'
+      - name: restart the captcha container
+        working-directory: deploy
+        run: docker compose restart captcha
+      - name: retry /healthz after the restart
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt after the restart"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs captcha
+          echo "healthz never answered 200 after the restart" >&2
+          exit 1
+      - name: issue, solve and verify again against the persistent store
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
+            -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+          docker compose cp /tmp/challenge2.json captcha:/tmp/challenge2.json
+          docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > /tmp/token2.txt
+          TOKEN2="$(tr -d '\r\n' < /tmp/token2.txt)"
+          test -n "$TOKEN2"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN2\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/verify2.json
+          php -r 'exit(json_decode(file_get_contents("/tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
+      - name: docker compose down
+        if: always()
+        working-directory: deploy
+        run: docker compose down
+
   php-core-real-redis:
     # The real-Redis fault/topology/death coverage of the PHP core
     # must actually RUN in CI: the default PHP core matrix lanes have

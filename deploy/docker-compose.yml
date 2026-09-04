@@ -1,8 +1,9 @@
-# The KiwiCaptcha reference deployment: the quick-start server plus
-# Valkey (the Redis-compatible store the core targets). The fixture
-# server mirrors the bundle's /challenge and /verify semantics with the
-# exact library code paths; production Symfony deployment is the
-# published bundle + recipe.
+# The KiwiCaptcha reference deployment: the reference image plus Valkey
+# (the Redis-compatible store the core targets). The captcha service
+# reads EVERY secret and knob from the environment or from deploy/.env
+# (see deploy/.env.example and deploy/README.md); no secret is
+# committed. Valkey keeps its data in the named volume below, so the
+# challenge records survive a captcha container restart.
 services:
   valkey:
     image: valkey/valkey:8-alpine
@@ -16,12 +17,30 @@ services:
       retries: 10
 
   captcha:
+    image: kiwicaptcha/reference-deployment
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
+      # KC_REDIS_URL is the challenge-store connection of the core, the
+      # same variable the CI real-Redis lanes publish.
       KC_REDIS_URL: redis://valkey:6379
-      TEST_REDIS_URL: redis://valkey:6379
+      # Required: at least 32 bytes of random data. The :? form fails
+      # the compose up when the variable is missing from the
+      # environment or deploy/.env.
+      KIWI_SECRET_KEY: "${KIWI_SECRET_KEY:?KIWI_SECRET_KEY must be set in the environment or deploy/.env (at least 32 bytes of random data)}"
+      # Optional surface knobs; an unset or empty value uses the
+      # documented in-image default (see deploy/README.md).
+      KIWI_EXECUTION_KEY: ${KIWI_EXECUTION_KEY:-}
+      KIWI_RSW_MODULUS_N: ${KIWI_RSW_MODULUS_N:-}
+      KIWI_RSW_LAMBDA: ${KIWI_RSW_LAMBDA:-}
+      KIWI_ALGORITHM: ${KIWI_ALGORITHM:-}
+      KIWI_SHA_TARGET_BITS: ${KIWI_SHA_TARGET_BITS:-}
+      KIWI_ARGON2_TARGET_BITS: ${KIWI_ARGON2_TARGET_BITS:-}
+      KIWI_ARGON2_M_KIB: ${KIWI_ARGON2_M_KIB:-}
+      KIWI_TTL_SECS: ${KIWI_TTL_SECS:-}
+      KIWI_MIN_DURATION_MS: ${KIWI_MIN_DURATION_MS:-}
+      KIWI_RSW_T: ${KIWI_RSW_T:-}
     depends_on:
       valkey:
         condition: service_healthy
