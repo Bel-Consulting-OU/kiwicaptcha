@@ -1906,3 +1906,28 @@ jobs:
           KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
           KC_RUST_EXPECT_TAMPER: '1'
         run: php tests/CrossLanguageVerify.php
+
+  release-validator-mutation-suite:
+    # Adversarial mutation corpus of the release-baseline validator
+    # (audit finding 10): the ordinary "Performance budgets" check
+    # runs the validator against the committed lab baseline, which
+    # only proves today's real file is accepted/rejected as expected.
+    # This self-contained node job generates temporary budget/baseline
+    # fixtures in os.tmpdir() and runs the validator as a subprocess
+    # against them, asserting on exit codes AND on the specific reason
+    # substrings of the validator's own messages: the per-mode
+    # schema-3 matrix coverage (deleting sha18:cold:files while inline
+    # survives is caught, and vice versa), the device-indexed physical
+    # evidence proofs (per-device coverage, per-device sample floors
+    # and failure budgets, worst-physical-p95, provenance), the
+    # tested_at freshness/chronology rules, the physical-claim-in-CI
+    # rules, and the legacy schema-1 path. New job only: it does not
+    # touch the existing perf-budget or docker/no-GMP steps.
+    name: Release-validator mutation suite
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: adversarial mutation corpus of the release-baseline validator
+        run: node tools/ci/test-validate-release-baseline.mjs
