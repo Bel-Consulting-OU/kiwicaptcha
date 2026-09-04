@@ -217,18 +217,18 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-103,732 bytes raw, 30,326 bytes gzip and 25,564 bytes brotli, against
+103,732 bytes raw, 30,220 bytes gzip and 25,564 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 47,649 bytes raw, 14,347 bytes gzip and 12,228 bytes
+module) is 47,649 bytes raw, 14,301 bytes gzip and 12,228 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
-widget-telemetry.js copy is 2,922 bytes raw, 1,249 bytes gzip and 992
+widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
-widget-compat.js copy is 25,460 bytes raw, 8,160 bytes gzip and 6,969
+widget-compat.js copy is 25,460 bytes raw, 8,137 bytes gzip and 6,969
 bytes brotli against caps of 32,768 / 12,000 / 10,000; every
 execution-interpreter copy (execution-interpreter.js, the lazy
-ExecutionChallengeV1 asset) is 33,402 bytes raw, 10,411 bytes gzip
+ExecutionChallengeV1 asset) is 33,402 bytes raw, 10,404 bytes gzip
 and 8,955 bytes brotli, against caps of 36,000 / 11,200 / 9,500
 bytes; the same budgets section also records the measured raw bytes
 of the worker at 24,819 bytes, the wasm glue runtime at 97,815 bytes
@@ -244,8 +244,11 @@ riding along) is 1,293-1,667 bytes for sha256 and 1,301-1,633 bytes
 for argon2id, against the 1,900-byte cap. The byte fields of the
 budgets section were re-recorded on 2026-09-04 after the P1-8 driver
 split, and perf-budget.sh verifies the recorded raw_bytes EQUAL the
-current measured bytes (an equality gate, not just cap compliance),
-so a drifted record fails the budget job. The caps are read by the
+current measured bytes, and the recorded gzip and brotli bytes of the
+driver core, the widget modules and the execution interpreter EQUAL
+the deterministic gzip -n -9 and brotli measurements of every mirror
+copy (an equality gate, not just cap compliance), so a drifted record
+fails the budget job. The caps are read by the
 shell from the record at run time; the record is the single hard-
 budget authority.
 
@@ -257,7 +260,7 @@ budget job. They are not the goal. The P1-8 driver split moved the
 server-armed and configuration-armed machinery out of the always-
 loaded file, so the ordinary bootstrap — the bytes a plain SHA-256
 page downloads before any memory-hard challenge — is the eager core
-alone: 103,732 bytes raw, 30,326 gzip and 25,564 brotli (the record's
+alone: 103,732 bytes raw, 30,220 gzip and 25,564 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 numbers are inside the **sub-30 KB compressed** target with margin;
 the raw 160,000 cap is carried forward unchanged.
@@ -267,24 +270,24 @@ record's budget rows, equality-gated):
 
 - `widget-driver.js`, the eager core: bootstrap, challenge request,
   the SHA-256 solve, the state/token lifecycle, retry/reset and the
-  lazy-module loader (103,732 raw / 30,326 gzip / 25,564 brotli);
+  lazy-module loader (103,732 raw / 30,220 gzip / 25,564 brotli);
 - `widget-risk.js`, the lazy adaptive-risk module: the argon2id/rsw
   worker solve tier (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner, the
   decoy/honeypot rendering and the coarse client-context descriptor.
   The core loads it on a memory-hard challenge, an armed response or
-  the risk-context opt-in (47,649 raw / 14,347 gzip / 12,228 brotli);
+  the risk-context opt-in (47,649 raw / 14,301 gzip / 12,228 brotli);
 - `widget-telemetry.js`, the lazy telemetry session, loaded only when
-  a widget enables one (2,922 raw / 1,249 gzip / 992 brotli);
+  a widget enables one (2,922 raw / 1,229 gzip / 992 brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (25,460 raw / 8,160 gzip / 6,969 brotli).
+  (25,460 raw / 8,137 gzip / 6,969 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:
 
 - the execution interpreter itself is a separate lazy asset
-  (`execution.<sha256>.js`, 33,402 raw / 10,435 gzip / 8,955 brotli,
+  (`execution.<sha256>.js`, 33,402 raw / 10,404 gzip / 8,955 brotli,
   the `budgets.widget_execution` section): the driver's orchestration
   is the minimal seam that creates a sandboxed ephemeral iframe per
   armed challenge, loads the SRI-pinned interpreter inside it and

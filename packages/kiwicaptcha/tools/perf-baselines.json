@@ -10,7 +10,7 @@
   "budgets": {
     "widget_driver": {
       "raw_bytes": 103732,
-      "gzip_bytes": 30326,
+      "gzip_bytes": 30220,
       "brotli_bytes": 25564,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
@@ -21,12 +21,12 @@
     "widget_worker": {
       "raw_bytes": 24819,
       "copies_identical": true,
-      "note": "The worker asset (kiwi-worker.js), three byte-identical copies at 23547 bytes; the rsw sequential time-lock solver lives inside it (pure JS BigInt, exactly the Argon worker's loading and message pattern); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+      "note": "The worker asset (kiwi-worker.js), three byte-identical copies; the rsw sequential time-lock solver lives inside it (pure JS BigInt, exactly the Argon worker's loading and message pattern); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_runtime": {
       "raw_bytes": 97815,
       "copies_identical": true,
-      "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies at 96528 bytes; the embedded worker source is regenerated from assets/kiwi-worker.js by the embed-worker tool, so the rsw solver rides the glue copy too; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+      "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from assets/kiwi-worker.js by the embed-worker tool, so the rsw solver rides the glue copy too; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_css": {
       "raw_bytes": 13863,
@@ -35,7 +35,7 @@
     },
     "widget_execution": {
       "raw_bytes": 33402,
-      "gzip_bytes": 10435,
+      "gzip_bytes": 10404,
       "brotli_bytes": 8955,
       "raw_cap_bytes": 36000,
       "gzip_cap_bytes": 11200,
@@ -61,7 +61,7 @@
     },
     "widget_risk": {
       "raw_bytes": 47649,
-      "gzip_bytes": 14347,
+      "gzip_bytes": 14301,
       "brotli_bytes": 12228,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
@@ -71,7 +71,7 @@
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
-      "gzip_bytes": 1249,
+      "gzip_bytes": 1229,
       "brotli_bytes": 992,
       "raw_cap_bytes": 8192,
       "gzip_cap_bytes": 2500,
@@ -81,7 +81,7 @@
     },
     "widget_compat": {
       "raw_bytes": 25460,
-      "gzip_bytes": 8160,
+      "gzip_bytes": 8137,
       "brotli_bytes": 6969,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,

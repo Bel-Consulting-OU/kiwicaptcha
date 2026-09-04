@@ -22,8 +22,11 @@
 # the runtime, the css and the execution interpreter; plus gzip/brotli
 # of the driver core, the widget modules and the execution
 # interpreter), and this script verifies the recorded raw_bytes equal
-# the current measured bytes — a stale record describes bytes the caps
-# no longer gate, so a drift is a hard failure, never just
+# the current measured bytes, and the recorded gzip_bytes and
+# brotli_bytes of the driver core, the widget modules and the
+# execution interpreter equal the deterministic measurement of every
+# one of their mirror copies — a stale record describes bytes the
+# caps no longer gate, so a drift is a hard failure, never just
 # cap-compliance. The recorded sizes are re-measured by hand on a
 # clean local machine against the current assets, and the challenge
 # budgets against the current php-core issuance.
@@ -31,7 +34,11 @@
 # Compressed budgets: the same copies must stay under a gzip cap and a
 # brotli cap, so a regression that bloats the wire bytes the browser
 # actually downloads (gzip on the wire, brotli when the server offers
-# it) is caught even when the raw cap still has headroom. Brotli is
+# it) is caught even when the raw cap still has headroom. Sizes are
+# measured with the deterministic gzip -n -9 (the -n strips the
+# timestamp and stored-name header fields, so the byte count is
+# reproducible across machines and runs) and the brotli CLI at
+# quality 11. Brotli is
 # enforced when the CLI or the python3 brotli module exists and noted
 # as skipped when neither is available (the CI job installs the brotli
 # CLI so the cap is enforced on the runner).
@@ -92,6 +99,14 @@ with open(sys.argv[1], "rb") as f:
   fi
 }
 
+# gzip_size <file> — the deterministic gzip byte count. The -n strips
+# the timestamp and stored-name header fields and -9 selects the
+# maximum compression, so the count is reproducible across machines
+# and runs.
+gzip_size() {
+  gzip -n -9 -c "$1" | wc -c | tr -d ' '
+}
+
 # budget_asset <budgets key> <label> — enforce the raw/gzip/brotli caps
 # of one widget asset across its three byte-identical copies. The cap
 # keys are "<key>.raw_cap_bytes", "<key>.gzip_cap_bytes" and
@@ -113,7 +128,7 @@ budget_asset() {
       echo "$label budget OK: $copy $size bytes (cap $raw_cap)"
     fi
 
-    gzip_size=$(gzip -c "$copy" | wc -c | tr -d ' ')
+    gzip_size=$(gzip_size "$copy")
     if [ "$gzip_size" -gt "$gzip_cap" ]; then
       echo "perf budget FAILED: gzip of $copy is $gzip_size bytes (cap $gzip_cap)" >&2
       FAILED=1
@@ -156,7 +171,11 @@ budget_asset widget_execution execution-interpreter.js
 # Measured-byte equality gate: the recorded raw_bytes in the budgets
 # section must equal the current measured bytes of the canonical copy of
 # every widget asset (driver core, widget modules, worker, runtime, css,
-# execution interpreter). raw_bytes is a measured fact, never a budget:
+# execution interpreter). The recorded gzip_bytes and brotli_bytes of
+# the driver core, the widget modules and the execution interpreter
+# must equal the deterministic gzip -n -9 and brotli measurements of
+# every one of their three mirror copies. raw_bytes is a measured fact,
+# never a budget:
 # it is re-recorded by hand on a clean local machine, and this equality
 # check turns a drifted record into a hard failure instead of letting the
 # caps silently gate different bytes than the record describes.
@@ -172,6 +191,38 @@ verify_recorded_raw_bytes() {
   fi
 }
 
+# verify_recorded_compressed_bytes <budgets key> <file> — the recorded
+# gzip_bytes and brotli_bytes must equal the deterministic gzip -n -9
+# and brotli measurements of the given mirror copy, so a stale
+# compressed record fails the script exactly like a stale raw_bytes
+# record does. Brotli is skipped only when no brotli encoder exists on
+# the machine (the script reports the same skip for the brotli caps).
+verify_recorded_compressed_bytes() {
+  local key="$1" file="$2"
+  local recorded_gzip recorded_brotli actual_gzip actual_brotli
+  recorded_gzip=$(json_get "$BASELINES_FILE" "budgets.$key.gzip_bytes")
+  recorded_brotli=$(json_get "$BASELINES_FILE" "budgets.$key.brotli_bytes")
+  actual_gzip=$(gzip_size "$file")
+  if [ "$recorded_gzip" != "$actual_gzip" ]; then
+    echo "perf-budget FAILED: budgets.$key.gzip_bytes records $recorded_gzip bytes but the deterministic gzip of $file is $actual_gzip bytes (re-measure and re-record the budgets section)" >&2
+    FAILED=1
+  else
+    echo "perf-budget gzip_bytes equality OK: budgets.$key.gzip_bytes == $recorded_gzip bytes ($file)"
+  fi
+  actual_brotli=$(brotli_size "$file")
+  if [ "$actual_brotli" = "unavailable" ]; then
+    echo "perf-budget brotli_bytes equality NOTE: brotli is not installed; budgets.$key.brotli_bytes equality is not enforced on this machine"
+  else
+    BROTLI_AVAILABLE=1
+    if [ "$recorded_brotli" != "$actual_brotli" ]; then
+      echo "perf-budget FAILED: budgets.$key.brotli_bytes records $recorded_brotli bytes but the brotli of $file is $actual_brotli bytes (re-measure and re-record the budgets section)" >&2
+      FAILED=1
+    else
+      echo "perf-budget brotli_bytes equality OK: budgets.$key.brotli_bytes == $recorded_brotli bytes ($file)"
+    fi
+  fi
+}
+
 verify_recorded_raw_bytes widget_driver packages/kiwicaptcha-wasm/assets/widget-driver.js
 verify_recorded_raw_bytes widget_risk packages/kiwicaptcha-wasm/assets/widget-risk.js
 verify_recorded_raw_bytes widget_telemetry packages/kiwicaptcha-wasm/assets/widget-telemetry.js
@@ -180,6 +231,21 @@ verify_recorded_raw_bytes widget_worker packages/kiwicaptcha-wasm/assets/kiwi-wo
 verify_recorded_raw_bytes widget_runtime packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
 verify_recorded_raw_bytes widget_css packages/kiwicaptcha-wasm/assets/widget.css
 verify_recorded_raw_bytes widget_execution packages/kiwicaptcha-wasm/assets/execution-interpreter.js
+
+# The compressed equality gate covers the same five capped keys over
+# the same three mirror copies budget_asset caps (the eager driver
+# core, the three lazy widget modules and the execution interpreter).
+for pair in widget_driver/widget-driver.js widget_risk/widget-risk.js \
+            widget_telemetry/widget-telemetry.js widget_compat/widget-compat.js \
+            widget_execution/execution-interpreter.js; do
+  key="${pair%/*}"
+  label="${pair#*/}"
+  for copy in packages/kiwicaptcha-wasm/assets/"$label" \
+              packages/kiwicaptcha/resources/"$label" \
+              packages/kiwicaptcha/integrations/symfony/Resources/public/"$label"; do
+    verify_recorded_compressed_bytes "$key" "$copy"
+  done
+done
 
 CHALLENGE_JSON_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json.cap_bytes")
 CHALLENGE_JSON_V4_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json_v4.cap_bytes")
@@ -299,7 +365,7 @@ if [ "$FAILED" = "1" ]; then
   exit 1
 fi
 if [ "$BROTLI_AVAILABLE" = "0" ]; then
-  echo "perf-budget: OK (all widget-driver, widget-module and widget-execution copies raw and gzip, and the challenge responses, within their caps; brotli not enforced — no brotli on this machine)"
+  echo "perf-budget: OK (all widget-driver, widget-module and widget-execution copies raw and gzip, and the challenge responses, within their caps; the recorded raw_bytes and gzip_bytes equality-verified; brotli not enforced — no brotli on this machine)"
   exit 0
 fi
-echo "perf-budget: OK (all widget-driver, widget-module and widget-execution copies raw/gzip/brotli and the challenge responses within their caps)"
+echo "perf-budget: OK (all widget-driver, widget-module and widget-execution copies raw/gzip/brotli and the challenge responses within their caps; the recorded raw_bytes, gzip_bytes and brotli_bytes equality-verified)"
