@@ -181,6 +181,94 @@ final class RswTest extends TestCase
         }
     }
 
+    public function testModulusWithASmallPrimeFactorIsRejected(): void
+    {
+        $this->requireGmp();
+        $weak = gmp_mul(gmp_add(gmp_pow(gmp_init(2), 2046), 1), 3);
+        self::assertSame(2048, \strlen(gmp_strval($weak, 2)), 'the test modulus is exactly 2048 bits');
+        self::assertSame('1', gmp_strval(gmp_mod($weak, gmp_init(2))), 'the test modulus is odd');
+        $bytes = hex2bin(str_pad(gmp_strval($weak, 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: base64_encode($bytes),
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a modulus with a small prime factor must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('found 3', $e->getMessage());
+        }
+    }
+
+    public function testModulusOfTheWrongBitLengthIsRejected(): void
+    {
+        $this->requireGmp();
+        $full = gmp_init(bin2hex(base64_decode(RswFixture::MODULUS_N_B64, true)), 16);
+        $short = gmp_or(gmp_mod($full, gmp_pow(gmp_init(2), 1024)), gmp_pow(gmp_init(2), 1023));
+        self::assertSame(1024, \strlen(gmp_strval($short, 2)));
+        $bytes = hex2bin(str_pad(gmp_strval($short, 16), 256, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: base64_encode($bytes),
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a 1024-bit modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('exactly 256 bytes', $e->getMessage());
+        }
+    }
+
+    public function testProbablePrimeModulusIsRejected(): void
+    {
+        $this->requireGmp();
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: RswFixture::PROBABLE_PRIME_N_B64,
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a probable-prime modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('probable prime', $e->getMessage());
+        }
+    }
+
+    public function testMismatchedLambdaIsRejected(): void
+    {
+        $this->requireGmp();
+        $lambda = gmp_init(bin2hex(base64_decode(RswFixture::LAMBDA_B64, true)), 16);
+        $shifted = gmp_sub($lambda, 2);
+        $bytes = hex2bin(str_pad(gmp_strval($shifted, 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: RswFixture::MODULUS_N_B64,
+                rswLambda: base64_encode($bytes),
+            );
+            self::fail('a lambda that is not the trapdoor of the modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('rsw_lambda', $e->getMessage());
+        }
+    }
+
+    public function testGoodFixturePairStillPassesTheStrengthenedValidation(): void
+    {
+        $this->requireGmp();
+        $modulus = gmp_init(bin2hex(base64_decode(RswFixture::MODULUS_N_B64, true)), 16);
+        self::assertSame(0, gmp_prob_prime($modulus), 'the fixture semiprime is composite');
+        self::assertSame('1', gmp_strval(gmp_mod($modulus, gmp_init(2))), 'the fixture modulus is odd');
+
+        $config = $this->rswConfig();
+        self::assertSame(RswFixture::MODULUS_N_B64, $config->rswModulusN);
+        $rsw = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+        self::assertNotNull($rsw->modulus());
+    }
+
     public function testRswTBounds(): void
     {
         $this->requireGmp();

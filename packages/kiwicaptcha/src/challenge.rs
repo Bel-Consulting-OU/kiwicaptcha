@@ -2961,6 +2961,61 @@ mod tests {
     }
 
     #[test]
+    fn rsw_issuance_rejects_weak_or_inconsistent_trapdoor_material() {
+        use num_bigint::BigUint;
+        let modulus_b64 = |value: &BigUint| {
+            let bytes = value.to_bytes_be();
+            let mut padded = vec![0u8; 256 - bytes.len()];
+            padded.extend_from_slice(&bytes);
+            base64::engine::general_purpose::STANDARD.encode(&padded)
+        };
+        let reject = |config: &ChallengeConfig| {
+            assert!(matches!(
+                issue_challenge(
+                    config,
+                    "login",
+                    "1.2.3.4",
+                    1_000_000,
+                    1_700_000_000_000_000,
+                    0,
+                    None
+                )
+                .unwrap_err(),
+                SignError::InvalidRswParams
+            ));
+        };
+        let fixture = crate::rsw::fixtures::LAMBDA_B64;
+
+        // A modulus divisible by the small prime 3, shaped exactly like
+        // a genuine 2048-bit modulus.
+        let mut weak = rsw_config(MIN_RSW_T);
+        let factor_three =
+            BigUint::from(3u8) * ((BigUint::from(1u8) << 2046usize) + BigUint::from(1u8));
+        weak.rsw_modulus_n = Some(modulus_b64(&factor_three));
+        reject(&weak);
+
+        // A real 2048-bit probable prime as the modulus.
+        let mut prime = rsw_config(MIN_RSW_T);
+        prime.rsw_modulus_n = Some(
+            "3QB709I66Q8Ivp2P5RtgD4+ci38dHuAuXfzGL4KtCk34UGX9uOG1FgNV92B9BcVS1iX4JCYdqN9cHg62sqEWx+p0fn7rUCuPYZSFpnwcWpVjHMbigzz2wjWt2mhkqLtbgZ/+nar/ptQu7aHKOrQYVAppYf0txmfwtnUbHSWpyMZhUv10JSnNPRuPL6wrb0cH8TjHex2W90islc3qPAwi9lAZdtX/+OepFBLDkmjnE4yi2SyBZ75kHWn+ve7nXg0352zbPtL3gos658lJsVVdt3IbqeVf1I9wnViRYpIS+EYHK5olWm3+sOxwZfbixlgLh0p3JafQoCnZpkF2j+9Gzw=="
+                .into(),
+        );
+        reject(&prime);
+
+        // The fixture lambda shifted by two: even and correctly shaped,
+        // but no longer a multiple of the Carmichael value.
+        let mut shifted_lambda = rsw_config(MIN_RSW_T);
+        let lambda = BigUint::from_bytes_be(
+            &base64::engine::general_purpose::STANDARD
+                .decode(fixture)
+                .expect("the fixture lambda is base64"),
+        );
+        let shifted = (&lambda - BigUint::from(2u8)).to_bytes_be();
+        shifted_lambda.rsw_lambda = Some(base64::engine::general_purpose::STANDARD.encode(&shifted));
+        reject(&shifted_lambda);
+    }
+
+    #[test]
     fn rsw_issuance_validates_t_bounds() {
         for t in [MIN_RSW_T - 1, MAX_RSW_T + 1, 0] {
             let config = rsw_config(t);
