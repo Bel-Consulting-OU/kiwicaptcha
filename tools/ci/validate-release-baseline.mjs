@@ -637,8 +637,9 @@ function main() {
 
   // ── Coverage and budget compliance: every release-required cell. ───
   // A required cell is every (tier, difficulty, cache) combination the
-  // budgets file rows declare (plus, in release mode, every tier the
-  // qualification declares in release_tiers), for every asset mode the
+  // budgets file rows declare (plus every tier the qualification
+  // declares in release_tiers when the file claims physical
+  // qualification or release mode is on), for every asset mode the
   // harness schema attaches to that difficulty. The baseline rows that
   // match a required cell are aggregated (per-repetition samples
   // concatenated across the cell's mode rows) and the aggregate p95s
@@ -646,9 +647,10 @@ function main() {
   //
   // When the file claims physical qualification, the release-tier
   // cells are governed by the physical-evidence contract below
-  // (provenance, per-device worst p95, per-mode failure budgets,
-  // sample floors); the generic merged coverage/budget rules still
-  // bind the cells of the remaining (lab-scope) tiers.
+  // (per-device coverage, per-device sample floors and failure
+  // budgets, worst per-device p95); the generic merged
+  // coverage/budget rules still bind the cells of the remaining
+  // (lab-scope) tiers.
   const results = payload.results || {};
   const allRequiredCells = [];
   for (const tier of certTiers) {

@@ -549,5 +549,24 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   pass('healthy physical claim: release mode certifies it (per-device sha20 floor met)', runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true));
 }
 
+// 22. Physical claim with an empty evidence index: the claim without
+//     per-device rows is a silent gap.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const res = runValidator(physicalPayload({}), budgets, false);
+  reject('physical claim with an empty physical_results index', res, ['carries no physical_results object']);
+}
+
+// 23. Evidence rows indexed under a registered kind:"lab" device.
+{
+  const labDevice = physicalDevice('lab-rig');
+  labDevice.kind = 'lab';
+  const budgets = physicalBudgets({
+    devices: [labDevice, physicalDevice('dev-a')],
+  });
+  const res = runValidator(physicalPayload({ 'lab-rig': deviceIndex('lab-rig') }), budgets, false);
+  reject('physical_results indexed under a registered lab device', res, ['not a registered kind:"physical" device']);
+}
+
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
 process.exit(failures === 0 ? 0 : 1);
