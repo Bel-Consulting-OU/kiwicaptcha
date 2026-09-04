@@ -30,15 +30,24 @@
  *     challenge arrives; the fetch start is recorded), and a repeat
  *     navigation measurement after the warm reps (everything cached).
  *
- * The ExecutionChallengeV1 cells (?execution=1 armed, files tier only)
- * are: execvm (the execution VM on an ordinary fixture-default SHA
- * challenge, no PoW change), execsha18 (execution + SHA-256 18 bits),
- * execargon (execution + Argon2id at the real ladder) and execchain
- * (execution + chained escalation: the driver requests SHA-256, the
- * server escalates to Argon2id). The interpreter asset is lazy in the
- * files tier, so the cell records when its single fetch starts and
- * how long it takes (executionFetchStartMs/DurationMs), alongside the
- * ordinary solve/parse/wasm/worker/fixed-work metrics.
+ * The ExecutionChallengeV1 cells (?execution=1 armed) are: execvm (the
+ * execution VM on an ordinary fixture-default SHA challenge, no PoW
+ * change), execsha18 (execution + SHA-256 18 bits), execargon
+ * (execution + Argon2id at the real ladder), execchain (execution +
+ * chained escalation: the driver requests SHA-256, the server
+ * escalates to Argon2id), and execvminline + execsha18inline: the
+ * VM-only and 18-bit SHA profiles on the inline tier. The product
+ * delivers the interpreter asset in both asset tiers: the bundle's
+ * data-kiwi-execution-src rides the container inline and files alike,
+ * and the interpreter is never embedded, only lazily fetched. An armed
+ * inline page therefore performs the same single lazy interpreter
+ * fetch as a files-tier one, and the fixture mirrors that delivery.
+ * The interpreter asset is lazy in both tiers, so every execution cell
+ * records when its single fetch starts and how long it takes
+ * (executionFetchStartMs/DurationMs), alongside the ordinary
+ * solve/parse/wasm/worker/fixed-work metrics. execargon and execchain
+ * stay files-only by matrix scope: the inline-execution evidence this
+ * matrix carries is the SHA-profile pair.
  *
  * The KEY benchmark cell is files + warm + ordinary SHA (16-20 bits):
  * the returning-user path, which must be extremely cheap (all assets
@@ -268,12 +277,15 @@ const DIFFICULTIES = {
   // risk.execution_challenge gate); the challenge response then carries
   // an execution program the driver runs in a sandboxed ephemeral
   // iframe (the lazy execution.<sha256>.js interpreter asset) and the
-  // execution digest rides the solution token. The interpreter asset is
-  // a FILES-TIER feature: the fixture emits its SRI-linked
-  // data-kiwi-execution-src only in the ?assets=files variant, so these
-  // cells are files-only by design — an inline page never arms the
-  // dimension, and a cell that deterministically fails its verify state
-  // would measure nothing.
+  // execution digest rides the solution token. The interpreter asset
+  // is delivered in both asset tiers: the bundle theme emits the
+  // SRI-linked data-kiwi-execution-src on the container in inline mode
+  // exactly as in files mode (the interpreter is never embedded), and
+  // the fixture mirrors that — so the files-tier cells below are
+  // joined by the inline-tier cells execvminline/execsha18inline. The
+  // interpreter fetch is lazy in both tiers: a cell that arms execution
+  // records the single fetch (network layer), a SHA-only page pays
+  // zero bytes.
   execvm: {
     label: 'execution VM only (armed, fixture SHA default, no PoW change)',
     query: () => '?execution=1',
@@ -302,12 +314,33 @@ const DIFFICULTIES = {
     isArgon: true,
     assetModes: ['files'],
   },
+  // The inline-tier execution cells: the same SHA-profile execution
+  // workloads on the ?assets=inline page (glue and driver inlined, the
+  // interpreter still lazily fetched from its content-addressed route
+  // when the armed challenge arrives — the product's inline execution
+  // behavior, one lazy interpreter fetch per armed page). They measure
+  // the interpreter fetch start/duration and the VM run against an
+  // inline bootstrap instead of a files one.
+  execvminline: {
+    label: 'execution VM only, inline assets (armed, fixture SHA default, no PoW change)',
+    query: () => '?execution=1',
+    dimension: 'execution',
+    isArgon: false,
+    assetModes: ['inline'],
+  },
+  execsha18inline: {
+    label: 'execution + SHA-256 18 bits, inline assets',
+    query: () => '?execution=1&bits=18',
+    dimension: 'execution',
+    isArgon: false,
+    assetModes: ['inline'],
+  },
 };
 
 function parseArgs(argv) {
   const opts = {
     tiers: null, // null = all
-    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id', 'execvm', 'execsha18', 'execargon', 'execchain'],
+    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id', 'execvm', 'execsha18', 'execargon', 'execchain', 'execvminline', 'execsha18inline'],
     reps: 50, // SHA-256 solve repetitions per cell (the percentile-supporting default)
     argonReps: 20, // Argon2id solve repetitions per cell (memory-hard, so fewer but still percentile-supporting)
     cache: 'both', // cold | warm | both
@@ -419,13 +452,15 @@ Options:
   --tiers <list>          comma list of device tiers (default: all)
                           ${Object.keys(TIERS).join(', ')}
   --difficulties <list>   comma list (default:
-                          sha16,sha18,sha20,argon2id,execvm,execsha18,execargon,execchain)
+                          sha16,sha18,sha20,argon2id,execvm,execsha18,
+                          execargon,execchain,execvminline,execsha18inline)
   --reps N                SHA-256 solve repetitions per tier/difficulty/cache/assets
                           (default 50; the percentile-supporting range is 50-100)
   --argon-reps N          Argon2id repetitions per cell (default 20; range 20-30)
                           (the execution cells inherit the rep count of their PoW
-                          profile: execvm and execsha18 use --reps, execargon and
-                          execchain use --argon-reps)
+                          profile: execvm, execsha18, execvminline and
+                          execsha18inline use --reps, execargon and execchain use
+                          --argon-reps)
   --samples N             shorthand for --reps N --argon-reps N
   --cache <cold|warm|both>  cold = fresh context per load with the HTTP
                           cache disabled; warm = one reused context with
@@ -434,9 +469,14 @@ Options:
                           and driver; files = the ?assets=files variant
                           (external SRI assets, lazy Argon runtime and
                           lazy execution interpreter).
-                          Default both; the execution cells are files-only
-                          by design (the interpreter asset exists only in
-                          the files tier).
+                          Default both; the files execution cells
+                          (execvm, execsha18, execargon, execchain) are
+                          files-only and the inline execution cells
+                          (execvminline, execsha18inline) inline-only by
+                          design (the interpreter asset rides the
+                          container in both tiers, so each tier's cells
+                          measure its own bootstrap against the one
+                          lazy interpreter fetch).
   --fixture-port N        fixture server port (default 8091)
   --no-fixture            attach to an already-running fixture (e.g. the
                           playwright lane on 8085)
@@ -521,8 +561,9 @@ function seededShuffle(arr, rng) {
 
 // Every configured cell (tier x difficulty x cache x assets) as one
 // flat list; the run executes the list once, in seeded random order.
-// A difficulty may restrict its asset modes (the execution cells are
-// files-only by design), intersected with the CLI --assets selection.
+// A difficulty may restrict its asset modes (the files execution cells
+// are files-only and the inline execution cells inline-only by
+// design), intersected with the CLI --assets selection.
 function buildCellList(opts, tierNames) {
   const assetModes = opts.assets === 'both' ? ['inline', 'files'] : [opts.assets];
   const caches = opts.cache === 'both' ? ['cold', 'warm'] : [opts.cache];
@@ -1693,7 +1734,7 @@ function buildPayload(opts, ctx, completion) {
       sampleSizes: {
         shaReps: opts.reps,
         argonReps: opts.argonReps,
-        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration. The execution cells inherit the rep count of their PoW profile (execvm and execsha18 use the SHA count, execargon and execchain the Argon count).',
+        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration. The execution cells inherit the rep count of their PoW profile (execvm, execsha18, execvminline and execsha18inline use the SHA count, execargon and execchain the Argon count).',
       },
       argonLadder: {
         mKib: opts.argonMKib,
@@ -1704,8 +1745,8 @@ function buildPayload(opts, ctx, completion) {
         note: 'cold = a fresh context per load with the HTTP cache disabled, so every byte is re-fetched; warm = one reused context whose cache is enabled and populated by the first rep, so reps 2+ are cache-hit loads. The repeat-navigation field after the warm reps measures the fully-cached load.',
       },
       assets: {
-        inline: 'the fixture inlines the wasm glue and the driver in the page HTML',
-        files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, a lazy Argon runtime that is fetched only when a memory-hard challenge arrives, and the lazy execution interpreter that is fetched only when an armed challenge arrives (the execution cells are files-only by design)',
+        inline: 'the fixture inlines the wasm glue and the driver in the page HTML; the container still carries the SRI-linked execution interpreter attrs (data-kiwi-execution-src + integrity) in both tiers, mirroring the bundle theme, so an armed inline page lazily fetches the interpreter exactly once',
+        files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, a lazy Argon runtime that is fetched only when a memory-hard challenge arrives, and the lazy execution interpreter that is fetched only when an armed challenge arrives',
       },
     },
     fixture: {
@@ -1753,9 +1794,11 @@ function buildPayload(opts, ctx, completion) {
  * reasons, any results file that is not a clean completed full-matrix
  * run: the completion marker must be present (the incomplete-run
  * guard), the full default matrix must be covered (all seven tiers,
- * all eight difficulties — the four ordinary cells plus the four
- * ExecutionChallengeV1 cells — cold and warm, inline and files, with
- * the execution cells files-only by design), the sample sizes must
+ * all ten difficulties — the four ordinary cells plus the six
+ * ExecutionChallengeV1 cells, of which execvm/execsha18/execargon/
+ * execchain are files-only and execvminline/execsha18inline are
+ * inline-only by design — cold and warm across each cell's asset
+ * modes), the sample sizes must
  * meet the defaults, and the argon ladder must be the real one. Only
  * then is the file copied to results/baseline.json. The current
  * committed baseline.json stays untouched by every run; it is replaced

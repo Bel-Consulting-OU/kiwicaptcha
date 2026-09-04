@@ -5,20 +5,28 @@ name: Release
 # job, and publishes atomically:
 #
 #   job 1 (contents: read, actions: write — cannot publish/attest):
-#     gate (exact tag CI run succeeded; commit on protected main; release
-#     does not exist yet) -> strict pinned build -> released==committed
-#     byte proof -> manifests -> workflow artifact
+#     tag-ruleset preflight (the v* tag ruleset must be active with
+#     creation + deletion + non-fast-forward blocked) -> gate (no
+#     existing release; immutable-releases chain; tag SHA == authorized
+#     protected-branch head; signed annotated tag; exact tag CI run
+#     succeeded) -> strict pinned build -> released==committed byte
+#     proof -> manifests -> release asset contract -> workflow artifact
 #
 #   job 2 (contents: write, id-token: write, attestations: write — only
 #     runs after job 1):
 #     download the immutable artifact -> SLSA attestation -> atomic
 #     `gh release create` (draft -> upload -> publish, no clobber).
 #
-# v* tags are protected by a repository ruleset; GitHub Immutable
-# Releases is enabled (PUT /repos/{owner}/{repo}/immutable-releases), so
-# every published release object locks its tag and assets and carries a
-# release-level attestation; the publish step verifies both
-# (immutable:true API assertion + gh release verify).
+# v* tags are protected by an active repository ruleset (creation,
+# deletion and non-fast-forward are blocked for refs/tags/v*; the
+# bypass-actor list is empty), and the pipeline re-proves that ruleset
+# on every run as its first release step. A ruleset that is unreadable,
+# inactive or missing any of the three rules fails the run closed.
+# GitHub Immutable Releases is enabled
+# (PUT /repos/{owner}/{repo}/immutable-releases), so every published
+# release object locks its tag and assets and carries a release-level
+# attestation; the publish step verifies both (immutable:true API
+# assertion + gh release verify).
 on:
   push:
     tags:
@@ -45,17 +53,46 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
           fetch-depth: 0
-      - name: gate — exact tag CI, protected-main reachability, no existing release
-        # The gate selects the specific ci.yml workflow run triggered by
-        # this tag push (head_sha == GITHUB_SHA AND head_branch ==
-        # GITHUB_REF_NAME AND event == push) and requires it to be
-        # completed with success. Querying all check runs for the SHA is
-        # wrong twice over: the release job's own run can never complete
-        # while it waits, and the same SHA carries both a main-push and a
-        # tag-push CI copy — only the tag-triggered run proves "the CI
-        # workflow triggered by this tag passed". An existing release is
-        # also refused here, before any build, manifest or attestation
-        # work (never create attestations for a release that cannot be
+      - name: preflight — the v* tag ruleset protects release-tag creation
+        # Repository rulesets are the only enforcement that can restrict
+        # who creates v* tags, so a release is refused unless the tag
+        # ruleset is live: enforcement active, the creation rule plus
+        # deletion and non-fast-forward on refs/tags/v*, and no routine
+        # bypass actor (only the dedicated release GitHub App may ever be
+        # listed). This is the first release step and it fails closed: a
+        # 403, a 404 or any other unreadable or unparseable ruleset
+        # response is a hard refusal, never a warning — a ruleset that
+        # cannot be proven is treated as absent. The parser is shared
+        # with the CI fixture (tools/ci/tag-ruleset-check.sh), so the
+        # fixture matrix proves the exact logic this step runs.
+        run: |
+          set -euo pipefail
+          ruleset_id="20868582"
+          if ! ruleset_json="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"; then
+            echo "refusing to release: cannot read the v* tag ruleset $ruleset_id (ruleset preflight fails closed on 403/404/unreadable)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$ruleset_json" | bash "$GITHUB_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$ruleset_id"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: gate — exact tag CI, authorized-HEAD equality, signed annotated tag, no existing release
+        # The gate runs in a fixed order: an existing release is refused
+        # first (releases are immutable), then the immutable-releases
+        # preflight chain, then the authorized-head equality (the tag
+        # SHA must equal the current head of the authorized protected
+        # branch, never merely an ancestor of it), then the signed
+        # annotated tag pointing exactly at this workflow SHA, then the
+        # GitHub-verified commit, and finally the exact tag CI run. The
+        # CI wait is last because the release job's own run can never
+        # complete while it waits, and because every cheaper gate should
+        # fail before any waiting starts. Querying all check runs for
+        # the SHA is wrong twice over: the same SHA carries both a
+        # main-push and a tag-push CI copy — only the tag-triggered run
+        # proves "the CI workflow triggered by this tag passed",
+        # selected by head_sha == GITHUB_SHA AND head_branch ==
+        # GITHUB_REF_NAME AND event == push. An existing release is
+        # also refused before any build, manifest or attestation work
+        # (never create attestations for a release that cannot be
         # published).
         run: |
           set -euo pipefail
@@ -157,15 +194,77 @@ jobs:
             fi
           fi
 
-          # The reachability proof uses local git: the tag's commit must
-          # be an ancestor of protected origin/main (the GitHub compare
-          # endpoint is not usable for every ref pair on this repository).
-          git fetch --quiet --depth=100 origin main
-          if ! git merge-base --is-ancestor "$sha" FETCH_HEAD 2>/dev/null; then
-            echo "refusing to release: $sha is not reachable from protected main" >&2
+          # The tag SHA must equal the current head of the authorized
+          # protected branch — never merely be an ancestor of it. A
+          # signed tag pointing at an older commit would pass an
+          # ancestry gate and publish an outdated snapshot as the newest
+          # release; exact equality subsumes reachability, so the tagged
+          # commit is the branch head. The authorized branch is main by
+          # default and is set by the repository variable
+          # `RELEASE_AUTHORIZED_BRANCH`; a maintenance release may be cut
+          # only from an explicit protected release/N.N branch (for
+          # example release/1.6), and any other value is refused. The
+          # local-git proof is used because the GitHub compare endpoint
+          # is not usable for every ref pair on this repository.
+          authorized_branch="${RELEASE_AUTHORIZED_BRANCH:-main}"
+          case "$authorized_branch" in
+            main|release/[0-9]*.[0-9]*) ;;
+            *)
+              echo "refusing to release: RELEASE_AUTHORIZED_BRANCH=$authorized_branch is not 'main' or a protected 'release/N.N' branch" >&2
+              exit 1
+              ;;
+          esac
+          git fetch --quiet --depth=100 origin "refs/heads/$authorized_branch:refs/remotes/origin/$authorized_branch"
+          authorized_head="$(git rev-parse --verify "refs/remotes/origin/$authorized_branch")"
+          if [[ "$sha" != "$authorized_head" ]]; then
+            echo "refusing to release: tag SHA $sha does not equal the protected $authorized_branch head ($authorized_head) — releases publish only the exact current authorized-branch head" >&2
             exit 1
           fi
-          echo "reachability: $sha is an ancestor of origin/main (local git)"
+          echo "authorized-HEAD equality: $sha == protected $authorized_branch head (local git)"
+
+          # The release tag itself must be a signed annotated tag whose
+          # target is exactly this workflow SHA. A lightweight tag or an
+          # unsigned annotated tag is refused even when the commit is
+          # verified: the tag object carries the release identity and
+          # must show GitHub-recognized signature verification of its
+          # own. The git tag-object API is the only read path that
+          # exposes tag-object verification; the tag ref is fetched so
+          # the local resolution is exact.
+          git fetch --quiet --depth=100 origin "+refs/tags/$tag:refs/tags/$tag"
+          tag_ref="refs/tags/$tag"
+          if ! tag_obj_sha="$(git rev-parse --verify "$tag_ref" 2>/dev/null)"; then
+            echo "refusing to release: cannot resolve $tag_ref locally" >&2
+            exit 1
+          fi
+          tag_type="$(git cat-file -t "$tag_ref" 2>/dev/null || true)"
+          if [[ "$tag_type" != "tag" ]]; then
+            echo "refusing to release: $tag_ref is a $tag_type tag, not an annotated tag — release tags must be annotated and signed" >&2
+            exit 1
+          fi
+          if ! tag_ver="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_obj_sha" \
+              --jq '{verified: .verification.verified, reason: .verification.reason, type: .object.type, target: .object.sha}'
+          )"; then
+            echo "refusing to release: cannot read the annotated tag object $tag_obj_sha (signed-tag preflight fails closed)" >&2
+            exit 1
+          fi
+          echo "annotated tag verification: $tag_ver"
+          tag_verified="$(jq -r '.verified' <<<"$tag_ver")"
+          tag_target_type="$(jq -r '.type' <<<"$tag_ver")"
+          tag_target="$(jq -r '.target' <<<"$tag_ver")"
+          if [[ "$tag_verified" != "true" ]]; then
+            echo "refusing to release: annotated tag $tag is not GitHub-verified (signed-annotated-tag provenance required)" >&2
+            exit 1
+          fi
+          if [[ "$tag_target_type" != "commit" ]]; then
+            echo "refusing to release: annotated tag $tag points at a $tag_target_type object, not a commit" >&2
+            exit 1
+          fi
+          if [[ "$tag_target" != "$sha" ]]; then
+            echo "refusing to release: annotated tag $tag points at $tag_target, not the workflow SHA $sha" >&2
+            exit 1
+          fi
+          echo "signed annotated tag OK: $tag_obj_sha verified and targeted at the workflow SHA"
 
           # Release provenance must survive an administrator bypass of
           # branch protection: the exact tagged commit must be
@@ -218,6 +317,10 @@ jobs:
           # variable `IMMUTABLE_RELEASES_ENFORCED=true` as part of the
           # governance contract.
           IMMUTABLE_RELEASES_ENFORCED: ${{ vars.IMMUTABLE_RELEASES_ENFORCED }}
+          # The authorized release branch (main by default; a protected
+          # release/N.N branch for a maintenance release). The variable
+          # is set by an org admin before a maintenance tag push.
+          RELEASE_AUTHORIZED_BRANCH: ${{ vars.RELEASE_AUTHORIZED_BRANCH }}
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
@@ -246,7 +349,7 @@ jobs:
           echo "strict rebuild == committed/tested assets"
       - name: release manifest (SHA-256 + SRI)
         # SHA256SUMS uses basenames so `shasum -c SHA256SUMS` works in a
-        # flat download folder; SRI covers all four release assets
+        # flat download folder; SRI covers all five release assets
         # (widget.css is SRI-capable via <link>). Both manifests are
         # written inside assets/ so the single upload directory carries
         # everything with a predictable layout (no common-prefix
@@ -254,6 +357,16 @@ jobs:
         run: |
           set -euo pipefail
           ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+      - name: release asset contract (workflow lists == generated manifests)
+        # The asset contract is re-proven here on the exact artifacts
+        # about to be attested and published: every asset in
+        # release-assets.txt must appear in the workflow's attestation
+        # list, publish list, manifest producer and SRI producer, and
+        # the freshly generated SHA256SUMS and SRI.txt files. The same
+        # script is a required CI job, so drift fails CI long before a
+        # tag exists; this step makes the contract part of the release
+        # run itself.
+        run: bash "$GITHUB_WORKSPACE/tools/ci/release-asset-contract.sh"
       - name: upload the immutable build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -297,6 +410,7 @@ jobs:
             ${{ github.workspace }}/kiwi-worker.js
             ${{ github.workspace }}/widget-driver.js
             ${{ github.workspace }}/widget.css
+            ${{ github.workspace }}/execution-interpreter.js
             ${{ github.workspace }}/SHA256SUMS
             ${{ github.workspace }}/SRI.txt
       - name: publish the release atomically (draft -> upload -> publish)
@@ -337,6 +451,7 @@ jobs:
             "$GITHUB_WORKSPACE/kiwi-worker.js" \
             "$GITHUB_WORKSPACE/widget-driver.js" \
             "$GITHUB_WORKSPACE/widget.css" \
+            "$GITHUB_WORKSPACE/execution-interpreter.js" \
             "$GITHUB_WORKSPACE/SHA256SUMS" \
             "$GITHUB_WORKSPACE/SRI.txt" \
             --verify-tag \

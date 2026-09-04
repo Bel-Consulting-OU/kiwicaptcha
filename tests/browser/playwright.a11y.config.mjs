@@ -27,11 +27,14 @@ import { defineConfig } from '@playwright/test';
 // portable execution-evidence suite (execution-portable.spec.mjs) runs
 // the armed ExecutionChallengeV1 lifecycle end to end on every engine:
 // six fresh armed solves, token minting, digest and trace shape, and
-// the ephemeral-iframe teardown. The engine-specific torture cases stay
-// on the chromium-only default config.
+// the ephemeral-iframe teardown. The execution-CSP suite
+// (execution-csp.spec.mjs) drives the same lifecycle under real
+// Content-Security-Policy response headers (the documented strict
+// profile and an interpreter-blocking policy). The engine-specific
+// torture cases stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },

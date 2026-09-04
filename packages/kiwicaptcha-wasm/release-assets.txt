@@ -1,0 +1,5 @@
+kiwicaptcha-wasm.js
+kiwi-worker.js
+widget-driver.js
+widget.css
+execution-interpreter.js

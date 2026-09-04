@@ -38,17 +38,22 @@ namespace KiwiCaptcha;
  * the generator, which draws the bytes from the PRF stream, and every
  * interpreter, which reads them from the blob, can never drift.
  * The opcode table is the OP_* constant block of this class. It covers
- * integer arithmetic, typed-array ops, string ops and DOM ops.
- * The list: add, sub, mul, xor, and, or, shl, shr, u8 create, u8
- * write, u8 read, u8 rotate, length, charcode, codepoint, slice,
- * create, set attribute, append, query, get attribute, dataset set,
- * dataset get, class add, class contains, parent, dispatch, serialize.
+ * integer arithmetic, typed-array ops, string ops and DOM ops. The
+ * base list: add, sub, mul, xor, and, or, shl, shr, u8 create, u8
+ * write, u8 read, u8 rotate, string length, charcode, codepoint and
+ * slice. The DOM ops follow: create, set attribute, append, query, get
+ * attribute, dataset set, dataset get, class add, class contains,
+ * parent, dispatch and serialize. The browser-observed probes close
+ * the table: query real, geometry, point, event real, serialize real
+ * and observe. Version 2 adds observe, version 3 the sibling-index
+ * probe, and version 4 the child and depth probes of the nested tree.
  *
  * String literals are printable ASCII (0x20..0x7E); ids and class
  * names come from fixed 64-char alphabets; u32 literals are raw
  * big-endian bytes, so charcode, codepoint, length and slice
  * semantics are byte-exact across JS, PHP and Rust. Dataset keys
- * always start with a digit, so a real-DOM dataset write can never
+ * always start with the literal `x` and stay inside the safe
+ * `x[0-9a-z_]{0,15}` alphabet, so a real-DOM dataset write can never
  * reflect onto a `data-*` attribute that collides with the fixed
  * attribute-name list.
  *
@@ -105,7 +110,6 @@ final class ExecutionChallengeGenerator
 
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
-    /** The highest execution version this generator can emit (2 adds the observe opcode and the causal u8 chain). */
     /**
      * The highest execution version this generator can emit. Version 2
      * adds the observe opcode and the causal u8 chain. Version 3 adds a
@@ -251,9 +255,11 @@ final class ExecutionChallengeGenerator
         // observe opcode; version 2 adds the causal u8 chain (floor
         // 11); version 3 adds a second constructed node and the
         // sibling-index traversal probe — its fixed 12-op skeleton
-        // plus the drawn 1..3 extra probes needs floor 15. Every
-        // stamped count always fits its emitted records and the
-        // grammar bounds 8..24 stay unchanged.
+        // plus the drawn 1..3 extra probes needs floor 15. Version 4
+        // adds the nested tree (two child ops) and the depth probe;
+        // its fixed 15-op skeleton plus the drawn 1..3 extra probes
+        // needs floor 18. Every stamped count always fits its emitted
+        // records and the grammar bounds 8..24 stay unchanged.
         $opCount = match ($version) {
             2 => 11 + (self::nextByte($stream) % 14),
             3 => 15 + (self::nextByte($stream) % 10),
@@ -270,8 +276,9 @@ final class ExecutionChallengeGenerator
         // chain (create the array, observe the real layout height of
         // the constructed node into it, read the observed byte back,
         // checksum/rotate over it) and a mandatory real-probe block
-        // (one of the id probes 28/29/31, plus on version 3 the
-        // sibling-index probe 34, plus 1..3 further real probes). The
+        // (one of the id probes 28/29/31; version 3 adds the
+        // sibling-index probe 34; version 4 adds the depth probe and
+        // the two child ops; 1..3 further real probes follow). The
         // probe and observe id operands are the constructed id bytes,
         // drawn once and reused, so every probe reads a real
         // constructed node after the append. The remaining op slots
@@ -442,9 +449,10 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $opVersion = $read(1);
-        // Execution versions 1, 2 and 3 are accepted (the compat
-        // window: old challenges stay verifiable for their whole TTL);
-        // each version bounds its own opcode space below.
+        // Every execution version from 1 through the maximum constant
+        // is accepted (the compat window: older challenges stay
+        // verifiable for their whole TTL); each version bounds its own
+        // opcode space below.
         if ($opVersion === null || (\ord($opVersion) < 1 || \ord($opVersion) > self::MAX_EXECUTION_VERSION)) {
             return null;
         }
@@ -466,9 +474,10 @@ final class ExecutionChallengeGenerator
             $opcode = \ord($opcode);
             // Older-version programs never carry newer opcodes (the
             // version-2 observe opcode 33, the version-3 sibling-index
-            // opcode 34): the interpreter of a mixed fleet must be
-            // able to reject a newer grammar by the declared version
-            // byte alone.
+            // opcode 34, the version-4 child and depth opcodes 35 and
+            // 36): the interpreter of a mixed fleet must be able to
+            // reject a newer grammar by the declared version byte
+            // alone.
             $maxOpcode = match (\ord($opVersion)) {
                 1 => 33,
                 2 => 34,
@@ -627,7 +636,8 @@ final class ExecutionChallengeGenerator
                 }
                 $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_OBSERVE) {
-                                // validates the grammar and the bounds, requires the
+                // The causal observe entry obs(<dst>,<h>): the walker
+                // validates the grammar and the bounds, requires the
                 // probed id to be an appended node at this point, then
                 // replays the reported height into its own u8 state so
                 // every later checksum/read entry is exact-compared

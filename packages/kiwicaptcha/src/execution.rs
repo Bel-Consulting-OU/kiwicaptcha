@@ -2404,6 +2404,102 @@ mod tests {
     }
 
     #[test]
+    fn manifest_constants_match_the_module_register() {
+        // The protocol manifest (protocol/execution-v1.json, schema
+        // 'kiwicaptcha.execution-v1/1') is the canonical register shared
+        // by the PHP core, the Rust core and the interpreter asset. This
+        // test pins the module's own constants against the file, the
+        // mirror of the PHP ExecutionConstantsParityTest and of the CI
+        // lane tools/ci/protocol-manifest-check.sh: opcode numbers,
+        // opcode count, the maximum execution version, the trace-name
+        // list and the internal coherence of the manifest.
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/execution-v1.json"))
+                .expect("the manifest must parse");
+        assert_eq!(manifest["$schema"], "kiwicaptcha.execution-v1/1");
+        assert_eq!(
+            manifest["format_version"].as_u64().unwrap(),
+            FORMAT_VERSION as u64
+        );
+        assert_eq!(
+            manifest["max_execution_version"].as_u64().unwrap(),
+            MAX_EXECUTION_VERSION as u64
+        );
+        assert_eq!(manifest["opcode_count"].as_u64().unwrap(), OP_COUNT as u64);
+
+        let opcodes = manifest["opcodes"].as_object().expect("opcodes map");
+        let trace_names = manifest["trace_names"]
+            .as_array()
+            .expect("trace_names list");
+        assert_eq!(opcodes.len(), OP_COUNT as usize);
+        assert_eq!(trace_names.len(), OP_COUNT as usize);
+        for (name, number) in opcodes {
+            let constant: u8 = match name.as_str() {
+                "ADD" => OP_ADD,
+                "SUB" => OP_SUB,
+                "MUL" => OP_MUL,
+                "XOR" => OP_XOR,
+                "AND" => OP_AND,
+                "OR" => OP_OR,
+                "SHL" => OP_SHL,
+                "SHR" => OP_SHR,
+                "U8_CREATE" => OP_U8_CREATE,
+                "U8_WRITE" => OP_U8_WRITE,
+                "U8_READ" => OP_U8_READ,
+                "U8_ROTATE" => OP_U8_ROTATE,
+                "STR_LEN" => OP_STR_LEN,
+                "STR_CHARCODE" => OP_STR_CHARCODE,
+                "STR_CODEPOINT" => OP_STR_CODEPOINT,
+                "STR_SLICE" => OP_STR_SLICE,
+                "DOM_CREATE" => OP_DOM_CREATE,
+                "DOM_SET_ATTR" => OP_DOM_SET_ATTR,
+                "DOM_APPEND" => OP_DOM_APPEND,
+                "DOM_QUERY" => OP_DOM_QUERY,
+                "DOM_GET_ATTR" => OP_DOM_GET_ATTR,
+                "DOM_DATASET_SET" => OP_DOM_DATASET_SET,
+                "DOM_DATASET_GET" => OP_DOM_DATASET_GET,
+                "DOM_CLASS_ADD" => OP_DOM_CLASS_ADD,
+                "DOM_CLASS_CONTAINS" => OP_DOM_CLASS_CONTAINS,
+                "DOM_PARENT" => OP_DOM_PARENT,
+                "DOM_DISPATCH" => OP_DOM_DISPATCH,
+                "DOM_SERIALIZE" => OP_DOM_SERIALIZE,
+                "DOM_QUERY_REAL" => OP_DOM_QUERY_REAL,
+                "DOM_GEOMETRY" => OP_DOM_GEOMETRY,
+                "DOM_POINT" => OP_DOM_POINT,
+                "DOM_EVENT_REAL" => OP_DOM_EVENT_REAL,
+                "DOM_SERIALIZE_REAL" => OP_DOM_SERIALIZE_REAL,
+                "DOM_OBSERVE" => OP_DOM_OBSERVE,
+                "DOM_SIBLING_INDEX" => OP_DOM_SIBLING_INDEX,
+                "DOM_CHILD" => OP_DOM_CHILD,
+                "DOM_DEPTH" => OP_DOM_DEPTH,
+                other => panic!("manifest opcode {other:?} has no module constant"),
+            };
+            assert_eq!(
+                constant as u64,
+                number.as_u64().unwrap(),
+                "manifest opcode {name} must equal the module constant"
+            );
+        }
+        let mut numbers: Vec<u64> = opcodes
+            .values()
+            .map(|number| number.as_u64().unwrap())
+            .collect();
+        numbers.sort_unstable();
+        let sequential: Vec<u64> = (0..OP_COUNT as u64).collect();
+        assert_eq!(
+            numbers, sequential,
+            "the manifest opcode numbers must be the sequential set 0..N-1"
+        );
+        for (index, name) in trace_names.iter().enumerate() {
+            assert_eq!(
+                name.as_str().unwrap(),
+                TRACE_NAMES[index],
+                "the manifest trace-name list must match the module list"
+            );
+        }
+    }
+
+    #[test]
     fn browserless_shadow_solver_forges_v1_v2_v3_traces() {
         // The adversarial regression oracle: a pure shadow solver must
         // forge verifier-accepted traces for the v1, v2 and v3

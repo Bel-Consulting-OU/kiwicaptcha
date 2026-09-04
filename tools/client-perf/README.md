@@ -4,9 +4,10 @@ A Playwright-based client benchmark that drives the browser fixture
 (`tests/browser/router.php`) and measures the widget's real browser
 costs per difficulty tier: SHA-256 at 16/18/20 leading zero bits,
 Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), and
-the four ExecutionChallengeV1 cells (execvm, execsha18, execargon,
-execchain — see the execution-cells section), in both asset modes
-(inline and files). This is the calibration lab
+the six ExecutionChallengeV1 cells (execvm, execsha18, execargon,
+execchain, execvminline, execsha18inline — see the execution-cells
+section), across the asset tiers (inline and files). This is the
+calibration lab
 referenced by the `RiskProfileResolver` calibration note: the highest
 Argon rung and the SHA ladder must be measured on the throttled tiers,
 never assumed from desktop estimates.
@@ -65,7 +66,12 @@ and the driver in the page HTML. Files mode (`?assets=files`) emits the
 stylesheet and the driver as versioned SRI-linked external assets with
 an immutable cache lifetime, keeps the Argon runtime lazy (fetched only
 when a memory-hard challenge arrives), and dedups each asset once per
-page. The harness runs both shapes against both cache states:
+page. The execution interpreter is delivered in both tiers (the bundle
+theme emits its SRI-linked `data-kiwi-execution-src` on the container
+inline and files alike; the interpreter is never embedded), so an armed
+inline page performs the one lazy interpreter fetch exactly like an
+armed files page. The harness runs both shapes against both cache
+states:
 
 | cell | what it measures |
 |---|---|
@@ -89,22 +95,29 @@ mirror of the bundle's `risk.execution_challenge` gate): the challenge
 response then carries an execution program the driver runs in a
 sandboxed ephemeral iframe (the lazy `execution.<sha256>.js`
 interpreter asset) and the execution digest rides the solution token.
-The interpreter asset exists only in the files tier (the fixture emits
-its SRI-linked `data-kiwi-execution-src` only in the `?assets=files`
-variant), so the execution cells are files-only by design — an inline
-page never arms the dimension.
+The interpreter asset is delivered in both asset tiers: the fixture
+emits its SRI-linked `data-kiwi-execution-src` on every container,
+mirroring the bundle theme, so an armed
+inline page performs the same single lazy interpreter fetch as an
+armed files page — real inline-execution behavior, not a files-only
+construct.
 
-| difficulty key | what it measures |
-|---|---|
-| `execvm` | the execution VM on an ordinary fixture-default SHA challenge (no PoW change): interpreter fetch + iframe creation + VM run + digest, isolated from difficulty cost |
-| `execsha18` | the execution dimension on the ordinary 18-bit SHA rung |
-| `execargon` | the execution dimension on the real-ladder Argon2id rung (m=16384 KiB, target 8) |
-| `execchain` | the execution dimension on the chained-escalation path: the driver requests SHA-256 and the server issues the memory-hard rung at the real ladder (the lazy runtime fetch and worker startup are paid too) |
+| difficulty key | asset tier | what it measures |
+|---|---|---|
+| `execvm` | files | the execution VM on an ordinary fixture-default SHA challenge (no PoW change): interpreter fetch + iframe creation + VM run + digest, isolated from difficulty cost |
+| `execsha18` | files | the execution dimension on the ordinary 18-bit SHA rung |
+| `execargon` | files | the execution dimension on the real-ladder Argon2id rung (m=16384 KiB, target 8) |
+| `execchain` | files | the execution dimension on the chained-escalation path: the driver requests SHA-256 and the server issues the memory-hard rung at the real ladder (the lazy runtime fetch and worker startup are paid too) |
+| `execvminline` | inline | the VM-only profile with an inline bootstrap (glue and driver inlined, no PoW change): the one lazy interpreter fetch + VM run against the inline page |
+| `execsha18inline` | inline | the 18-bit SHA rung with an inline bootstrap |
 
 The execution cells inherit the rep count of their PoW profile:
-`execvm` and `execsha18` use the SHA count (default 50, `--reps`),
-`execargon` and `execchain` the Argon count (default 20,
-`--argon-reps`). Every cell records the ordinary solve/parse/wasm/
+`execvm`, `execsha18`, `execvminline` and `execsha18inline` use the SHA
+count (default 50, `--reps`), `execargon` and `execchain` the Argon
+count (default 20, `--argon-reps`). The Argon-profile execution cells
+stay files-tier by matrix scope; the inline-execution evidence this
+matrix carries is the SHA-profile pair. Every cell records the
+ordinary solve/parse/wasm/
 worker/fixed-work metrics plus the interpreter fetch start and
 duration, so the execution marginal cost is separable from the
 difficulty cost in the same file.
@@ -213,9 +226,10 @@ node tools/client-perf/client-perf.mjs --promote-baseline FILE
 
 The loader refuses, with the reasons, any results file that lacks the
 completion marker or that does not cover the full default matrix (all
-seven tiers, all eight difficulties — the four ordinary cells plus the
-four execution cells — cold and warm, inline and files, with the
-execution cells files-only by design). It also refuses runs recorded
+seven tiers, all ten difficulties — the four ordinary cells plus the
+six execution cells — cold and warm across each cell's asset tiers:
+the files execution cells files-only and the inline execution cells
+inline-only by design). It also refuses runs recorded
 below the default sample sizes (50 SHA and 20 Argon repetitions) or
 with a non-real argon ladder (m=16384 KiB, target 8). Only a clean
 full run can replace `results/baseline.json`, so the committed
@@ -224,10 +238,11 @@ baseline is never overwritten by an interrupted or partial run.
 ## Running
 
 ```sh
-# Default: all seven tiers, sha16+sha18+sha20+argon2id plus the four
-# execution cells (execvm, execsha18, execargon, execchain) at the real
-# ladder (16 MiB, target 8), cold and warm, inline and files (the
-# execution cells files-only), plus the 3-widget page scenario. SHA
+# Default: all seven tiers, sha16+sha18+sha20+argon2id plus the six
+# execution cells (execvm, execsha18, execargon, execchain — files —
+# and execvminline, execsha18inline — inline) at the real
+# ladder (16 MiB, target 8), cold and warm, inline and files, plus the
+# 3-widget page scenario. SHA
 # cells run 50 reps, Argon cells 20. A committed full run takes many
 # hours on the recording Mac.
 node tools/client-perf/client-perf.mjs

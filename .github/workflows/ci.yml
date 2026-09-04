@@ -889,6 +889,27 @@ jobs:
           done < packages/kiwicaptcha/tools/docs-lint-adopted.txt
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
 
+  release-contract:
+    # Release governance semantic gate, required like its repo-sanity
+    # neighbors: the release asset contract (every manifest asset must
+    # ride every release carrier list and the manifests, as one set),
+    # the tag-ruleset parser fixture matrix (the release workflow's
+    # ruleset preflight logic, proven without network), and the
+    # version-prose ratchet (stale execution-version and bypass
+    # governance claims anywhere in the scanned roots fail CI).
+    name: Release asset contract + governance fixtures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: release asset contract (workflow asset lists == manifests)
+        run: bash tools/ci/release-asset-contract.sh
+      - name: release governance fixtures (tag-ruleset parser matrix)
+        run: bash tools/ci/release-governance-fixture.sh
+      - name: version prose lint (stale execution-version/bypass claims)
+        run: bash tools/ci/version-prose-lint.sh
+
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
     # public READMEs and the workflows themselves must never carry

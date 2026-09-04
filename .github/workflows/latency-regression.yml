@@ -1,0 +1,273 @@
+name: Latency regression (self-hosted base/head)
+
+# Base/head latency regression on a dedicated self-hosted runner,
+# the end state documented in docs/performance-analysis.md ("The
+# dedicated hard-latency-runner end state" + "Operational steps") and
+# tracked as release-checklist.md milestone A. Every change is
+# benchmarked against the base ref on one host in one
+# session, distribution against distribution, never a point value
+# against a stale absolute threshold.
+#
+# Required runner: a self-hosted runner registered with the labels
+# [self-hosted, kiwi-perf] (docs step 3 names the machine-class
+# registration; the label is pinned to the fixed CPU class, never a
+# "latest" label). The machine must run the pinned PHP patch version
+# and Redis on loopback (KC_REDIS_URL, default redis://127.0.0.1:6399).
+#
+# Safe to add now, before the runner exists: the job reuses the skip
+# pattern of the existing manual latency job in ci.yml
+# (perf-latency-quiet, `if: github.event_name == 'workflow_dispatch'`),
+# so a push to main leaves the job skipped and a workflow_dispatch
+# run without a matching runner stays queued/unrunnable — nothing
+# blocks the merge lane until the runner is provisioned. Flipping the
+# gate (milestone A step 6): register the runner, regenerate the
+# timing baselines on it, drop the dispatch-only `if` so the push
+# trigger engages, and add the job to the protected-main required
+# contexts.
+#
+# The measured percentiles are p50 and p95: those are the percentiles
+# the repo's benchmark harness publishes (perf-bench.php prints
+# p50/p95 per phase; the recorded figures in
+# docs/performance-analysis.md use them). p90 is NOT yet published by
+# the harness — recording p90 and the within-run spread is the
+# documented harness-extension step (docs step 7) that lands when the
+# runner is provisioned; until then the p95/p50 spread bound below is
+# the variance signal. The comparison harness here is deliberately
+# self-contained (bash + awk, no repo tooling beyond perf-bench.php).
+#
+# Periodic reverse-order validation: to prove the comparison is not
+# biased by run order or host drift, periodically run the same job
+# with base_ref set to a newer commit than the checked-out head (head
+# older than base). The comparator must then report no regression —
+# a "regression" in reverse order is an order-bias signal, and a
+# workflow_dispatch run with base_ref=head is exactly that probe.
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base ref to benchmark against (default head~1; for a release regression pass the previous release tag)
+        required: false
+        default: head~1
+      redis_url:
+        description: Redis URL the redis benchmark mode runs against (defaults to the local instance)
+        required: false
+        default: redis://127.0.0.1:6399
+
+permissions:
+  contents: read
+
+env:
+  # Gate thresholds, overridable per dispatch via repository variables
+  # or a temporary env edit. A regression fires only when both are
+  # exceeded (relative % and absolute ms) with repeated-runs
+  # agreement, so a noisy single window never trips the gate.
+  LATENCY_REGRESSION_MAX_REL_PCT: '20'
+  LATENCY_REGRESSION_MAX_ABS_MS: '0.5'
+  # Within-run variance bound: a phase whose p95/p50 ratio exceeds the
+  # bound marks the window noisy (the p95/p50 spread is the variance
+  # signal until the harness records p90).
+  LATENCY_REGRESSION_MAX_SPREAD: '10'
+  # Benchmark modes: array (always), redis and argon (opt-in).
+  LATENCY_REGRESSION_MODES: 'array'
+  # Repeated interleaved runs per side for the agreement gate.
+  LATENCY_REGRESSION_REPEATS: '3'
+
+jobs:
+  latency-regression:
+    name: Latency regression (base/head, self-hosted kiwi-perf)
+    # Skip pattern mirror of the manual perf-latency-quiet job in
+    # ci.yml: dispatch-only until the runner is provisioned and the
+    # gate is flipped (see the header comment).
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, kiwi-perf]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: resolve the base ref (previous release commit by ref)
+        run: |
+          set -euo pipefail
+          base="${{ inputs.base_ref }}"
+          git fetch origin "$base" --tags 2>/dev/null || true
+          if ! git rev-parse --verify -q "$base" >/dev/null 2>&1; then
+            echo "base ref $base does not resolve" >&2
+            exit 1
+          fi
+          echo "BASE_REF=$base" >> "$GITHUB_ENV"
+      - name: check out the base tree (same session, same host)
+        run: |
+          set -euo pipefail
+          git worktree add --detach base "$BASE_REF"
+          git -C base rev-parse head
+      - name: composer install (head tree)
+        working-directory: packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: composer install (base tree)
+        working-directory: base/packages/kiwicaptcha-php
+        run: composer install --no-interaction --prefer-dist
+      - name: host warm-up run (head, discarded; settles governor, page cache, pools)
+        # The workloads already discard their own warmup iterations;
+        # this extra run settles the CPU governor, the page cache and
+        # the connection pools before the measured window starts
+        # (docs: "Warm-up before measurement").
+        run: |
+          set -euo pipefail
+          php packages/kiwicaptcha/tools/perf-bench.php >/dev/null 2>&1 || true
+          echo "warm-up run done"
+      - name: interleaved repeated benchmark runs (base then head per repeat)
+        # One base run and one head run per repeat, interleaved, so
+        # host drift is spread evenly across the two sides instead of
+        # correlating with run order. Each perf-bench run is recorded
+        # even when its internal 3x advisory ratchet fails (the log
+        # carries the p50/p95 line either way); a run whose workload
+        # hard-errors (a verification failed) writes no perf-bench
+        # line and the comparator below fails on the gap.
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: |
+          set -euo pipefail
+          repeats="${LATENCY_REGRESSION_REPEATS:-3}"
+          modes="${LATENCY_REGRESSION_MODES:-array}"
+          mkdir -p "$RUNNER_TEMP/kiwi-latency/base" "$RUNNER_TEMP/kiwi-latency/head"
+          for mode in $modes; do
+            case "$mode" in
+              array) flags=() ;;
+              redis) flags=(--redis) ;;
+              argon) flags=(--argon) ;;
+              *) echo "unknown LATENCY_REGRESSION_MODES entry: $mode" >&2; exit 1 ;;
+            esac
+            for ((repeat = 1; repeat <= repeats; repeat++)); do
+              for side in base head; do
+                if [ "$side" = base ]; then
+                  root="$GITHUB_WORKSPACE/base"
+                  out="$RUNNER_TEMP/kiwi-latency/base/$mode-$repeat.log"
+                else
+                  root="$GITHUB_WORKSPACE"
+                  out="$RUNNER_TEMP/kiwi-latency/head/$mode-$repeat.log"
+                fi
+                (cd "$root" && php packages/kiwicaptcha/tools/perf-bench.php "${flags[@]}") >"$out" 2>&1 || true
+                echo "$side $mode repeat $repeat: $(sed -n 's/perf-bench: \(SHA-256 [a-z]*\|Argon2id admission\) issuance.*/bench line recorded/p' "$out" || true)"
+              done
+            done
+          done
+      - name: compare base vs head (p50/p95, repeated-runs agreement gate)
+        run: |
+          set -euo pipefail
+          repeats="${LATENCY_REGRESSION_REPEATS:-3}"
+          modes="${LATENCY_REGRESSION_MODES:-array}"
+          rel_max="${LATENCY_REGRESSION_MAX_REL_PCT:-20}"
+          abs_max="${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}"
+          spread_max="${LATENCY_REGRESSION_MAX_SPREAD:-10}"
+          failed=0
+          ambiguous=0
+          for mode in $modes; do
+            : >"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
+            for ((repeat = 1; repeat <= repeats; repeat++)); do
+              for side in base head; do
+                log="$RUNNER_TEMP/kiwi-latency/$side/$mode-$repeat.log"
+                if [ ! -s "$log" ]; then
+                  echo "missing benchmark log for $side/$mode repeat $repeat" >&2
+                  exit 1
+                fi
+                if grep -q 'no Redis answers' "$log"; then
+                  echo "$mode: Redis unavailable — $side repeat $repeat skipped (loud note only)"
+                  continue
+                fi
+                # One perf-bench line per mode: issuance p50 p95 then
+                # verification p50 p95 on the same line (the phase
+                # summaries are separated by their sample-count
+                # segments, so each phase is extracted on its own).
+                issue="$(sed -n 's/.*issuance p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms.*/\1 \2/p' "$log")"
+                verify="$(sed -n 's/.*verification p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms.*/\1 \2/p' "$log")"
+                if [ -z "$issue" ] || [ -z "$verify" ]; then
+                  echo "no perf-bench measurement line in $log (hard error or missing workload):" >&2
+                  cat "$log" >&2
+                  exit 1
+                fi
+                read -r i50 i95 <<<"$issue"
+                read -r v50 v95 <<<"$verify"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$side" "$repeat" "$i50" "$i95" "$v50" "$v95" >>"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
+              done
+            done
+            echo "=== mode $mode ==="
+            # metric columns in the TSV: 1=issuance p50, 2=issuance
+            # p95, 3=verification p50, 4=verification p95 (offset 3).
+            for metric in 1 2 3 4; do
+              case "$metric" in
+                1) name="issue p50" ;;
+                2) name="issue p95" ;;
+                3) name="verify p50" ;;
+                4) name="verify p95" ;;
+              esac
+              col=$((metric + 3))
+              # The within-run spread of the phase is its p95/p50
+              # ratio (fixed TSV columns per phase).
+              if [ "$metric" -le 2 ]; then p50c=4; p95c=5; else p50c=6; p95c=7; fi
+              tsv="$RUNNER_TEMP/kiwi-latency/$mode.tsv"
+              b_med="$(awk -F '\t' -v c="$col" '$2 == "base" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
+              h_med="$(awk -F '\t' -v c="$col" '$2 == "head" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
+              if [ -z "$b_med" ] || [ -z "$h_med" ]; then
+                echo "$mode $name: no paired samples — skipped"
+                continue
+              fi
+              rel="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { if (b > 0) printf "%.1f", (h - b) / b * 100; else print "inf" }')"
+              absd="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { printf "%.4f", h - b }')"
+              # Repeated-runs agreement: no run pair may contradict the
+              # median delta's sign (a pair within exact equality is
+              # not a contradiction).
+              agreement="$(awk -F '\t' -v c="$col" -v b="$b_med" -v h="$h_med" '
+                $2 == "head" { hh[$3] = $c }
+                $2 == "base" { bb[$3] = $c }
+                END {
+                  n = 0
+                  for (r in hh) if (hh[r] != bb[r] && ((hh[r] - bb[r] > 0) != (h - b > 0))) n++
+                  print (n == 0 ? "agree" : "disagree:" n)
+                }' "$tsv")"
+              # Within-run spread bound (docs variance limit): any
+              # base/head run whose p95/p50 ratio for this phase
+              # exceeds the bound marks the window noisy — a noisy
+              # window cannot produce a trustworthy comparison.
+              noisy="$(awk -F '\t' -v p="$p50c" -v q="$p95c" -v smax="$spread_max" '
+                $2 == "base" || $2 == "head" {
+                  if ($p > 0 && $q / $p > smax) { print "noisy"; exit }
+                }
+                END { if (!noisy && NR > 0) print "quiet" }' "$tsv")"
+              [ -z "$noisy" ] && noisy="quiet"
+              echo "$mode $name: base median ${b_med} ms, head median ${h_med} ms, delta ${absd} ms (${rel}%), agreement ${agreement}, window ${noisy}"
+              over="$(awk -v r="$rel" -v rm="$rel_max" -v a="$absd" -v am="$abs_max" 'BEGIN { print (r >= rm && a >= am) ? 1 : 0 }')"
+              if [ "$over" = "1" ]; then
+                if [ "$agreement" = "agree" ] && [ "$noisy" = "quiet" ]; then
+                  echo "REGRESSION: $mode $name head is slower by $absd ms ($rel%) — over the ${rel_max}% / ${abs_max} ms thresholds with repeated-runs agreement" >&2
+                  failed=1
+                else
+                  echo "SIGNAL BUT AMBIGUOUS: $mode $name delta $absd ms ($rel%) exceeds the thresholds but agreement=$agreement window=$noisy — re-run on the quiet runner before concluding" >&2
+                  ambiguous=1
+                fi
+              fi
+            done
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo "latency-regression: FAILED — confident regression(s) above" >&2
+            exit 1
+          fi
+          if [ "$ambiguous" -eq 1 ]; then
+            echo "latency-regression: AMBIGUOUS — signals over threshold without repeated-runs agreement; re-run on the quiet runner" >&2
+            exit 1
+          fi
+          echo "latency-regression: PASS — no phase exceeds the ${rel_max}% / ${abs_max} ms thresholds with agreement"
+      - name: reverse-order validation note
+        # Periodic head->base reverse-order validation (see the header
+        # comment): dispatch the workflow with base_ref set to a
+        # newer commit than head (or base_ref=head with an older
+        # checked-out head) and confirm the comparator reports no
+        # regression. A "regression" in that order proves run-order or
+        # host-drift bias in the comparison, and the run must be
+        # investigated before the gate can trust its forward results.
+        run: |
+          echo "reverse-order probe: dispatch with base_ref newer than the head commit; expect PASS"

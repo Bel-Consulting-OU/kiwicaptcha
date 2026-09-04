@@ -36,15 +36,17 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 ## Release and branch governance
 
 - **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for all changes; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
-  All required security CI checks must pass (strict). The ruleset currently requires 25 check contexts, including the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job and the two stable matrix aggregators.
+  All required security CI checks must pass (strict), currently 26 contexts. The set includes the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job, the two stable matrix aggregators and the release asset contract + governance fixtures job.
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
   No actor holds a ruleset bypass: both rulesets carry an empty
   bypass-actor list, so every change to protected `main` and every
   protected-tag operation goes through the enforced checks.
-- `refs/tags/v*` are protected by an active tag ruleset: deletion and
-  non-fast-forward updates are blocked; tag creation is open to the
-  normal protected flow (a future release identity may narrow it).
+- `refs/tags/v*` are protected by an active tag ruleset with an empty
+  bypass-actor list: tag creation, deletion and non-fast-forward
+  updates are blocked for every actor. Releases are therefore blocked
+  by design until a dedicated hardware-backed GitHub App release
+  authority exists to create release tags under the ruleset.
 - **GitHub Immutable Releases is enabled** (`PUT /repos/{owner}/{repo}/immutable-releases`; the setting is also available in Settings -> General -> Immutable Releases).
   It applies to future releases only: the release object locks its tag and assets after publication and carries a release-level attestation.
   `v1.6.10` and earlier were published while the setting was off and remain mutable; `v1.6.11` is the first release published under it.
@@ -64,59 +66,57 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
   4. Mandatory post-publish proof: every published release is checked for `immutable: true` via the API and with `gh release verify`; a failure auto-deletes the release and fails the run (containment).
      A public mutable release can never be the outcome of a successful release run.
 - The workflow additionally fails instead of clobbering an existing release (`--clobber` is never used), and it refuses an existing release in the gate before any build or attestation work.
-- **Publication is CI-gated**: `.github/workflows/release.yml` verifies that the exact tag-triggered CI run succeeded (head_sha + head_branch + event) and that the commit is reachable from protected `main` before building, attesting, or publishing anything.
+- **Publication is CI-gated and ruleset-gated**: `.github/workflows/release.yml` re-verifies the live governance itself on every run, before building, attesting or publishing anything.
+  Its first step is the tag-ruleset preflight: the v* tag ruleset (id 20868582) must read as active, with the creation, deletion and non-fast-forward rules on `refs/tags/v*` and no routine bypass actor.
+  The preflight fails closed, so a ruleset that is unreadable (including a 403 for the plain token) or missing any requirement refuses the release.
+  The workflow then requires the exact tag-triggered CI run to have succeeded (head_sha + head_branch + event). It also requires the tag SHA to equal the current head of the authorized protected branch, a signed annotated tag pointing exactly at the workflow SHA, and the release asset contract to hold.
+  The authorized branch is `main` by default; a maintenance release is cut only from an explicit protected `release/N.N` branch, selected through the `RELEASE_AUTHORIZED_BRANCH` repository variable.
 - **Tested bytes == released bytes**: the release pipeline rebuilds the assets under the strict pinned toolchain and fails unless `git diff --exit-code` shows they are byte-identical to the committed assets that the browser suite and Symfony byte-parity job tested.
 - Releases are published atomically (`gh release create` with the assets inline: draft → upload → publish); a failure never leaves a public partial release.
 
 ### Governance bypass posture
 
-Both rulesets now carry an empty bypass-actor list: there is no
-organization-admin always-bypass. Protected `main` requires pull
-requests with two approving reviews, stale-review dismissal, code
-owner review, strict required checks, signed commits and linear
-history; protected `v*` tags block deletion and non-fast-forward
-updates for everyone.
+Both rulesets carry an empty bypass-actor list: no actor holds a
+ruleset bypass, and protected `main` has zero bypass actors. Protected
+`main` requires pull requests with two approving reviews, stale-review
+dismissal, code owner review, strict required checks, signed commits
+and linear history. The live `refs/tags/v*` ruleset blocks tag
+creation, deletion and non-fast-forward updates for every actor.
 
-The remaining recommendation: narrow release-tag creation to a scoped
-break-glass or release identity (a dedicated GitHub App with
-hardware-backed credentials), and keep the empty-bypass posture for
-routine actors. Every bypass or release action should land in the
-organization audit log with alerting.
+That ruleset is what blocks releases by design: no actor can create a
+release tag until a dedicated hardware-backed GitHub App release
+authority exists, scoped to `v*` tag creation and wired through the
+rulesets API. The release authority App is the remaining step. Every
+release action should land in the organization audit log with
+alerting.
 
-Signed release tags stay mandatory regardless. The release workflow
-independently verifies that the exact tag commit is GitHub-verified
-(signed), reachable from protected `main`, with the exact tag CI run
-succeeded. It also enforces the immutability chain and the SLSA
-attestation, so an administrator bypass cannot publish an unsigned or
-unattested artifact. That independent verification limits the blast
-radius of any bypass.
+Signed annotated release tags stay mandatory regardless. The release
+workflow independently verifies the ruleset preflight, the exact
+authorized-head equality, the signed annotated tag, the GitHub-verified
+commit, the exact tag CI run, the immutability chain, the SLSA
+attestation and the asset contract. No release path can publish an
+unsigned, off-head or unattested artifact. That independent
+verification is what makes the by-design release block safe while the
+authority App does not exist yet.
 
-Concrete steps an organization admin takes to narrow the bypass,
-through the rulesets API:
+The live ruleset state is verifiable through the rulesets API:
+`GET /repos/{owner}/{repo}/rulesets`, then
+`GET /repos/{owner}/{repo}/rulesets/{id}` for each, and the
+`bypass_actors` arrays of both rulesets are empty.
 
-- Enumerate the rulesets: `GET /repos/{owner}/{repo}/rulesets`, then
-  `GET /repos/{owner}/{repo}/rulesets/{id}` for each, and inspect the
-  `bypass_actors` array.
-- Update each ruleset with `PUT /repos/{owner}/{repo}/rulesets/{id}`:
-  remove the `OrganizationAdmin` entry from `bypass_actors`.
-- Add a narrow replacement: a `RepositoryRole` entry whose custom role
-  carries the bypass permission and is granted to the break-glass
-  identities only, or an `Integration` entry for a dedicated
-  break-glass GitHub App. Prefer `bypass_mode: pull_request` where the
-  operation permits, so the bypass covers pull-request rules only.
-- Enforce hardware-backed authentication at the organization level: a
-  security-key two-factor requirement, so the break-glass identity
-  cannot authenticate with a password or a copied token.
-- Stream the organization audit log to an external monitoring system
-  and alert on ruleset edits and on every bypass event.
-- Verify with `GET` after the `PUT`, and keep the signed-commit
-  requirement, the linear-history rule and the release workflow's
-  signature checks, which remain the release integrity boundary.
-
-This is a governance hardening recommendation, not evidence that
-releases are currently unsafe. The release pipeline verifies
-signatures and provenance independently of branch and tag rules, so
-releases stay protected even while the bypass exists.
+The remaining step, for when releases must resume, is to authorize a
+dedicated release GitHub App with hardware-backed credentials through
+a ruleset `Integration` entry whose bypass covers `v*` tag creation
+only. Prefer `bypass_mode: pull_request` where the operation permits,
+so the bypass covers pull-request rules only. Enforce hardware-backed
+authentication at the organization level: a security-key two-factor
+requirement, so the release identity cannot authenticate with a
+password or a copied token. Stream the organization audit log to an
+external monitoring system and alert on ruleset edits and on every
+release action. Verify with `GET` after any ruleset change, and keep
+the signed-commit requirement, the linear-history rule and the release
+workflow's signature checks, which remain the release integrity
+boundary.
 
 [GitHub Security Advisories]: https://github.com/Bel-Consulting-OU/kiwicaptcha/security/advisories
 

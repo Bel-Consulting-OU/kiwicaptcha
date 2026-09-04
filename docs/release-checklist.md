@@ -5,8 +5,8 @@ installation path: publishing the package chain, validating clean-room
 Composer resolution, landing the Symfony Flex recipe, and proving the
 one-command install on an empty application. Every step states its pass
 criteria and its current status. Statuses: not started, in progress,
-blocked, done. It also tracks the governance and operations milestones
-that sit outside the publication sequence.
+blocked, done, closed. It also tracks the governance and operations
+milestones that sit outside the publication sequence.
 
 ## Step 1. Publish the package chain to Packagist
 
@@ -149,24 +149,23 @@ regressions.
 
 Status: not started.
 
-### Milestone B. Scoped release/break-glass identity
+### Milestone B. OrganizationAdmin bypass narrowing
 
-Status: the permanent OrganizationAdmin always-bypass is REMOVED from
-both rulesets (empty bypass-actor lists; protected main runs the full
-PR/approval/CI flow and protected tags block deletion and
-non-fast-forward updates for everyone). Remaining work: authorize a
-scoped release identity (a dedicated GitHub App) for v* tag creation,
-with hardware-backed authentication, audit-log coverage and bypass
-alerting, through the rulesets API.
+Status: closed. The OrganizationAdmin always-bypass removal is live:
+both rulesets carry empty bypass-actor lists, protected `main` has
+zero bypass actors, and the `refs/tags/v*` ruleset blocks tag
+creation, deletion and non-fast-forward updates for every actor.
+Releases are blocked by design until the remaining step lands: a
+dedicated hardware-backed GitHub App release authority, scoped to `v*`
+tag creation with audit-log coverage and bypass alerting, through the
+rulesets API.
 
-Pass criteria: no routine actor holds a permanent always-bypass, the
-release identity is scoped and hardware-authenticated, and every
-use is audited and alerted.
-
-Status: not started. This is a governance hardening recommendation,
-not evidence that releases are currently unsafe; signed release tags
-and the release workflow's independent provenance checks remain in
-force.
+Pass criteria: no routine actor holds a permanent always-bypass, and
+the release identity is scoped and hardware-authenticated. The first
+criterion is met by the live empty bypass lists. The second is the
+remaining step: a dedicated hardware-backed GitHub App release
+authority for `v*` tag creation, with audit-log coverage and bypass
+alerting.
 
 ### Milestone C. Independent external security audit
 
