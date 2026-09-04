@@ -640,13 +640,17 @@ machinery (the Argon2id/rsw worker solve, the ExecutionChallengeV1
 runner, the decoy rendering and the coarse client-context descriptor)
 live in `widget-risk.js`. The core loads that module lazily when a
 memory-hard challenge, an armed response or the risk-context opt-in
-needs it. The telemetry session lives in `widget-telemetry.js`, loaded
-only when the widget enables a session. The incumbent compatibility
-loader lives in `widget-compat.js`, delivered inside the `/api.js`
-loader response and never fetched elsewhere. The files tier
-carries `data-kiwi-risk-src` + `data-kiwi-risk-integrity` and
-`data-kiwi-telemetry-src` + `data-kiwi-telemetry-integrity` on the
-container, and the core injects the same-origin SRI-pinned module
+needs it. The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
+in `widget-locales.js`, loaded only when the core resolves a
+non-default language (English pages pay zero bytes; a failed load
+degrades to the English fallback with a console warning). The
+telemetry session lives in `widget-telemetry.js`, loaded only when the
+widget enables a session. The incumbent compatibility loader lives in
+`widget-compat.js`, delivered inside the `/api.js` loader response and
+never fetched elsewhere. The container carries the lazy module URLs +
+SRI digests as `data-kiwi-risk-src`/`-integrity`,
+`data-kiwi-telemetry-src`/`-integrity` and `data-kiwi-locales-src`/
+`-integrity`, and the core injects the same-origin SRI-pinned module
 script only on trigger, mirroring the worker asset's lazy fetch.
 
 Why immutable caching: the URL contains the content hash, so the bytes
@@ -669,8 +673,11 @@ CSP per mode:
   same way, so a memory-hard or armed challenge never needs an
   external fetch under a CSP that allows inline scripts but not
   `'self'`; `widget-telemetry.js` is embedded only when telemetry is
-  enabled. The worker is built from a Blob URL, so this tier needs
-  `worker-src blob:`.
+  enabled. The locale packs are never embedded in either tier: their
+  content-addressed URL rides the container (like the execution
+  interpreter), so a default-language inline page still pays zero
+  bytes for translations. The worker is built from a Blob URL, so this
+  tier needs `worker-src blob:`.
 
 The execution dimension needs no extra directive in either tier. The
 interpreter is a lazy first-party content-addressed asset in both
@@ -685,9 +692,10 @@ profile stays compatible with execution challenges.
 zero-request deployments. It embeds the CSS, the WASM runtime, the
 driver core and the `widget-risk.js` module into the page at render
 time. It embeds `widget-telemetry.js` when a session is enabled. Only
-an execution-armed lifecycle fetches the interpreter asset (the lazy
-invariant of the ExecutionChallengeV1 section). A deployment that
-cannot serve or cache the versioned asset URLs selects it explicitly.
+an execution-armed lifecycle fetches the interpreter asset, and only
+a non-default-language widget fetches the locale module (the lazy
+invariants of the sections above). A deployment that cannot serve or
+cache the versioned asset URLs selects it explicitly.
 
 #### Ordinary-bootstrap size target
 
@@ -696,8 +704,8 @@ and its baselines record (`perf-baselines.json`), enforced in CI. The
 eager core (`widget-driver.js`) carries the raw 160,000-byte cap
 forward, now with compressed caps of 30,720 gzip / 28,000 brotli
 bytes; the lazy module assets (`widget-risk.js`,
-`widget-telemetry.js`, `widget-compat.js`) carry their own recorded
-raw-bytes rows and raw caps. The ordinary bootstrap, the bytes a plain
+`widget-telemetry.js`, `widget-locales.js`, `widget-compat.js`) carry
+their own recorded raw-bytes rows and caps. The ordinary bootstrap, the bytes a plain
 SHA-256 page downloads before any memory-hard or armed challenge,
 targets **sub-30 KB compressed** (gzip or brotli) for the eager core
 alone. The full browser suite, the asset-parity jobs and the perf
