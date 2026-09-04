@@ -7,3 +7,5 @@ composer.lock
 *.rs.bk
 test-results/
 playwright-report/
+
+tools/rsw-keygen/Cargo.lock

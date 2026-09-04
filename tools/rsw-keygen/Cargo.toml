@@ -1,0 +1,28 @@
+[package]
+name = "rsw-keygen"
+description = "Offline generator and checker for the KiwiCaptcha rsw trapdoor pair (n, lambda)"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+# The exact versions of the kiwicaptcha workspace lock: the tool builds
+# standalone (outside the workspace) and pins the same dependency set so
+# its resolution matches the shipped crate graph.
+base64 = "=0.22.1"
+hex = "=0.4.3"
+num-bigint = "=0.4.8"
+num-integer = "=0.1.47"
+rand = "=0.8.7"
+sha2 = "=0.10.9"
+kiwicaptcha = { path = "../../packages/kiwicaptcha" }
+
+[dev-dependencies]
+num-bigint = "=0.4.8"
+
+# The heavy modular arithmetic runs in num-bigint (and in the kiwicaptcha
+# path dependency). Optimizing the dependencies keeps dev-mode `cargo test`
+# and the self-test loops near release speed without touching the workspace.
+[profile.dev.package."*"]
+opt-level = 3

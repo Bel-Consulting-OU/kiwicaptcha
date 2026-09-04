@@ -7,6 +7,7 @@ members = [
 exclude = [
     "packages/kiwicaptcha-wasm",
     "packages/kiwicaptcha-wasm/tools/embed",
+    "tools/rsw-keygen",
 ]
 
 # The wasm crate is excluded from the workspace because it targets
