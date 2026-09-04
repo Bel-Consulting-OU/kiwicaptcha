@@ -227,7 +227,7 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version < 1 || $version > 4) {
+        if ($version < 1 || $version > self::MAX_EXECUTION_VERSION) {
             throw new \InvalidArgumentException(
                 'execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)'
             );

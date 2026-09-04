@@ -1743,7 +1743,7 @@ final class Verifier
         // a corrupt or foreign record — stripping, substituting or
         // injecting a program always invalidates the challenge.
         if ($executionPresent) {
-            if (($record->executionVersion < 1 || $record->executionVersion > 4) || $record->executionCommitment === null) {
+            if (($record->executionVersion < 1 || $record->executionVersion > ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) || $record->executionCommitment === null) {
                 return false;
             }
             if (preg_match('/^[0-9a-f]{64}$/D', $record->executionCommitment) !== 1) {

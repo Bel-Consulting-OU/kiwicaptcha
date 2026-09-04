@@ -605,9 +605,10 @@ impl VerifyError {
 /// - the protocol-vs-decoy-vs-execution grammar: v2 => no decoy, v3 =>
 ///   decoy present, v2/v3 => no execution, v4 => execution present (the
 ///   exact armed/unarmed equivalence: signed commitment absent <=> stored
-///   program absent, present <=> present, `execution_version` exactly 1,
-///   commitment exactly 64 lowercase hex, and SHA256(stored program) ==
-///   the signed commitment, constant-time).
+///   program absent, present <=> present, `execution_version` inside the
+///   set the register gate accepts below (currently 1..=2), commitment
+///   exactly 64 lowercase hex, and SHA256(stored program) == the signed
+///   commitment, constant-time).
 ///
 /// Argon2id memory/time/parallelism are deliberately NOT bounded here —
 /// the absolute process ceilings apply to the signed parameters after

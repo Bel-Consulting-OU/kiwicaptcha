@@ -258,11 +258,13 @@
   var actionBytes = take(actionLen);
   if (actionBytes === null) return null;
   var opVersion = byte();
-  // Execution versions 1, 2 and 3 are accepted (the compat window:
-  // old challenges stay executable for their whole TTL); each version
+  // Execution versions 1..4 are accepted (the compat window: old
+  // challenges stay executable for their whole TTL; 4 is the live
+  // maximum, mirroring the core's MAX_EXECUTION_VERSION); each version
   // bounds its own opcode space below — version 1 never carries the
   // version-2 observe opcode (33), versions below 3 never carry the
-  // version-3 sibling-index opcode (34).
+  // version-3 sibling-index opcode (34), versions below 4 never carry
+  // the version-4 child/depth opcodes (35/36).
   if (opVersion < 1 || opVersion > 4) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;

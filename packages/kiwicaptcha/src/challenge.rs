@@ -684,9 +684,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid[|decoy_field]|execution_version|execution_commitment
 /// ```
 ///
-/// - `execution_version` is the canonical numeric byte 1 or 2 (decimal
-///   on the
-///   wire; never `|`-capable).
+/// - `execution_version` is the canonical numeric byte carrying the
+///   program's execution grammar version, 1..=MAX_EXECUTION_VERSION
+///   when armed (decimal on the wire; never `|`-capable).
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never
 ///   `|`-capable.
@@ -1536,7 +1536,7 @@ pub fn issue_challenge_with_decoy(
 /// the provider-style action of the request (1..32 chars of
 /// `[A-Za-z0-9._:-]`, default "default") and `execution_version` the
 /// dimension protocol version, the canonical numeric byte (default 1,
-/// exactly 1 — the only version of the wire contract; passed as a u8,
+/// the live grammar range 1..=MAX_EXECUTION_VERSION; passed as a u8,
 /// never a string that is parsed). Both are embedded in the program and
 /// bound by the commitment.
 ///
