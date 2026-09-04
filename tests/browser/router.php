@@ -1659,9 +1659,6 @@ if ($path === '/' || $path === '/index.html') {
     $css = file_get_contents($assets.'/widget.css');
     $wasm = file_get_contents($assets.'/kiwicaptcha-wasm.js');
     $driver = file_get_contents($assets.'/widget-driver.js');
-    $csp = ($_GET['csp'] ?? '') === 'strict'
-        ? '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; style-src \'unsafe-inline\'">'
-        : '';
     $algorithmParam = (string) ($_GET['algorithm'] ?? '');
     $algorithm = $algorithmParam === 'argon2id' || $algorithmParam === 'rsw' ? $algorithmParam : 'sha256';
     $workerAttr = '';
@@ -1725,6 +1722,20 @@ if ($path === '/' || $path === '/index.html') {
     $assetTags = '';
     $runtimeAttr = '';
     $workerAttrFiles = '';
+    // The ExecutionChallengeV1 interpreter asset is delivered in both
+    // asset tiers, the mirror of the bundle theme: KiwiCaptchaRuntime's
+    // executionSrc/executionIntegrity are asset-mode independent, the
+    // interpreter is never embedded, and the container always carries
+    // its content-addressed URL + SRI. The driver fetches the asset
+    // lazily only when an armed challenge arrives (a SHA-only page pays
+    // zero bytes), so an inline page that arms ?execution=1 performs
+    // exactly the one lazy interpreter fetch — real inline-execution
+    // behavior, not a files-only construct. The runtime and the worker
+    // stay lazy files-tier features (inline mode embeds them, so no
+    // data-kiwi-runtime-src / data-kiwi-worker-src in this variant).
+    $executionBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/execution-interpreter.js');
+    $executionAttr = ' data-kiwi-execution-src="/kiwi-captcha/assets/execution.'.hash('sha256', $executionBody).'.js"'
+        .' data-kiwi-execution-integrity="sha256-'.base64_encode(hash('sha256', $executionBody, true)).'"';
     if ($filesMode) {
         $assetFiles = [
             'widget' => 'widget.css',
@@ -1746,24 +1757,48 @@ if ($path === '/' || $path === '/index.html') {
         $driverAsset = $assetLink('driver', 'js');
         $runtimeAsset = $assetLink('runtime', 'js');
         $workerAsset = $assetLink('worker', 'js');
-        $executionAsset = $assetLink('execution', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
             .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
         $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
-        // The ExecutionChallengeV1 interpreter asset stays lazy in the
-        // files tier (exactly like the runtime/worker): its URL + SRI
-        // ride the container and the driver fetches it only when an
-        // armed challenge arrives (a SHA-only page pays zero bytes).
-        $executionAttrFiles = ' data-kiwi-execution-src="'.$executionAsset['url'].'" data-kiwi-execution-integrity="'.$executionAsset['sri'].'"';
-    } else {
-        $executionAttrFiles = '';
+    }
+    // Real Content-Security-Policy header qualification (?csp=strict and
+    // ?csp=execution-blocked): a genuine response header, never a <meta>
+    // approximation, so the browser enforces the policy exactly like a
+    // deployment's page header. The inline tier keeps the historical
+    // allowance: every ordinary asset is embedded, so the strict header
+    // permits inline scripts and styles (the chromium-only strict-CSP
+    // specs depend on that). The files tier carries the documented
+    // production profile: same-origin assets only (script-src,
+    // style-src, connect-src and worker-src 'self'), the fixture's
+    // inline stylesheet hash-pinned, no wasm-unsafe-eval (a SHA-256 page
+    // solves in pure JS), no inline allowance (the tier emits no inline
+    // script). frame-src 'none' stays: about:srcdoc iframes are not
+    // governed by frame-src in any engine, so the execution iframe still
+    // loads and its interpreter <script src> rides the inherited
+    // script-src.
+    $cspHeader = null;
+    $cspKnob = (string) ($_GET['csp'] ?? '');
+    if ($filesMode && $cspKnob === 'strict') {
+        $cspHeader = "default-src 'self'; script-src 'self'; style-src 'self' 'sha256-".base64_encode(hash('sha256', $css, true))."'; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'";
+    } elseif ($filesMode && $cspKnob === 'execution-blocked') {
+        // The interpreter-blocking policy: script-src lists hash sources
+        // only, and the execution asset's content hash is absent from
+        // the list, so the srcdoc iframe's interpreter fetch is refused
+        // by the inherited policy while the page's own driver script
+        // stays allowed through its content hash.
+        $cspHeader = "default-src 'self'; script-src 'sha256-".base64_encode(hash('sha256', $driver, true))."'; style-src 'self' 'sha256-".base64_encode(hash('sha256', $css, true))."'; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'";
+    } elseif ($cspKnob === 'strict') {
+        $cspHeader = "script-src 'unsafe-inline'; style-src 'unsafe-inline'";
     }
     header('Content-Type: text/html');
+    if ($cspHeader !== null) {
+        header('Content-Security-Policy: '.$cspHeader);
+    }
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttrFiles}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
@@ -1777,7 +1812,7 @@ if ($path === '/' || $path === '/index.html') {
 ";
     }
     $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>';
-    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}{$assetTags}</head><body>
+    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$assetTags}</head><body>
 {$containers}{$inlineScripts}</body></html>";
 
     return true;

@@ -1,0 +1,127 @@
+name: Public install smoke
+
+# Clean-room public-registry install proof (release-checklist.md
+# steps 1-3 and 6): a completely empty application that shares no
+# files with this repository installs the published packages from the
+# public registries — Packagist (composer smoke) and crates.io (cargo
+# smoke) — with no path repository, no local artifact and no
+# repository checkout. These jobs are the machine proof that the
+# public instructions work from the registries alone; until the
+# packages are actually published (release-checklist.md step 1/2), a
+# dispatch run fails at the require/add step, which is the expected
+# honest state of a proof that cannot pass yet. The jobs run only on
+# workflow_dispatch with the exact versions to smoke, so a failed
+# proof is always attributable to a version pair.
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_version:
+        description: Exact bundle version to require from Packagist (e.g. 1.0.0)
+        required: true
+      rust_version:
+        description: Exact kiwicaptcha crate version to add from crates.io (e.g. 1.7.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  composer-smoke:
+    name: public composer smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium, intl
+          coverage: none
+      - name: install the symfony CLI
+        run: |
+          set -euo pipefail
+          curl -sS https://get.symfony.com/cli/installer | bash
+          echo "$HOME/.symfony5/bin" >> "$GITHUB_PATH"
+      - name: create the empty LTS application (--webapp)
+        run: |
+          set -euo pipefail
+          symfony new kiwi-smoke --version=lts --webapp
+      - name: require the bundle from Packagist (no path repository)
+        working-directory: kiwi-smoke
+        env:
+          BUNDLE_VERSION: ${{ inputs.bundle_version }}
+        run: |
+          set -euo pipefail
+          composer require "bel-consulting/kiwicaptcha-symfony:$BUNDLE_VERSION" --no-interaction --no-progress
+          composer show bel-consulting/kiwicaptcha-symfony
+      - name: the application boots (console about)
+        working-directory: kiwi-smoke
+        run: php bin/console about
+      - name: kiwicaptcha:doctor run, output recorded (missing-config notes tolerated)
+        # Honest variant of the doctor check: a smoke application has
+        # no production wiring (no Redis, no sitekeys, no public
+        # origin), so the doctor legitimately reports check-level
+        # failures that a configured deployment must resolve. The
+        # smoke's job is to prove the command boots from the public
+        # install, so the output is recorded and a hard error (the
+        # command itself crashing, an unknown command, a fatal) fails
+        # the step, while check-level failures caused by the missing
+        # config are logged as the expected smoke outcome. The
+        # documented env seed KIWI_SECRET_KEY is set so the secret
+        # check has a real value to evaluate.
+        working-directory: kiwi-smoke
+        env:
+          KIWI_SECRET_KEY: "0123456789abcdef0123456789abcdef"
+        run: |
+          set -u
+          php bin/console kiwicaptcha:doctor > doctor.out 2>&1
+          code=$?
+          set -e
+          cat doctor.out
+          if [ "$code" -eq 0 ]; then
+            echo "doctor: exit 0 (clean)"
+            exit 0
+          fi
+          if grep -Eq 'Command "kiwicaptcha:doctor" is not defined|In [A-Za-z_]+\.php line [0-9]+|Uncaught |Fatal error|is not registered' doctor.out; then
+            echo "doctor: HARD ERROR — the doctor itself crashed instead of reporting check statuses" >&2
+            exit 1
+          fi
+          echo "doctor: exit $code with check-level failures — recorded above; a smoke app without production wiring legitimately fails checks, so only hard errors fail this step"
+          exit 0
+      - name: the installed bundle ships its own assets (no repository file)
+        # The installed package must be self-contained: the widget
+        # assets ride the bundle's own Resources/public (the files-tier
+        # delivery reads them from the package), never a repository
+        # checkout.
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js
+          test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-driver.js
+          echo "bundle assets present in the installed package"
+
+  cargo-smoke:
+    name: public cargo smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - name: init an empty crate in a temp dir (no repo checkout)
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/kiwi-cargo-smoke"
+          cargo init --name kiwi-cargo-smoke "$RUNNER_TEMP/kiwi-cargo-smoke"
+      - name: add kiwicaptcha from crates.io and check (no path, no git source)
+        env:
+          RUST_VERSION: ${{ inputs.rust_version }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/kiwi-cargo-smoke"
+          cargo add "kiwicaptcha@$RUST_VERSION"
+          cargo check
+          # The resolution must come from the public registry alone:
+          # the empty temp crate has no path or git override, so the
+          # lockfile entry can only have been fetched from crates.io.
+          cargo tree -p kiwicaptcha --depth 0
+          echo "cargo smoke: kiwicaptcha@$RUST_VERSION resolved and checked from crates.io"

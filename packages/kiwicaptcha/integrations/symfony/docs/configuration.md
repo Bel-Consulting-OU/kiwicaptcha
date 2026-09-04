@@ -323,27 +323,33 @@ boundary. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
 
-Current status: the dimension is experimental and now carries the
-V2 causal-consistency semantics. Every issued program opens with a
-guaranteed causal graph: DOM construction (createElement, a mutate op,
-an append), a u8 array, and an observe op measuring the real layout
-height of the constructed node. The observed byte lands in the u8
-state, is read back, and is checksummed or rotated over, so later
-exact entries and the final digest depend on the browser-observed
-value. The verifier replays the whole graph
-forward from the reported value, checking bounds, structure and
-whole-trace coherence; a short pure synthesis that skips the
-write-through is rejected. The observed height is a genuine browser
-measurement: the interpreter styles the probed node as a fixed-width
-block rendering a canonical text line, so the value is the engine's
-own default-font metrics. The mirrors never predict it; their
-browser-equivalent traces use a fabricated reference value. In short:
-the first-party client exercises real browser layout during execution
-version 2, while verification currently establishes causal trace
-consistency with the claimed observation, not cryptographic
-provenance of the layout value itself. A solver that implements the
-full public semantics can still fabricate a coherent trace: the
-values are evidence, not a cryptographic proof of a browser.
+Current status: the dimension is experimental and carries the
+version-1 through version-4 grammars. Version 1 is the
+construction-to-probe grammar. Version 2 adds the causal-consistency
+semantics: every issued program opens with a guaranteed causal graph
+(DOM construction: createElement, a mutate op, an append; a u8 array;
+an observe op measuring the real layout height of the constructed
+node). The observed byte lands in the u8 state, is read back, and is
+checksummed or rotated over, so later exact entries and the final
+digest depend on the browser-observed value. Version 3 adds a second
+constructed node and the sibling-index traversal probe, a real DOM
+walk over the built siblings. Version 4 builds a real nested tree
+(two child nodes created under the current node) and probes the
+deepest child with an ancestor-depth walk. The verifier replays the
+whole graph forward from the reported value, checking bounds,
+structure and whole-trace coherence; a short pure synthesis that
+skips the write-through is rejected. The observed height is a genuine
+browser measurement: the interpreter styles the probed node as a
+fixed-width block rendering a canonical text line, so the value is
+the engine's own default-font metrics. The mirrors never predict it;
+their browser-equivalent traces use a fabricated reference value. In
+short: the first-party client exercises real browser layout across
+execution versions 2 through 4, while verification currently
+establishes causal trace consistency with the claimed observation,
+not cryptographic provenance of the layout values themselves. A
+solver that implements the full public semantics can still fabricate
+a coherent trace: the values are evidence, not a cryptographic proof
+of a browser.
 
 The dimension is controlled by these knobs:
 
@@ -367,12 +373,13 @@ The dimension is controlled by these knobs:
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
 - `kiwi_captcha.execution_required_version` (int 1..4, default 1):
-  the server-owned required execution tier. When 2, an execution-armed
-  request from a client below version 2 is refused with the
-  deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome and is
-  never downgraded to the weaker version-1 grammar. Raise it to 2 only
-  after the fleet is fully on the version-2 generation (the cap above
-  and the central `min_execution_version` floor at 2 everywhere).
+  the server-owned required execution tier. When set above 1, an
+  execution-armed request from a client below that tier is refused
+  with the deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED`
+  outcome and is never downgraded to a weaker grammar. Raise it only
+  after the fleet is fully on the destination generation (the cap
+  above and the central `min_execution_version` floor at that tier
+  everywhere).
   `kiwi_captcha.execution_min_required_version` is the semantic alias
   of this option: both spellings set the same value, and setting both
   to different values is refused as a configuration error. The legacy
@@ -380,9 +387,11 @@ The dimension is controlled by these knobs:
   window, so an existing deployment never needs to change its config.
 
 - `kiwi_captcha.execution_version` (int 1..4, default 1): the
-  node's execution-program grammar cap. Version 3 is the
-  sibling-index traversal grammar (opcode 34); version 2 is the
-  causal observe grammar (opcode 33); version 1 is the
+  node's execution-program grammar cap. Version 4 is the nested-tree
+  grammar: the child opcode (35) builds nodes under the current node
+  and the depth probe (36) walks the real ancestor chain. Version 3
+  is the sibling-index traversal grammar (opcode 34); version 2 is
+  the causal observe grammar (opcode 33); version 1 is the
   construction-to-probe grammar every interpreter generation runs. A
   node emits a version above 1 only when the client advertised at
   least that version with the challenge request (the
@@ -394,7 +403,7 @@ The dimension is controlled by these knobs:
   Every other combination emits version 1, so a mixed fleet of older
   binaries and stale open pages is never handed the newer grammar.
   The cap defaults to 1: raising it declares the node ready to write
-  version-2 programs, and the counterpart central floor is declared by
+  the newer grammar, and the counterpart central floor is declared by
   the operator, see operations.md "Execution versioning".
   `kiwi_captcha.execution_max_version` is the semantic alias of this
   option, with the same both-spellings rule as above.
@@ -408,8 +417,11 @@ The dimension is controlled by these knobs:
   required tier is below the node cap, the configuration is refused at
   compile time unless this flag is explicitly true. Set it to true
   only to accept the deliberate downgrade window during the fleet
-  transition. The doctor then warns that the downgrade is permitted
-  only through this flag.
+  transition. The flag only lets the configuration compile: the
+  doctor's posture audit accepts a downgrade window only while
+  `protocol_rollout.mode: migration` is declared, and high_abuse in
+  the normal state must require the strongest confirmed tier, see
+  operations.md "Execution versioning".
 
 The dimension is supplementary evidence only. It is never the sole
 acceptance boundary: the proof-of-work proof and the record state
@@ -435,8 +447,10 @@ config layer always wins over the balanced and high_abuse derived
 defaults; only privacy_strict keeps the force. Under `high_abuse`
 with the gate on, an armed required tier below the node cap is
 refused at compile time unless `execution_allow_downgrade` is
-explicitly true; the balanced and privacy_strict profiles never apply
-that invariant, so their required tier stays operator-owned.
+explicitly true. The balanced and privacy_strict profiles never apply
+that compile-time invariant, yet their required tier is still audited
+against the effective fleet tier by the doctor and the readiness
+probe, see operations.md "Execution versioning".
 
 ## RSW time-lock: the optional sequential proof (experimental)
 
@@ -603,15 +617,27 @@ CSP per mode:
   `style-src 'self'`); the lazy runtime and worker fetches use
   `connect-src 'self'`, and the same-origin Worker needs
   `worker-src 'self'` — `blob:` is never required.
-- `inline` (compatibility / zero-request tier): every asset is embedded
-  into the page at render time (the historical behavior, zero requests,
-  no static asset handling). The worker is built from a Blob URL, so
+- `inline` (compatibility / zero-request tier): the CSS, the WASM
+  runtime and the driver are embedded into the page at render time
+  (the historical zero-request behavior for the ordinary surface, no
+  static asset handling). The worker is built from a Blob URL, so
   this tier needs `worker-src blob:`.
 
-`inline` is the documented compatibility tier for zero-request
-deployments: it embeds the CSS, the WASM runtime and the driver into the
-page at render time. A deployment that cannot serve or cache the versioned
-asset URLs selects it explicitly.
+The execution dimension needs no extra directive in either tier. The
+interpreter is a lazy first-party content-addressed asset in both
+tiers (see the ExecutionChallengeV1 section above). The driver loads
+it through a same-origin script tag inside the sandboxed srcdoc
+iframe, so the page's own `script-src` governs the fetch; a SHA-only
+page never triggers it. The `frame-src` directive does not
+govern the about:srcdoc document, so a strict `frame-src 'none'`
+profile stays compatible with execution challenges.
+
+`inline` is the documented compatibility tier for ordinary
+zero-request deployments. It embeds the CSS, the WASM runtime and the
+driver into the page at render time, and only an execution-armed
+lifecycle fetches the interpreter asset (the lazy invariant of the
+ExecutionChallengeV1 section). A deployment that cannot serve or cache
+the versioned asset URLs selects it explicitly.
 
 #### Ordinary-bootstrap size target
 
@@ -933,8 +959,11 @@ is never forced) are the privacy contract; see
     # emission (a forgotten override must not silently persist). mode
     # "migration" declares the deliberate two-phase migration (v3/v4
     # emission deferred until the fleet floor is confirmed); the doctor
-    # records the same high_abuse deferral as a WARN (exit 0). The
-    # two-phase rollout procedures themselves are unchanged; see
+    # records the same high_abuse deferral as a WARN (exit 0). The mode
+    # also gates the execution-versioning audit: the doctor accepts a
+    # required-tier downgrade window only in the migration state, see
+    # operations.md "Execution versioning".
+    # The two-phase rollout procedures themselves are unchanged; see
     # operations.md "Protocol v3 two-phase rollout" and "Protocol v4
     # execution rollout".
 ```

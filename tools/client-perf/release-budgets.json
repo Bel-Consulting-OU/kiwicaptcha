@@ -1,0 +1,326 @@
+{
+  "schema": "kiwicaptcha.release-budgets/1",
+  "generated": "2026-09-04",
+  "note": "PLACEHOLDER p95 budgets, derived from the harness's own published desktop-emulation figures. Each value is 1.5x the legacy recording's p95 (tools/client-perf/results/baseline.json, the schema-1 pre-matrix recording, rounded up to whole ms) for the matching tier/difficulty/cache row. The 1.5x factor is headroom for the difference between the legacy 5-sample p95 and the harness's 50-sample p95; it is a placeholder margin, not a measured allowance. The real budgets come from the first physical-device qualification (the physical-run procedure in tools/client-perf/README.md). Before a release gates on these, replace every row below with the physical-device figures of the exact tier the deployment targets. The argon2id placeholder rows were recorded at the legacy fixture envelope (64 KiB, 4-bit target), not the real adaptive-risk ladder (16 MiB, target 8). A real-ladder run legitimately exceeds them, which is a feature: the gate refuses until the physical-device argon budgets land. It is never a claim about real-ladder admission cost. The execution cells (execvm, execsha18, execargon, execchain, execvminline, execsha18inline) carry no latency budget rows yet, because no execution figures are published anywhere and placeholder numbers for them would be invented. Their rows are required in the baseline (presence, sample counts, failure rate). Their p95 budgets arrive with the first physical-device qualification. Until then the validator reports those cells as budget-uncovered and refuses a release baseline that violates any budget row that does exist.",
+  "recordAgeDays": 90,
+  "minShaReps": 50,
+  "minArgonReps": 20,
+  "maxCellFailureRate": 0.02,
+  "tiers": [
+    "low-android",
+    "mid-android",
+    "flagship-android",
+    "older-iphone",
+    "current-iphone",
+    "low-desktop",
+    "mainstream-desktop"
+  ],
+  "difficulties": [
+    "sha16",
+    "sha18",
+    "sha20",
+    "argon2id",
+    "execvm",
+    "execsha18",
+    "execargon",
+    "execchain",
+    "execvminline",
+    "execsha18inline"
+  ],
+  "budgets": {
+    "low-android": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 551,
+          "pageToVerifiedMsP95": 627
+        },
+        "warm": {
+          "solveMsP95": 321,
+          "pageToVerifiedMsP95": 406
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 1747,
+          "pageToVerifiedMsP95": 1817
+        },
+        "warm": {
+          "solveMsP95": 2155,
+          "pageToVerifiedMsP95": 2241
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 4492,
+          "pageToVerifiedMsP95": 4565
+        },
+        "warm": {
+          "solveMsP95": 4477,
+          "pageToVerifiedMsP95": 4552
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 90,
+          "pageToVerifiedMsP95": 159
+        },
+        "warm": {
+          "solveMsP95": 94,
+          "pageToVerifiedMsP95": 175
+        }
+      }
+    },
+    "mid-android": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 489,
+          "pageToVerifiedMsP95": 536
+        },
+        "warm": {
+          "solveMsP95": 597,
+          "pageToVerifiedMsP95": 646
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 583,
+          "pageToVerifiedMsP95": 629
+        },
+        "warm": {
+          "solveMsP95": 786,
+          "pageToVerifiedMsP95": 833
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 1522,
+          "pageToVerifiedMsP95": 1574
+        },
+        "warm": {
+          "solveMsP95": 6566,
+          "pageToVerifiedMsP95": 6613
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 66,
+          "pageToVerifiedMsP95": 114
+        },
+        "warm": {
+          "solveMsP95": 60,
+          "pageToVerifiedMsP95": 110
+        }
+      }
+    },
+    "flagship-android": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 174,
+          "pageToVerifiedMsP95": 198
+        },
+        "warm": {
+          "solveMsP95": 208,
+          "pageToVerifiedMsP95": 233
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 518,
+          "pageToVerifiedMsP95": 542
+        },
+        "warm": {
+          "solveMsP95": 491,
+          "pageToVerifiedMsP95": 515
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 1255,
+          "pageToVerifiedMsP95": 1278
+        },
+        "warm": {
+          "solveMsP95": 1300,
+          "pageToVerifiedMsP95": 1322
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 50,
+          "pageToVerifiedMsP95": 73
+        },
+        "warm": {
+          "solveMsP95": 35,
+          "pageToVerifiedMsP95": 59
+        }
+      }
+    },
+    "older-iphone": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 267,
+          "pageToVerifiedMsP95": 317
+        },
+        "warm": {
+          "solveMsP95": 269,
+          "pageToVerifiedMsP95": 321
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 922,
+          "pageToVerifiedMsP95": 971
+        },
+        "warm": {
+          "solveMsP95": 2042,
+          "pageToVerifiedMsP95": 2095
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 4905,
+          "pageToVerifiedMsP95": 4950
+        },
+        "warm": {
+          "solveMsP95": 4305,
+          "pageToVerifiedMsP95": 4356
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 114,
+          "pageToVerifiedMsP95": 166
+        },
+        "warm": {
+          "solveMsP95": 66,
+          "pageToVerifiedMsP95": 118
+        }
+      }
+    },
+    "current-iphone": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 190,
+          "pageToVerifiedMsP95": 215
+        },
+        "warm": {
+          "solveMsP95": 161,
+          "pageToVerifiedMsP95": 183
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 230,
+          "pageToVerifiedMsP95": 253
+        },
+        "warm": {
+          "solveMsP95": 379,
+          "pageToVerifiedMsP95": 402
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 2457,
+          "pageToVerifiedMsP95": 2479
+        },
+        "warm": {
+          "solveMsP95": 3396,
+          "pageToVerifiedMsP95": 3417
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 51,
+          "pageToVerifiedMsP95": 76
+        },
+        "warm": {
+          "solveMsP95": 41,
+          "pageToVerifiedMsP95": 63
+        }
+      }
+    },
+    "low-desktop": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 222,
+          "pageToVerifiedMsP95": 268
+        },
+        "warm": {
+          "solveMsP95": 318,
+          "pageToVerifiedMsP95": 367
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 907,
+          "pageToVerifiedMsP95": 952
+        },
+        "warm": {
+          "solveMsP95": 609,
+          "pageToVerifiedMsP95": 657
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 2507,
+          "pageToVerifiedMsP95": 2550
+        },
+        "warm": {
+          "solveMsP95": 2572,
+          "pageToVerifiedMsP95": 2618
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 62,
+          "pageToVerifiedMsP95": 106
+        },
+        "warm": {
+          "solveMsP95": 63,
+          "pageToVerifiedMsP95": 111
+        }
+      }
+    },
+    "mainstream-desktop": {
+      "sha16": {
+        "cold": {
+          "solveMsP95": 94,
+          "pageToVerifiedMsP95": 105
+        },
+        "warm": {
+          "solveMsP95": 138,
+          "pageToVerifiedMsP95": 149
+        }
+      },
+      "sha18": {
+        "cold": {
+          "solveMsP95": 235,
+          "pageToVerifiedMsP95": 246
+        },
+        "warm": {
+          "solveMsP95": 120,
+          "pageToVerifiedMsP95": 131
+        }
+      },
+      "sha20": {
+        "cold": {
+          "solveMsP95": 889,
+          "pageToVerifiedMsP95": 900
+        },
+        "warm": {
+          "solveMsP95": 1538,
+          "pageToVerifiedMsP95": 1552
+        }
+      },
+      "argon2id": {
+        "cold": {
+          "solveMsP95": 79,
+          "pageToVerifiedMsP95": 91
+        },
+        "warm": {
+          "solveMsP95": 47,
+          "pageToVerifiedMsP95": 64
+        }
+      }
+    }
+  }
+}

@@ -30,9 +30,14 @@ use Twig\Environment;
  *    SHA-256 page pays nothing for the Argon machinery. The worker runs
  *    as a same-origin Worker (no Blob), so files mode needs
  *    worker-src 'self'.
- *  - "inline" (compatibility / zero-request tier): all assets are
- *    inlined at render time — the widget makes no external requests (the
- *    historical behavior). The Blob worker it builds needs
+ *  - "inline" (compatibility / zero-request tier): the ordinary
+ *    compatibility surface — the stylesheet, the WASM runtime glue and
+ *    the driver — is inlined at render time (the historical behavior).
+ *    The ExecutionChallenge interpreter stays a lazy first-party
+ *    content-addressed asset (executionSrc below; the interpreter is
+ *    never embedded) that the driver fetches exactly once on an
+ *    execution-armed lifecycle, so a non-execution lifecycle makes no
+ *    external asset request. The Blob worker this tier builds needs
  *    worker-src blob:.
  *
  * The telemetry mode (off/minimal/full) follows the bundle config (forced
