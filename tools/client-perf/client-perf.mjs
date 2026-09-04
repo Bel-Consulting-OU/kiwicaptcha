@@ -4,9 +4,9 @@
  *
  * A Playwright-based client benchmark that drives the browser fixture
  * (tests/browser/router.php) and measures, per difficulty tier
- * (SHA-256 16/18/20 bits, Argon2id, and the four ExecutionChallengeV1
- * cells) and per asset mode (inline vs files, the ?assets=files
- * fixture variant):
+ * (SHA-256 16/18/20 bits, Argon2id at the real ladder, the three rsw
+ * time-lock rungs, and the ExecutionChallengeV1 cells) and per asset
+ * mode (inline vs files, the ?assets=files fixture variant):
  *
  *   - solve time (challenge fetch start -> kiwi:verified) and the pure
  *     proof computation (solving state -> verified): p50/p95/p99,
@@ -23,12 +23,20 @@
  *     message, i.e. the driver's ready handshake),
  *   - main-thread blocking (Long Task API): count, total, p95,
  *   - peak JS heap (performance.memory samples + final heap),
- *   - the inline/files x cold/warm matrix: transferred bytes (Resource
+ *  - the inline/files x cold/warm matrix: transferred bytes (Resource
  *     Timing transferSize, document + assets), cache-hit loads (warm
  *     reps reusing one populated context), the lazy Argon runtime fetch
  *     (files mode: the wasm glue is fetched only when a memory-hard
  *     challenge arrives; the fetch start is recorded), and a repeat
  *     navigation measurement after the warm reps (everything cached).
+ *
+ * The rsw sequential time-lock rungs (?algorithm=rsw&rsw_t=<T>) are:
+ * rsw75k, rsw150k and rsw300k (the default rung, the midpoint and the
+ * protocol ceiling of the 10,000..=300,000 T range). An rsw solve is T
+ * deterministic modular squarings in the worker's pure-JS BigInt
+ * solver; the rsw cells ride the same asset tiers as Argon2id (the
+ * inline Blob worker and the files-mode versioned worker asset), so
+ * the matrix records the full solve through the worker path.
  *
  * The ExecutionChallengeV1 cells (?execution=1 armed) are: execvm (the
  * execution VM on an ordinary fixture-default SHA challenge, no PoW
@@ -272,6 +280,39 @@ const DIFFICULTIES = {
     isArgon: true,
     assetModes: ['inline', 'files'],
   },
+  // The rsw sequential time-lock rungs: T deterministic modular
+  // squarings over the 2048-bit composite, solved in pure JS BigInt in
+  // the worker (the same dispatch as Argon2id: the driver builds the
+  // Blob worker from the glue-carried source in inline mode, or the
+  // versioned worker asset in files mode; the wasm glue is never
+  // consulted for the squaring itself). The fixture issues rsw only
+  // when asked (?algorithm=rsw&rsw_t=<T>), mirroring an operator-armed
+  // deployment. The three rungs are the default ladder T=75,000 and
+  // the protocol ceiling T=300,000, with 150,000 as the midpoint.
+  rsw75k: {
+    label: 'rsw time-lock, T=75,000 squarings (the default rung)',
+    query: () => '?algorithm=rsw&rsw_t=75000',
+    dimension: 'rsw',
+    isArgon: false,
+    sequential: true,
+    assetModes: ['inline', 'files'],
+  },
+  rsw150k: {
+    label: 'rsw time-lock, T=150,000 squarings',
+    query: () => '?algorithm=rsw&rsw_t=150000',
+    dimension: 'rsw',
+    isArgon: false,
+    sequential: true,
+    assetModes: ['inline', 'files'],
+  },
+  rsw300k: {
+    label: 'rsw time-lock, T=300,000 squarings (the protocol ceiling)',
+    query: () => '?algorithm=rsw&rsw_t=300000',
+    dimension: 'rsw',
+    isArgon: false,
+    sequential: true,
+    assetModes: ['inline', 'files'],
+  },
   // The ExecutionChallengeV1 cells. The fixture arms the execution
   // dimension with ?execution=1 (the mirror of the bundle's
   // risk.execution_challenge gate); the challenge response then carries
@@ -340,7 +381,7 @@ const DIFFICULTIES = {
 function parseArgs(argv) {
   const opts = {
     tiers: null, // null = all
-    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id', 'execvm', 'execsha18', 'execargon', 'execchain', 'execvminline', 'execsha18inline'],
+    difficulties: ['sha16', 'sha18', 'sha20', 'argon2id', 'rsw75k', 'rsw150k', 'rsw300k', 'execvm', 'execsha18', 'execargon', 'execchain', 'execvminline', 'execsha18inline'],
     reps: 50, // SHA-256 solve repetitions per cell (the percentile-supporting default)
     argonReps: 20, // Argon2id solve repetitions per cell (memory-hard, so fewer but still percentile-supporting)
     cache: 'both', // cold | warm | both
@@ -452,8 +493,9 @@ Options:
   --tiers <list>          comma list of device tiers (default: all)
                           ${Object.keys(TIERS).join(', ')}
   --difficulties <list>   comma list (default:
-                          sha16,sha18,sha20,argon2id,execvm,execsha18,
-                          execargon,execchain,execvminline,execsha18inline)
+                          sha16,sha18,sha20,argon2id,rsw75k,rsw150k,rsw300k,
+                          execvm,execsha18,execargon,execchain,
+                          execvminline,execsha18inline)
   --reps N                SHA-256 solve repetitions per tier/difficulty/cache/assets
                           (default 50; the percentile-supporting range is 50-100)
   --argon-reps N          Argon2id repetitions per cell (default 20; range 20-30)
@@ -1269,7 +1311,10 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
     }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     const isArgon = difficulty.isArgon;
-    const timeoutMs = isArgon ? 300000 : 90000;
+    // Memory-hard and sequential-time-lock cells get the long timeout:
+    // the real Argon ladder costs tens of seconds even unthrottled, and
+    // the rsw ceiling rung is T=300,000 sequential squarings.
+    const timeoutMs = isArgon || difficulty.sequential ? 300000 : 90000;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const state = await page.evaluate(() => {
@@ -1352,7 +1397,9 @@ async function runRepeatNavigation(browser, opts, tierName, difficultyName, asse
     await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     const isArgon = DIFFICULTIES[difficultyName].isArgon;
-    const timeoutMs = isArgon ? 300000 : 90000;
+    // Memory-hard and sequential-time-lock cells get the long timeout
+    // (see runLoad): the rsw ceiling rung is T=300,000 squarings.
+    const timeoutMs = isArgon || DIFFICULTIES[difficultyName].sequential ? 300000 : 90000;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const state = await page.evaluate(() => {
@@ -1794,11 +1841,11 @@ function buildPayload(opts, ctx, completion) {
  * reasons, any results file that is not a clean completed full-matrix
  * run: the completion marker must be present (the incomplete-run
  * guard), the full default matrix must be covered (all seven tiers,
- * all ten difficulties — the four ordinary cells plus the six
- * ExecutionChallengeV1 cells, of which execvm/execsha18/execargon/
- * execchain are files-only and execvminline/execsha18inline are
- * inline-only by design — cold and warm across each cell's asset
- * modes), the sample sizes must
+ * all thirteen difficulties — the four ordinary cells, the three rsw
+ * time-lock rungs, and the six ExecutionChallengeV1 cells, of which
+ * execvm/execsha18/execargon/execchain are files-only and
+ * execvminline/execsha18inline are inline-only by design — cold and
+ * warm across each cell's asset modes), the sample sizes must
  * meet the defaults, and the argon ladder must be the real one. Only
  * then is the file copied to results/baseline.json. The current
  * committed baseline.json stays untouched by every run; it is replaced

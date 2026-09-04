@@ -83,10 +83,15 @@ final class Config
     public const MIN_RSW_T = 10_000;
 
     /**
-     * The ceiling for the rsw sequential-squaring cost T. The browser
-     * BigInt solver completes 300,000 squarings in about a second on a
-     * mid-range device, so the ceiling keeps a legitimate solve inside
-     * the challenge lifetime while the sequential cost stays material.
+     * The ceiling for the rsw sequential-squaring cost T. The bound is
+     * a protocol ceiling, not a device-performance claim: it keeps a
+     * legitimate solve inside the challenge lifetime on the slowest
+     * supported device while the sequential cost stays material. The
+     * per-deployment T choice must be derived from measurements on the
+     * worst device a deployment supports, and the qualification state
+     * must be documented; the client-performance lab measures the rsw
+     * rungs and documents the release-gate procedure
+     * (tools/client-perf/README.md). Shared with the Rust core.
      */
     public const MAX_RSW_T = 300_000;
 
