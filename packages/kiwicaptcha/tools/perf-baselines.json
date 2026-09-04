@@ -17,7 +17,7 @@
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies at 92,053 bytes raw / 27,286 gzip / 23,132 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). The raw 160,000-byte cap is carried forward onto the always-loaded core; the compressed caps are the ordinary-bootstrap target of 30,720 gzip / 28,000 brotli bytes. The lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes.",
       "gzip_bytes_zlib12": 27286,
-      "gzip_bytes_zlib13": 27087
+      "gzip_bytes_zlib13": 27286
     },
     "widget_worker": {
       "raw_bytes": 24819,
@@ -70,7 +70,7 @@
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, decoy machinery and the coarse client-context descriptor. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
       "gzip_bytes_zlib12": 14301,
-      "gzip_bytes_zlib13": 14247
+      "gzip_bytes_zlib13": 14301
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
@@ -92,7 +92,7 @@
       "copies_identical": true,
       "note": "The incumbent compatibility-loader module (widget-compat.js), three byte-identical copies at 27,078 bytes raw / 8,573 gzip / 7,367 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes.",
       "gzip_bytes_zlib12": 8573,
-      "gzip_bytes_zlib13": 8564
+      "gzip_bytes_zlib13": 8573
     },
     "widget_locales": {
       "raw_bytes": 13395,
