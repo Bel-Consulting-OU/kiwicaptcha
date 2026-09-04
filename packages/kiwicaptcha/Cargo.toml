@@ -34,7 +34,7 @@ hmac = "0.12"
 hkdf = "0.12"
 base64 = "0.22"
 rand = "0.8"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 num-bigint = "0.4"
 serde = { version = "1", features = ["derive"] }
