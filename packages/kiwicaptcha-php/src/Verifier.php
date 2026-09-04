@@ -1012,7 +1012,11 @@ final class Verifier
             if ($this->rsw === null) {
                 return null;
             }
-            if ($token->rswProof === null) {
+            // The rsw composition invariant: an rsw record's solution
+            // must carry counter 0 (a time-lock proof has no search
+            // counter) AND a non-null rsw final value — any other token
+            // shape is rejected outright, never compared.
+            if ($token->counter !== 0 || $token->rswProof === null) {
                 return false;
             }
 
@@ -1020,6 +1024,13 @@ final class Verifier
                 $this->rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
                 $token->rswProof
             );
+        }
+        // The mirror invariant for every non-rsw algorithm: an rsw
+        // final value is rsw evidence only, so a sha256/argon2id record
+        // presented with a token carrying one is rejected outright —
+        // the hash is never derived for it.
+        if ($token->rswProof !== null) {
+            return false;
         }
         $hash = $this->deriveHash($record, $token->counter);
         if ($hash === null) {

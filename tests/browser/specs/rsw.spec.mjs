@@ -59,4 +59,28 @@ test.describe('KiwiCaptcha rsw sequential time-lock', () => {
     expect(body.ok).toBe(false);
     expect(body.code).toBe('insufficient_work');
   });
+
+  test('an execution-armed rsw challenge solves with the digest:trace evidence and the final value on one token', async ({ page }) => {
+    // The rsw + execution composition end to end: the fixture issues an
+    // execution-armed rsw challenge (algorithm rsw, T=10000, armed
+    // ExecutionChallengeV1 program), the driver runs the worker's
+    // sequential squarer AND the interpreter, and mints the composed
+    // token shape — nonce.0.duration.telemetry.digest:trace.512hex —
+    // whose server-side decode previously folded the digest:trace
+    // segment into the telemetry and failed. The fixture /verify must
+    // now accept the composed token.
+    await page.goto('/?algorithm=rsw&rsw_t=10000&execution=1&assets=files');
+    const tokenInput = page.locator('[data-kiwi-token]');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 90_000 });
+    const token = await tokenInput.inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const parts = atob(token).split('.');
+    expect(parts.length).toBe(6, 'the composed token is nonce.0.duration.telemetry.digest:trace.proof');
+    expect(parts[1]).toBe('0'); // no search counter exists for a time lock
+    expect(parts[4]).toMatch(/^[0-9a-f]{64}:[A-Za-z0-9_-]+$/); // the digest:trace evidence
+    expect(parts[5]).toMatch(/^[0-9a-f]{512}$/); // the rsw final value
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    const body = await resp.json();
+    expect(body.ok, `verify must accept the composed rsw + execution token (${body.code})`).toBe(true);
+  });
 });

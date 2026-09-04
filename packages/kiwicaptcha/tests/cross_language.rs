@@ -1772,6 +1772,12 @@ fn rust_issues_rsw_record_for_php() {
 /// verifies through the real PHP verifier. Runs only when a Redis URL
 /// is provided and the PHP core's autoloader is reachable from this
 /// crate.
+///
+/// Directions 3 and 4 are the rsw + execution composition: the issuer
+/// arms an rsw challenge with the ExecutionChallengeV1 dimension, the
+/// solve presents the digest:trace evidence AND the sequential final
+/// value on one token, and the other language decodes and verifies the
+/// composed token end to end through its production verifier.
 #[test]
 #[cfg(feature = "redis")]
 fn redis_rsw_interop_with_php() {
@@ -1963,4 +1969,199 @@ echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
         "PHP must verify a Rust-issued rsw challenge through real Redis: {php_result}"
     );
     println!("PHP_VERIFIES_RUST_RSW_REDIS: OK");
+
+    // 3. The rsw + execution composition, PHP issue side: PHP issues an
+    //    execution-armed rsw challenge (protocol v4, algorithm rsw),
+    //    solves the sequential final value AND the real executed-trace
+    //    digest, and serializes the composed token (digest:trace
+    //    segment plus the final 512-hex proof segment). Rust decodes
+    //    the composed wire and verifies it through the production
+    //    verifier with the trapdoor.
+    let php_issue_composed_solve = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$issuer = new KiwiCaptcha\Issuer(new KiwiCaptcha\Config(
+    secretKey: '0123456789abcdef0123456789abcdef',
+    algorithm: KiwiCaptcha\PoWAlgorithm::Rsw,
+    ttlSecs: 120,
+    minDurationMs: 0,
+    executionKey: '0123456789abcdef0123456789abcdef',
+    rswModulusN: getenv('KC_INTEROP_RSW_N'),
+    rswLambda: getenv('KC_INTEROP_RSW_LAMBDA'),
+    rswT: KiwiCaptcha\Config::MIN_RSW_T,
+), $storage);
+$ch = $issuer->issueWithExecutionField('login', '127.0.0.1', true, executionAction: 'login-action');
+$proof = KiwiCaptcha\Tests\Support\RswFixture::sequentialProof($ch->prefix, $ch->nonce, $ch->t);
+$program = KiwiCaptcha\ExecutionChallengeGenerator::decode($ch->executionProgram);
+if ($program === null) { fwrite(STDERR, 'the composed program must parse'); exit(16); }
+$trace = KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
+$digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($ch->executionProgram, $ch->nonce, $trace);
+if ($digest === null) { fwrite(STDERR, 'the composed digest must compute'); exit(17); }
+$token = KiwiCaptcha\SolutionToken::create($ch->nonce, 0, 5000, [], $digest, base64_encode($trace), $proof)->encode();
+echo $token;
+"#;
+    let php_composed_token = php_script(php_issue_composed_solve)
+        .expect("PHP must issue and solve the composed rsw challenge");
+    let php_composed_token = php_composed_token.trim();
+
+    let decoded_composed = kiwicaptcha::token::SolutionToken::decode(php_composed_token)
+        .expect("Rust must decode the PHP-serialized composed rsw token");
+    assert_eq!(
+        decoded_composed.rsw_proof.as_deref().map(|p| (
+            p.len(),
+            p.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        )),
+        Some((512, true)),
+        "the composed token carries the 512-hex rsw proof"
+    );
+    assert_eq!(
+        decoded_composed.execution_digest.as_deref().map(str::len),
+        Some(64),
+        "the composed token carries the execution digest"
+    );
+    assert!(
+        decoded_composed.execution_trace.is_some(),
+        "the composed token carries the execution trace"
+    );
+    assert_eq!(
+        decoded_composed.counter, 0,
+        "an rsw token has no search counter"
+    );
+
+    let composed_outcome = verifier.verify(
+        php_composed_token,
+        "login",
+        "127.0.0.1",
+        kiwicaptcha::challenge::now_epoch_micros(),
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    match composed_outcome {
+        VerifyOutcome::Valid { .. } => {}
+        other => {
+            panic!("Rust must verify the PHP-issued rsw + execution composition, got {other:?}")
+        }
+    }
+    println!("RUST_VERIFIES_PHP_RSW_EXECUTION_COMPOSITION_REDIS: OK");
+
+    // 4. The reverse composition: Rust issues an execution-armed rsw
+    //    record, solves the sequential final value AND the executed
+    //    trace digest, and serializes the composed token. PHP loads the
+    //    record by nonce and verifies the composed token through the
+    //    real verifier.
+    let composed_issued = {
+        use kiwicaptcha::challenge::{
+            issue_challenge_with_execution, BindingMode, ChallengeConfig, PoWAlgorithm,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let config = ChallengeConfig {
+            secret_key: "0123456789abcdef0123456789abcdef".into(),
+            kid: 1,
+            execution_key: Some("0123456789abcdef0123456789abcdef".into()),
+            rsw_modulus_n: Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into()),
+            rsw_lambda: Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into()),
+            rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
+            algorithm: PoWAlgorithm::Rsw,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: Some(0),
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        issue_challenge_with_execution(
+            &config,
+            "login",
+            "127.0.0.1",
+            now,
+            now_ns,
+            0,
+            None,
+            true,
+            Some("login-action"),
+            Some(1),
+            false,
+        )
+        .expect("the composed rsw issue")
+    };
+    store
+        .store(&composed_issued.record)
+        .expect("Rust must store the composed rsw record");
+    let composed_proof = kiwicaptcha::rsw::fixtures::sequential_proof(
+        &composed_issued.record.prefix,
+        &composed_issued.record.nonce,
+        composed_issued.record.t as u64,
+    );
+    let (composed_digest, composed_trace_b64) = {
+        let program = composed_issued
+            .record
+            .execution_program
+            .as_deref()
+            .expect("the composed record carries the program");
+        let decoded = kiwicaptcha::execution::decode(program).expect("the composed program parses");
+        let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
+        let trace_b64: String =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(trace.as_bytes());
+        let digest = kiwicaptcha::execution::expected_digest_over_trace(
+            program,
+            &composed_issued.record.nonce,
+            &trace,
+        )
+        .expect("the composed digest computes");
+        (digest, trace_b64)
+    };
+    let composed_token = kiwicaptcha::token::SolutionToken {
+        nonce: composed_issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(composed_digest),
+        execution_trace: Some(composed_trace_b64),
+        rsw_proof: Some(composed_proof),
+    }
+    .encode();
+    let php_verify_composed = format!(
+        r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$token = trim(stream_get_contents(STDIN));
+$outcome = (new KiwiCaptcha\Verifier($storage, rswModulusN: '{N}', rswLambda: '{L}'))
+    ->verify($token, '0123456789abcdef0123456789abcdef', 'login', '127.0.0.1');
+echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
+"#,
+        N = kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        L = kiwicaptcha::rsw::fixtures::LAMBDA_B64
+    );
+    let php_composed_result = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        &php_verify_composed,
+        composed_token.as_bytes(),
+    )
+    .expect("PHP must verify the Rust-issued composed rsw record");
+    let php_composed_json: serde_json::Value =
+        serde_json::from_str(&php_composed_result).expect("the PHP verifier result is JSON");
+    assert_eq!(
+        php_composed_json["ok"], true,
+        "PHP must verify a Rust-issued rsw + execution composition through real Redis: {php_composed_result}"
+    );
+    println!("PHP_VERIFIES_RUST_RSW_EXECUTION_COMPOSITION_REDIS: OK");
 }
