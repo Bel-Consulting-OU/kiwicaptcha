@@ -420,11 +420,12 @@ fact, not a statistic. The caps are
 defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
-authority that could drift. The recorded sizes (159,751 / 45,259 /
-38,055 bytes for the driver and 33,402 / 10,411 / 8,949 bytes for the
-execution interpreter) leave about 2-18% headroom under the widget
-caps, and the challenge-response budgets (1,014-1,046 bytes decoy
-armed, 1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte
+authority that could drift. The recorded sizes (92,053 / 27,286 /
+23,132 bytes for the eager driver core and 33,402 / 10,404 / 8,955
+bytes for the execution interpreter) gate against the widget caps
+with the recorded-gzip/brotli equality checks, and the
+challenge-response budgets (1,014-1,046 bytes decoy armed,
+1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte
 and 1,900-byte caps; a legitimate addition lands
 inside them and an accidental bloating regression trips them.
 
