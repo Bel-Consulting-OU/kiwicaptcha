@@ -442,8 +442,9 @@ pub struct ChallengeConfig {
     /// base64 of 1..=256 even bytes, the trapdoor that lets the server
     /// verify without the T squarings. It is the secret trapdoor:
     /// never persist it beside client material. A lambda that fails
-    /// the Euler self-test against the modulus is refused by the
-    /// shared decode. Required when the algorithm is
+    /// the deterministic trapdoor consistency spot-check against the
+    /// modulus is refused by the shared decode. Required when the
+    /// algorithm is
     /// [`PoWAlgorithm::Rsw`]; ignored otherwise. Never stored on the
     /// record and never sent to the client.
     pub rsw_lambda: Option<String>,
