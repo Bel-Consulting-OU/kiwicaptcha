@@ -222,20 +222,33 @@ verify_recorded_raw_bytes() {
   fi
 }
 
-# The recorded compressed bytes of widget-locales.js are equality-gated
-# the same way, measured with the deterministic definitions the record
-# uses (gzip -n -9: no filename header, maximum compression; brotli
-# -q 11). A drifted compressed record fails, exactly like a drifted
-# raw_bytes record.
+# The recorded gzip bytes are equality-gated per zlib encoder family:
+# the classic zlib encoder's deflate output differs across versions
+# (and the gzip >= 1.12 binary links zlib-ng, whose output differs
+# again), so the record carries one measured value per zlib family
+# (gzip_bytes_zlib12 / gzip_bytes_zlib13, gzip container, level 9, no
+# mtime, measured via python3's zlib). The gate measures with the
+# local python3 zlib and compares against the recorded value for the
+# local family; an unrecorded family prints an explicit note and the
+# caps still apply. A drifted record for the recorded families fails,
+# exactly like a drifted raw_bytes record.
 verify_recorded_gzip_bytes() {
-  local key="$1" file="$2" recorded actual
-  recorded=$(json_get "$BASELINES_FILE" "budgets.$key.gzip_bytes")
-  actual=$(gzip -n -9 -c "$file" | wc -c | tr -d ' ')
+  local key="$1" file="$2" recorded actual fam
+  fam=$(python3 -c 'import zlib; print("".join(zlib.ZLIB_VERSION.split(".")[:2]))')
+  if [ "$fam" = "12" ]; then
+    recorded=$(json_get "$BASELINES_FILE" "budgets.$key.gzip_bytes_zlib12")
+  elif [ "$fam" = "13" ]; then
+    recorded=$(json_get "$BASELINES_FILE" "budgets.$key.gzip_bytes_zlib13")
+  else
+    echo "perf-budget gzip_bytes NOTE: local zlib family $fam has no recorded gzip expectation for budgets.$key (recorded families: zlib12, zlib13); cap enforcement still applies"
+    return
+  fi
+  actual=$(gzip_size "$file")
   if [ "$recorded" != "$actual" ]; then
-    echo "perf-budget FAILED: budgets.$key.gzip_bytes records $recorded bytes but gzip -n -9 of $file is $actual bytes (re-measure and re-record the budgets section)" >&2
+    echo "perf-budget FAILED: budgets.$key.gzip_bytes_zlib$fam records $recorded bytes but python3 zlib $fam of $file is $actual bytes (re-measure and re-record the budgets section)" >&2
     FAILED=1
   else
-    echo "perf-budget gzip_bytes equality OK: budgets.$key.gzip_bytes == $recorded bytes ($file)"
+    echo "perf-budget gzip_bytes equality OK (zlib$fam): budgets.$key == $recorded bytes ($file)"
   fi
 }
 
@@ -371,16 +384,16 @@ fi
 # plain digit strings with thousand separators exactly as the record
 # stores them.
 dr_raw=$(json_get "$BASELINES_FILE" "budgets.widget_driver.raw_bytes")
-dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes")
+dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes_zlib13")
 dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
 rk_raw=$(json_get "$BASELINES_FILE" "budgets.widget_risk.raw_bytes")
 tm_raw=$(json_get "$BASELINES_FILE" "budgets.widget_telemetry.raw_bytes")
 lc_raw=$(json_get "$BASELINES_FILE" "budgets.widget_locales.raw_bytes")
-lc_gz=$(json_get "$BASELINES_FILE" "budgets.widget_locales.gzip_bytes")
+lc_gz=$(json_get "$BASELINES_FILE" "budgets.widget_locales.gzip_bytes_zlib13")
 lc_br=$(json_get "$BASELINES_FILE" "budgets.widget_locales.brotli_bytes")
 cp_raw=$(json_get "$BASELINES_FILE" "budgets.widget_compat.raw_bytes")
 ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
-ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes")
+ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes_zlib13")
 ex_br=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_bytes")
 DOC_NORM=$(cat "docs/performance-analysis.md" 2>/dev/null | tr -d ',' || true)
 MISSING=""

@@ -10,13 +10,14 @@
   "budgets": {
     "widget_driver": {
       "raw_bytes": 92053,
-      "gzip_bytes": 27286,
       "brotli_bytes": 23132,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
-      "note": "The eager driver core (widget-driver.js), three byte-identical copies at 92,053 bytes raw / 27,286 gzip / 23,132 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). The raw 160,000-byte cap is carried forward onto the always-loaded core; the compressed caps are the ordinary-bootstrap target of 30,720 gzip / 28,000 brotli bytes. The lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+      "note": "The eager driver core (widget-driver.js), three byte-identical copies at 92,053 bytes raw / 27,286 gzip / 23,132 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). The raw 160,000-byte cap is carried forward onto the always-loaded core; the compressed caps are the ordinary-bootstrap target of 30,720 gzip / 28,000 brotli bytes. The lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes.",
+      "gzip_bytes_zlib12": 27286,
+      "gzip_bytes_zlib13": 27087
     },
     "widget_worker": {
       "raw_bytes": 24819,
@@ -35,13 +36,14 @@
     },
     "widget_execution": {
       "raw_bytes": 33402,
-      "gzip_bytes": 10404,
       "brotli_bytes": 8955,
       "raw_cap_bytes": 36000,
       "gzip_cap_bytes": 11200,
       "brotli_cap_bytes": 9500,
       "copies_identical": true,
-      "note": "Execution interpreter: raw 33,402 / gzip 10,435 / brotli 8,955 bytes (measured 2026-09-04); hard caps 36,000 / 11,200 / 9,500 with the doc-integrity guard syncing the narrative record."
+      "note": "Execution interpreter: raw 33,402 / gzip 10,435 / brotli 8,955 bytes (measured 2026-09-04); hard caps 36,000 / 11,200 / 9,500 with the doc-integrity guard syncing the narrative record.",
+      "gzip_bytes_zlib12": 10404,
+      "gzip_bytes_zlib13": 10404
     },
     "challenge_response_json": {
       "sha256_bytes_min": 1014,
@@ -61,43 +63,47 @@
     },
     "widget_risk": {
       "raw_bytes": 47649,
-      "gzip_bytes": 14301,
       "brotli_bytes": 12228,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
-      "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, decoy machinery and the coarse client-context descriptor. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them)."
+      "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, decoy machinery and the coarse client-context descriptor. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
+      "gzip_bytes_zlib12": 14301,
+      "gzip_bytes_zlib13": 14247
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
-      "gzip_bytes": 1229,
       "brotli_bytes": 992,
       "raw_cap_bytes": 8192,
       "gzip_cap_bytes": 2500,
       "brotli_cap_bytes": 2000,
       "copies_identical": true,
-      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them)."
+      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
+      "gzip_bytes_zlib12": 1229,
+      "gzip_bytes_zlib13": 1229
     },
     "widget_compat": {
       "raw_bytes": 27078,
-      "gzip_bytes": 8573,
       "brotli_bytes": 7367,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,
       "brotli_cap_bytes": 10000,
       "copies_identical": true,
-      "note": "The incumbent compatibility-loader module (widget-compat.js), three byte-identical copies at 27,078 bytes raw / 8,573 gzip / 7,367 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes."
+      "note": "The incumbent compatibility-loader module (widget-compat.js), three byte-identical copies at 27,078 bytes raw / 8,573 gzip / 7,367 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes.",
+      "gzip_bytes_zlib12": 8573,
+      "gzip_bytes_zlib13": 8564
     },
     "widget_locales": {
       "raw_bytes": 13395,
-      "gzip_bytes": 3570,
       "brotli_bytes": 3193,
       "raw_cap_bytes": 16384,
       "gzip_cap_bytes": 6000,
       "brotli_cap_bytes": 5000,
       "copies_identical": true,
-      "note": "The lazy non-default locale packs (widget-locales.js), three byte-identical copies at 13,395 bytes raw / 3,570 gzip / 3,193 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). Loaded by the eager core only when kiwiResolveLang() resolves a non-default language; a default-language page pays zero bytes. Never embedded inline (the compat loader carries its descriptor; the Symfony theme and the fixture issue data-kiwi-locales-src/-integrity in both asset tiers). Its recorded raw/gzip/brotli bytes are equality-gated by perf-budget.sh."
+      "note": "The lazy non-default locale packs (widget-locales.js), three byte-identical copies at 13,395 bytes raw / 3,570 gzip / 3,193 brotli (measured 2026-09-04 with gzip -n -9 and brotli -q 11). Loaded by the eager core only when kiwiResolveLang() resolves a non-default language; a default-language page pays zero bytes. Never embedded inline (the compat loader carries its descriptor; the Symfony theme and the fixture issue data-kiwi-locales-src/-integrity in both asset tiers). Its recorded raw/gzip/brotli bytes are equality-gated by perf-budget.sh.",
+      "gzip_bytes_zlib12": 3570,
+      "gzip_bytes_zlib13": 3570
     }
   },
   "bench": {
