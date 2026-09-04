@@ -424,13 +424,19 @@ pub struct ChallengeConfig {
     pub execution_key: Option<String>,
     /// The rsw modulus n = p*q as canonical standard base64 of exactly
     /// 256 bytes (top bit set, odd), the public half of the time-lock
-    /// trapdoor. Required when the algorithm is [`PoWAlgorithm::Rsw`];
-    /// ignored otherwise. `None` (the default) = the rsw algorithm is
-    /// not configured.
+    /// trapdoor. Generate the pair with the shipped tools/rsw-keygen
+    /// binary and record its rsw_modulus_n_sha256 fingerprint; the
+    /// shared decode refuses a weak or probable-prime modulus.
+    /// Required when the algorithm is [`PoWAlgorithm::Rsw`]; ignored
+    /// otherwise. `None` (the default) = the rsw algorithm is not
+    /// configured.
     pub rsw_modulus_n: Option<String>,
     /// The rsw secret lambda = lcm(p-1, q-1) as canonical standard
     /// base64 of 1..=256 even bytes, the trapdoor that lets the server
-    /// verify without the T squarings. Required when the algorithm is
+    /// verify without the T squarings. It is the secret trapdoor:
+    /// never persist it beside client material. A lambda that fails
+    /// the Euler self-test against the modulus is refused by the
+    /// shared decode. Required when the algorithm is
     /// [`PoWAlgorithm::Rsw`]; ignored otherwise. Never stored on the
     /// record and never sent to the client.
     pub rsw_lambda: Option<String>,
@@ -3011,7 +3017,8 @@ mod tests {
                 .expect("the fixture lambda is base64"),
         );
         let shifted = (&lambda - BigUint::from(2u8)).to_bytes_be();
-        shifted_lambda.rsw_lambda = Some(base64::engine::general_purpose::STANDARD.encode(&shifted));
+        shifted_lambda.rsw_lambda =
+            Some(base64::engine::general_purpose::STANDARD.encode(&shifted));
         reject(&shifted_lambda);
     }
 

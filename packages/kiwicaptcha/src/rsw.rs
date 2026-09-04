@@ -526,11 +526,7 @@ mod tests {
 
     #[test]
     fn fixture_trapdoor_pair_still_validates() {
-        assert!(RswTrapdoor::new(
-            fixtures::MODULUS_N_B64,
-            fixtures::LAMBDA_B64
-        )
-        .is_ok());
+        assert!(RswTrapdoor::new(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64).is_ok());
     }
 
     #[test]
@@ -583,10 +579,12 @@ mod tests {
         ));
         // The even exponent keeps 2^2044 + 1 away from the factor 3, so
         // the smallest factor of the multiple really is 5.
-        let by_five =
-            BigUint::from(5u8) * ((BigUint::from(1u8) << 2044usize) + BigUint::from(1u8));
+        let by_five = BigUint::from(5u8) * ((BigUint::from(1u8) << 2044usize) + BigUint::from(1u8));
         assert_eq!(small_prime_factor(&by_five), Some(5));
-        assert_eq!(small_prime_factor(&big_from_b64(fixtures::MODULUS_N_B64)), None);
+        assert_eq!(
+            small_prime_factor(&big_from_b64(fixtures::MODULUS_N_B64)),
+            None
+        );
     }
 
     #[test]
@@ -605,11 +603,14 @@ mod tests {
         assert!(matches!(
             RswTrapdoor::new(
                 fixtures::MODULUS_N_B64,
-                &TestB64.encode(&shifted.to_bytes_be())
+                &TestB64.encode(shifted.to_bytes_be())
             ),
             Err(RswError::InvalidLambdaTrapdoor)
         ));
-        assert!(!trapdoor_consistent(&big_from_b64(fixtures::MODULUS_N_B64), &shifted));
+        assert!(!trapdoor_consistent(
+            &big_from_b64(fixtures::MODULUS_N_B64),
+            &shifted
+        ));
         assert!(trapdoor_consistent(
             &big_from_b64(fixtures::MODULUS_N_B64),
             &lambda
@@ -640,10 +641,7 @@ mod tests {
         // cheapest one. Spot-check base 3 directly.
         let n = big_from_b64(fixtures::MODULUS_N_B64);
         let shifted = big_from_b64(fixtures::LAMBDA_B64) - BigUint::from(2u8);
-        assert_ne!(
-            BigUint::from(3u8).modpow(&shifted, &n),
-            BigUint::from(1u8)
-        );
+        assert_ne!(BigUint::from(3u8).modpow(&shifted, &n), BigUint::from(1u8));
     }
 
     #[test]

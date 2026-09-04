@@ -262,6 +262,11 @@ final class RswTest extends TestCase
         $modulus = gmp_init(bin2hex(base64_decode(RswFixture::MODULUS_N_B64, true)), 16);
         self::assertSame(0, gmp_prob_prime($modulus), 'the fixture semiprime is composite');
         self::assertSame('1', gmp_strval(gmp_mod($modulus, gmp_init(2))), 'the fixture modulus is odd');
+        // The 1024-bit fixture prime squared is a 2048-bit composite
+        // with no small factor: gmp still reads it as composite, the
+        // same verdict the Rust probable-prime test returns.
+        $prime = gmp_init(bin2hex(base64_decode(RswFixture::PRIME_1024_B64, true)), 16);
+        self::assertSame(0, gmp_prob_prime(gmp_mul($prime, $prime)), 'a prime square is composite');
 
         $config = $this->rswConfig();
         self::assertSame(RswFixture::MODULUS_N_B64, $config->rswModulusN);

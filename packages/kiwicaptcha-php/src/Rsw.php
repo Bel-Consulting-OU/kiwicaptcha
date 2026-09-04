@@ -35,18 +35,18 @@ namespace KiwiCaptcha;
  * Validation first proves the shape: the modulus must be exactly 256
  * bytes with the top bit set and odd, and lambda must decode to 1..256
  * even bytes. Beyond the shape, three weak or inconsistent inputs are
- * refused: a modulus divisible by any prime at or below 1000 (no
- * product of two 1024-bit primes has one), a modulus that is itself a
- * probable prime (a genuine modulus is composite), and a lambda that
- * fails the Euler self-test base^lambda == 1 for a few small bases,
- * the exact condition under which the trapdoor shortcut agrees with
- * the client's sequential squaring at every cost T. The full lcm
- * relation cannot be established without the factorization, exactly
- * like an RSA public key cannot be verified against its private
- * exponent, so the residual assurance for a deployed pair is its
- * provenance: generate n and lambda with the shipped rsw-keygen tool
- * and record the modulus fingerprint. Both values are canonical
- * standard base64 of their big-endian bytes.
+ * refused: a modulus divisible by any prime at or below 1000, a
+ * modulus reading as a probable prime, and a lambda failing the Euler
+ * self-test for a few small bases. No product of two 1024-bit primes
+ * has a small factor, and a genuine modulus is composite. The Euler
+ * test requires base^lambda == 1 modulo n and is the exact condition
+ * under which the trapdoor shortcut agrees with the client's
+ * sequential squaring at every cost T. The full lcm relation cannot be established without the
+ * factorization, exactly like an RSA public key cannot be verified
+ * against its private exponent. The residual assurance for a deployed
+ * pair is its provenance: generate n and lambda with the shipped
+ * rsw-keygen tool and record the modulus fingerprint. Both values are
+ * canonical standard base64 of their big-endian bytes.
  *
  * gmp is required for the arithmetic. The optional algorithm is refused
  * at configuration time when the extension is missing, so the default
@@ -247,8 +247,9 @@ final class Rsw
 
     /**
      * Refuse a modulus divisible by any prime at or below
-     * SMALL_PRIME_LIMIT. The parity check already ran, so the factor 2
-     * is skipped: a genuine modulus has no small factor at all.
+     * self::SMALL_PRIME_LIMIT. The parity check already ran, so the
+     * factor 2 is skipped: a genuine modulus has no small factor at
+     * all.
      *
      * @throws \InvalidArgumentException on a modulus with a small
      *                           prime factor
@@ -291,7 +292,8 @@ final class Rsw
     }
 
     /**
-     * The primes at or below SMALL_PRIME_LIMIT, sieve-generated once.
+     * The primes at or below self::SMALL_PRIME_LIMIT, sieve-generated
+     * once.
      *
      * @return list<int>
      */

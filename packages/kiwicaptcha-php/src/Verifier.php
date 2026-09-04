@@ -329,18 +329,21 @@ final class Verifier
         private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
         /**
          * The rsw modulus n (canonical standard base64 of the 2048-bit
-         * composite), the public half of the time-lock trapdoor. When
-         * set together with rswLambda, rsw records verify through the
-         * trapdoor; when both are null (the default), a signed rsw
-         * record is authentic but unsupported (UnsupportedRswParams).
-         * Setting exactly one of the pair is refused at construction.
+         * composite, generated with the shipped rsw-keygen tool), the
+         * public half of the time-lock trapdoor. When set together
+         * with rswLambda, rsw records verify through the trapdoor;
+         * when both are null (the default), a signed rsw record is
+         * authentic but unsupported (UnsupportedRswParams). Setting
+         * exactly one of the pair is refused at construction.
          */
         private readonly ?string $rswModulusN = null,
         /**
          * The rsw secret lambda = lcm(p-1, q-1) (canonical standard
          * base64), the trapdoor that lets this verifier compute the
-         * expected final value without the T sequential squarings. Never
-         * stored on the record and never sent to the client.
+         * expected final value without the T sequential squarings. It
+         * is the secret trapdoor: never persist it beside client
+         * material. Never stored on the record and never sent to the
+         * client.
          */
         private readonly ?string $rswLambda = null,
     ) {
