@@ -97,6 +97,9 @@ jobs:
           set -euo pipefail
           test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js
           test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-driver.js
+          test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-risk.js
+          test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-telemetry.js
+          test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-compat.js
           echo "bundle assets present in the installed package"
 
   cargo-smoke:

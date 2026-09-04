@@ -42,13 +42,14 @@ final class ApiJsController
 
     /**
      * The lazy widget modules that ride the loader response after the
-     * driver core: widget-risk.js first (the worker machinery and the
-     * armed-evidence runners register on the core bridge the moment
-     * they execute, so an Argon2id/decoy/execution lifecycle on the
-     * compat route never needs an extra fetch), then widget-compat.js
-     * (the incumbent-compat bootstrap, active only when the loader URL
-     * carries the compat parameter). Ordinary widget pages never load
-     * the /api.js route, so the modules stay lazy everywhere else.
+     * driver core: widget-risk.js first, then widget-compat.js. The
+     * worker machinery and the armed-evidence runners of widget-risk.js
+     * register on the core bridge the moment they execute, so an
+     * Argon2id/decoy/execution lifecycle on the compat route never
+     * needs an extra fetch. The compat bootstrap activates only when
+     * the loader URL carries the compat parameter. Ordinary widget
+     * pages never load the /api.js route, so the modules stay lazy
+     * everywhere else.
      *
      * @return list<string>
      */

@@ -1724,6 +1724,7 @@ if ($path === '/' || $path === '/index.html') {
     $assetTags = '';
     $runtimeAttr = '';
     $workerAttrFiles = '';
+    $moduleAttrs = '';
     // The ExecutionChallengeV1 interpreter asset is delivered in both
     // asset tiers, the mirror of the bundle theme: KiwiCaptchaRuntime's
     // executionSrc/executionIntegrity are asset-mode independent, the
@@ -1819,7 +1820,6 @@ if ($path === '/' || $path === '/index.html') {
 </div>
 ";
     }
-    $moduleAttrs = $moduleAttrs ?? '';
     $riskEmbed = '';
     if (!$filesMode) {
         $riskBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/widget-risk.js');

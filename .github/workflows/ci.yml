@@ -753,7 +753,7 @@ jobs:
           grep -q 'packages/kiwicaptcha' README.md || { echo "README lost the package references" >&2; exit 1; }
           grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
           grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml || { echo "Cargo package name wrong" >&2; exit 1; }
-          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css; do
+          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-compat.js widget.css; do
             test -f "packages/kiwicaptcha-wasm/assets/$asset" || { echo "missing release asset $asset" >&2; exit 1; }
           done
           test -f tests/browser/compat-capabilities.json || { echo "missing capability matrix" >&2; exit 1; }
@@ -1113,7 +1113,7 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-a
-          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget.css /tmp/repro-a/
+          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css /tmp/repro-a/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-a
@@ -1141,7 +1141,7 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-b
-          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget.css /tmp/repro-b/
+          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css /tmp/repro-b/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-b
@@ -1166,7 +1166,7 @@ jobs:
       - name: byte-compare the independent artifacts
         run: |
           set -euo pipefail
-          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget.css; do
+          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-compat.js widget.css; do
             cmp "/tmp/repro-a/$asset" "/tmp/repro-b/$asset" || { echo "independent builds differ on $asset" >&2; exit 1; }
             shasum -a 256 "/tmp/repro-a/$asset"
           done
@@ -1199,7 +1199,7 @@ jobs:
         run: |
           bash build.sh
           shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget.css > /tmp/build1.sha256
+                 assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css > /tmp/build1.sha256
       - name: second clean strict build (fresh cache + target)
         env:
           WASM_OPT_STRICT: "1"
@@ -1209,7 +1209,7 @@ jobs:
           rm -rf "$HOME/.cache/kiwicaptcha-wasm"
           bash build.sh
           shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget.css > /tmp/build2.sha256
+                 assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css > /tmp/build2.sha256
       - name: byte-compare the two builds
         run: |
           diff /tmp/build1.sha256 /tmp/build2.sha256
@@ -1232,7 +1232,7 @@ jobs:
         # the canonical wasm assets.
         run: |
           set -euo pipefail
-          for f in widget-driver.js widget.css kiwicaptcha-wasm.js execution-interpreter.js; do
+          for f in widget-driver.js widget-risk.js widget-telemetry.js widget-compat.js widget.css kiwicaptcha-wasm.js execution-interpreter.js; do
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/resources/$f" \
               || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh"; exit 1; }
@@ -1245,7 +1245,7 @@ jobs:
         # cmp on every push.
         run: |
           set -euo pipefail
-          for f in widget-driver.js kiwicaptcha-wasm.js widget.css execution-interpreter.js; do
+          for f in widget-driver.js widget-risk.js widget-telemetry.js widget-compat.js kiwicaptcha-wasm.js widget.css execution-interpreter.js; do
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
               || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh"; exit 1; }

@@ -284,6 +284,7 @@ test.describe('KiwiCaptcha adversarial client-side protocol', () => {
     });
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     await page.route('https://evil.test/frame.html', (route) =>
       route.fulfill({
         contentType: 'text/html',
