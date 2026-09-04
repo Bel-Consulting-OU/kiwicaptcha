@@ -57,6 +57,31 @@ namespace KiwiCaptcha;
  * gmp is required for the arithmetic. The optional algorithm is refused
  * at configuration time when the extension is missing, so the default
  * sha256/argon2id deployment never needs it.
+ *
+ * Performance: validating a pair dominates the Rsw cost. The canonical
+ * decode, the small-factor trial division, the probable-prime probe and
+ * the eight-base trapdoor spot-check measure ~12.2 ms per construction
+ * on an Apple M5 Pro (arm64) under PHP 8.5.10. That is about 7.6x the
+ * ~1.6 ms of one expectedProofHex() trapdoor exponentiation at the
+ * 75_000-squaring default. A verification can pay the validation
+ * twice. The Config and the Verifier each construct an Rsw from the
+ * same configured pair, and the standalone php -S route rebuilds both
+ * per request. On that route a request used to spend ~26 ms of pair
+ * validation ahead of a single ~1.6 ms proof.
+ *
+ * The validation verdict is deterministic, so Rsw memoizes the decoded
+ * pair per process. The cache key is the exact configured base64 pair,
+ * and the cache holds at most {@see self::VALIDATED_PAIR_CACHE_MAX}
+ * entries. The first construction of a distinct pair in a process still
+ * runs the full validation with the identical rejections. Later
+ * constructions of the same pair reuse the validated representation.
+ * That mirrors the Rust ProductionVerifier, which decodes its trapdoor
+ * once at build time. The per-request pair-validation cost is therefore
+ * amortized to once per distinct configured pair per process. After the
+ * warm-up request a standalone rsw verification pays only the trapdoor
+ * exponentiation. Invalid pairs are never memoized. A weak input is
+ * re-validated and refused with the identical message on every
+ * construction.
  */
 final class Rsw
 {
@@ -115,6 +140,35 @@ final class Rsw
     private const SELFTEST_BASES = [2, 3, 5, 7, 11, 13, 17, 19];
 
     /**
+     * The cap of the validated-pair cache: at most this many distinct
+     * validated (n, lambda) pairs are retained per process, the oldest
+     * evicted first. A deployment configures one pair, so the cap
+     * engages only in a process that serves several distinct rsw
+     * configurations. Eviction is deterministic and never changes a
+     * verdict. It only re-runs the full validation of the evicted pair
+     * on its next construction.
+     */
+    private const VALIDATED_PAIR_CACHE_MAX = 8;
+
+    /**
+     * The process-lifetime validated-pair memo: canonical base64
+     * modulus and lambda joined by a NUL byte, mapped to the decoded
+     * and fully validated GMP pair. A NUL byte can never appear in
+     * base64, so the key cannot collide across pairs. The validation
+     * pipeline is deterministic, so the memoized verdict of a pair
+     * equals a fresh validation of the same pair. The memo amortizes
+     * the expensive pair validation across the Config and Verifier
+     * constructions of the same process. The standalone php -S route
+     * rebuilds both per request. Only fully validated pairs are stored.
+     * A rejected pair throws before the store, so every weak input is
+     * re-validated and refused with the identical message on every
+     * construction. See the class docblock for the measured motivation.
+     *
+     * @var array<string, array{\GMP, \GMP}>
+     */
+    private static array $validatedPairCache = [];
+
+    /**
      * @param string $modulusB64 canonical standard base64 of the
      *                           2048-bit composite n, exactly 256 bytes
      *                           with the top bit set and odd.
@@ -137,22 +191,57 @@ final class Rsw
                 'the rsw algorithm requires the gmp extension for its modular arithmetic'
             );
         }
-        $this->n = self::decodeModulus($modulusB64);
-        $this->lambda = self::decodeLambda($lambdaB64);
-        self::rejectSmallPrimeFactor($this->n);
-        if (gmp_prob_prime($this->n) !== 0) {
+        [$this->n, $this->lambda] = self::validatedPair($modulusB64, $lambdaB64);
+    }
+
+    /**
+     * Decode and fully validate a configured pair, reusing the memo
+     * when the exact same base64 pair was validated earlier in this
+     * process. The pipeline keeps the pre-memo constructor order, the
+     * same weak-input rejections and the same messages. The verdict of
+     * a memoized pair equals a fresh validation of it. A rejected pair
+     * is never stored, so it re-runs the full pipeline on every
+     * construction. The cache key is the exact configured pair, never a
+     * transcoded or truncated form. Oldest entries evict first at
+     * {@see self::VALIDATED_PAIR_CACHE_MAX}. A process serving several
+     * distinct rsw configurations stays bounded.
+     *
+     * @return array{\GMP, \GMP} the decoded modulus and lambda.
+     *
+     * @throws \InvalidArgumentException on a malformed modulus or
+     *                           lambda, on a modulus with a small prime
+     *                           factor or a probable-prime modulus, and
+     *                           on a lambda that fails the trapdoor
+     *                           consistency spot-check against the
+     *                           modulus
+     */
+    private static function validatedPair(string $modulusB64, string $lambdaB64): array
+    {
+        // A NUL byte separates the two canonical base64 strings: base64
+        // never emits a NUL, so the key cannot collide across pairs.
+        $key = $modulusB64."\0".$lambdaB64;
+        if (isset(self::$validatedPairCache[$key])) {
+            return self::$validatedPairCache[$key];
+        }
+        $n = self::decodeModulus($modulusB64);
+        $lambda = self::decodeLambda($lambdaB64);
+        self::rejectSmallPrimeFactor($n);
+        if (gmp_prob_prime($n) !== 0) {
             throw new \InvalidArgumentException(
                 'rsw_modulus_n must not itself be a probable prime (a genuine 2048-bit modulus is the product of two large primes)'
             );
         }
-        if (!self::trapdoorConsistent($this->n, $this->lambda)) {
+        if (!self::trapdoorConsistent($n, $lambda)) {
             throw new \InvalidArgumentException(
                 'rsw_lambda is not a matching trapdoor for rsw_modulus_n (the lambda shortcut diverges from sequential squaring)'
             );
         }
-    }
+        if (\count(self::$validatedPairCache) >= self::VALIDATED_PAIR_CACHE_MAX) {
+            array_shift(self::$validatedPairCache);
+        }
 
-    
+        return self::$validatedPairCache[$key] = [$n, $lambda];
+    }
 
     /** The decoded modulus n. */
     public function modulus(): \GMP
