@@ -228,10 +228,10 @@ bytes brotli against caps of 8,192 / 2,500 / 2,000; every
 widget-compat.js copy is 25,460 bytes raw, 8,160 bytes gzip and 6,969
 bytes brotli against caps of 32,768 / 12,000 / 10,000; every
 execution-interpreter copy (execution-interpreter.js, the lazy
-ExecutionChallengeV1 asset) is 33,259 bytes raw, 10,343 bytes gzip
-and 8,913 bytes brotli, against caps of 36,000 / 11,200 / 9,500
+ExecutionChallengeV1 asset) is 33,402 bytes raw, 10,411 bytes gzip
+and 8,955 bytes brotli, against caps of 36,000 / 11,200 / 9,500
 bytes; the same budgets section also records the measured raw bytes
-of the worker at 23,547 bytes, the wasm glue runtime at 96,528 bytes
+of the worker at 24,819 bytes, the wasm glue runtime at 97,815 bytes
 and the widget stylesheet at 13,863 bytes, each byte-identical across
 the three copies, with the optional rsw sequential solver living
 inside the worker asset; the decoy-armed challenge-response JSON (the
@@ -284,7 +284,7 @@ The execution-orchestration delivery is a deliberate split, not eager
 bloat:
 
 - the execution interpreter itself is a separate lazy asset
-  (`execution.<sha256>.js`, 33,259 raw / 10,343 gzip / 8,913 brotli,
+  (`execution.<sha256>.js`, 33,402 raw / 10,435 gzip / 8,955 brotli,
   the `budgets.widget_execution` section): the driver's orchestration
   is the minimal seam that creates a sandboxed ephemeral iframe per
   armed challenge, loads the SRI-pinned interpreter inside it and
@@ -292,8 +292,8 @@ bloat:
   bytes for the interpreter; the files-tier page performs exactly one
   fetch of it when an armed challenge arrives, and the browser's
   cache dedups it across the page;
-- the runtime (the wasm glue, 96,528 raw / 36,553 gzip) and the
-  worker (23,547 raw / 7,632 gzip, the Argon2id and rsw solver asset)
+- the runtime (the wasm glue, 97,815 raw) and the
+  worker (24,819 raw, the Argon2id and rsw solver asset)
   are already lazy in the files tier: a memory-hard or sequential
   challenge fetches the runtime once, a SHA page never does.
 
@@ -405,7 +405,7 @@ defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
 authority that could drift. The recorded sizes (159,751 / 45,259 /
-38,055 bytes for the driver and 33,259 / 10,343 / 8,913 bytes for the
+38,055 bytes for the driver and 33,402 / 10,411 / 8,949 bytes for the
 execution interpreter) leave about 2-18% headroom under the widget
 caps, and the challenge-response budgets (1,014-1,046 bytes decoy
 armed, 1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte

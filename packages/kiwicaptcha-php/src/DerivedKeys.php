@@ -181,20 +181,7 @@ final class DerivedKeys
         );
     }
 
-    /**
-     * Debug inspection must never surface the derived purpose keys: the
-     * full property shape stays visible under the exact property names,
-     * with the three key values replaced by a redaction marker.
-     */
-    public function __debugInfo(): array
-    {
-        $shape = get_object_vars($this);
-        $shape['challengeKey'] = '<redacted>';
-        $shape['ipBindKey'] = '<redacted>';
-        $shape['resultKey'] = '<redacted>';
-
-        return $shape;
-    }
+    
 
     /** The challenge-signing key (K_challenge): HMAC over the canonical payload. */
     public function challengeKey(): string
