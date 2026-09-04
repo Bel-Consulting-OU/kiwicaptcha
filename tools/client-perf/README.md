@@ -367,12 +367,15 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    server-selected
    ladder globally or transition earlier to StepUp, never weaken the
    rung based on client-reported device capabilities (bots lie).
-6. Record the physical-device rows in the results file (or an attached
-   run notes section) with the device/browser/OS and date, and carry
-   the provenance the gate proves: every release-tier measurement row
-   with `source: "physical"` and a `device_id` from
-   `qualification.devices`. The
-   emulation numbers alone do not constitute a release qualification.
+6. Record the physical-device rows device-indexed in the results
+   payload's top-level `physical_results` object
+   (`{ "<device-id>": { "<tier>:<difficulty>:<cache>:<asset-mode>":
+   <row> } }`) — the shape `merge-cells.mjs --physical-index` emits
+   (see the physical-authority contract below) — with the device/
+   browser/OS and date carried by the qualification entry's
+   `tested_at`, and every row stamped `source: "physical"` and
+   `device_id` from `qualification.devices`. The emulation numbers
+   alone do not constitute a release qualification.
 
 ## The release gate and the performance-qualification status
 
@@ -413,11 +416,13 @@ are calibration signals and are not on the ladder. The extension rule:
 adding a tier to `release_tiers` requires (1) the tier's p95 budget
 rows for every released mode x cold/warm in the same file, (2) at
 least one `kind: "physical"` device qualified on that tier, and (3)
-physical measurement rows for every one of its cells. In release mode
-the validator derives the release-required cells from the union of the
-budget file's `tiers` and `qualification.release_tiers`, so a future
-file cannot declare a release ladder that lacks p95 budgets or
-measured rows.
+per-device physical evidence rows in the payload's `physical_results`
+for every cell of every registered physical device of that tier. The
+release-required scope is the union of the budget file's `tiers` and
+`qualification.release_tiers` whenever the file claims physical
+qualification (so ordinary CI proves the claim) or release mode is
+on; a file can never declare a release ladder that lacks p95 budgets
+or measured rows.
 
 ### Failure-rate limits and the sha20 carve-out
 
@@ -491,14 +496,20 @@ non-empty, it does not enumerate the vocabulary.
   any release-required cell. It prints the current qualification
   status line (e.g. `performance qualification status=lab —
   physical-device data required before release certification`) and
-  does not fail solely on the status.
+  does not fail solely on the status. Once the committed file claims
+  `status: "physical"`, every physical-authority proof below binds in
+  CI mode too, and the release-required scope widens to the union of
+  the budget `tiers` and `qualification.release_tiers` — a malformed
+  committed claim cannot survive ordinary CI and wait for release
+  mode to catch it.
 - Release mode (`--release` or `RELEASE_PERFORMANCE=1`) is the
   release-certification gate. It refuses to certify unless
   `qualification.status` is `"physical"` (with a qualified_at date and
   recorded devices) and the physical-authority contract below holds; a
   current-harness (schema 3) payload must additionally satisfy the
   completed-run guards (completion marker, full default matrix,
-  default sample sizes, real argon ladder). Release mode widens the
+  default sample sizes, real argon ladder), and the per-device sha20
+  evidence must meet `minSha20SamplesPhysical`. Release mode widens the
   release-required cells to the union of the budget `tiers` and
   `qualification.release_tiers`. In the committed state (status
   `lab`), release mode fails with the qualification reason and no
@@ -527,7 +538,8 @@ refuses certification in release mode.
 Certification is only as strong as the file's claims, so when
 `qualification.status` is `"physical"` the validator proves every part
 of the claim — in release mode and in CI mode alike (a committed
-physical claim must hold on every push):
+physical claim must hold on every push, and a physical release tier
+must carry its own p95 budget rows in the same budget file):
 
 1. **Device registration.** At least one device entry is
    `kind: "physical"` with a non-empty `id` and `tier`; the generic
@@ -536,38 +548,99 @@ physical claim must hold on every push):
 2. **Tier coverage.** Every tier in `qualification.release_tiers` has
    at least one physical device qualified on it. A release tier with
    no physical qualification device is a hard reason.
-3. **Row provenance.** Measurement rows are the per-cell result rows
-   of the baseline (`tier:difficulty:cache[:asset-mode]`), the
-   granularity the baseline keys support. Every measurement row of a
-   release-tier cell must carry `row.source: "physical"` and a
-   `row.device_id` naming a registered `kind: "physical"` device whose
-   tier equals the cell's tier. A physical row without a device_id, a
-   row naming an unknown or non-physical device, or a row whose device
-   is qualified on another tier is a hard reason. Recording
-   convention: one result row per device and cell — a schema-3 run on
-   the device, or a maintenance merge of that device's rows. Folding
-   several devices into a single row is out of schema scope: the
-   worst-p95 rule compares per-row measurements, so a merged row would
-   hide which device was slowest.
-4. **Physical coverage.** Every mode x release-tier x cold/warm cell
-   has at least one physical measurement row. A release tier whose
-   cells only carry lab rows has no physical evidence.
-5. **Budget derivation from the physical rows.** For every
+3. **Evidence index.** Physical evidence lives in the baseline
+   payload's top-level `physical_results` object, one row per device
+   and per cell:
+
+   ```json
+   {
+     "physical_results": {
+       "pixel-9-mainstream-01": {
+         "mainstream-desktop:sha18:cold:inline": { "source": "physical", "device_id": "pixel-9-mainstream-01", "reps": [ ... ] },
+         "mainstream-desktop:sha18:cold:files":  { "source": "physical", "device_id": "pixel-9-mainstream-01", "reps": [ ... ] },
+         "mainstream-desktop:sha18:warm:inline": { "source": "physical", "device_id": "pixel-9-mainstream-01", "reps": [ ... ] },
+         "mainstream-desktop:sha18:warm:files":  { "source": "physical", "device_id": "pixel-9-mainstream-01", "reps": [ ... ] }
+       },
+       "pixel-9-mainstream-02": { "mainstream-desktop:sha18:cold:inline": { "source": "physical", "device_id": "pixel-9-mainstream-02", "reps": [ ... ] } }
+     }
+   }
+   ```
+
+   The index keys are the per-mode result-row keys
+   (`tier:difficulty:cache:assetMode`) of the device's tier. A
+   physical claim without `physical_results`, an index key that does
+   not name a registered `kind: "physical"` device, a row whose
+   `source` is not `"physical"`, a row whose `device_id` does not
+   match its index key, or a row whose cell tier differs from the
+   device's qualified tier are all hard reasons. `merge-cells.mjs
+   --physical-index --source physical --device-id <id>` emits this
+   shape from a device's schema-3 run without folding the asset
+   modes; a merged (three-part) row folds the modes and can never
+   satisfy the per-mode invariant.
+4. **Per-device coverage (the RELEASE invariant).** Every registered
+   physical device x every released difficulty x cold/warm x every
+   required asset mode of the device's tier has its own evidence row.
+   A device missing a required cell is a hard reason naming the
+   device and the cell: registered devices without measurements are
+   never invisible, so the "worst physical device" is the worst
+   among ALL qualified devices, not the worst among devices that
+   happened to contribute rows.
+5. **Per-device evidence quality.** Each device's own samples meet
+   the generic minShaReps/minArgonReps floor and the mode's
+   `failureRateBudgets` rate (failure rate over its own samples,
+   timedOut or errorCount; 1.0 when it has rows but zero samples),
+   computed per device per cell, never aggregated across devices —
+   one healthy device can never mask a failing one. Release mode
+   only: each device's sha20 cells meet `minSha20SamplesPhysical`, so
+   a single exhaustion observation on a thin per-device sample never
+   forces the sha20 allowance.
+6. **Budget derivation from the physical rows.** For every
    release-tier cell the p95 budget is checked against the WORST
-   physical p95 across the qualified devices of the tier (each
-   device's own rows for the cell aggregated, worst device taken), for
-   solveMs and pageToVerifiedMs. Budget compliance therefore uses the
-   max physical p95, never one recording: if the budget rows were
-   copied from a lab run or from a single fast device while another
-   qualified device is slower, the budget fails.
-6. **Evidence quality.** The physical samples of every release-tier
-   cell stay under the mode's `failureRateBudgets` rate, meet the
-   generic minShaReps/minArgonReps floors, and — release mode only —
-   sha20 cells meet `minSha20SamplesPhysical`.
+   per-device physical p95 across the qualified devices of the tier
+   (each device's own rows merged across the cell's asset modes,
+   worst device taken), for solveMs and pageToVerifiedMs. Budget
+   compliance therefore uses the max physical p95, never one
+   recording: if the budget rows were copied from a lab run or from a
+   single fast device while another qualified device is slower, the
+   budget fails.
+7. **Freshness and chronology.** Every physical device's `tested_at`
+   is within `recordAgeDays` of now (a regenerated baseline can never
+   launder old measurements), never postdates
+   `qualification.qualified_at` or the payload's `generated_at`, and
+   `qualified_at` never precedes the newest physical `tested_at`.
 
 A `lab` file runs none of these proofs (there is no physical claim to
 prove); its CI gate is the coverage and budget-compliance rules above,
-and release mode rejects it on the status reason alone.
+and release mode rejects it on the status reason alone. The committed
+file stays `lab` with no `physical_results` until physical-device
+data is recorded.
+
+## The validator's adversarial mutation suite
+
+`tools/ci/test-validate-release-baseline.mjs` is the validator's own
+mutation corpus: it generates temporary budget/baseline fixtures in
+`os.tmpdir()` and runs the validator as a subprocess against them,
+asserting on exit codes AND on the specific reason substrings of the
+validator's own messages. The harness constants are read out of
+`client-perf.mjs` and the committed `release-budgets.json` is cloned,
+so the fixtures can never drift from the harness authority. Run it
+standalone (no harness install needed):
+
+```sh
+node tools/ci/test-validate-release-baseline.mjs
+```
+
+The corpus covers the complete schema-3 matrix (pass), per-mode
+matrix deletions (removing only `sha18:cold:files` or only
+`:inline`, or replacing both four-part rows with one three-part row),
+the legacy schema-1 path, and the physical-claim negatives: lab-only
+devices, missing device id, invalid tier, unknown device_id, a row
+whose device belongs to another tier, an unmeasured registered
+device, a 100%-failure device next to a healthy one, a one-sample
+sha20 device, a p95 over budget, stale `tested_at`, a release tier
+without p95 budgets, `source: "lab"` rows, and a qualification date
+predating the evidence. The job is wired into CI as the
+self-contained "Release-validator mutation suite" job.
 
 ## Results store
 
@@ -577,7 +650,10 @@ and release mode rejects it on the status reason alone.
   per-repetition samples). The payload records the served client
   assets (driver, glue, worker, execution interpreter) with their
   sizes and sha256 prefixes, so a run is attributable to the exact
-  bytes measured.
+  bytes measured. A physical-device recording (or the maintenance
+  payload built from one) additionally carries the top-level
+  `physical_results` per-device evidence index of the physical-
+  authority contract.
 - `results/results-<date>-partial-<time>.json` is a crashed or
   interrupted run, written without the completion marker. It is
   evidence only and can never be promoted to baseline.

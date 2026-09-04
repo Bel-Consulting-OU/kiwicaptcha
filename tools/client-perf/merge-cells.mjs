@@ -27,6 +27,30 @@
  * the provenance the release validator proves on release-tier cells.
  * Both flags must be given together; without them the rows are
  * emitted exactly as before (unattributed lab evidence).
+ *
+ * Device-index plumbing (round 4): the release validator proves a
+ * physical claim from the baseline payload's per-device evidence
+ * index, payload.physical_results = { "<device-id>": {
+ * "<tier>:<difficulty>:<cache>:<asset-mode>": <row> } }, and the
+ * release invariant demands per-mode evidence rows PER DEVICE (a
+ * merged row folds the asset modes and can never prove per-mode
+ * coverage). Emit that index with:
+ *   --physical-index --source physical --device-id <id> [--tier ...]
+ * which routes every per-mode row of the run(s) into the device
+ * index WITHOUT folding asset modes together:
+ *   node tools/client-perf/merge-cells.mjs --physical-index \
+ *     --source physical --device-id pixel-9-mainstream-01 \
+ *     --tier mainstream-desktop \
+ *     --run results/physical-pixel9-run.json
+ * prints { "physical_results": { "pixel-9-mainstream-01": { ... } } },
+ * the fragment to merge into the baseline payload next to results.
+ * Multiple --run files for the same device are merged per
+ * (difficulty, cache, asset mode): repetitions concatenate and every
+ * summary statistic is recomputed over the concatenation, exactly
+ * like the legacy merge. The budget numbers are still derived in the
+ * default merged mode (one device's merged rows at a time; the
+ * release file's budget rows must cover the slowest qualified device,
+ * which the validator checks against this index).
  */
 import { readFileSync } from 'node:fs';
 
@@ -55,14 +79,16 @@ const difficulties = [];
 let tier = null;
 let source = null;
 let deviceId = null;
+let physicalIndex = false;
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--run') runs.push(args[++i]);
   else if (args[i] === '--tier') tier = args[++i];
   else if (args[i] === '--difficulties') difficulties.push(...args[++i].split(','));
   else if (args[i] === '--source') source = args[++i];
   else if (args[i] === '--device-id') deviceId = args[++i];
+  else if (args[i] === '--physical-index') physicalIndex = true;
   else if (args[i] === '--help') {
-    console.log('usage: node merge-cells.mjs --run FILE [--run FILE] --tier TIER [--difficulties a,b,c] [--source lab|physical --device-id ID]');
+    console.log('usage: node merge-cells.mjs --run FILE [--run FILE] --tier TIER [--difficulties a,b,c] [--source lab|physical --device-id ID] [--physical-index]');
     process.exit(0);
   } else {
     console.error(`unknown option: ${args[i]}`);
@@ -75,6 +101,10 @@ if (!runs.length || !tier) {
 }
 if ((source === null) !== (deviceId === null)) {
   console.error('merge-cells: --source and --device-id must be given together (the provenance pair of a merged row)');
+  process.exit(2);
+}
+if (physicalIndex && (source === null || source !== 'physical')) {
+  console.error('merge-cells: --physical-index routes per-device physical evidence and requires --source physical --device-id <id>');
   process.exit(2);
 }
 if (source !== null && source !== 'lab' && source !== 'physical') {
@@ -104,29 +134,36 @@ for (const runPath of runs) {
     const [rowTier, difficulty, cache] = parts;
     if (rowTier !== tier) continue;
     if (difficulties.length && !difficulties.includes(difficulty)) continue;
-    perRunRows.push({ difficulty, cache, agg, run: payload.generated_at, schema: payload.schema });
+    // The physical index keeps the asset mode as its own dimension
+    // (the release invariant is per-device x per-mode); the legacy
+    // merged shape folds the modes.
+    const mode = parts[3];
+    perRunRows.push({ difficulty, cache, mode, agg, run: payload.generated_at, schema: payload.schema });
   }
 }
 
 const merged = new Map();
-for (const { difficulty, cache, agg } of perRunRows) {
+const indexed = new Map();
+for (const { difficulty, cache, mode, agg } of perRunRows) {
   const mapKey = `${difficulty}:${cache}`;
   if (!merged.has(mapKey)) merged.set(mapKey, []);
   merged.get(mapKey).push(agg);
+  if (physicalIndex) {
+    const indexKey = `${difficulty}:${cache}:${mode}`;
+    if (!indexed.has(indexKey)) indexed.set(indexKey, []);
+    indexed.get(indexKey).push(agg);
+  }
 }
 
-const out = [];
-for (const [mapKey, aggs] of [...merged.entries()].sort()) {
-  const [difficulty, cache] = mapKey.split(':');
+const buildRow = (difficulty, cache, aggs, mode) => {
   const reps = aggs.flatMap((a) => a.reps || []);
-  const base = { ...aggs[0] };
-  delete base.assets;
   const row = {
     tier,
     difficulty,
     cache,
     reps,
   };
+  if (mode !== null) row.assets = mode;
   if (source !== null) {
     row.source = source;
     row.device_id = deviceId;
@@ -137,7 +174,25 @@ for (const [mapKey, aggs] of [...merged.entries()].sort()) {
   row.longTaskCount = summarize(reps.map((s) => s.longTaskCount).filter((v) => v !== null));
   row.timedOutCount = reps.filter((s) => s.timedOut).length;
   row.errorCount = reps.filter((s) => s.errorCount > 0).length;
-  out.push(row);
+  return row;
+};
+
+const out = [];
+for (const [mapKey, aggs] of [...merged.entries()].sort()) {
+  const [difficulty, cache] = mapKey.split(':');
+  out.push(buildRow(difficulty, cache, aggs, null));
+}
+
+if (physicalIndex) {
+  // Per-device per-mode evidence index: rows keyed
+  // tier:difficulty:cache:assetMode, never folded across modes.
+  const index = {};
+  for (const [indexKey, aggs] of [...indexed.entries()].sort()) {
+    const [difficulty, cache, mode] = indexKey.split(':');
+    index[`${tier}:${difficulty}:${cache}:${mode}`] = buildRow(difficulty, cache, aggs, mode);
+  }
+  console.log(JSON.stringify({ physical_results: { [deviceId]: index } }, null, 2));
+  process.exit(0);
 }
 
 const budget = {};
