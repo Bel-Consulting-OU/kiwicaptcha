@@ -27,10 +27,16 @@
  *   Release mode (--release or RELEASE_PERFORMANCE=1) is the release
  *   certification gate. It refuses to certify a release unless
  *   qualification.status is "physical" (with a qualified_at date and
- *   recorded devices) AND, for a current-harness (schema 3) payload,
- *   the completed-run guards below hold. A lab-status gate therefore
- *   always fails a release: physical-device data is the release
- *   boundary, and nothing else can substitute for it.
+ *   recorded devices) AND the physical-evidence proofs below hold
+ *   (device registration, per-tier device coverage, per-row
+ *   provenance, worst-physical-p95 budget compliance) AND, for a
+ *   current-harness (schema 3) payload, the completed-run guards
+ *   hold. A lab-status gate therefore always fails a release:
+ *   physical-device data is the release boundary, and nothing else
+ *   can substitute for it. In release mode the release-required cells
+ *   additionally span the union of the budget file's tiers and its
+ *   qualification.release_tiers, so a file cannot declare a release
+ *   ladder that lacks p95 budget rows.
  *
  * The validator rejects the file, with every reason printed, unless
  * all of these hold:
@@ -42,12 +48,17 @@
  *      cold|warm combination has an explicit positive p95 budget row.
  *      A released solver mode without a budget row fails the run:
  *      there is no uncovered-cell escape, notes never carry a
- *      release-required cell.
+ *      release-required cell. In release mode the qualified tiers are
+ *      the union of the budget file's tiers and its
+ *      qualification.release_tiers, so a declared release ladder
+ *      without p95 budgets is a rejection.
  *   2. the budget authority carries a qualification block
  *      (status one of lab|physical, qualified_at null or ISO,
- *      harness_schema equal to the harness schema, devices array);
- *      a "physical" status without qualified_at or devices is a
- *      rejection, never a silent claim.
+ *      harness_schema equal to the harness schema, devices array,
+ *      release_tiers a non-empty ordered list of harness tier keys).
+ *      A "physical" status without qualified_at, without devices, or
+ *      without at least one kind:"physical" device (non-empty id and
+ *      tier) is a rejection, never a silent claim.
  *   3. every release-required cell (every mode x tier x cold/warm
  *      combination the budgets file requires) has a matching measured
  *      baseline row: coverage gaps are hard failures, counted and
@@ -55,12 +66,19 @@
  *   4. the measured p95 of every required cell (solveMs and
  *      pageToVerifiedMs, aggregated across the asset-mode rows the
  *      baseline records for the cell) stays under the matching budget
- *      row.
- *   5. the per-cell failure rate (timed-out + errored samples over the
- *      cell's sample count) stays under release-budgets.json
- *      maxCellFailureRate, and the sample count meets the budget file's
- *      minShaReps / minArgonReps floors (the floors are the lab
- *      evidence floors; the harness defaults exceed them).
+ *      row. When the file claims physical qualification, the budget
+ *      of every release-tier cell is instead checked against the
+ *      WORST physical p95 across the qualified devices of that tier
+ *      (the budget must cover the slowest qualified device, proving
+ *      the budget was derived from the physical rows, not from one
+ *      recording).
+ *   5. the sample count of every required cell meets the budget
+ *      file's minShaReps / minArgonReps floors (the floors are the
+ *      lab evidence floors; the harness defaults exceed them). When
+ *      the file claims physical, the sha20 release-tier cells must in
+ *      release mode additionally meet minSha20SamplesPhysical, the
+ *      physical sha20 sample floor: the sha20 allowance must never be
+ *      forced by a single exhaustion observation on a small sample.
  *   6. the record is no older than release-budgets.json recordAgeDays
  *      (default 90 days) and carries browser/OS/hardware identity.
  *   7. release mode only: qualification.status must be "physical";
@@ -70,6 +88,58 @@
  *      x cold/warm x asset cell), default sample sizes, both cache
  *      and asset modes, and the real argon ladder (m=16384 KiB,
  *      target 8).
+ *   8. per-mode failure-rate limits (failureRateBudgets: every mode
+ *      except sha20 is held to the "default" rate, sha20 alone keeps
+ *      its documented 0.02 allowance for the measured driver-
+ *      exhaustion tail) bind the physical evidence of a physical-
+ *      qualified file: when qualification.status is "physical", each
+ *      release-tier cell's physical samples must stay under its
+ *      per-mode failure budget. The old global maxCellFailureRate is
+ *      gone: lab rows are never certification evidence, so no
+ *      per-mode budget is asserted against them (a lab claim already
+ *      fails release certification on the status reason alone).
+ *
+ * Physical-evidence proofs (audit finding 3). When
+ * qualification.status is "physical", the validator additionally
+ * proves the claim:
+ *
+ *   - devices: at least one entry with kind:"physical" and non-empty
+ *     id and tier exists, ids are unique, every entry's kind is
+ *     lab|physical, every entry carries a non-empty tier that is a
+ *     harness tier, and a physical entry additionally carries
+ *     non-empty hardware/os/browser/battery_state and a parseable
+ *     tested_at date.
+ *   - tier coverage: every tier named in qualification.release_tiers
+ *     has at least one kind:"physical" device qualified on that tier
+ *     ("release tier X has no physical qualification device").
+ *   - provenance: every measurement row (results row) of a
+ *     release-tier cell carries row.source "physical" and a
+ *     row.device_id that names a registered kind:"physical" device
+ *     whose tier equals the cell's tier. A row whose provenance
+ *     names an unknown device, a non-physical device, or a device
+ *     qualified on another tier is a hard reason.
+ *   - coverage: every mode x release-tier x cold/warm cell has at
+ *     least one physical measurement row.
+ *   - derivation: every release-tier cell's p95 budget row covers the
+ *     worst measured physical p95 across the qualified devices of the
+ *     tier (per-device rows merged across the cell's asset modes,
+ *     worst device taken), for solveMs and pageToVerifiedMs.
+ *   - quality: the physical samples of every release-tier cell stay
+ *     under the per-mode failure budget of failureRateBudgets, and
+ *     sha20 release-tier cells in release mode meet
+ *     minSha20SamplesPhysical.
+ *
+ * Provenance granularity note: provenance lives on the result rows
+ * (row.source, row.device_id), the granularity the baseline keys
+ * support (rows are keyed tier:difficulty:cache[:asset-mode]). A
+ * physical recording therefore writes one result row per device and
+ * cell (a schema-3 run on a device, or a maintenance merge of that
+ * device's rows). The worst-p95 rule compares per-row measured p95s
+ * across the physical rows of a cell and takes the worst. A future
+ * multi-device merge that folds several devices into one cell row
+ * must carry row-level provenance per device run instead; folding
+ * several devices into a single row is out of this schema's scope and
+ * is documented as such in tools/client-perf/README.md.
  *
  * Exit status: 0 on a clean pass, 1 on any rejection. Every reason is
  * written to stderr with the offending keys and values; the pass
@@ -87,8 +157,14 @@ const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 const HARNESS_FILE = join(REPO_ROOT, 'tools', 'client-perf', 'client-perf.mjs');
 const DEFAULT_BUDGETS = join(REPO_ROOT, 'tools', 'client-perf', 'release-budgets.json');
 
-const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/1';
+const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/2';
 const RELEASE_STATUSES = ['lab', 'physical'];
+const DEVICE_KINDS = ['lab', 'physical'];
+const CACHE_STATES = ['cold', 'warm'];
+const BUDGET_METRICS = [
+  ['solveMsP95', 'solveMs'],
+  ['pageToVerifiedMsP95', 'pageToVerifiedMs'],
+];
 
 /**
  * Read a constant out of the harness source: the validator never
@@ -175,6 +251,10 @@ function aggregate(samples, field) {
   };
 }
 
+function cellKey(cell) {
+  return `${cell.tier}:${cell.difficulty}:${cell.cache}`;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   let releaseMode = process.env.RELEASE_PERFORMANCE === '1';
@@ -240,7 +320,7 @@ function main() {
   // Qualification block.
   const qualification = budgets.qualification;
   if (!qualification || typeof qualification !== 'object') {
-    reasons.push(`budget file ${budgetsPath}: missing top-level qualification object (status, qualified_at, harness_schema, devices)`);
+    reasons.push(`budget file ${budgetsPath}: missing top-level qualification object (status, qualified_at, harness_schema, devices, release_tiers)`);
   } else {
     if (!RELEASE_STATUSES.includes(qualification.status)) {
       reasons.push(`budget file ${budgetsPath}: qualification.status ${JSON.stringify(qualification.status)} is not one of ${RELEASE_STATUSES.join('|')}`);
@@ -265,7 +345,121 @@ function main() {
         reasons.push(`budget file ${budgetsPath}: qualification.status "physical" requires recorded devices (a physical claim without device rows is a silent gap)`);
       }
     }
+
+    // The release ladder: release_tiers is the explicit ordered list of
+    // tiers the release gate certifies. Every entry must be a harness
+    // tier key the repo documents (the README device-tier table); a
+    // file cannot invent a tier name here.
+    if (!Array.isArray(qualification.release_tiers)) {
+      reasons.push(`budget file ${budgetsPath}: qualification.release_tiers must be an ordered list of the harness tier keys the release gate certifies (missing or not an array)`);
+    } else {
+      if (qualification.release_tiers.length === 0) {
+        reasons.push(`budget file ${budgetsPath}: qualification.release_tiers must name at least one tier (an empty release ladder cannot be certified)`);
+      }
+      const seenTiers = new Set();
+      for (const t of qualification.release_tiers) {
+        if (typeof t !== 'string' || !t.length) {
+          reasons.push(`budget file ${budgetsPath}: qualification.release_tiers entries must be non-empty tier key strings (got ${JSON.stringify(t)})`);
+        } else if (!tierNames.includes(t)) {
+          reasons.push(`budget file ${budgetsPath}: qualification.release_tiers names unknown tier ${JSON.stringify(t)} (not a harness tier; release tiers must be documented harness tier keys)`);
+        }
+        if (typeof t === 'string' && seenTiers.has(t)) {
+          reasons.push(`budget file ${budgetsPath}: qualification.release_tiers repeats tier ${t} (the ladder is an ordered list without duplicates)`);
+        }
+        if (typeof t === 'string') seenTiers.add(t);
+      }
+    }
   }
+
+  // Device registration: every device entry must identify the rig it
+  // records (id, kind, tier), and a kind:"physical" entry must carry
+  // the full physical identity (hardware/os/browser/battery_state and
+  // a tested_at date) the release claim requires.
+  const deviceEntries = [];
+  const deviceById = new Map();
+  if (qualification && Array.isArray(qualification.devices)) {
+    const seenIds = new Set();
+    qualification.devices.forEach((dev, i) => {
+      if (!dev || typeof dev !== 'object' || Array.isArray(dev)) {
+        reasons.push(`budget file ${budgetsPath}: qualification.devices[${i}] is not an object`);
+        return;
+      }
+      if (typeof dev.id !== 'string' || dev.id.length === 0) {
+        reasons.push(`budget file ${budgetsPath}: qualification.devices[${i}] needs a non-empty id string`);
+      } else {
+        if (seenIds.has(dev.id)) {
+          reasons.push(`budget file ${budgetsPath}: duplicate qualification.devices id ${JSON.stringify(dev.id)} (device ids must be unique)`);
+        }
+        seenIds.add(dev.id);
+      }
+      if (!DEVICE_KINDS.includes(dev.kind)) {
+        reasons.push(`budget file ${budgetsPath}: device ${JSON.stringify(dev.id || dev)} kind ${JSON.stringify(dev.kind)} is not one of ${DEVICE_KINDS.join('|')}`);
+      }
+      if (typeof dev.tier !== 'string' || dev.tier.length === 0) {
+        reasons.push(`budget file ${budgetsPath}: device ${JSON.stringify(dev.id || dev)} needs a non-empty tier`);
+      } else if (!tierNames.includes(dev.tier)) {
+        reasons.push(`budget file ${budgetsPath}: device ${JSON.stringify(dev.id)} tier ${JSON.stringify(dev.tier)} is not a harness tier`);
+      }
+      if (dev.kind === 'physical') {
+        for (const field of ['hardware', 'os', 'browser', 'battery_state']) {
+          if (typeof dev[field] !== 'string' || dev[field].length === 0) {
+            reasons.push(`budget file ${budgetsPath}: physical device ${JSON.stringify(dev.id)} needs a non-empty ${field}`);
+          }
+        }
+        const testedAt = dev.tested_at;
+        if (typeof testedAt !== 'string' || Number.isNaN(Date.parse(testedAt))) {
+          reasons.push(`budget file ${budgetsPath}: physical device ${JSON.stringify(dev.id)} needs a parseable ISO tested_at date`);
+        }
+      }
+      deviceEntries.push(dev);
+      if (typeof dev.id === 'string' && dev.id.length > 0) deviceById.set(dev.id, dev);
+    });
+  }
+
+  // The physical devices of the claim: kind:"physical" entries with a
+  // non-empty id and tier (audit finding 3: the validator must never
+  // count a lab rig or a device row without identity as physical
+  // evidence).
+  const physicalDevices = deviceEntries.filter(
+    (d) => d.kind === 'physical' && typeof d.id === 'string' && d.id.length > 0 && typeof d.tier === 'string' && d.tier.length > 0
+  );
+  const physicalClaim = qualification && qualification.status === 'physical';
+  if (physicalClaim) {
+    if (physicalDevices.length === 0) {
+      reasons.push(`budget file ${budgetsPath}: qualification.status "physical" requires at least one kind:"physical" device with a non-empty id and tier (${Array.isArray(qualification.devices) ? qualification.devices.length : 0} device(s) recorded, none physical)`);
+    }
+  }
+
+  // Per-mode failure-rate limits (replaces the old global
+  // maxCellFailureRate, which let every RSW/Argon/execution cell carry
+  // ~5% failures): failureRateBudgets.default binds every mode that
+  // has no explicit entry; only sha20 carries an explicit allowance
+  // (0.02) for the measured driver-exhaustion tail of the 20-bit
+  // pure-JS search. Unknown modes are rejections: a file cannot invent
+  // a carve-out for a mode the harness does not solve.
+  const failureRateBudgets = budgets.failureRateBudgets;
+  if (!failureRateBudgets || typeof failureRateBudgets !== 'object' || Array.isArray(failureRateBudgets)) {
+    reasons.push(`budget file ${budgetsPath}: failureRateBudgets must be an object { default: 0..1, "<mode>": 0..1 } (per-mode failure-rate limits; every mode except sha20 inherits default)`);
+  } else {
+    const frbKeys = Object.keys(failureRateBudgets);
+    if (typeof failureRateBudgets.default !== 'number' || !(failureRateBudgets.default > 0 && failureRateBudgets.default <= 1)) {
+      reasons.push(`budget file ${budgetsPath}: failureRateBudgets.default ${JSON.stringify(failureRateBudgets.default)} is not a rate in (0, 1]`);
+    }
+    for (const key of frbKeys) {
+      if (key !== 'default' && !Object.prototype.hasOwnProperty.call(difficultyProfiles, key)) {
+        reasons.push(`budget file ${budgetsPath}: failureRateBudgets names unknown mode ${JSON.stringify(key)} (only "default" or harness difficulties such as sha20 may carry a rate)`);
+      }
+      const v = failureRateBudgets[key];
+      if (typeof v !== 'number' || !(v > 0 && v <= 1)) {
+        reasons.push(`budget file ${budgetsPath}: failureRateBudgets[${JSON.stringify(key)}] ${JSON.stringify(v)} is not a rate in (0, 1]`);
+      }
+    }
+  }
+  const failureRateForMode = (difficulty) => {
+    const frb = budgets.failureRateBudgets;
+    if (!frb || typeof frb !== 'object') return null;
+    return typeof frb[difficulty] === 'number' ? frb[difficulty] : (typeof frb.default === 'number' ? frb.default : null);
+  };
 
   // The released-mode set: the budget difficulty list must equal the
   // harness's difficulty set. A mode the harness solves but the budget
@@ -284,7 +478,9 @@ function main() {
 
   // Qualified tier scope: every budget tier must be a harness tier, and
   // every difficulty x tier x cold|warm combination must carry an
-  // explicit positive p95 budget row.
+  // explicit positive p95 budget row. In release mode the scope widens
+  // to the union with qualification.release_tiers, so a file cannot
+  // declare a release ladder that lacks p95 budgets.
   const budgetTiers = Array.isArray(budgets.tiers) ? budgets.tiers : [];
   if (budgetTiers.length === 0) {
     reasons.push(`budget file ${budgetsPath}: tiers list is empty (a release gate must name the tiers it qualifies)`);
@@ -293,19 +489,32 @@ function main() {
   if (unknownBudgetTiers.length) {
     reasons.push(`budget file ${budgetsPath}: unknown tier(s) ${unknownBudgetTiers.join(', ')} (not harness tiers)`);
   }
+  const releaseTiers =
+    qualification && Array.isArray(qualification.release_tiers)
+      ? qualification.release_tiers.filter((t) => typeof t === 'string' && tierNames.includes(t))
+      : [];
+  const releaseTierSet = new Set(releaseTiers);
+  const certTiers = releaseMode ? [...new Set([...budgetTiers, ...releaseTiers])] : [...budgetTiers];
+  if (releaseMode) {
+    for (const t of releaseTiers) {
+      if (!budgetTiers.includes(t)) {
+        reasons.push(`release tier ${t} is not covered by the budget file's tiers (release_tiers and the budget tiers must name the same ladder in release certification: ${t} has no p95 budget rows)`);
+      }
+    }
+  }
   const missingBudgetRows = [];
-  for (const tier of budgetTiers) {
+  for (const tier of certTiers) {
     const tierBudget = (budgets.budgets || {})[tier];
     if (!tierBudget) {
       for (const difficulty of budgetDifficulties) {
-        for (const cache of ['cold', 'warm']) {
+        for (const cache of CACHE_STATES) {
           missingBudgetRows.push(`${tier}/${difficulty}/${cache}`);
         }
       }
       continue;
     }
     for (const difficulty of budgetDifficulties) {
-      for (const cache of ['cold', 'warm']) {
+      for (const cache of CACHE_STATES) {
         const b = (tierBudget[difficulty] || {})[cache];
         if (!b || !(b.solveMsP95 > 0) || !(b.pageToVerifiedMsP95 > 0)) {
           missingBudgetRows.push(`${tier}/${difficulty}/${cache}`);
@@ -323,6 +532,14 @@ function main() {
   }
   if (!(Number.isInteger(minArgonReps) && minArgonReps > 0)) {
     reasons.push(`budget file ${budgetsPath}: minArgonReps ${JSON.stringify(minArgonReps)} is not a positive integer`);
+  }
+  // The physical sha20 sample floor (schema 1.x had no sample floor;
+  // the sha20 allowance must never be forced by a single exhaustion
+  // observation on a small sample). Enforced in release mode against
+  // the physical sha20 evidence of a physical-qualified file.
+  const minSha20SamplesPhysical = budgets.minSha20SamplesPhysical;
+  if (!(Number.isInteger(minSha20SamplesPhysical) && minSha20SamplesPhysical > 0)) {
+    reasons.push(`budget file ${budgetsPath}: minSha20SamplesPhysical ${JSON.stringify(minSha20SamplesPhysical)} is not a positive integer (the physical sha20 evidence floor)`);
   }
 
   // ── Baseline identity and age. ─────────────────────────────────────
@@ -353,20 +570,30 @@ function main() {
 
   // ── Coverage and budget compliance: every release-required cell. ───
   // A required cell is every (tier, difficulty, cache) combination the
-  // budgets file rows declare, for every asset mode the harness schema
-  // attaches to that difficulty. The baseline rows that match a
-  // required cell are aggregated (per-repetition samples concatenated
-  // across the cell's mode rows) and the aggregate p95s are compared
-  // with the budget row.
+  // budgets file rows declare (plus, in release mode, every tier the
+  // qualification declares in release_tiers), for every asset mode the
+  // harness schema attaches to that difficulty. The baseline rows that
+  // match a required cell are aggregated (per-repetition samples
+  // concatenated across the cell's mode rows) and the aggregate p95s
+  // are compared with the budget row.
+  //
+  // When the file claims physical qualification, the release-tier
+  // cells are governed by the physical-evidence contract below
+  // (provenance, per-device worst p95, per-mode failure budgets,
+  // sample floors); the generic merged coverage/budget rules still
+  // bind the cells of the remaining (lab-scope) tiers.
   const results = payload.results || {};
-  const requiredCells = [];
-  for (const tier of budgetTiers) {
+  const allRequiredCells = [];
+  for (const tier of certTiers) {
     for (const difficulty of budgetDifficulties) {
-      for (const cache of ['cold', 'warm']) {
-        requiredCells.push({ tier, difficulty, cache, isArgon: !!difficultyProfiles[difficulty]?.isArgon });
+      for (const cache of CACHE_STATES) {
+        allRequiredCells.push({ tier, difficulty, cache, isArgon: !!difficultyProfiles[difficulty]?.isArgon });
       }
     }
   }
+  const requiredCells = physicalClaim
+    ? allRequiredCells.filter((c) => !releaseTierSet.has(c.tier))
+    : allRequiredCells;
 
   const matchingRows = (cell) => {
     const prefix3 = `${cell.tier}:${cell.difficulty}:${cell.cache}`;
@@ -438,7 +665,7 @@ function main() {
     if (matches.length === 0) continue;
     const budget = budgetRows(cell);
     if (!budget) continue; // already reported by the budget-authority rule
-    for (const [metric, field] of [['solveMsP95', 'solveMs'], ['pageToVerifiedMsP95', 'pageToVerifiedMs']]) {
+    for (const [metric, field] of BUDGET_METRICS) {
       const measured = coverageField(cell, field);
       if (measured === null) {
         budgetViolations.push(`${cell.tier}:${cell.difficulty}:${cell.cache} ${field}.p95 is not recorded`);
@@ -447,23 +674,144 @@ function main() {
       }
     }
   }
-  if (budgetViolations.length) {
-    reasons.push(`${budgetViolations.length} p95 budget violation(s) (${budgetViolations.slice(0, 6).join('; ')}${budgetViolations.length > 6 ? '; ...' : ''})`);
-  }
 
-  // Failure rate over the aggregated samples of each required cell.
-  const failureRateBudget = typeof budgets.maxCellFailureRate === 'number' ? budgets.maxCellFailureRate : 0.02;
-  const cellFailureViolations = [];
-  for (const cell of requiredCells) {
-    const reps = cellReps(cell);
-    if (reps.length === 0) continue;
-    const failed = reps.filter((s) => s && ((s.timedOut && s.timedOut !== false) || s.errorCount > 0)).length;
-    if (failed / reps.length > failureRateBudget) {
-      cellFailureViolations.push(`${cell.tier}:${cell.difficulty}:${cell.cache} failure rate ${(failed / reps.length * 100).toFixed(1)}% (${failed}/${reps.length}) exceeds the ${(failureRateBudget * 100).toFixed(0)}% budget`);
+  // ── Physical-evidence contract (audit finding 3). ──────────────────
+  // When the file claims physical qualification, the claim must be
+  // provable: every release tier has a kind:"physical" device, every
+  // release-tier cell's measurement rows carry provenance that names a
+  // registered physical device of that tier, and the p95 budget rows
+  // cover the WORST physical p95 across the qualified devices of the
+  // tier (the budget must be derivable from the physical rows, never
+  // from one recording). The per-mode failure-rate budgets and the
+  // sha20 physical sample floor bind this evidence. The provenance and
+  // device checks run in both modes whenever the claim is physical;
+  // the minSha20SamplesPhysical floor is asserted only in release
+  // mode (certification), per the sha20 carve-out contract.
+  if (physicalClaim) {
+    // Tier coverage: every declared release tier must have at least one
+    // physical device qualified on it.
+    for (const t of releaseTiers) {
+      if (!physicalDevices.some((d) => d.tier === t)) {
+        reasons.push(`release tier ${t} has no physical qualification device`);
+      }
+    }
+
+    // Per-cell proofs over the release-tier cells.
+    for (const tier of releaseTiers) {
+      for (const difficulty of budgetDifficulties) {
+        for (const cache of CACHE_STATES) {
+          const cell = { tier, difficulty, cache, isArgon: !!difficultyProfiles[difficulty]?.isArgon };
+          const key = cellKey(cell);
+          const matches = matchingRows(cell);
+          const physicalMatches = []; // {key, row, device}
+          if (matches.length === 0) {
+            reasons.push(`${key} has no measured row (release tier ${tier} requires a physical measurement row)`);
+            continue;
+          }
+          for (const { key: rowKey, row } of matches) {
+            if (row.source !== 'physical') {
+              reasons.push(`${rowKey} is a release-tier measurement row without provenance: physical qualification evidence requires row.source "physical" on a registered device`);
+              continue;
+            }
+            const deviceId = row.device_id;
+            if (typeof deviceId !== 'string' || deviceId.length === 0) {
+              reasons.push(`${rowKey} row.source "physical" carries no device_id (every physical measurement row must name the device it was recorded on)`);
+              continue;
+            }
+            const dev = deviceById.get(deviceId);
+            if (!dev || dev.kind !== 'physical') {
+              reasons.push(`${rowKey} references device_id ${JSON.stringify(deviceId)} which is not a registered kind:"physical" device in qualification.devices`);
+              continue;
+            }
+            if (dev.tier !== tier) {
+              reasons.push(`${rowKey} references device ${JSON.stringify(deviceId)} qualified on tier ${JSON.stringify(dev.tier)}, not the cell tier ${JSON.stringify(tier)} (a physical row's device tier must equal its cell's tier)`);
+              continue;
+            }
+            physicalMatches.push({ key: rowKey, row, device: dev });
+          }
+          if (physicalMatches.length === 0) {
+            reasons.push(`${key} has no physical measurement row (release tier ${tier} requires rows with source "physical" recorded on a kind:"physical" device qualified on that tier)`);
+            continue;
+          }
+
+          const budget = budgetRows(cell);
+
+          // Worst physical p95 across the qualified devices of the
+          // tier: aggregate each device's own measurement rows for the
+          // cell (per-row provenance: one device per row) and take the
+          // worst device p95 against the budget row.
+          const byDevice = new Map();
+          for (const { row, device } of physicalMatches) {
+            if (!byDevice.has(device.id)) byDevice.set(device.id, []);
+            byDevice.get(device.id).push(row);
+          }
+          const deviceFieldP95 = (deviceId, field) => {
+            const rows = byDevice.get(deviceId) || [];
+            const reps = [];
+            const summaryP95s = [];
+            for (const row of rows) {
+              if (Array.isArray(row.reps) && row.reps.length > 0) reps.push(...row.reps);
+              const s = row && row[field] && typeof row[field] === 'object' ? row[field] : null;
+              if (s && typeof s.p95 === 'number') summaryP95s.push(s.p95);
+            }
+            if (reps.length > 0) {
+              const agg = aggregate(reps, field);
+              return agg ? agg.p95 : null;
+            }
+            return summaryP95s.length ? Math.max(...summaryP95s) : null;
+          };
+          const allPhysicalSamples = [];
+          for (const { row } of physicalMatches) {
+            if (Array.isArray(row.reps)) allPhysicalSamples.push(...row.reps);
+          }
+
+          // Sample floors on the physical evidence (the generic floors
+          // and, in release mode, the sha20 physical floor).
+          const min = cell.isArgon ? minArgonReps : minShaReps;
+          if (allPhysicalSamples.length > 0 && allPhysicalSamples.length < min) {
+            reasons.push(`${key} has ${allPhysicalSamples.length} physical samples (need >= ${min})`);
+          }
+          if (releaseMode && difficulty === 'sha20') {
+            const floor = budgets.minSha20SamplesPhysical;
+            if (allPhysicalSamples.length < floor) {
+              reasons.push(`${key} has ${allPhysicalSamples.length} physical sha20 samples, below the minSha20SamplesPhysical floor ${floor} (physical sha20 certification needs much larger samples so a single exhaustion observation never forces the sha20 allowance)`);
+            }
+          }
+
+          // Per-mode failure budget over the physical evidence.
+          const rateBudget = failureRateForMode(difficulty);
+          if (rateBudget !== null && allPhysicalSamples.length > 0) {
+            const failed = allPhysicalSamples.filter(
+              (s) => s && ((s.timedOut && s.timedOut !== false) || s.errorCount > 0)
+            ).length;
+            if (failed / allPhysicalSamples.length > rateBudget) {
+              reasons.push(`${key} physical failure rate ${((failed / allPhysicalSamples.length) * 100).toFixed(1)}% (${failed}/${allPhysicalSamples.length}) exceeds the ${(rateBudget * 100).toFixed(0)}% per-mode failure budget of mode ${difficulty}`);
+            }
+          }
+
+          if (!budget) continue; // budget-row gaps already reported
+          for (const [metric, field] of BUDGET_METRICS) {
+            const worst = { value: null, device: null };
+            for (const device of byDevice.keys()) {
+              const p95 = deviceFieldP95(device, field);
+              if (p95 === null) continue;
+              if (worst.value === null || p95 > worst.value) {
+                worst.value = p95;
+                worst.device = device;
+              }
+            }
+            if (worst.value === null) {
+              budgetViolations.push(`${key} ${field} physical p95 is not recorded on any physical device`);
+            } else if (worst.value > budget[metric]) {
+              budgetViolations.push(`${key} ${field} worst physical p95 ${worst.value.toFixed(1)} ms (device ${worst.device}) exceeds the budget ${budget[metric]} ms (the budget must cover the slowest qualified physical device)`);
+            }
+          }
+        }
+      }
     }
   }
-  if (cellFailureViolations.length) {
-    reasons.push(`${cellFailureViolations.length} cell(s) over the failure-rate budget (${cellFailureViolations.slice(0, 5).join('; ')}${cellFailureViolations.length > 5 ? '; ...' : ''})`);
+  if (budgetViolations.length) {
+    reasons.push(`${budgetViolations.length} p95 budget violation(s) (${budgetViolations.slice(0, 6).join('; ')}${budgetViolations.length > 6 ? '; ...' : ''})`);
   }
 
   // ── Completed-run guards: current-harness (schema 3) payloads only. ─
@@ -490,7 +838,7 @@ function main() {
     const expectedCells = [];
     for (const tier of tierNames) {
       for (const [difficulty, profile] of Object.entries(difficultyProfiles)) {
-        for (const cache of ['cold', 'warm']) {
+        for (const cache of CACHE_STATES) {
           for (const assetMode of profile.assetModes) {
             expectedCells.push({ tier, difficulty, cache, assetMode });
           }
@@ -526,9 +874,10 @@ function main() {
   // refuses to certify unless the qualification is physical. ─────────
   const qual = budgets.qualification || {};
   const status = qual.status;
+  const physicalCount = physicalDevices.length;
   const statusLine =
     status === 'physical'
-      ? `performance qualification status=${status} (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded)`
+      ? `performance qualification status=physical (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded, ${physicalCount} physical device(s) on release tiers ${(Array.isArray(qual.release_tiers) ? qual.release_tiers : []).join('+') || '(none)'})`
       : `performance qualification status=${status} — physical-device data required before release certification`;
   if (releaseMode) {
     if (status !== 'physical') {
@@ -544,13 +893,10 @@ function main() {
     for (const n of notes) process.stderr.write(`  note: ${n}\n`);
     process.exit(1);
   }
-  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length} release-required cells, budgets ${budgetsPath}${releaseMode ? ', release mode' : ''})`);
+  if (releaseMode) console.log(statusLine);
+  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length + (physicalClaim ? releaseTiers.length * budgetDifficulties.length * CACHE_STATES.length : 0)} release-required cells, budgets ${budgetsPath}${releaseMode ? ', release mode, release tiers: ' + (releaseTiers.join('+') || '(none)') : ''})`);
   for (const n of notes) console.log(`  note: ${n}`);
   process.exit(0);
-}
-
-function cellKey(cell) {
-  return `${cell.tier}:${cell.difficulty}:${cell.cache}:${cell.assetMode}`;
 }
 
 main();
