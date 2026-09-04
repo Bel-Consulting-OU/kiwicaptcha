@@ -1,0 +1,41 @@
+{
+    "name": "kiwicaptcha/reference-deployment",
+    "description": "KiwiCaptcha reference deployment: the PHP core behind a php -S request surface, backed by Valkey/Redis through the core RedisStorage. Configuration comes exclusively from environment variables; production deployments use the published Symfony bundle instead.",
+    "type": "project",
+    "license": "MIT",
+    "keywords": [
+        "captcha",
+        "proof-of-work",
+        "sha256",
+        "argon2",
+        "security",
+        "privacy",
+        "redis",
+        "valkey"
+    ],
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*",
+        "ext-openssl": "*",
+        "ext-sodium": "*",
+        "predis/predis": "^3.5",
+        "kiwicaptcha/kiwicaptcha-php": "^1.0"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../packages/kiwicaptcha-php",
+            "options": {
+                "symlink": false,
+                "versions": {
+                    "kiwicaptcha/kiwicaptcha-php": "1.0.0"
+                }
+            }
+        }
+    ],
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
