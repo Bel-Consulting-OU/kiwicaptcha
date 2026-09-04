@@ -20,11 +20,11 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The token-shape matrix shared with the Rust core (token.rs and
- * verify.rs): for every PoW algorithm, with execution evidence off and
- * on, the token grammar must round-trip encode -> decode; an rsw final
+ * verify.rs). For every PoW algorithm, with execution evidence off and
+ * on, the token grammar must round-trip encode -> decode. An rsw final
  * value presented to a non-rsw record is rejected at the verifier; an
- * rsw record demands counter 0; and the malformed composition tails
- * (a broken trace or a broken 512-hex proof behind a real digest:trace
+ * rsw record demands counter 0. The malformed composition tails (a
+ * broken trace, or a broken 512-hex proof behind a real digest:trace
  * segment) fail the decode deterministically. PHP and Rust assert the
  * same outcomes row for row.
  */

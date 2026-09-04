@@ -1351,7 +1351,9 @@ mod tests {
                 .unwrap();
         assert_eq!(
             plain,
-            format!("{VALID_NONCE}.0.1234.{telemetry_json}.{COMPOSED_DIGEST}:{COMPOSED_TRACE}.{proof}"),
+            format!(
+                "{VALID_NONCE}.0.1234.{telemetry_json}.{COMPOSED_DIGEST}:{COMPOSED_TRACE}.{proof}"
+            ),
             "the proof rides after the digest:trace segment"
         );
         let decoded = SolutionToken::decode(&wire).unwrap();
@@ -1393,16 +1395,41 @@ mod tests {
         // and rsw token shapes, with execution evidence off and on.
         // Every row must round-trip encode -> decode.
         let proof = "b".repeat(512);
-        let rows: &[(&str, bool, Option<&str>, Option<&str>, Option<&str>)] = &[
-            // (label, execution on, digest, trace, rsw proof)
+        // (label, execution on, digest, trace, rsw proof)
+        type Row<'a> = (
+            &'a str,
+            bool,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<&'a str>,
+        );
+        let rows: &[Row] = &[
             ("sha256-off", false, None, None, None),
-            ("sha256-on", true, Some(COMPOSED_DIGEST), Some(COMPOSED_TRACE), None),
+            (
+                "sha256-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                None,
+            ),
             ("argon2id-off", false, None, None, None),
-            ("argon2id-on", true, Some(COMPOSED_DIGEST), Some(COMPOSED_TRACE), None),
+            (
+                "argon2id-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                None,
+            ),
             ("rsw-off", false, None, None, Some(&proof)),
             // The composition row: the rsw proof rides behind the
             // execution evidence on one token.
-            ("rsw-on", true, Some(COMPOSED_DIGEST), Some(COMPOSED_TRACE), Some(&proof)),
+            (
+                "rsw-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                Some(&proof),
+            ),
         ];
         for &(label, exec_on, digest, trace, rsw) in rows {
             let token = SolutionToken {
@@ -1414,9 +1441,8 @@ mod tests {
                 execution_trace: trace.map(str::to_string),
                 rsw_proof: rsw.map(str::to_string),
             };
-            let decoded = SolutionToken::decode(&token.encode()).unwrap_or_else(|e| {
-                panic!("{label} (execution={exec_on}) must decode: {e}")
-            });
+            let decoded = SolutionToken::decode(&token.encode())
+                .unwrap_or_else(|e| panic!("{label} (execution={exec_on}) must decode: {e}"));
             assert_eq!(decoded.execution_digest.as_deref(), digest, "{label}");
             assert_eq!(decoded.execution_trace.as_deref(), trace, "{label}");
             assert_eq!(decoded.rsw_proof.as_deref(), rsw, "{label}");
@@ -1433,10 +1459,7 @@ mod tests {
                     rsw_proof: rsw.map(str::to_string),
                 };
                 let again = SolutionToken::decode(&dotted.encode()).unwrap();
-                assert_eq!(
-                    again.telemetry["ua"],
-                    "Mozilla/5.0 (X11; Linux x86_64)"
-                );
+                assert_eq!(again.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
             }
         }
     }
@@ -1449,22 +1472,19 @@ mod tests {
         // or wrong length) fails closed through the telemetry JSON
         // parse — both deterministically, exactly like PHP.
         for bad_trace in [
-            "aGk=",        // padded — not the unpadded wire form
-            "aGk+",        // standard-alphabet char
-            "aGk/",        // standard-alphabet char
-            "a:b",         // colon outside the separator
-            "ab.cd",       // dot outside the grammar
-            "a b",         // whitespace
+            "aGk=",  // padded — not the unpadded wire form
+            "aGk+",  // standard-alphabet char
+            "aGk/",  // standard-alphabet char
+            "a:b",   // colon outside the separator
+            "ab.cd", // dot outside the grammar
+            "a b",   // whitespace
         ] {
             let wire = composed_wire(
                 "{}",
                 &format!("{COMPOSED_DIGEST}:{bad_trace}.{}", "a".repeat(512)),
             );
             assert!(
-                matches!(
-                    SolutionToken::decode(&wire),
-                    Err(DecodeError::Malformed)
-                ),
+                matches!(SolutionToken::decode(&wire), Err(DecodeError::Malformed)),
                 "a composed token with trace {bad_trace:?} must be rejected"
             );
         }
@@ -1479,10 +1499,7 @@ mod tests {
                 &format!("{COMPOSED_DIGEST}:{COMPOSED_TRACE}.{bad_proof}"),
             );
             assert!(
-                matches!(
-                    SolutionToken::decode(&wire),
-                    Err(DecodeError::Malformed)
-                ),
+                matches!(SolutionToken::decode(&wire), Err(DecodeError::Malformed)),
                 "a composed token with a {}-char non-lowercase-hex proof must be rejected",
                 bad_proof.len()
             );

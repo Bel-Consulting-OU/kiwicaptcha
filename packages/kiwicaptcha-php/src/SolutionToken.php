@@ -11,10 +11,10 @@ namespace KiwiCaptcha;
  * ["." execution_digest[":" execution_trace]] ["." rsw_proof])`.
  * The telemetry segment may itself contain dots, so decoding splits on
  * all dots and peels the optional suffix segments right-to-left,
- * independently: the rsw final value (when the last segment is exactly
- * 512 lowercase hex), then the execution-evidence segment that precedes
- * it (digest or digest:trace); the unarmed token keeps the exact
- * four-segment shape.
+ * independently. The rsw final value is peeled first, exactly when the
+ * last segment is 512 lowercase hex. The execution-evidence segment
+ * that precedes it (digest or digest:trace) is peeled next. The
+ * unarmed token keeps the exact four-segment shape.
  *
  * An rsw token carries the client's final value as an optional final
  * segment: exactly 512 lowercase hex characters (the 256-byte

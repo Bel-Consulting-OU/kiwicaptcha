@@ -6245,7 +6245,13 @@ mod tests {
         );
         let (digest, trace_b64) = execution_evidence(&composed);
         assert_eq!(
-            verify_composed(&mut composed, 7, Some(&proof), Some(&digest), Some(&trace_b64)),
+            verify_composed(
+                &mut composed,
+                7,
+                Some(&proof),
+                Some(&digest),
+                Some(&trace_b64)
+            ),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork),
             "an rsw + execution token with a nonzero counter must be rejected"
         );
@@ -6272,7 +6278,13 @@ mod tests {
         let argon_counter = solve_for_test(&argon).expect("the argon challenge solves");
         assert!(
             matches!(
-                verify_composed(&mut argon, argon_counter, Some(&"a".repeat(512)), None, None),
+                verify_composed(
+                    &mut argon,
+                    argon_counter,
+                    Some(&"a".repeat(512)),
+                    None,
+                    None
+                ),
                 VerifyOutcome::Invalid(VerifyError::InsufficientWork)
             ),
             "an argon2id record must reject a presented rsw proof"
