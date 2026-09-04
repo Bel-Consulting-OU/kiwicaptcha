@@ -839,11 +839,12 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
         let mut chars: Vec<char> = probe.trace_b64.chars().collect();
         for at in [0usize, probe.trace_b64.len() / 2, probe.trace_b64.len() - 1] {
             let old = chars[at];
-            let mut fresh = old;
-            while fresh == old {
-                fresh = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-                    .as_bytes()[cases % 64] as char;
+            let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut k = cases % 64;
+            while alphabet[k] == old as u8 {
+                k = (k + 1) % 64;
             }
+            let fresh = alphabet[k] as char;
             let original = chars[at];
             chars[at] = fresh;
             let mutated: String = chars.iter().collect();
@@ -869,6 +870,9 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
 
         // The digest mutations: length, hex alphabet and value are all
         // rejected by the constant-time comparison.
+        let digest_last = probe.digest.as_bytes()[63];
+        let digest_last_flipped = if digest_last == b'0' { '1' } else { '0' };
+        let digest_last_mutated = format!("{}{}", &probe.digest[..63], digest_last_flipped);
         for digest in [
             "".to_string(),
             "a".repeat(63),
@@ -876,7 +880,7 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
             "A".repeat(64),
             "g".repeat(64),
             "0".repeat(64),
-            probe.digest[..63].to_string() + "0",
+            digest_last_mutated,
         ] {
             let label = what(format!(
                 "digest variant {:?}",
@@ -910,8 +914,12 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
         // commitment equivalence before any execution work.
         let mut base = serde_json::to_value(&probe.record).expect("record serializes");
         let original_commitment = base["execution_commitment"].as_str().unwrap().to_string();
+        let commitment_last = original_commitment.as_bytes()[63];
+        let commitment_last_flipped = if commitment_last == b'1' { '2' } else { '1' };
+        let commitment_last_mutated =
+            format!("{}{}", &original_commitment[..63], commitment_last_flipped);
         for commitment in [
-            format!("{}1", &original_commitment[..63]),
+            commitment_last_mutated,
             "0".repeat(64),
             "f".repeat(63),
             "g".repeat(64),
