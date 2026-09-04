@@ -110,8 +110,27 @@
     link.href = base.substring(0, base.lastIndexOf("/") + 1) + "widget.css";
     document.head.appendChild(link);
   }
+  // The /api.js loader response carries the content-addressed
+  // widget-locales.js descriptor (the server computes the hash and the
+  // SRI digest of the exact module bytes; see ApiJsController). The
+  // compat markup issues it as data-kiwi-locales-src / data-kiwi-
+  // locales-integrity on the rendered container, so the core lazy-
+  // fetches the non-default packs only when the resolved language
+  // needs them. The compat tier embeds its other modules, but locale
+  // strings stay lazy: an English page pays zero bytes for
+  // translations.
+  var compatLocales = (typeof window !== "undefined" && window.__kiwiCaptchaCompatLocales) || null;
+  var compatLocalesAttrs = "";
+  var compatLocalesSrc = "";
+  if (compatLocales && compatScriptUrl) {
+    var compatBase = compatScriptUrl.split("?")[0];
+    compatBase = compatBase.substring(0, compatBase.lastIndexOf("/") + 1);
+    compatLocalesSrc = compatBase + 'assets/locales.' + compatLocales.hash + '.js';
+    compatLocalesAttrs = ' data-kiwi-locales-src="' + compatLocalesSrc + '"'
+      + ' data-kiwi-locales-integrity="' + compatLocales.sri + '"';
+  }
   function compatMarkup() {
-    return '<div class="kiwi-container"><input type="hidden" name="kiwi__token" data-kiwi-token value="">' +
+    return '<div class="kiwi-container"' + compatLocalesAttrs + '><input type="hidden" name="kiwi__token" data-kiwi-token value="">' +
       '<div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group" aria-label="KiwiCaptcha security check">' +
       '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '<div class="kiwi-glow"></div></div>' +
       '<div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>' +
@@ -166,10 +185,17 @@
     // needs NO endpoint configuration.
     var inner = el.querySelector(".kiwi-container");
     if (inner) {
-      ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src"].forEach(function (attr) {
+      ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src", "data-kiwi-locales-src", "data-kiwi-locales-integrity"].forEach(function (attr) {
         if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
       });
       if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+      // The driver reads module attrs from the rendered container AND
+      // its own element; mirror the loader-issued locales attrs onto
+      // the element when the page left them unset.
+      if (compatLocalesSrc && !el.hasAttribute("data-kiwi-locales-src")) {
+        el.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
+        el.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
+      }
       // The driver reads the endpoint from the rendered container AND
       // from its own ancestor chain — mirror the default onto the
       // incumbent container so a page with NO explicit endpoint uses

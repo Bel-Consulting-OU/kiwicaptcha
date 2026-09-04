@@ -42,6 +42,7 @@ final class AssetRouteKernelIntegrationTest extends TestCase
         'execution' => ['file' => 'execution-interpreter.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'risk' => ['file' => 'widget-risk.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'telemetry' => ['file' => 'widget-telemetry.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
+        'locales' => ['file' => 'widget-locales.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
     ];
 
     private static ?KernelBrowser $browser = null;

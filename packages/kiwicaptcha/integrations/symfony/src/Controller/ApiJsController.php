@@ -51,11 +51,38 @@ final class ApiJsController
      * pages never load the /api.js route, so the modules stay lazy
      * everywhere else.
      *
+     * widget-locales.js is deliberately NOT in this set: the loader is
+     * a mutable asset served to every compat page, and a default-
+     * language page must pay zero bytes for translations. The locales
+     * descriptor below (the content-addressed asset URL parts) rides
+     * the response instead, and the compat markup issues it as
+     * container attributes, so the driver lazy-fetches the module only
+     * when a non-default language is resolved.
+     *
      * @return list<string>
      */
     private function loaderChunks(): array
     {
         return ['widget-driver.js', 'widget-risk.js', 'widget-compat.js'];
+    }
+
+    /**
+     * The widget-locales.js descriptor for the compat tier: the module
+     * is never concatenated into the loader (see loaderChunks), so the
+     * rendered compat containers carry its content-addressed URL and
+     * SRI digest as data-kiwi-locales-src / data-kiwi-locales-integrity
+     * instead. The widget-compat.js chunk reads the marker below and
+     * composes the asset URL from its own script URL.
+     */
+    private function localesMarker(): string
+    {
+        $body = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget-locales.js');
+        $hash = hash('sha256', $body);
+
+        $sri = 'sha256-'.base64_encode(hash('sha256', $body, true));
+
+        return "\n/*KIWI_LOCALES_MARKER*/\n"
+            .'window.__kiwiCaptchaCompatLocales={name:"locales",hash:"'.$hash.'",sri:"'.$sri.'"};'."\n";
     }
 
     /** @var string|null in-process cache of the concatenated loader */
@@ -117,6 +144,11 @@ final class ApiJsController
             $glue = (string) file_get_contents(rtrim($this->assetsDir, '/').'/kiwicaptcha-wasm.js');
             $body = $glue.self::SPLIT;
             foreach ($this->loaderChunks() as $chunk) {
+                if ($chunk === 'widget-compat.js') {
+                    // The locales marker precedes the compat chunk so the
+                    // rendered containers can issue the lazy module URL.
+                    $body .= $this->localesMarker();
+                }
                 $body .= (string) file_get_contents(rtrim($this->assetsDir, '/').'/'.$chunk)."\n";
             }
             self::$cachedBody = $body;

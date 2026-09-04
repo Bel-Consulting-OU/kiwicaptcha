@@ -1,6 +1,6 @@
 # KiwiCaptcha WASM — Security & Supply-Chain Notes
 
-This package ships eight browser assets (`assets/`):
+This package ships nine browser assets (`assets/`):
 
 | Asset | Purpose |
 |---|---|
@@ -9,6 +9,7 @@ This package ships eight browser assets (`assets/`):
 | `widget-driver.js` | the always-loaded eager driver core and the solver protocol id; reads the worker source off the glue (inline mode) or hands the worker asset to the lazy `widget-risk.js` module (files mode) — it no longer embeds the worker bytes. |
 | `widget-risk.js` | the lazy adaptive-risk module: the argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, the decoy/honeypot rendering and the coarse client-context descriptor; the core loads it on a memory-hard challenge or an armed response. |
 | `widget-telemetry.js` | the lazy telemetry session module, loaded only when a widget enables telemetry. |
+| `widget-locales.js` | the lazy non-default locale packs (de/fr/es/it/nl/pl/pt/ar, RTL included); loaded only when the core resolves a non-default language, never embedded inline. |
 | `widget-compat.js` | the incumbent compatibility loader module, delivered inside the `/api.js` loader response and never fetched elsewhere. |
 | `execution-interpreter.js` | the lazy ExecutionChallengeV1 interpreter, fetched by the driver only for an armed challenge. |
 | `widget.css` | the widget stylesheet (first-class release asset; SRI-capable via `<link>`). |
@@ -35,6 +36,7 @@ kiwi-worker.js       sha384-<VALUE-FROM-SRI.txt>
 widget-driver.js     sha384-<VALUE-FROM-SRI.txt>
 widget-risk.js       sha384-<VALUE-FROM-SRI.txt>
 widget-telemetry.js  sha384-<VALUE-FROM-SRI.txt>
+widget-locales.js    sha384-<VALUE-FROM-SRI.txt>
 widget-compat.js     sha384-<VALUE-FROM-SRI.txt>
 execution-interpreter.js  sha384-<VALUE-FROM-SRI.txt>
 widget.css           sha384-<VALUE-FROM-SRI.txt>
@@ -77,7 +79,7 @@ Notes:
   There is currently no standalone raw `.wasm` artifact on the release.
   Integrators who need the raw wasm may extract it once and serve it under a content-addressed name such as `argon-solver.<sha256>.wasm` at their CDN layer, or apply the `<name>.<hash>.<ext>` pattern to the `kiwicaptcha-wasm.js` glue directly.
   A URL change then *proves* a content change, and SRI on top of it is belt-and-braces.
-- The stable asset names in this package (`assets/kiwicaptcha-wasm.js`, `assets/kiwi-worker.js`, `assets/widget-driver.js`, the lazy modules `assets/widget-risk.js`, `assets/widget-telemetry.js`, `assets/widget-compat.js` and the other assets) stay unchanged between builds; the bundle's own asset versioning content-addresses them.
+- The stable asset names in this package (`assets/kiwicaptcha-wasm.js`, `assets/kiwi-worker.js`, `assets/widget-driver.js`, the lazy modules `assets/widget-risk.js`, `assets/widget-telemetry.js`, `assets/widget-locales.js`, `assets/widget-compat.js` and the other assets) stay unchanged between builds; the bundle's own asset versioning content-addresses them.
   That is why SRI is mandatory.
   The filename alone never proves which build you served.
 
@@ -100,7 +102,7 @@ For each release:
 
 1) Build, then record hashes:
    ```sh
-   shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-compat.js assets/execution-interpreter.js assets/widget.css
+   shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/execution-interpreter.js assets/widget.css
    node tools/sri-hashes.mjs
    ```
 2) Publish the hash list as the attached `SHA256SUMS`/`SRI.txt` manifests (SHA-256 for artifact verification, sha384 SRI form for script tags).
