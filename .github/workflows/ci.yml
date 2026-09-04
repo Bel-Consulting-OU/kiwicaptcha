@@ -223,14 +223,14 @@ jobs:
         working-directory: packages/kiwicaptcha-php
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
-        with:
-          php-version: '8.5'
-          extensions: json, openssl, sodium
-          coverage: none
+      - name: install the distro php without ext-gmp
+        run: >-
+          sudo apt-get update -qq &&
+          sudo apt-get install -y -qq php-cli php-openssl php-sodium
+          php-mbstring php-xml php-zip php-curl php-bcmath composer
       - name: prove ext-gmp is absent
         run: >-
-          php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
+          php -r "exit(extension_loaded('gmp') ? 1 : 0);"
       - name: composer validate
         run: composer validate --strict
       - name: composer install
