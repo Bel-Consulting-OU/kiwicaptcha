@@ -67,7 +67,7 @@
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
-      "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies at 47,649 bytes raw / 14,347 gzip / 12,228 brotli (measured 2026-09-04). Loaded by the eager core only when a memory-hard challenge, an armed response or the risk-context opt-in needs it: the argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, the decoy/honeypot rendering and the coarse client-context descriptor."
+      "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner, decoy machinery and the coarse client-context descriptor. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them)."
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
@@ -77,7 +77,7 @@
       "gzip_cap_bytes": 2500,
       "brotli_cap_bytes": 2000,
       "copies_identical": true,
-      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies at 2,922 bytes raw / 1,249 gzip / 992 brotli (measured 2026-09-04). Loaded only when a widget enables a telemetry session."
+      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them)."
     },
     "widget_compat": {
       "raw_bytes": 27078,
