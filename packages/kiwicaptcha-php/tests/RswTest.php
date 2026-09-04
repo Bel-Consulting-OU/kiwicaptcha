@@ -480,4 +480,32 @@ final class RswTest extends TestCase
             protocolVersion: 2,
         );
     }
+
+    public function testDebugInfoRedactsLambdaAndKeepsThePublicModulus(): void
+    {
+        $this->requireGmp();
+        $rsw = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+
+        // __debugInfo must show the full four-field shape (modulusB64, n
+        // and their names), with the secret lambda material replaced.
+        self::assertSame(
+            ['modulusB64', 'lambdaB64', 'n', 'lambda'],
+            array_keys($rsw->__debugInfo()),
+        );
+
+        foreach ([
+            static function () use ($rsw): string {
+                ob_start();
+                var_dump($rsw);
+                return (string) ob_get_clean();
+            },
+            static fn (): string => print_r($rsw, true),
+        ] as $capture) {
+            $dump = $capture();
+            self::assertStringNotContainsString(RswFixture::LAMBDA_B64, $dump);
+            // The modulus (raw base64 and decoded) is public and prints.
+            self::assertStringContainsString(RswFixture::MODULUS_N_B64, $dump);
+            self::assertSame(2, substr_count($dump, '<redacted>'));
+        }
+    }
 }
