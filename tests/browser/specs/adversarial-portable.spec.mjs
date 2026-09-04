@@ -139,6 +139,7 @@ ${WIDGET_MARKUP}
 async function serveFormPage(page, endpoint) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
 ${widgetMarkupFor({
@@ -149,7 +150,7 @@ ${widgetMarkupFor({
   <label>Username <input type="text" name="username" autocomplete="username" /></label>
   <label>Password <input type="password" name="password" autocomplete="current-password" /></label>
 </form>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
   await page.route('**/autofill-form', (route) =>
     route.fulfill({ contentType: 'text/html', body: html })
   );
@@ -413,7 +414,7 @@ ${WIDGET_MARKUP}
 ${WIDGET_MARKUP}
   </div>
 </form>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
     await page.route('**/multi-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
@@ -747,7 +748,7 @@ test.describe('KiwiCaptcha autofill and password-manager compatibility', () => {
 ${WIDGET_MARKUP}
   </div>
 </form>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
     await page.route('**/collision-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
