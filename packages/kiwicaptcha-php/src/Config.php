@@ -153,14 +153,21 @@ final class Config
      * @param string|null $rswModulusN      The rsw modulus n = p*q as canonical
      *                                      standard base64 of exactly 256 bytes (top bit
      *                                      set, odd), the public half of the time-lock
-     *                                      trapdoor. Required when algorithm is rsw;
-     *                                      ignored otherwise (null default = the rsw
-     *                                      algorithm is not configured).
+     *                                      trapdoor. Generate the pair with the shipped
+     *                                      tools/rsw-keygen binary and record its
+     *                                      rsw_modulus_n_sha256 fingerprint; weak or
+     *                                      fabricated moduli are refused here. Required
+     *                                      when algorithm is rsw; ignored otherwise (null
+     *                                      default = the rsw algorithm is not configured).
      * @param string|null $rswLambda        The rsw secret lambda = lcm(p-1, q-1) as
      *                                      canonical standard base64 of 1..256 even
      *                                      bytes, the trapdoor that lets the server
-     *                                      verify without the T squarings. Required
-     *                                      when algorithm is rsw; ignored otherwise.
+     *                                      verify without the T squarings. It is the
+     *                                      secret trapdoor: never persist it beside
+     *                                      client material. A lambda that fails the
+     *                                      Euler self-test against the modulus is
+     *                                      refused here. Required when algorithm is
+     *                                      rsw; ignored otherwise.
      * @param int      $rswT                The rsw sequential-squaring cost T
      *                                      (default 75,000; validated to 10,000..300,000
      *                                      when algorithm is rsw). The client performs T

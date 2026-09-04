@@ -430,13 +430,19 @@ pub struct ChallengeConfig {
     pub execution_key: Option<String>,
     /// The rsw modulus n = p*q as canonical standard base64 of exactly
     /// 256 bytes (top bit set, odd), the public half of the time-lock
-    /// trapdoor. Required when the algorithm is [`PoWAlgorithm::Rsw`];
-    /// ignored otherwise. `None` (the default) = the rsw algorithm is
-    /// not configured.
+    /// trapdoor. Generate the pair with the shipped tools/rsw-keygen
+    /// binary and record its rsw_modulus_n_sha256 fingerprint; the
+    /// shared decode refuses a weak or probable-prime modulus.
+    /// Required when the algorithm is [`PoWAlgorithm::Rsw`]; ignored
+    /// otherwise. `None` (the default) = the rsw algorithm is not
+    /// configured.
     pub rsw_modulus_n: Option<String>,
     /// The rsw secret lambda = lcm(p-1, q-1) as canonical standard
     /// base64 of 1..=256 even bytes, the trapdoor that lets the server
-    /// verify without the T squarings. Required when the algorithm is
+    /// verify without the T squarings. It is the secret trapdoor:
+    /// never persist it beside client material. A lambda that fails
+    /// the Euler self-test against the modulus is refused by the
+    /// shared decode. Required when the algorithm is
     /// [`PoWAlgorithm::Rsw`]; ignored otherwise. Never stored on the
     /// record and never sent to the client.
     pub rsw_lambda: Option<String>,
@@ -2998,6 +3004,62 @@ mod tests {
             .unwrap_err(),
             SignError::InvalidRswParams
         ));
+    }
+
+    #[test]
+    fn rsw_issuance_rejects_weak_or_inconsistent_trapdoor_material() {
+        use num_bigint::BigUint;
+        let modulus_b64 = |value: &BigUint| {
+            let bytes = value.to_bytes_be();
+            let mut padded = vec![0u8; 256 - bytes.len()];
+            padded.extend_from_slice(&bytes);
+            base64::engine::general_purpose::STANDARD.encode(&padded)
+        };
+        let reject = |config: &ChallengeConfig| {
+            assert!(matches!(
+                issue_challenge(
+                    config,
+                    "login",
+                    "1.2.3.4",
+                    1_000_000,
+                    1_700_000_000_000_000,
+                    0,
+                    None
+                )
+                .unwrap_err(),
+                SignError::InvalidRswParams
+            ));
+        };
+        let fixture = crate::rsw::fixtures::LAMBDA_B64;
+
+        // A modulus divisible by the small prime 3, shaped exactly like
+        // a genuine 2048-bit modulus.
+        let mut weak = rsw_config(MIN_RSW_T);
+        let factor_three =
+            BigUint::from(3u8) * ((BigUint::from(1u8) << 2046usize) + BigUint::from(1u8));
+        weak.rsw_modulus_n = Some(modulus_b64(&factor_three));
+        reject(&weak);
+
+        // A real 2048-bit probable prime as the modulus.
+        let mut prime = rsw_config(MIN_RSW_T);
+        prime.rsw_modulus_n = Some(
+            "3QB709I66Q8Ivp2P5RtgD4+ci38dHuAuXfzGL4KtCk34UGX9uOG1FgNV92B9BcVS1iX4JCYdqN9cHg62sqEWx+p0fn7rUCuPYZSFpnwcWpVjHMbigzz2wjWt2mhkqLtbgZ/+nar/ptQu7aHKOrQYVAppYf0txmfwtnUbHSWpyMZhUv10JSnNPRuPL6wrb0cH8TjHex2W90islc3qPAwi9lAZdtX/+OepFBLDkmjnE4yi2SyBZ75kHWn+ve7nXg0352zbPtL3gos658lJsVVdt3IbqeVf1I9wnViRYpIS+EYHK5olWm3+sOxwZfbixlgLh0p3JafQoCnZpkF2j+9Gzw=="
+                .into(),
+        );
+        reject(&prime);
+
+        // The fixture lambda shifted by two: even and correctly shaped,
+        // but no longer a multiple of the Carmichael value.
+        let mut shifted_lambda = rsw_config(MIN_RSW_T);
+        let lambda = BigUint::from_bytes_be(
+            &base64::engine::general_purpose::STANDARD
+                .decode(fixture)
+                .expect("the fixture lambda is base64"),
+        );
+        let shifted = (&lambda - BigUint::from(2u8)).to_bytes_be();
+        shifted_lambda.rsw_lambda =
+            Some(base64::engine::general_purpose::STANDARD.encode(&shifted));
+        reject(&shifted_lambda);
     }
 
     #[test]

@@ -285,15 +285,17 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::InsufficientWork`].
     pub rsw_proof: Option<&'a str>,
     /// The verifier's configured rsw modulus n (canonical standard
-    /// base64 of the 2048-bit composite). Together with `rsw_lambda` it
-    /// forms the time-lock trapdoor; a signed rsw record then verifies
+    /// base64 of the 2048-bit composite, generated with the shipped
+    /// tools/rsw-keygen binary). Together with `rsw_lambda` it forms
+    /// the time-lock trapdoor; a signed rsw record then verifies
     /// through it. When both are `None` (the default), an rsw record is
     /// authentic but unsupported
     /// ([`VerifyError::UnsupportedRswParams`]).
     pub rsw_modulus_n: Option<&'a str>,
     /// The verifier's configured rsw secret lambda = lcm(p-1, q-1)
-    /// (canonical standard base64). Never stored on the record and
-    /// never sent to the client.
+    /// (canonical standard base64). It is the secret trapdoor: never
+    /// persist it beside client material. Never stored on the record
+    /// and never sent to the client.
     pub rsw_lambda: Option<&'a str>,
 }
 

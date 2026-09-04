@@ -477,17 +477,38 @@ kiwi_captcha:
 
 ### Modulus setup
 
-Generate two 1024-bit primes p and q, form n = p*q, and precompute
-lambda = lcm(p-1, q-1). Configure n as rsw_modulus_n and lambda as
-rsw_lambda, both canonical standard base64 of the big-endian bytes.
-The modulus is public: it rides the challenge response, because the
-client squares modulo it. Lambda is the trapdoor and must never leave
-the server configuration. The primes themselves are not stored
-anywhere in KiwiCaptcha, so keep them offline or delete them once
-lambda is computed. Validation is shape-only, exactly like an RSA
-public key: the modulus must be exactly 256 bytes with its top bit
-set and odd, and lambda must be even. The lcm relation cannot be
-verified without the primes.
+Generate the pair exclusively with the shipped offline generator
+[`tools/rsw-keygen`](../../../../../tools/rsw-keygen/README.md). The
+tool draws two independent random 1024-bit primes, requires their
+product to be exactly 2048 bits, and computes lambda = lcm(p-1, q-1).
+It runs the trapdoor self-test against the shipped math before it
+emits anything. Do not assemble n and lambda from ad-hoc prime
+generation. No configuration validator can prove that a modulus was
+securely built from two large primes, so the provenance of the pair
+is the whole assurance.
+
+Configure n as rsw_modulus_n and lambda as rsw_lambda, both canonical
+standard base64 of the big-endian bytes. The keygen prints both the
+hex and the base64 forms of each value. The modulus is public: it
+rides the challenge response, because the client squares modulo it.
+Lambda is the secret trapdoor and must never leave the server
+configuration. Never share it with client material, logs, or any
+record. The primes p and q are never stored anywhere in KiwiCaptcha
+and appear only in the keygen's explicit --diagnostic output. Run the
+generator on an offline trusted machine and keep that output out of
+the repository.
+
+Record the modulus fingerprint printed by the keygen
+(rsw_modulus_n_sha256, the sha256 of the canonical 256-byte n). It is
+the way to state which modulus a deployment holds. The command
+`rsw-keygen --fingerprint` recomputes it from a configured n, and a
+redeployment audit compares the two. Validation refuses the weak
+shapes up front: an even or mis-sized modulus, a modulus with a small
+prime factor, and a probable-prime modulus are configuration errors
+at boot. So is a lambda that fails the Euler self-test
+`base^lambda == 1 (mod n)` for the small bases. The full lcm relation
+still cannot be verified without the primes, which is why the keygen
+provenance and the fingerprint matter.
 
 ### The sequential cost T
 

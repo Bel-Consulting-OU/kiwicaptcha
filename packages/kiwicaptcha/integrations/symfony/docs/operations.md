@@ -113,6 +113,15 @@ version. kiwicaptcha:doctor reports the armed posture, so a deploy
 gate can confirm every node verifies the rung before traffic is
 routed to it.
 
+The configuration boundary refuses weak or inconsistent pairs at
+boot: a modulus with a small prime factor, a probable-prime modulus,
+and a lambda that fails the Euler self-test are configuration errors.
+Record the rsw_modulus_n_sha256 fingerprint from the keygen run as
+the identity of the deployed modulus, and spot-check a node with the
+keygen's --fingerprint mode when a rotation or redeployment is
+audited. The primes themselves stay off the servers: only the
+--diagnostic run of the generator ever prints them.
+
 ### Budget guidance
 
 The worker asset carries the rsw solver inside the existing worker
