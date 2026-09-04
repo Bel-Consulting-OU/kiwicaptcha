@@ -61,6 +61,7 @@ final class KiwiCaptchaRuntime
         'execution' => ['execution', 'js'],
         'risk' => ['risk', 'js'],
         'telemetry' => ['telemetry', 'js'],
+        'locales' => ['locales', 'js'],
     ];
 
     private readonly string $css;
@@ -70,6 +71,7 @@ final class KiwiCaptchaRuntime
     private readonly string $execution;
     private readonly string $risk;
     private readonly string $telemetryAsset;
+    private readonly string $localesAsset;
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -96,6 +98,7 @@ final class KiwiCaptchaRuntime
         $this->execution = $this->readAsset($assetDir, 'execution-interpreter.js');
         $this->risk = $this->readAsset($assetDir, 'widget-risk.js');
         $this->telemetryAsset = $this->readAsset($assetDir, 'widget-telemetry.js');
+        $this->localesAsset = $this->readAsset($assetDir, 'widget-locales.js');
     }
 
     private function readAsset(string $dir, string $name): string
@@ -144,6 +147,11 @@ final class KiwiCaptchaRuntime
         return $this->telemetryAsset;
     }
 
+    public function locales(): string
+    {
+        return $this->localesAsset;
+    }
+
     public function assetMode(): string
     {
         return $this->assetMode;
@@ -177,7 +185,7 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution, 'risk' => $this->risk, 'telemetry' => $this->telemetryAsset];
+        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution, 'risk' => $this->risk, 'telemetry' => $this->telemetryAsset, 'locales' => $this->localesAsset];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
             $content = $contents[$key];
@@ -370,6 +378,31 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The driver's data-kiwi-locales-src value: the versioned
+     * widget-locales.js asset URL the driver lazy-fetches only when a
+     * widget's resolved language is non-default. Emitted in both asset
+     * tiers like the execution interpreter: the module is never
+     * embedded (a default-language page pays zero bytes for the
+     * non-default translations), so the content-addressed URL is the
+     * only delivery. Empty when the asset is unavailable.
+     */
+    public function localesSrc(): string
+    {
+        return $this->assets()['locales']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-locales-integrity value: the SRI digest of
+     * the widget-locales.js asset (sha256-<base64>), verified by the
+     * browser's native SRI check when the core injects the module
+     * script. Empty when the asset is unavailable.
+     */
+    public function localesIntegrity(): string
+    {
+        return $this->assets()['locales']['sri'];
+    }
+
+    /**
      * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist), always explicit, never
@@ -444,6 +477,8 @@ final class KiwiCaptchaRuntime
             'risk_integrity' => $this->riskIntegrity(),
             'telemetry_src' => $this->telemetrySrc(),
             'telemetry_integrity' => $this->telemetryIntegrity(),
+            'locales_src' => $this->localesSrc(),
+            'locales_integrity' => $this->localesIntegrity(),
             // Files-mode delivery state (asset_mode + the request-scoped
             // emission registry + the driver's lazy runtime and worker
             // URLs and SRI digests).

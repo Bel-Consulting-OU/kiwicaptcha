@@ -33,7 +33,8 @@ use Symfony\Component\Routing\RouteCollection;
  *                                      (the versioned immutable widget
  *                                       assets of asset_mode "files":
  *                                       runtime/widget/driver/worker/
- *                                       execution, served with a long
+ *                                       execution and the lazy widget
+ *                                       modules, served with a long
  *                                       immutable cache lifetime).
  *  - GET   {prefix}/health/live        (liveness, always 200).
  *  - GET   {prefix}/health/ready       (readiness, 200 only when signing
@@ -109,15 +110,16 @@ final class KiwiCaptchaRouteLoader extends Loader
         // The `name` constraint is the complete asset set: the widget css,
         // the driver js, the lazy WASM runtime js, the same-origin worker
         // js, the lazy execution interpreter js and the lazy widget-module
-        // js assets (widget-risk.js / widget-telemetry.js, loaded by the
-        // driver on trigger). A Twig-emitted URL must always match this
-        // route (the KernelBrowser invariant test asserts every rendered
-        // URL is routable), so the constraint is the seven names, never a
+        // js assets (widget-risk.js / widget-telemetry.js /
+        // widget-locales.js, loaded by the driver on trigger). A
+        // Twig-emitted URL must always match this route (the
+        // KernelBrowser invariant test asserts every rendered URL is
+        // routable), so the constraint is the eight names, never a
         // subset.
         $routes->add('kiwicaptcha_asset', new Route(
             $prefix.'/assets/{name}.{hash}.{extension}',
             ['_controller' => [AssetController::class, 'asset']],
-            ['name' => 'execution|runtime|widget|driver|worker|risk|telemetry', 'hash' => '[0-9a-f]{64}', 'extension' => 'js|css'],
+            ['name' => 'execution|runtime|widget|driver|worker|risk|telemetry|locales', 'hash' => '[0-9a-f]{64}', 'extension' => 'js|css'],
             [],
             '',
             [],

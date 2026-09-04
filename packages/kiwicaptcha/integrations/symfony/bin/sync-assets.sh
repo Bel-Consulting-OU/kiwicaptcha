@@ -26,6 +26,7 @@ cp "$ROOT/packages/kiwicaptcha-wasm/assets/kiwi-worker.js"       "$DEST/kiwi-wor
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-driver.js"   "$DEST/widget-driver.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-risk.js"     "$DEST/widget-risk.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-telemetry.js" "$DEST/widget-telemetry.js"
+cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-locales.js"  "$DEST/widget-locales.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-compat.js"   "$DEST/widget-compat.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget.css"          "$DEST/widget.css"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/execution-interpreter.js" "$DEST/execution-interpreter.js"

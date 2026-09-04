@@ -1560,8 +1560,9 @@ $assetSpecs = [
     'execution' => ['file' => 'execution-interpreter.js', 'type' => 'application/javascript; charset=UTF-8'],
     'risk' => ['file' => 'widget-risk.js', 'type' => 'application/javascript; charset=UTF-8'],
     'telemetry' => ['file' => 'widget-telemetry.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'locales' => ['file' => 'widget-locales.js', 'type' => 'application/javascript; charset=UTF-8'],
 ];
-if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution|risk|telemetry)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution|risk|telemetry|locales)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
     [, $assetName, $assetHash, $assetExt] = $m;
     $spec = $assetSpecs[$assetName];
     if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
@@ -1739,6 +1740,15 @@ if ($path === '/' || $path === '/index.html') {
     $executionBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/execution-interpreter.js');
     $executionAttr = ' data-kiwi-execution-src="/kiwi-captcha/assets/execution.'.hash('sha256', $executionBody).'.js"'
         .' data-kiwi-execution-integrity="sha256-'.base64_encode(hash('sha256', $executionBody, true)).'"';
+    // The lazy locale packs (widget-locales.js) follow the execution
+    // delivery in both tiers: the module is never embedded inline (a
+    // default-language page pays zero bytes for translations), so the
+    // container always carries its content-addressed URL + SRI digest
+    // and the driver fetches it only when a non-default language is
+    // resolved.
+    $localesBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/widget-locales.js');
+    $localesAttr = ' data-kiwi-locales-src="/kiwi-captcha/assets/locales.'.hash('sha256', $localesBody).'.js"'
+        .' data-kiwi-locales-integrity="sha256-'.base64_encode(hash('sha256', $localesBody, true)).'"';
     if ($filesMode) {
         $assetFiles = [
             'widget' => 'widget.css',
@@ -1748,6 +1758,7 @@ if ($path === '/' || $path === '/index.html') {
             'execution' => 'execution-interpreter.js',
             'risk' => 'widget-risk.js',
             'telemetry' => 'widget-telemetry.js',
+            'locales' => 'widget-locales.js',
         ];
         $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
             $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
@@ -1807,7 +1818,7 @@ if ($path === '/' || $path === '/index.html') {
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

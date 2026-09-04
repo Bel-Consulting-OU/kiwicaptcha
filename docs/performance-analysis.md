@@ -217,7 +217,7 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-103,732 bytes raw, 30,326 bytes gzip and 25,564 bytes brotli, against
+92,053 bytes raw, 27,286 bytes gzip and 23,132 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
@@ -225,60 +225,76 @@ module) is 47,649 bytes raw, 14,347 bytes gzip and 12,228 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,249 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
-widget-compat.js copy is 25,460 bytes raw, 8,160 bytes gzip and 6,969
-bytes brotli against caps of 32,768 / 12,000 / 10,000; every
-execution-interpreter copy (execution-interpreter.js, the lazy
-ExecutionChallengeV1 asset) is 33,402 bytes raw, 10,411 bytes gzip
-and 8,955 bytes brotli, against caps of 36,000 / 11,200 / 9,500
-bytes; the same budgets section also records the measured raw bytes
-of the worker at 24,819 bytes, the wasm glue runtime at 97,815 bytes
-and the widget stylesheet at 13,863 bytes, each byte-identical across
-the three copies, with the optional rsw sequential solver living
-inside the worker asset; the decoy-armed challenge-response JSON (the
-wire shape of the bundle's /challenge response) is
-1,014-1,045 bytes for sha256 and 1,025-1,046 bytes for argon2id (the
-grammar-composed name length varies the size between issuances),
-against the 4,096-byte cap, and the v4 execution-armed response (the
-same wire shape carrying `execution_program`, the authenticated decoy
-riding along) is 1,293-1,667 bytes for sha256 and 1,301-1,633 bytes
-for argon2id, against the 1,900-byte cap. The byte fields of the
-budgets section were re-recorded on 2026-09-04 after the P1-8 driver
-split, and perf-budget.sh verifies the recorded raw_bytes EQUAL the
-current measured bytes (an equality gate, not just cap compliance),
-so a drifted record fails the budget job. The caps are read by the
-shell from the record at run time; the record is the single hard-
-budget authority.
+widget-locales.js copy (the lazy non-default locale packs) is 13,395
+bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
+16,384 / 6,000 / 5,000; every widget-compat.js copy is 27,078 bytes
+raw, 8,573 bytes gzip and 7,367 bytes brotli against caps of
+32,768 / 12,000 / 10,000; every execution-interpreter copy
+(execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
+33,402 bytes raw, 10,435 bytes gzip and 8,955 bytes brotli, against
+caps of 36,000 / 11,200 / 9,500 bytes; the same budgets section also
+records the measured raw bytes of the worker at 24,819 bytes, the
+wasm glue runtime at 97,815 bytes and the widget stylesheet at 13,863
+bytes, each byte-identical across the three copies, with the optional
+rsw sequential solver living inside the worker asset; the
+decoy-armed challenge-response JSON (the wire shape of the bundle's
+/challenge response) is 1,014-1,045 bytes for sha256 and 1,025-1,046
+bytes for argon2id (the grammar-composed name length varies the size
+between issuances), against the 4,096-byte cap, and the v4
+execution-armed response (the same wire shape carrying
+`execution_program`, the authenticated decoy riding along) is
+1,293-1,667 bytes for sha256 and 1,301-1,633 bytes for argon2id,
+against the 1,900-byte cap. The byte fields of the budgets section
+were re-recorded on 2026-09-04 after the locale-pack split (the
+eager core at 92,053 raw / 27,286 gzip / 23,132 brotli and the new
+widget-locales.js row, compressed sizes measured with `gzip -n -9`
+and `brotli -q 11`), and perf-budget.sh verifies the recorded
+raw_bytes EQUAL the current measured bytes (an equality gate, not
+just cap compliance), so a drifted record fails the budget job. A
+measured size at or above 90% of its hard cap prints a soft warning;
+a size above the cap fails. The caps are read by the shell from the
+record at run time; the record is the single hard-budget authority.
 
 ## Ordinary-bootstrap target
 
 The eager-core caps (160,000 raw / 30,720 gzip / 28,000 brotli bytes,
 perf-budget.sh) are the guardrail: a regression there fails the perf
-budget job. They are not the goal. The P1-8 driver split moved the
-server-armed and configuration-armed machinery out of the always-
-loaded file, so the ordinary bootstrap — the bytes a plain SHA-256
-page downloads before any memory-hard challenge — is the eager core
-alone: 103,732 bytes raw, 30,326 gzip and 25,564 brotli (the record's
+budget job. They are not the goal. The driver splits moved the
+server-armed and configuration-armed machinery (and the non-default
+locale packs) out of the always-loaded file, so the ordinary
+bootstrap — the bytes a plain SHA-256 English page downloads before
+any memory-hard challenge — is the eager core alone: 92,053 bytes
+raw, 27,286 gzip and 23,132 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
-numbers are inside the **sub-30 KB compressed** target with margin;
-the raw 160,000 cap is carried forward unchanged.
+numbers are inside the **sub-30 KB compressed** target with clear
+margin (they also clear the perf tooling's 90%-of-cap soft-warning
+line); the raw 160,000 cap is carried forward unchanged.
 
-The driver surface is now four files with one eager core (the
+The driver surface is now five files with one eager core (the
 record's budget rows, equality-gated):
 
 - `widget-driver.js`, the eager core: bootstrap, challenge request,
-  the SHA-256 solve, the state/token lifecycle, retry/reset and the
-  lazy-module loader (103,732 raw / 30,326 gzip / 25,564 brotli);
+  the SHA-256 solve, the state/token lifecycle, retry/reset, the
+  English locale pack and the lazy-module loader (92,053 raw /
+  27,286 gzip / 23,132 brotli);
 - `widget-risk.js`, the lazy adaptive-risk module: the argon2id/rsw
   worker solve tier (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner, the
   decoy/honeypot rendering and the coarse client-context descriptor.
   The core loads it on a memory-hard challenge, an armed response or
   the risk-context opt-in (47,649 raw / 14,347 gzip / 12,228 brotli);
+- `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
+  it/nl/pl/pt/ar, RTL included). The eager core keeps English and
+  the fallback, and loads the module exactly when a widget's resolved
+  language is non-default, so a default-language page pays zero bytes
+  for translations; a load failure degrades to English with a console
+  warning, never a broken widget (13,395 raw / 3,570 gzip / 3,193
+  brotli);
 - `widget-telemetry.js`, the lazy telemetry session, loaded only when
   a widget enables one (2,922 raw / 1,249 gzip / 992 brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (25,460 raw / 8,160 gzip / 6,969 brotli).
+  (27,078 raw / 8,573 gzip / 7,367 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:

@@ -76,6 +76,15 @@ final class TwigRuntimeTest extends TestCase
         // attribute (both asset tiers; the fetch happens only when an
         // armed challenge arrives, never for a SHA-only page).
         self::assertStringContainsString('data-kiwi-execution-src="/kiwi-captcha/assets/execution.', $html);
+        // The lazy locale packs (widget-locales.js) follow the same
+        // both-tier delivery: never embedded inline (a default-language
+        // page pays zero bytes for translations), the container carries
+        // the versioned URL + SRI digest and the driver fetches them
+        // only when a non-default language is resolved.
+        self::assertStringNotContainsString('__kiwiCaptchaCore.register("locales"', $html, 'the inline tier must never embed widget-locales.js');
+        self::assertStringContainsString('data-kiwi-locales-src="/kiwi-captcha/assets/locales.', $html);
+        self::assertStringContainsString('data-kiwi-locales-integrity="sha256-', $html);
+        self::assertStringContainsString('data-kiwi-locales-integrity="sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-locales.js'), true)).'"', $html, 'the locales integrity digest is the sha256 of the exact module bytes');
     }
 
     public function testDefaultEndpointUsesRoutePrefix(): void
@@ -127,6 +136,12 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringNotContainsString('<script src="/kiwi-captcha/assets/runtime.', $html, 'the runtime must never be emitted as a script tag');
         self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js')).'.js"', $html);
         self::assertStringContainsString('data-kiwi-runtime-integrity="sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js'), true)).'"', $html);
+
+        // The lazy locale packs stay fetchable-lazy in files mode too:
+        // no script tag (only the driver script is emitted), and the
+        // container carries the content-addressed URL + SRI digest.
+        self::assertStringNotContainsString('<script src="/kiwi-captcha/assets/locales.', $html, 'widget-locales.js must never be emitted as a script tag');
+        self::assertStringContainsString('data-kiwi-locales-src="/kiwi-captcha/assets/locales.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-locales.js')).'.js"', $html);
     }
 
     public function testFilesModeEmitsEachAssetExactlyOnceAcrossWidgets(): void

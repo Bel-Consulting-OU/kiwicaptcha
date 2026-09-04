@@ -66,6 +66,8 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['kiwi_driver'] = $this->runtime?->driver() ?? '';
         $view->vars['kiwi_risk'] = $this->runtime?->risk() ?? '';
         $view->vars['kiwi_telemetry'] = $this->runtime?->telemetry() ?? '';
+        $view->vars['locales_src'] = $this->runtime?->localesSrc() ?? '';
+        $view->vars['locales_integrity'] = $this->runtime?->localesIntegrity() ?? '';
 
         // Files-mode delivery state: the asset_mode tier, the once-per-
         // page asset tags (the request-scoped emission registry lives on

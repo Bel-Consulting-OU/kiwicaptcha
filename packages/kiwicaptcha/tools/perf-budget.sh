@@ -8,14 +8,19 @@
 # driver is the eager core (widget-driver.js) with its own raw cap (the
 # 160,000-byte cap carried forward) and the new compressed caps of
 # 30,720 gzip / 28,000 brotli bytes; the lazy widget modules
-# (widget-risk.js, widget-telemetry.js, widget-compat.js) and the
-# execution interpreter (execution-interpreter.js) carry their own caps
-# (the execution caps unchanged). Every cap value is read from the
-# budgets section of packages/kiwicaptcha/tools/perf-baselines.json,
-# the single hard-budget authority. A cap that the record cannot supply
-# (missing file, missing section, non-numeric value) fails the script,
-# because the budget cannot be enforced from a second authority that
-# does not exist.
+# (widget-risk.js, widget-telemetry.js, widget-locales.js,
+# widget-compat.js) and the execution interpreter
+# (execution-interpreter.js) carry their own caps (the execution caps
+# unchanged). Every cap value is read from the budgets section of
+# packages/kiwicaptcha/tools/perf-baselines.json, the single
+# hard-budget authority. A cap that the record cannot supply (missing
+# file, missing section, non-numeric value) fails the script, because
+# the budget cannot be enforced from a second authority that does not
+# exist.
+#
+# Soft warnings: every measured size at or above 90% of its hard cap
+# prints a warning line (the regression has not failed yet, but the
+# budget headroom is nearly gone); a size above the cap fails.
 #
 # Measured-byte equality: the budgets section records the measured
 # sizes (raw_bytes of the driver core, the widget modules, the worker,
@@ -96,6 +101,18 @@ with open(sys.argv[1], "rb") as f:
 # of one widget asset across its three byte-identical copies. The cap
 # keys are "<key>.raw_cap_bytes", "<key>.gzip_cap_bytes" and
 # "<key>.brotli_cap_bytes".
+# budget_asset <budgets key> <label> — enforce the raw/gzip/brotli caps
+# of one widget asset across its three byte-identical copies, with a
+# soft warning (not a failure) when a measured size reaches 90% of its
+# hard cap. The cap keys are "<key>.raw_cap_bytes",
+# "<key>.gzip_cap_bytes" and "<key>.brotli_cap_bytes".
+soft_cap_warning() {
+  local kind="$1" size="$2" cap="$3"
+  # At or above 90% of the cap (size*10 >= cap*9): warn without failing.
+  if [ "$((size * 10))" -ge "$((cap * 9))" ]; then
+    echo "perf-budget soft-warning: $kind is $size bytes, at or above 90% of the ${cap}-byte hard cap (a regression here fails the budget)" >&2
+  fi
+}
 budget_asset() {
   local key="$1" label="$2"
   local raw_cap gzip_cap brotli_cap size gzip_size br_size
@@ -111,6 +128,7 @@ budget_asset() {
       FAILED=1
     else
       echo "$label budget OK: $copy $size bytes (cap $raw_cap)"
+      soft_cap_warning "$label raw ($copy)" "$size" "$raw_cap"
     fi
 
     gzip_size=$(gzip -c "$copy" | wc -c | tr -d ' ')
@@ -119,6 +137,7 @@ budget_asset() {
       FAILED=1
     else
       echo "$label gzip budget OK: $copy $gzip_size bytes (cap $gzip_cap)"
+      soft_cap_warning "$label gzip ($copy)" "$gzip_size" "$gzip_cap"
     fi
 
     br_size=$(brotli_size "$copy")
@@ -131,6 +150,7 @@ budget_asset() {
         FAILED=1
       else
         echo "$label brotli budget OK: $copy $br_size bytes (cap $brotli_cap)"
+        soft_cap_warning "$label brotli ($copy)" "$br_size" "$brotli_cap"
       fi
     fi
   done
@@ -141,10 +161,12 @@ budget_asset() {
 # with the compressed caps of the ordinary-bootstrap target.
 budget_asset widget_driver widget-driver.js
 # The lazy widget modules: loaded on trigger only (a memory-hard or
-# armed challenge, an enabled telemetry session, or the /api.js compat
-# route), each with its own recorded caps.
+# armed challenge, an enabled telemetry session, a non-default
+# resolved language, or the /api.js compat route), each with its own
+# recorded caps.
 budget_asset widget_risk widget-risk.js
 budget_asset widget_telemetry widget-telemetry.js
+budget_asset widget_locales widget-locales.js
 budget_asset widget_compat widget-compat.js
 # The execution interpreter (execution-interpreter.js) gets the same
 # three-copy raw/gzip/brotli treatment as the driver: the asset is
@@ -172,9 +194,43 @@ verify_recorded_raw_bytes() {
   fi
 }
 
+# The recorded compressed bytes of widget-locales.js are equality-gated
+# the same way, measured with the deterministic definitions the record
+# uses (gzip -n -9: no filename header, maximum compression; brotli
+# -q 11). A drifted compressed record fails, exactly like a drifted
+# raw_bytes record.
+verify_recorded_gzip_bytes() {
+  local key="$1" file="$2" recorded actual
+  recorded=$(json_get "$BASELINES_FILE" "budgets.$key.gzip_bytes")
+  actual=$(gzip -n -9 -c "$file" | wc -c | tr -d ' ')
+  if [ "$recorded" != "$actual" ]; then
+    echo "perf-budget FAILED: budgets.$key.gzip_bytes records $recorded bytes but gzip -n -9 of $file is $actual bytes (re-measure and re-record the budgets section)" >&2
+    FAILED=1
+  else
+    echo "perf-budget gzip_bytes equality OK: budgets.$key.gzip_bytes == $recorded bytes ($file)"
+  fi
+}
+
+verify_recorded_brotli_bytes() {
+  local key="$1" file="$2" recorded actual
+  recorded=$(json_get "$BASELINES_FILE" "budgets.$key.brotli_bytes")
+  actual=$(brotli_size "$file")
+  if [ "$actual" = "unavailable" ]; then
+    echo "perf-budget brotli_bytes equality NOTE: brotli is not installed; the recorded brotli_bytes are not verified on this machine"
+  elif [ "$recorded" != "$actual" ]; then
+    echo "perf-budget FAILED: budgets.$key.brotli_bytes records $recorded bytes but brotli -q 11 of $file is $actual bytes (re-measure and re-record the budgets section)" >&2
+    FAILED=1
+  else
+    echo "perf-budget brotli_bytes equality OK: budgets.$key.brotli_bytes == $recorded bytes ($file)"
+  fi
+}
+
 verify_recorded_raw_bytes widget_driver packages/kiwicaptcha-wasm/assets/widget-driver.js
 verify_recorded_raw_bytes widget_risk packages/kiwicaptcha-wasm/assets/widget-risk.js
 verify_recorded_raw_bytes widget_telemetry packages/kiwicaptcha-wasm/assets/widget-telemetry.js
+verify_recorded_raw_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget-locales.js
+verify_recorded_gzip_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget-locales.js
+verify_recorded_brotli_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget-locales.js
 verify_recorded_raw_bytes widget_compat packages/kiwicaptcha-wasm/assets/widget-compat.js
 verify_recorded_raw_bytes widget_worker packages/kiwicaptcha-wasm/assets/kiwi-worker.js
 verify_recorded_raw_bytes widget_runtime packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
@@ -275,6 +331,9 @@ dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes")
 dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
 rk_raw=$(json_get "$BASELINES_FILE" "budgets.widget_risk.raw_bytes")
 tm_raw=$(json_get "$BASELINES_FILE" "budgets.widget_telemetry.raw_bytes")
+lc_raw=$(json_get "$BASELINES_FILE" "budgets.widget_locales.raw_bytes")
+lc_gz=$(json_get "$BASELINES_FILE" "budgets.widget_locales.gzip_bytes")
+lc_br=$(json_get "$BASELINES_FILE" "budgets.widget_locales.brotli_bytes")
 cp_raw=$(json_get "$BASELINES_FILE" "budgets.widget_compat.raw_bytes")
 ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
 ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes")
@@ -284,7 +343,7 @@ MISSING=""
 # The locale-independent comparison: the doc may format the figures
 # with or without thousand separators, so the guard strips the commas
 # and matches the bare digit strings from the record.
-for fig in "$dr_raw" "$dr_gz" "$dr_br" "$rk_raw" "$tm_raw" "$cp_raw" "$ex_raw" "$ex_gz" "$ex_br"; do
+for fig in "$dr_raw" "$dr_gz" "$dr_br" "$rk_raw" "$tm_raw" "$lc_raw" "$lc_gz" "$lc_br" "$cp_raw" "$ex_raw" "$ex_gz" "$ex_br"; do
   if [ -n "$DOC_NORM" ] && ! printf '%s' "$DOC_NORM" | grep -qF "$fig"; then
     MISSING="$MISSING $fig"
   fi
