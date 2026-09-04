@@ -505,10 +505,13 @@ the way to state which modulus a deployment holds. The command
 redeployment audit compares the two. Validation refuses the weak
 shapes up front: an even or mis-sized modulus, a modulus with a small
 prime factor, and a probable-prime modulus are configuration errors
-at boot. So is a lambda that fails the Euler self-test
-`base^lambda == 1 (mod n)` for the small bases. The full lcm relation
-still cannot be verified without the primes, which is why the keygen
-provenance and the fingerprint matter.
+at boot. So is a lambda that fails the deterministic consistency
+spot-check `base^lambda == 1 (mod n)` over the fixed small-prime
+base set (2, 3, 5, 7, 11, 13, 17 and 19). The spot-check is not a
+proof that lambda is the true Carmichael value of n: only the keygen
+p/q construction guarantees that. The full lcm relation still cannot
+be verified without the primes, which is why the keygen provenance
+and the fingerprint matter.
 
 ### The sequential cost T
 

@@ -29,11 +29,11 @@ rsw-keygen              # or rsw-keygen --diagnostic
 
 Before anything is emitted the fresh pair must pass the shipped decode
 and validation of the core (shape, small factors, probable-prime
-rejection, the Euler self-test) and the sequential-squaring self-test:
-for four deterministic challenge-derived bases the shipped trapdoor
-expectation must equal the client-style sequential solve at T = 17,
-1000 and 10007, plus T = 250000 for the first base. A mismatch aborts
-with exit 1 and emits nothing.
+rejection, the trapdoor consistency spot-check) and the
+sequential-squaring self-test: for four deterministic challenge-derived
+bases the shipped trapdoor expectation must equal the client-style
+sequential solve at T = 17, 1000 and 10007, plus T = 250000 for the
+first base. A mismatch aborts with exit 1 and emits nothing.
 
 Output is one value per line, all lowercase:
 
@@ -72,9 +72,12 @@ every applicable rejection:
 - `n` is divisible by a small prime at or below 1000,
 - `n` is a probable prime (a genuine modulus is composite),
 - `lambda` is odd, larger than 256 bytes, or empty,
-- `lambda` fails the Euler self-test `base^lambda == 1 (mod n)` for
-  the bases 2, 3 and 5, which is the exact condition for the trapdoor
-  shortcut to match sequential squaring at every cost T.
+- `lambda` fails the deterministic consistency spot-check
+  `base^lambda == 1 (mod n)` over the fixed small-prime base set
+  2, 3, 5, 7, 11, 13, 17 and 19, which is the exact condition for the
+  trapdoor shortcut to match sequential squaring at every cost T. The
+  spot-check cannot prove that lambda is the true Carmichael value of
+  n: only this generator's p/q construction guarantees that.
 
 Exit 0 with an OK line and the modulus fingerprint means the pair
 passes the shipped validation everywhere. Exit 1 lists the reasons.

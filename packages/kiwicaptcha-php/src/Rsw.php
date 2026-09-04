@@ -36,17 +36,23 @@ namespace KiwiCaptcha;
  * bytes with the top bit set and odd, and lambda must decode to 1..256
  * even bytes. Beyond the shape, three weak or inconsistent inputs are
  * refused: a modulus divisible by any prime at or below 1000, a
- * modulus reading as a probable prime, and a lambda failing the Euler
- * self-test for a few small bases. No product of two 1024-bit primes
- * has a small factor, and a genuine modulus is composite. The Euler
- * test requires base^lambda == 1 modulo n and is the exact condition
- * under which the trapdoor shortcut agrees with the client's
- * sequential squaring at every cost T. The full lcm relation cannot be established without the
- * factorization, exactly like an RSA public key cannot be verified
- * against its private exponent. The residual assurance for a deployed
- * pair is its provenance: generate n and lambda with the shipped
- * rsw-keygen tool and record the modulus fingerprint. Both values are
- * canonical standard base64 of their big-endian bytes.
+ * probable-prime modulus, and a lambda failing the deterministic
+ * trapdoor consistency spot-check over the fixed small-prime base
+ * set. No product of two 1024-bit primes has a small factor, and a
+ * genuine modulus is composite. The spot-check requires base^lambda
+ * == 1 modulo n per base; the equality is the exact condition under
+ * which the trapdoor shortcut agrees with the client's sequential
+ * squaring at every cost T. So a lambda that passes it for every base
+ * of the set behaves as the trapdoor at every tested base. It is a
+ * spot-check, not a proof: no fixed base set can establish that
+ * lambda is the true Carmichael value of n without the factorization,
+ * exactly like an RSA public key cannot be verified against its
+ * private exponent. Only the first-party generator's p/q construction
+ * (tools/rsw-keygen) is guaranteed to produce lambda = lcm(p-1, q-1),
+ * so the residual assurance for a deployed pair is its provenance:
+ * generate the pair with the shipped rsw-keygen tool and record the
+ * modulus fingerprint. Both values are canonical standard base64 of
+ * their big-endian bytes.
  *
  * gmp is required for the arithmetic. The optional algorithm is refused
  * at configuration time when the extension is missing, so the default
@@ -100,12 +106,13 @@ final class Rsw
     private const SMALL_PRIME_LIMIT = 1000;
 
     /**
-     * The deterministic bases of the Euler self-test. Each stays below
-     * the trial-division ceiling, so a conforming modulus shares no
-     * factor with any base and the exponent reduction of the trapdoor
+     * The fixed base set of the trapdoor consistency spot-check: the
+     * primes 2, 3, 5, 7, 11, 13, 17 and 19. Each stays below the
+     * trial-division ceiling, so a conforming modulus shares no factor
+     * with any base and the exponent reduction of the trapdoor
      * applies.
      */
-    private const SELFTEST_BASES = [2, 3, 5];
+    private const SELFTEST_BASES = [2, 3, 5, 7, 11, 13, 17, 19];
 
     /**
      * @param string $modulusB64 canonical standard base64 of the
@@ -117,8 +124,9 @@ final class Rsw
      * @throws \InvalidArgumentException on a malformed modulus or
      *                           lambda, on a modulus with a small prime
      *                           factor or a probable-prime modulus, and
-     *                           on a lambda that fails the Euler
-     *                           self-test against the modulus
+     *                           on a lambda that fails the trapdoor
+     *                           consistency spot-check against the
+     *                           modulus
      */
     public function __construct(
         private readonly string $modulusB64,
@@ -292,15 +300,20 @@ final class Rsw
     }
 
     /**
-     * Does lambda act as the trapdoor of n? The check is Euler's
-     * theorem per small base: base^lambda must equal 1 modulo n. The
-     * equality holds exactly when the base's order divides lambda,
+     * Does lambda act as the trapdoor of n? The check is a
+     * deterministic consistency spot-check: per base of the fixed
+     * `SELFTEST_BASES` set, base^lambda must equal 1 modulo n. Each
+     * equality holds exactly when that base's order divides lambda,
      * which is precisely the condition that the lambda shortcut
      * base^(2^T mod lambda) matches the T sequential squarings of the
      * base at every cost T. Every genuine pair passes, because lambda
      * is the Carmichael value of the semiprime; a mismatched or
-     * fabricated lambda fails almost surely, so it is refused at
-     * configuration time.
+     * fabricated lambda fails the spot-check almost surely, so it is
+     * refused at configuration time. Passing every base is not a
+     * proof that lambda is exactly the Carmichael value: only the
+     * first-party generator's p/q construction guarantees that, and
+     * the pass verdict is the strongest consistency evidence a
+     * configuration validator without the primes can hold.
      */
     private static function trapdoorConsistent(\GMP $n, \GMP $lambda): bool
     {

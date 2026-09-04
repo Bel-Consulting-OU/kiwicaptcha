@@ -115,7 +115,8 @@ routed to it.
 
 The configuration boundary refuses weak or inconsistent pairs at
 boot: a modulus with a small prime factor, a probable-prime modulus,
-and a lambda that fails the Euler self-test are configuration errors.
+and a lambda that fails the deterministic consistency spot-check
+over the fixed small-prime base set are configuration errors.
 Record the rsw_modulus_n_sha256 fingerprint from the keygen run as
 the identity of the deployed modulus, and spot-check a node with the
 keygen's --fingerprint mode when a rotation or redeployment is

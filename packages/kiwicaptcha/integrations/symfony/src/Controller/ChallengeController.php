@@ -807,19 +807,22 @@ final class ChallengeController
         // Execution-capability advertisement: the client declares the
         // highest execution-program grammar version its interpreter can
         // run via the `Kiwi-Execution-Max-Version` HTTP request header.
-        // The widget driver sends the header with value 2 when the
-        // deployment configured the execution tier; absence, an empty
-        // value, garbage or a value below 2 means the client only knows
-        // version 1 (an older driver, a stale open page, or any client
-        // that never advertises). The advertisement rides an ignorable
-        // header, never a body field: a server generation that
-        // validates challenge bodies against a closed field set would
-        // answer 422 `UNKNOWN_FIELDS` to an unknown body field, while
-        // an unknown header is ignored. The header is a capability
-        // claim, not a security gate: a malformed value degrades to 1,
-        // never a 422, and the issued version is further capped by the
-        // node config and the central fleet floor, see
-        // {@see self::effectiveExecutionVersion()}.
+        // The widget driver sends the header with its current driver
+        // maximum (the highest execution-program version it can run,
+        // today the generator's `MAX_EXECUTION_VERSION`, 4) when the
+        // deployment configured the execution tier. Absence, an empty
+        // value or garbage means the client only knows version 1 (an
+        // older driver, a stale open page, or any client that never
+        // advertises). A smaller valid advertisement caps the issued
+        // grammar at that older version. The advertisement rides an
+        // ignorable header, never a body field: a server generation
+        // that validates challenge bodies against a closed field set
+        // would answer 422 `UNKNOWN_FIELDS` to an unknown body field,
+        // while an unknown header is ignored. The header is a
+        // capability claim, not a security gate: a malformed value
+        // degrades to 1, never a 422, and the issued version is
+        // further capped by the node config and the central fleet
+        // floor, see {@see self::effectiveExecutionVersion()}.
         $clientExecutionCapability = 1;
         $rawCapability = $request->headers->get('Kiwi-Execution-Max-Version');
         if (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {

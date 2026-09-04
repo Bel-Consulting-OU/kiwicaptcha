@@ -170,7 +170,8 @@ final class Config
      *                                      verify without the T squarings. It is the
      *                                      secret trapdoor: never persist it beside
      *                                      client material. A lambda that fails the
-     *                                      Euler self-test against the modulus is
+     *                                      deterministic trapdoor consistency
+     *                                      spot-check against the modulus is
      *                                      refused here. Required when algorithm is
      *                                      rsw; ignored otherwise.
      * @param int      $rswT                The rsw sequential-squaring cost T
