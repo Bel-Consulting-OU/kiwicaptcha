@@ -632,7 +632,7 @@ for the worker asset, and the worker's importScripts for its WASM glue.
 No Blob URL is created, so the worker download is deduplicated across
 widgets like the runtime.
 
-The driver itself is split the same way (the P1-8 driver split): the
+The driver itself is split the same way: the
 always-loaded eager core (`widget-driver.js`) carries the bootstrap,
 the challenge request, the SHA-256 solve, the state machine and the
 lazy-module loader. The adaptive-risk solve tier and the armed-evidence

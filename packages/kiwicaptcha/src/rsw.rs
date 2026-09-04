@@ -195,7 +195,7 @@ fn canonical_base64_bytes(value: &str) -> Result<Vec<u8>, RswError> {
 }
 
 /// The trial-division ceiling of the weak-modulus rejection: any prime
-/// factor at or below this bound marks the modulus as catastrophically
+/// factor at or below this bound marks the modulus as severely
 /// weak, because a genuine modulus is the product of two primes of
 /// roughly 1024 bits.
 pub const SMALL_PRIME_LIMIT: u32 = 1000;
@@ -546,7 +546,7 @@ mod tests {
     }
 
     /// The odd 2048-bit multiple factor * (2^b + 1) with the top bit
-    /// set: exactly the shape of a genuine modulus, catastrophically
+    /// set: exactly the shape of a genuine modulus, severely
     /// weak underneath it.
     fn weak_modulus_with_factor(factor: u64) -> BigUint {
         let factor_bits = 64 - factor.leading_zeros();

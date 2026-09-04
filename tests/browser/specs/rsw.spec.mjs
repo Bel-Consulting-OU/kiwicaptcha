@@ -99,9 +99,7 @@ test.describe('KiwiCaptcha rsw sequential time-lock', () => {
     // ExecutionChallengeV1 program), the driver runs the worker's
     // sequential squarer AND the interpreter, and mints the composed
     // token shape — nonce.0.duration.telemetry.digest:trace.512hex —
-    // whose server-side decode previously folded the digest:trace
-    // segment into the telemetry and failed. The fixture /verify must
-    // now accept the composed token.
+    // whose server-side decode must now accept the composed token.
     await page.goto('/?algorithm=rsw&rsw_t=10000&execution=1&assets=files');
     const tokenInput = page.locator('[data-kiwi-token]');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 90_000 });

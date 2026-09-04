@@ -94,7 +94,7 @@ final class Rsw
     /**
      * The trial-division ceiling of the weak-modulus rejection: any
      * prime factor at or below this bound marks the modulus as
-     * catastrophically weak, because a genuine modulus is the product
+     * severely weak, because a genuine modulus is the product
      * of two primes of roughly 1024 bits.
      */
     private const SMALL_PRIME_LIMIT = 1000;

@@ -1259,7 +1259,7 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-a
-          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css /tmp/repro-a/
+          ls assets/ && cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-compat.js assets/widget.css /tmp/repro-a/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-a
@@ -1287,7 +1287,7 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-b
-          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css /tmp/repro-b/
+          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-compat.js assets/widget.css /tmp/repro-b/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-b
@@ -1345,7 +1345,7 @@ jobs:
         run: |
           bash build.sh
           shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css > /tmp/build1.sha256
+                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-compat.js assets/widget.css > /tmp/build1.sha256
       - name: second clean strict build (fresh cache + target)
         env:
           WASM_OPT_STRICT: "1"
@@ -1355,7 +1355,7 @@ jobs:
           rm -rf "$HOME/.cache/kiwicaptcha-wasm"
           bash build.sh
           shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js widget-telemetry.js widget-compat.js assets/widget.css > /tmp/build2.sha256
+                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-compat.js assets/widget.css > /tmp/build2.sha256
       - name: byte-compare the two builds
         run: |
           diff /tmp/build1.sha256 /tmp/build2.sha256

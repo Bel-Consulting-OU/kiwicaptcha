@@ -4,7 +4,7 @@
 #
 # The widget assets ship as three byte-identical copies (the canonical
 # WASM asset, the core crate's embedded resources copy and the Symfony
-# bundle's public copy). After the P1-8 driver split the always-loaded
+# bundle's public copy). After the driver split the always-loaded
 # driver is the eager core (widget-driver.js) with its own raw cap (the
 # 160,000-byte cap carried forward) and the new compressed caps of
 # 30,720 gzip / 28,000 brotli bytes; the lazy widget modules

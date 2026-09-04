@@ -77,7 +77,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
 
     // The driver surface is the eager core plus the lazy widget-risk.js
     // module (the worker machinery and the execution runner live there
-    // since the P1-8 driver split), plus the worker asset itself.
+    // since the driver was split into the eager core plus lazy modules), plus the worker asset itself.
     for (const [name, source] of [['widget-driver.js', src], ['widget-risk.js', risk], ['kiwi-worker.js', worker]]) {
       // The driver must never post to the parent page at all — and never
       // with a wildcard target origin.
@@ -118,7 +118,7 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     const worker = workerSource();
 
     // Driver side (the widget-risk.js module owns the worker machinery
-    // since the P1-8 driver split): the worker reply listener validates a
+    // since the driver split): the worker reply listener validates a
     // version field and the payload schema before acting; anything else
     // is ignored.
     expect(risk).toMatch(/msg\.v !== 1/);

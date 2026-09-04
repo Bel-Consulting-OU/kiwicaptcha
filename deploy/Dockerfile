@@ -21,7 +21,7 @@ COPY packages/kiwicaptcha-php/composer.json packages/kiwicaptcha-php/composer.js
 COPY packages/kiwicaptcha-php/src packages/kiwicaptcha-php/src
 WORKDIR /srv/kiwicaptcha/deploy/app
 RUN composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
-COPY deploy/app deploy/app
+COPY deploy/app/ /srv/kiwicaptcha/deploy/app/
 EXPOSE 8080
 # The healthcheck runs the real /healthz handler, which round-trips the
 # configured challenge store (write, read, delete-if-pending) and
