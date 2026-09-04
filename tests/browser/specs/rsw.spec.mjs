@@ -95,7 +95,7 @@ test.describe('KiwiCaptcha rsw sequential time-lock', () => {
 });
 
 test.describe('KiwiCaptcha rsw worker parameter rejection', () => {
-  // The worker must reject an unsupported rsw ladder IMMEDIATELY, before
+  // The worker must reject an unsupported rsw ladder at once, before
   // any work: T outside the protocol bounds 10,000..=300,000, a T that
   // is not an integer, or a modulus that is not a canonical 2048-bit odd
   // composite (not 256 bytes, top bit clear, or even) must produce the
@@ -116,7 +116,7 @@ test.describe('KiwiCaptcha rsw worker parameter rejection', () => {
       prefix: 'kiwicaptcha-rsw-reject-test-prefix',
       prefixLen: 34,
       salt: 'a2l3aWNhcHRjaGE=',
-      saltLen: 12,
+      saltLen: 11,
       targetBits: 1,
       mKib: 0,
       t,

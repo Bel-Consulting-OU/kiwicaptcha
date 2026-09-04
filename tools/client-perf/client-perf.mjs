@@ -1781,7 +1781,7 @@ function buildPayload(opts, ctx, completion) {
       sampleSizes: {
         shaReps: opts.reps,
         argonReps: opts.argonReps,
-        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration. The execution cells inherit the rep count of their PoW profile (execvm, execsha18, execvminline and execsha18inline use the SHA count, execargon and execchain the Argon count).',
+        note: 'SHA-256 cells default to 50 reps and Argon2id cells to 20 reps so p95/p99 are computed over a defensible sample; --samples N raises both, --quick lowers them for iteration. The execution cells inherit the rep count of their PoW profile (execvm, execsha18, execvminline and execsha18inline use the SHA count, execargon and execchain the Argon count), and the rsw rungs inherit the SHA count (deterministic work).',
       },
       argonLadder: {
         mKib: opts.argonMKib,
@@ -1800,7 +1800,7 @@ function buildPayload(opts, ctx, completion) {
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
       php: opts.php,
-      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib), the assets=files knob, and the execution arms (?execution=1 armed challenges, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
+      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib, algorithm=rsw with rsw_t for the time-lock rungs), the assets=files knob, and the execution arms (?execution=1 armed challenges, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
     },
     tiers: Object.fromEntries(
       tierNames.map((t) => [

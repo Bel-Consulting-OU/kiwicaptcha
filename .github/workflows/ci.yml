@@ -1319,6 +1319,18 @@ jobs:
         run: composer install --no-interaction --no-scripts --prefer-dist
       - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge responses)
         run: bash packages/kiwicaptcha/tools/perf-budget.sh
+      - name: client-performance release-baseline gate (CI mode)
+        # The release-baseline validator enforces that every
+        # release-required cell in tools/client-perf/release-budgets.json
+        # (every released solver mode x qualified tier x cold/warm) has a
+        # measured p95 under budget in the committed baseline, and prints
+        # the current performance-qualification status. CI mode never
+        # fails solely on the status: a lab-status gate is an honest
+        # not-yet-certified signal. The release workflow re-runs the same
+        # validator with --release, where a non-physical qualification
+        # status is a hard failure (the release boundary is physical-device
+        # data, per tools/client-perf/README.md).
+        run: node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench.php
