@@ -184,7 +184,11 @@ across the asset modes; the files-only execution cells carry 12/6)
 and at 50 reps in the 2026-09-04 focused run (100 merged), which is
 why the budget file's minShaReps/minArgonReps floors are 12/6: the
 floors equal the lowest real-ladder evidence count, and a future full
-run at the harness defaults exceeds them. The physical procedure below
+run at the harness defaults exceeds them. Physical sha20 evidence has
+its own floor — `minSha20SamplesPhysical` (100 merged samples per
+cache cell, see the release-gate section): the sha20 exhaustion
+allowance must never be forced by a single observation on a small
+sample. The physical procedure below
 matters more
 than any sample-size tweak: emulation noise is bounded, real-device
 noise is not.
@@ -355,12 +359,19 @@ widget, or the difficulty ladder, run the same matrix on real devices:
 5. The release boundary is met when the physical-device p95 solve
    times stay within the documented budget for every tier the
    deployment targets, and no tier shows a failure rate above the
-   widget's documented exhaustion bounds. If the highest Argon rung is
-   too expensive for legitimate mobile users, adjust the server-selected
+   mode's `failureRateBudgets` limit (1% per cell by default; the 2%
+   sha20 allowance is only for the measured driver-exhaustion tail,
+   and the physical sha20 evidence must meet `minSha20SamplesPhysical`
+   so a single observation never forces the allowance). If the highest
+   Argon rung is too expensive for legitimate mobile users, adjust the
+   server-selected
    ladder globally or transition earlier to StepUp, never weaken the
    rung based on client-reported device capabilities (bots lie).
 6. Record the physical-device rows in the results file (or an attached
-   run notes section) with the device/browser/OS and date. The
+   run notes section) with the device/browser/OS and date, and carry
+   the provenance the gate proves: every release-tier measurement row
+   with `source: "physical"` and a `device_id` from
+   `qualification.devices`. The
    emulation numbers alone do not constitute a release qualification.
 
 ## The release gate and the performance-qualification status
@@ -368,16 +379,19 @@ widget, or the difficulty ladder, run the same matrix on real devices:
 The release gate is a separate authority from the harness: the harness
 only records, `tools/client-perf/release-budgets.json` declares, and
 `tools/ci/validate-release-baseline.mjs` enforces. The budget file
-carries an explicit p95 budget row (solveMsP95 and pageToVerifiedMsP95)
-for every released solver mode x every qualified tier x cold/warm, and
-a top-level `qualification` block:
+(schema `kiwicaptcha.release-budgets/2`) carries an explicit p95 budget
+row (solveMsP95 and pageToVerifiedMsP95) for every released solver mode
+x every qualified tier x cold/warm, the per-mode failure-rate limits,
+the physical sha20 sample floor, and a top-level `qualification`
+block:
 
 ```json
 {
   "status": "lab",
   "qualified_at": null,
   "harness_schema": "kiwicaptcha.client-perf/3",
-  "devices": [ { "id": "...", "kind": "lab", "role": "...", ... } ]
+  "release_tiers": [ "mainstream-desktop" ],
+  "devices": [ { "id": "...", "kind": "lab", "role": "...", "tier": "mainstream-desktop", ... } ]
 }
 ```
 
@@ -385,10 +399,89 @@ a top-level `qualification` block:
 desktop-lab evidence recorded by the harness on the rigs listed in
 `devices` (the current file names the recording Mac). `physical` means
 the budgets come from the physical-device procedure below, with
-`qualified_at` and the device rows recorded.
+`qualified_at` and the device rows recorded, and the validator proves
+the claim (see the physical-authority contract section).
 
-The validator (`tools/ci/validate-release-baseline.mjs`) has two
-modes:
+### `qualification.release_tiers` — the declared release ladder
+
+`release_tiers` is the explicit, ordered list of tiers the release
+gate certifies. The entries must be documented harness tier keys from
+the device-tier table above — never invented names. The current file
+names only `mainstream-desktop`, the one tier with real-harness
+evidence; the five Android/iPhone emulation tiers and `low-desktop`
+are calibration signals and are not on the ladder. The extension rule:
+adding a tier to `release_tiers` requires (1) the tier's p95 budget
+rows for every released mode x cold/warm in the same file, (2) at
+least one `kind: "physical"` device qualified on that tier, and (3)
+physical measurement rows for every one of its cells. In release mode
+the validator derives the release-required cells from the union of the
+budget file's `tiers` and `qualification.release_tiers`, so a future
+file cannot declare a release ladder that lacks p95 budgets or
+measured rows.
+
+### Failure-rate limits and the sha20 carve-out
+
+`maxCellFailureRate` is gone. `failureRateBudgets` replaces it with
+per-mode limits:
+
+```json
+{
+  "failureRateBudgets": { "default": 0.01, "sha20": 0.02 },
+  "minSha20SamplesPhysical": 100
+}
+```
+
+- Every mode except `sha20` (sha16, sha18, argon2id, every rsw rung,
+  every execution cell) inherits `default` — 1% of a cell's samples
+  may fail (time out or error), not ~5%.
+- `sha20` alone keeps the 2% allowance, and only for the measured
+  driver-exhaustion tail: the 20-bit pure-JS files-mode search can
+  exhaust the 5M-hash cap, and the committed lab evidence for that
+  cell contains one such event.
+- The allowance is pre-justified, never per-sample. The lab's own
+  sha20 warm files-mode evidence was 1 exhaustion event in 24 merged
+  samples (4.2%) — above even the 2% carve-out. That is exactly why
+  lab rows are never release evidence, and why physical sha20
+  certification must meet `minSha20SamplesPhysical` (100 merged
+  samples per cache cell = 50 per asset mode at the harness default,
+  the natural evidence depth of a schema-3 full run): with the floor,
+  a single exhaustion observation is at most 1% of the evidence, so a
+  small-sample accident can never force the allowance upward. The
+  floor is asserted in release mode only (certification); the failure
+  budgets themselves bind whenever a file claims physical
+  qualification.
+- Failure-rate budgets bind the physical evidence of a
+  physical-qualified file. They are not asserted against lab rows: lab
+  rows are never certification evidence, and a lab-status file already
+  fails release certification on the status reason alone.
+
+### Physical device registration
+
+A physical qualification lists its devices inside `qualification`,
+one entry per rig, with the full physical identity:
+
+```json
+{
+  "id": "pixel-9-mainstream-01",
+  "kind": "physical",
+  "tier": "mainstream-desktop",
+  "hardware": "Google Pixel 9 (Tensor G4)",
+  "os": "Android 15",
+  "browser": "Chrome 129",
+  "tested_at": "2026-09-04T12:00:00.000Z",
+  "battery_state": "plugged-steady"
+}
+```
+
+`kind` is `lab` or `physical`; ids are unique; every device names a
+harness tier. A physical entry must additionally carry non-empty
+`hardware`/`os`/`browser`/`battery_state` and a parseable `tested_at`.
+The recommended `battery_state` vocabulary follows the physical-run
+procedure (plugged-steady, battery-steady, battery-saver,
+thermal-throttled); the validator requires the field to be present and
+non-empty, it does not enumerate the vocabulary.
+
+### The two validator modes
 
 - CI mode (the default; wired into the required "Performance budgets"
   workflow check) runs against the committed
@@ -402,12 +495,15 @@ modes:
 - Release mode (`--release` or `RELEASE_PERFORMANCE=1`) is the
   release-certification gate. It refuses to certify unless
   `qualification.status` is `"physical"` (with a qualified_at date and
-  recorded devices), and a current-harness (schema 3) payload must
-  additionally satisfy the completed-run guards (completion marker,
-  full default matrix, default sample sizes, real argon ladder). In
-  the committed state (status `lab`), release mode fails with the
-  qualification reason, which is the honest state: no physical-device
-  data exists yet, so no release can be performance-certified.
+  recorded devices) and the physical-authority contract below holds; a
+  current-harness (schema 3) payload must additionally satisfy the
+  completed-run guards (completion marker, full default matrix,
+  default sample sizes, real argon ladder). Release mode widens the
+  release-required cells to the union of the budget `tiers` and
+  `qualification.release_tiers`. In the committed state (status
+  `lab`), release mode fails with the qualification reason and no
+  other, which is the honest state: no physical-device data exists
+  yet, so no release can be performance-certified.
 
 ```sh
 # CI mode (the every-push check):
@@ -421,9 +517,57 @@ The outstanding requirement before any release can be
 performance-certified is the physical-device qualification: run the
 matrix on real devices (the procedure below), record the rows in a
 clean completed run, promote it, and re-record the budget rows and the
-qualification block (`status: "physical"`, `qualified_at`, the device
-rows) from the physical measurements. Until then the gate prints
-status `lab` in CI and refuses certification in release mode.
+qualification block (`status: "physical"`, `qualified_at`,
+`release_tiers`, the physical device rows) from the physical
+measurements. Until then the gate prints status `lab` in CI and
+refuses certification in release mode.
+
+## The physical-authority contract (what "physical" must prove)
+
+Certification is only as strong as the file's claims, so when
+`qualification.status` is `"physical"` the validator proves every part
+of the claim — in release mode and in CI mode alike (a committed
+physical claim must hold on every push):
+
+1. **Device registration.** At least one device entry is
+   `kind: "physical"` with a non-empty `id` and `tier`; the generic
+   "recorded devices" shape alone proves nothing about the kind of
+   device.
+2. **Tier coverage.** Every tier in `qualification.release_tiers` has
+   at least one physical device qualified on it. A release tier with
+   no physical qualification device is a hard reason.
+3. **Row provenance.** Measurement rows are the per-cell result rows
+   of the baseline (`tier:difficulty:cache[:asset-mode]`), the
+   granularity the baseline keys support. Every measurement row of a
+   release-tier cell must carry `row.source: "physical"` and a
+   `row.device_id` naming a registered `kind: "physical"` device whose
+   tier equals the cell's tier. A physical row without a device_id, a
+   row naming an unknown or non-physical device, or a row whose device
+   is qualified on another tier is a hard reason. Recording
+   convention: one result row per device and cell — a schema-3 run on
+   the device, or a maintenance merge of that device's rows. Folding
+   several devices into a single row is out of schema scope: the
+   worst-p95 rule compares per-row measurements, so a merged row would
+   hide which device was slowest.
+4. **Physical coverage.** Every mode x release-tier x cold/warm cell
+   has at least one physical measurement row. A release tier whose
+   cells only carry lab rows has no physical evidence.
+5. **Budget derivation from the physical rows.** For every
+   release-tier cell the p95 budget is checked against the WORST
+   physical p95 across the qualified devices of the tier (each
+   device's own rows for the cell aggregated, worst device taken), for
+   solveMs and pageToVerifiedMs. Budget compliance therefore uses the
+   max physical p95, never one recording: if the budget rows were
+   copied from a lab run or from a single fast device while another
+   qualified device is slower, the budget fails.
+6. **Evidence quality.** The physical samples of every release-tier
+   cell stay under the mode's `failureRateBudgets` rate, meet the
+   generic minShaReps/minArgonReps floors, and — release mode only —
+   sha20 cells meet `minSha20SamplesPhysical`.
+
+A `lab` file runs none of these proofs (there is no physical claim to
+prove); its CI gate is the coverage and budget-compliance rules above,
+and release mode rejects it on the status reason alone.
 
 ## Results store
 
@@ -465,6 +609,42 @@ physical-device procedure remains the release boundary: emulation
 numbers, with or without a fresh full run, are calibration signals,
 never mobile claims, and the qualification status stays `lab` until
 physical-device data is recorded.
+
+## Server-side latency baselines and hosted-Redis anomalies (finding-9 note)
+
+This repo keeps a second, server-side performance authority in
+`packages/kiwicaptcha/tools/perf-baselines.json` (enforced by
+`packages/kiwicaptcha/tools/perf-budget.sh` and emitted by
+`--baseline-out` from the perf-bench tools), separate from this
+client-side lab. The finding-9 discipline for that authority, recorded
+here because this directory owns the baseline-hygiene rules:
+
+- **Hosted-Redis risk anomalies must NEVER re-record the baseline.**
+  The `bench_risk.redis_concurrent` leaf of `perf-baselines.json` is a
+  fixed-host measurement: it was recorded on the dedicated local
+  machine that also records every other perf baseline. A run against a
+  hosted Redis service is a different host, and its numbers describe
+  that host's network and tenancy, not the code. Copying them over the
+  committed leaf would silently move the baseline authority onto
+  noise.
+- **Route anomalies through the interleaved same-host base/head
+  comparator first (the fixed-host workflow).** When a change touches
+  the Redis-backed risk path, run the base build and the head build on
+  the SAME fixed host in interleaved order and compare the pair; only
+  that comparison can separate a code signal from a host signal. A
+  single noisy observation is never a reason to touch a baseline.
+- **The current committed numbers are a host signal comparison, not a
+  code signal.** The committed lab leaf reads p95 1.364 ms /
+  4202 req/s for the concurrent real-Redis risk path; an observed
+  noisy hosted-Redis run at 5.837 ms / 1166 req/s is ~4x slower, which
+  is exactly the scale of hosted-network and shared-tenant variance,
+  not of an application regression. Treat the hosted number as a
+  prompt to run the fixed-host comparator, never as a new baseline and
+  never as a release blocker by itself.
+- Accordingly, `results/baseline.json` values are never re-recorded
+  from hosted or anomalous runs either; this file only changes through
+  the guarded `--promote-baseline` merge path from completed
+  fixed-host runs.
 
 ## Notes and caveats
 

@@ -19,6 +19,14 @@
  *   node tools/client-perf/merge-cells.mjs \
  *     --run results/run-2026-09-03.json [--run results/results-2026-09-04.json]
  *     --tier mainstream-desktop [--difficulties sha16,...]
+ *
+ * Physical-evidence plumbing (release-budgets schema 2): when the
+ * merged rows will back a qualification.devices entry, stamp them with
+ *   --source physical --device-id <id from qualification.devices>
+ * Every emitted merged row then carries row.source and row.device_id,
+ * the provenance the release validator proves on release-tier cells.
+ * Both flags must be given together; without them the rows are
+ * emitted exactly as before (unattributed lab evidence).
  */
 import { readFileSync } from 'node:fs';
 
@@ -45,12 +53,16 @@ const args = process.argv.slice(2);
 const runs = [];
 const difficulties = [];
 let tier = null;
+let source = null;
+let deviceId = null;
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--run') runs.push(args[++i]);
   else if (args[i] === '--tier') tier = args[++i];
   else if (args[i] === '--difficulties') difficulties.push(...args[++i].split(','));
+  else if (args[i] === '--source') source = args[++i];
+  else if (args[i] === '--device-id') deviceId = args[++i];
   else if (args[i] === '--help') {
-    console.log('usage: node merge-cells.mjs --run FILE [--run FILE] --tier TIER [--difficulties a,b,c]');
+    console.log('usage: node merge-cells.mjs --run FILE [--run FILE] --tier TIER [--difficulties a,b,c] [--source lab|physical --device-id ID]');
     process.exit(0);
   } else {
     console.error(`unknown option: ${args[i]}`);
@@ -59,6 +71,14 @@ for (let i = 0; i < args.length; i += 1) {
 }
 if (!runs.length || !tier) {
   console.error('merge-cells: --run and --tier are required');
+  process.exit(2);
+}
+if ((source === null) !== (deviceId === null)) {
+  console.error('merge-cells: --source and --device-id must be given together (the provenance pair of a merged row)');
+  process.exit(2);
+}
+if (source !== null && source !== 'lab' && source !== 'physical') {
+  console.error(`merge-cells: --source ${source} is not one of lab|physical`);
   process.exit(2);
 }
 
@@ -107,6 +127,10 @@ for (const [mapKey, aggs] of [...merged.entries()].sort()) {
     cache,
     reps,
   };
+  if (source !== null) {
+    row.source = source;
+    row.device_id = deviceId;
+  }
   for (const metric of SUMMARY_METRICS) {
     row[metric] = summarize(reps.map((s) => s[metric]).filter((v) => v !== null && v !== undefined));
   }

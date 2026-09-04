@@ -1,10 +1,13 @@
 {
-  "schema": "kiwicaptcha.release-budgets/1",
+  "schema": "kiwicaptcha.release-budgets/2",
   "generated": "2026-09-04",
   "qualification": {
     "status": "lab",
     "qualified_at": null,
     "harness_schema": "kiwicaptcha.client-perf/3",
+    "release_tiers": [
+      "mainstream-desktop"
+    ],
     "devices": [
       {
         "id": "lab-rig-macbook-pro-m5",
@@ -19,11 +22,15 @@
       }
     ]
   },
-  "note": "Real measured p95 budgets, recorded on the lab rig (MacBook-Pro.local, 18 x Apple M5 Pro, Chromium 151.0.7922.34, the unthrottled mainstream-desktop tier is the actual recording machine) at the real challenge configurations: Argon2id at the adaptive-risk ladder (m=16384 KiB, t=3, p=1, target 8), the rsw time-lock rungs at T=75,000 / 150,000 / 300,000 squarings (the default rung, the midpoint and the protocol ceiling of 10,000..=300,000), SHA-256 at 16/18/20 bits, and the ExecutionChallengeV1 cells (the files-tier execvm/execsha18/execargon/execchain and the inline-tier execvminline/execsha18inline). Every row is ceil(1.2 x merged p95) of the measurements in tools/client-perf/results/baseline.json: the p95 is the worst asset mode of the cell merged across the inline and files repetitions (the harness percentile semantics over the concatenated samples), and the fixed 20% margin is the documented allowance for the CDP-emulation noise this lab itself measures, not a placeholder factor. Evidence runs: results/run-2026-09-03.json (desktop real-ladder run, 12 SHA / 6 Argon reps per mode) and tools/client-perf/results/results-2026-09-04.json (focused run, 50 reps, the rsw rungs and the inline execution cells). The qualified tier scope is mainstream-desktop only: it is the tier that represents the actual lab hardware. The five emulation tiers (low-android, mid-android, flagship-android, older-iphone, current-iphone) and low-desktop carry no budget rows because no real-ladder qualification evidence exists for them; emulation tiers are calibration signals, never release boundaries. The release-gate procedure (physical-device qualification replacing this file tier by tier) is documented in tools/client-perf/README.md. maxCellFailureRate 0.05 reflects the measured 1-in-24 exhaustion tail of the sha20 warm files-mode cell (a 20-bit pure-JS search can exhaust the 5M-hash cap); 0.02 would reject the lab's own completed evidence.",
+  "note": "Real measured p95 budgets, recorded on the lab rig (MacBook-Pro.local, 18 x Apple M5 Pro, Chromium 151.0.7922.34, the unthrottled mainstream-desktop tier is the actual recording machine) at the real challenge configurations: Argon2id at the adaptive-risk ladder (m=16384 KiB, t=3, p=1, target 8), the rsw time-lock rungs at T=75,000 / 150,000 / 300,000 squarings (the default rung, the midpoint and the protocol ceiling of 10,000..=300,000), SHA-256 at 16/18/20 bits, and the ExecutionChallengeV1 cells (the files-tier execvm/execsha18/execargon/execchain and the inline-tier execvminline/execsha18inline). Every row is ceil(1.2 x merged p95) of the measurements in tools/client-perf/results/baseline.json: the p95 is the worst asset mode of the cell merged across the inline and files repetitions (the harness percentile semantics over the concatenated samples), and the fixed 20% margin is the documented allowance for the CDP-emulation noise this lab itself measures, not a placeholder factor. Evidence runs: results/run-2026-09-03.json (desktop real-ladder run, 12 SHA / 6 Argon reps per mode) and tools/client-perf/results/results-2026-09-04.json (focused run, 50 reps, the rsw rungs and the inline execution cells). The qualified tier scope is mainstream-desktop only: it is the tier that represents the actual lab hardware. The five emulation tiers (low-android, mid-android, flagship-android, older-iphone, current-iphone) and low-desktop carry no budget rows because no real-ladder qualification evidence exists for them; emulation tiers are calibration signals, never release boundaries. The release-gate procedure (physical-device qualification replacing this file tier by tier) is documented in tools/client-perf/README.md. qualification.release_tiers names the release-certification ladder (mainstream-desktop today, the only tier with real-harness evidence); extending the ladder means adding that tier's p95 budget rows and its physical-device evidence, never an invented tier name. failureRateBudgets {default 0.01, sha20 0.02} replaces the old global maxCellFailureRate 0.05 cap: every mode except sha20 is held to a 1% failure rate, and sha20 alone keeps a 2% allowance for the measured driver-exhaustion tail of the 20-bit pure-JS search at the 5M-hash cap. The allowance is pre-justified, never per-sample: the lab's own sha20 warm files-mode evidence had a 1-in-24 merged exhaustion event (4.2%), above even the carve-out, which is exactly why lab rows are never release evidence and why physical sha20 certification must meet minSha20SamplesPhysical 100 merged samples per cache cell (50 per asset mode at the harness default), so a single exhaustion observation is at most 1% of the physical evidence.",
   "recordAgeDays": 90,
   "minShaReps": 12,
   "minArgonReps": 6,
-  "maxCellFailureRate": 0.05,
+  "minSha20SamplesPhysical": 100,
+  "failureRateBudgets": {
+    "default": 0.01,
+    "sha20": 0.02
+  },
   "tiers": [
     "mainstream-desktop"
   ],
