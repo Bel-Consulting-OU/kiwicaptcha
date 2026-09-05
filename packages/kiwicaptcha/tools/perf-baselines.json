@@ -9,8 +9,8 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 99188,
-      "brotli_bytes": 25087,
+      "raw_bytes": 89162,
+      "brotli_bytes": 22684,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
@@ -35,8 +35,8 @@
       "note": "The widget stylesheet (widget.css), three byte-identical copies; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative."
     },
     "widget_execution": {
-      "raw_bytes": 35728,
-      "brotli_bytes": 8989,
+      "raw_bytes": 32378,
+      "brotli_bytes": 8466,
       "raw_cap_bytes": 36000,
       "gzip_cap_bytes": 11200,
       "brotli_cap_bytes": 9500,
