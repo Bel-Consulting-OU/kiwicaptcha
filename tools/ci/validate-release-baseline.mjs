@@ -111,11 +111,42 @@
  *      full default matrix coverage (every harness tier x difficulty
  *      x cold/warm x asset cell), default sample sizes, both cache
  *      and asset modes, and the real argon ladder (m=16384 KiB,
- *      target 8).
+ *      target 4).
  *   8. the schema-3 full-matrix guard uses the per-mode result-row
  *      keys: deleting tier:difficulty:cache:files while the :inline
  *      row survives is detected, and vice versa (an aggregate
  *      three-part row never satisfies the per-mode matrix).
+ *   9. absolute UX ceilings (audit finding 2): the budget file
+ *      declares absoluteP95Ceilings per tier
+ *      ({ solveMsP95, pageToVerifiedMsP95 }, 5000 ms for
+ *      mainstream-desktop), the absolute wall-clock p95 a release
+ *      may ask an ordinary interactive user to wait. A cell is
+ *      rejected when its measured p95 exceeds its budget row or when
+ *      its interactive budget row exceeds the tier's absolute
+ *      ceiling; a budget above the ceiling can never be bought out
+ *      by low measurements. execchain is the one explicitly
+ *      non-interactive difficulty (budgets.nonInteractiveDifficulties,
+ *      documented in the budget notes and the lab README): it models
+ *      the composed chained-escalation flow, so it is measured and
+ *      budgeted like every cell but never counted as an ordinary
+ *      interactive release cell and never ceiling-checked. Every
+ *      other difficulty is interactive and subject to the ceiling.
+ *      In release mode (and for a committed physical claim in CI
+ *      mode), every certified tier must carry an
+ *      absoluteP95Ceilings entry: a release ladder without absolute
+ *      ceilings is a hard reason.
+ *  10. evidence time validation (audit finding 3): payload
+ *      generated_at, qualification.qualified_at and every device
+ *      tested_at must be canonical UTC RFC3339 timestamps
+ *      (YYYY-MM-DDTHH:MM:SS(.fraction)?Z, zero offset) and may not
+ *      lie beyond now + MAX_EVIDENCE_CLOCK_SKEW_MS (5 minutes) —
+ *      a value "in the future beyond the 5-minute clock-skew
+ *      allowance" is rejected (a clock-skewed rig can never mint
+ *      qualification evidence), and qualified_at may not postdate
+ *      payload.generated_at beyond the same skew allowance.
+ *      Chronology stays strict: tested_at <= qualified_at and
+ *      tested_at <= generated_at, and qualified_at never precedes
+ *      the newest physical tested_at.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -204,6 +235,48 @@ const BUDGET_METRICS = [
   ['solveMsP95', 'solveMs'],
   ['pageToVerifiedMsP95', 'pageToVerifiedMs'],
 ];
+
+// The maximum acceptable skew between an evidence timestamp and the
+// validator's clock (audit finding 3): qualification evidence (payload
+// generated_at, qualification qualified_at, device tested_at) may sit
+// at most 5 minutes in the future. Anything beyond that is a
+// clock-skewed or forged record, never evidence.
+const MAX_EVIDENCE_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+// Canonical UTC RFC3339 evidence timestamps: full date, T separator,
+// seconds (with an optional fractional part), and the UTC designator
+// "Z" only — no space separator, no non-UTC offset. The canonical
+// shape keeps every evidence timestamp unambiguous and comparable.
+const RFC3339_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+/**
+ * Central evidence-time validation (audit finding 3): a value must be
+ * a canonical UTC RFC3339 timestamp (no space separator, zero offset)
+ * whose instant is not beyond now + MAX_EVIDENCE_CLOCK_SKEW_MS. Each
+ * violation appends a reason naming the field. Returns the parsed
+ * epoch ms, or NaN when the value is absent of unparseable.
+ */
+function parseEvidenceTime(label, value, reasons) {
+  if (typeof value !== 'string') {
+    if (value !== null && value !== undefined) {
+      reasons.push(`${label} ${JSON.stringify(value)} is not a canonical UTC RFC3339 timestamp (expected YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.sssZ)`);
+    }
+    return NaN;
+  }
+  if (!RFC3339_UTC_RE.test(value)) {
+    reasons.push(`${label} ${JSON.stringify(value)} is not a canonical UTC RFC3339 timestamp (expected YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.sssZ, with a zero UTC offset)`);
+    return NaN;
+  }
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    reasons.push(`${label} ${JSON.stringify(value)} is not a valid calendar instant`);
+    return NaN;
+  }
+  if (ms > Date.now() + MAX_EVIDENCE_CLOCK_SKEW_MS) {
+    reasons.push(`${label} ${value} is in the future beyond the 5-minute clock-skew allowance`);
+  }
+  return ms;
+}
 
 /**
  * Read a constant out of the harness source: the validator never
@@ -390,9 +463,11 @@ function main() {
     }
     const qualifiedAt = qualification.qualified_at;
     if (qualifiedAt !== null && qualifiedAt !== undefined) {
-      if (typeof qualifiedAt !== 'string' || Number.isNaN(Date.parse(qualifiedAt))) {
-        reasons.push(`budget file ${budgetsPath}: qualification.qualified_at ${JSON.stringify(qualifiedAt)} is not null or a parseable ISO date`);
-      }
+      parseEvidenceTime(
+        `budget file ${budgetsPath}: qualification.qualified_at`,
+        qualifiedAt,
+        reasons
+      );
     }
     if (qualification.status === 'physical') {
       if (!qualifiedAt) {
@@ -463,10 +538,15 @@ function main() {
             reasons.push(`budget file ${budgetsPath}: physical device ${JSON.stringify(dev.id)} needs a non-empty ${field}`);
           }
         }
-        const testedAt = dev.tested_at;
-        if (typeof testedAt !== 'string' || Number.isNaN(Date.parse(testedAt))) {
-          reasons.push(`budget file ${budgetsPath}: physical device ${JSON.stringify(dev.id)} needs a parseable ISO tested_at date`);
-        }
+      }
+      if (dev.tested_at !== null && dev.tested_at !== undefined) {
+        parseEvidenceTime(
+          `budget file ${budgetsPath}: device ${JSON.stringify(dev.id)} tested_at`,
+          dev.tested_at,
+          reasons
+        );
+      } else if (dev.kind === 'physical') {
+        reasons.push(`budget file ${budgetsPath}: physical device ${JSON.stringify(dev.id)} needs a parseable ISO tested_at date`);
       }
       deviceEntries.push(dev);
       if (typeof dev.id === 'string' && dev.id.length > 0) deviceById.set(dev.id, dev);
@@ -517,6 +597,60 @@ function main() {
     if (!frb || typeof frb !== 'object') return null;
     return typeof frb[difficulty] === 'number' ? frb[difficulty] : (typeof frb.default === 'number' ? frb.default : null);
   };
+
+  // Absolute UX ceilings (audit finding 2): the budget authority
+  // declares, per tier, the absolute p95 wall-clock ceiling an
+  // ordinary interactive cell may ask a user to wait
+  // ({ solveMsP95, pageToVerifiedMsP95 } in ms). The committed file
+  // declares 5000 ms for mainstream-desktop. A budget row above the
+  // ceiling is a rejection even when the measurements are below the
+  // budget: an inflated budget can never buy the ceiling out.
+  const absoluteCeilings = budgets.absoluteP95Ceilings;
+  if (!absoluteCeilings || typeof absoluteCeilings !== 'object' || Array.isArray(absoluteCeilings)) {
+    reasons.push(`budget file ${budgetsPath}: absoluteP95Ceilings must be an object { "<tier>": { solveMsP95: ms, pageToVerifiedMsP95: ms } } (the absolute UX ceiling of every interactive release cell)`);
+  } else {
+    for (const [tier, ceiling] of Object.entries(absoluteCeilings)) {
+      if (!tierNames.includes(tier)) {
+        reasons.push(`budget file ${budgetsPath}: absoluteP95Ceilings names unknown tier ${JSON.stringify(tier)} (not a harness tier)`);
+        continue;
+      }
+      if (!ceiling || typeof ceiling !== 'object' || Array.isArray(ceiling)) {
+        reasons.push(`budget file ${budgetsPath}: absoluteP95Ceilings[${tier}] is not an object { solveMsP95, pageToVerifiedMsP95 }`);
+        continue;
+      }
+      for (const metric of BUDGET_METRICS.map((m) => m[0])) {
+        if (!(typeof ceiling[metric] === 'number' && ceiling[metric] > 0)) {
+          reasons.push(`budget file ${budgetsPath}: absoluteP95Ceilings[${tier}].${metric} ${JSON.stringify(ceiling[metric])} is not a positive ms ceiling`);
+        }
+      }
+    }
+  }
+  const ceilingForTier = (tier) => {
+    if (!absoluteCeilings || typeof absoluteCeilings !== 'object' || Array.isArray(absoluteCeilings)) return null;
+    return absoluteCeilings[tier] || null;
+  };
+
+  // The explicit non-interactive difficulty set (audit finding 2):
+  // execchain models the composed chained-escalation flow (SHA
+  // request escalated to the memory-hard rung mid-flow), so it is
+  // measured and budgeted like every cell but never counted as an
+  // ordinary interactive release cell and never subjected to the
+  // absolute UX ceiling. Every other difficulty is interactive and
+  // ceiling-subject. Unknown entries are rejections: a file cannot
+  // invent a difficulty to exempt from the ceiling.
+  const nonInteractiveDifficulties = Array.isArray(budgets.nonInteractiveDifficulties)
+    ? budgets.nonInteractiveDifficulties
+    : [];
+  if (!Array.isArray(budgets.nonInteractiveDifficulties)) {
+    reasons.push(`budget file ${budgetsPath}: nonInteractiveDifficulties must be an array of harness difficulties (e.g. ["execchain"]) that are budgeted but never counted as ordinary interactive release cells`);
+  } else {
+    for (const d of nonInteractiveDifficulties) {
+      if (!Object.prototype.hasOwnProperty.call(difficultyProfiles, d)) {
+        reasons.push(`budget file ${budgetsPath}: nonInteractiveDifficulties names unknown difficulty ${JSON.stringify(d)} (only harness difficulties may be classified non-interactive)`);
+      }
+    }
+  }
+  const isNonInteractive = (difficulty) => nonInteractiveDifficulties.includes(difficulty);
 
   // The released-mode set: the budget difficulty list must equal the
   // harness's difficulty set. A mode the harness solves but the budget
@@ -592,6 +726,22 @@ function main() {
   if (missingBudgetRows.length) {
     reasons.push(`${missingBudgetRows.length} release-required cell(s) have no p95 budget row (${missingBudgetRows.slice(0, 8).join(', ')}${missingBudgetRows.length > 8 ? ', ...' : ''}); every released mode x qualified tier x cold/warm needs an explicit solveMsP95 + pageToVerifiedMsP95 budget`);
   }
+  // Every certified tier must carry an absoluteP95Ceilings entry in
+  // release certification (and for a committed physical claim in CI,
+  // where the claim must prove everything release would check): an
+  // interactive release ladder without absolute UX ceilings is a hard
+  // reason, never a silent gap.
+  if (releaseMode || physicalClaim) {
+    for (const t of certTiers) {
+      if (!ceilingForTier(t)) {
+        reasons.push(
+          physicalClaim
+            ? `release tier ${t} has no absoluteP95Ceilings entry (a committed physical claim must carry the absolute UX ceiling of every certified tier in the same file)`
+            : `release tier ${t} has no absoluteP95Ceilings entry (every interactive release cell must sit under an absolute UX ceiling in release certification)`
+        );
+      }
+    }
+  }
   const minShaReps = budgets.minShaReps;
   const minArgonReps = budgets.minArgonReps;
   if (!(Number.isInteger(minShaReps) && minShaReps > 0)) {
@@ -624,13 +774,28 @@ function main() {
   if (typeof payload.generated_at !== 'string') {
     reasons.push('generated_at missing: the record age cannot be validated');
   } else {
-    const ageMs = Date.now() - Date.parse(payload.generated_at);
-    if (Number.isNaN(ageMs)) {
-      reasons.push(`generated_at ${payload.generated_at} is not a parseable date`);
-    } else {
+    const generatedAtMs = parseEvidenceTime('generated_at', payload.generated_at, reasons);
+    if (!Number.isNaN(generatedAtMs)) {
+      const ageMs = Date.now() - generatedAtMs;
       const ageDays = ageMs / 86400000;
       if (ageDays > recordAgeDays) {
         reasons.push(`record age ${ageDays.toFixed(1)} days exceeds the ${recordAgeDays}-day budget (generated ${payload.generated_at}); an old recording cannot qualify a current release`);
+      }
+    }
+  }
+
+  // qualified_at may not postdate payload.generated_at beyond the
+  // clock-skew allowance (audit finding 3): a qualification dated
+  // after the record that carries it can only come from a skewed or
+  // re-dated record.
+  {
+    const qAt = qualification ? qualification.qualified_at : null;
+    const gAt = payload.generated_at;
+    if (typeof qAt === 'string' && typeof gAt === 'string') {
+      const qMs = Date.parse(qAt);
+      const gMs = Date.parse(gAt);
+      if (!Number.isNaN(qMs) && !Number.isNaN(gMs) && qMs > gMs + MAX_EVIDENCE_CLOCK_SKEW_MS) {
+        reasons.push(`qualification.qualified_at ${qAt} postdates payload.generated_at ${gAt} beyond the 5-minute clock-skew allowance`);
       }
     }
   }
@@ -644,6 +809,14 @@ function main() {
   // match a required cell are aggregated (per-repetition samples
   // concatenated across the cell's mode rows) and the aggregate p95s
   // are compared with the budget row.
+  //
+  // Absolute UX ceiling compliance (audit finding 2) runs over the
+  // same cell space: an interactive cell whose budget row exceeds the
+  // tier's absoluteP95Ceilings is rejected whether or not the
+  // measurements are below the budget. Cells of a non-interactive
+  // difficulty (budgets.nonInteractiveDifficulties, execchain) are
+  // budgeted normally but exempt from the interactive ceiling and
+  // counted separately in the summary.
   //
   // When the file claims physical qualification, the release-tier
   // cells are governed by the physical-evidence contract below
@@ -727,6 +900,7 @@ function main() {
   }
 
   const budgetViolations = [];
+  let ceilingCounts = null;
   const budgetRows = (cell) => {
     const b = ((budgets.budgets || {})[cell.tier] || {})[cell.difficulty] || {};
     return b[cell.cache] || null;
@@ -957,6 +1131,40 @@ function main() {
       }
     }
   }
+  // ── Absolute UX ceiling compliance (audit finding 2). ──────────────
+  // Interactive budget rows (every difficulty except the documented
+  // non-interactive class, budgets.nonInteractiveDifficulties) must
+  // sit at or under the tier's absoluteP95Ceilings: a budget above
+  // the absolute ceiling is rejected even when the measurements are
+  // below it, so an inflated budget can never buy the ceiling out.
+  // Non-interactive cells (execchain) are measured and budgeted
+  // normally but are not ordinary interactive release cells and are
+  // not ceiling-checked.
+  {
+    const ceilingViolations = [];
+    let interactiveCells = 0;
+    let nonInteractiveCells = 0;
+    for (const cell of allRequiredCells) {
+      const budget = budgetRows(cell);
+      if (!budget) continue; // budget-row gaps already reported
+      const ceiling = ceilingForTier(cell.tier);
+      if (isNonInteractive(cell.difficulty)) {
+        nonInteractiveCells += 1;
+        continue;
+      }
+      interactiveCells += 1;
+      if (!ceiling) continue; // missing-tier ceilings reported where required
+      for (const [metric, field] of BUDGET_METRICS) {
+        if (budget[metric] > ceiling[metric]) {
+          ceilingViolations.push(
+            `${aggregateCellKey(cell)} ${metric} budget ${budget[metric]} ms exceeds the absolute interactive ceiling ${ceiling[metric]} ms of tier ${cell.tier} (an inflated budget can never buy the UX ceiling out)`
+          );
+        }
+      }
+    }
+    for (const v of ceilingViolations) budgetViolations.push(v);
+    ceilingCounts = { interactiveCells, nonInteractiveCells };
+  }
   if (budgetViolations.length) {
     reasons.push(`${budgetViolations.length} p95 budget violation(s) (${budgetViolations.slice(0, 6).join('; ')}${budgetViolations.length > 6 ? '; ...' : ''})`);
   }
@@ -1011,8 +1219,8 @@ function main() {
     if (options.argonMKib !== 16384) {
       reasons.push(`argon envelope ${JSON.stringify(options.argonMKib)} KiB is not the real ladder 16384`);
     }
-    if (options.argonBits !== 8) {
-      reasons.push(`argon target ${JSON.stringify(options.argonBits)} is not the real ladder 8`);
+    if (options.argonBits !== 4) {
+      reasons.push(`argon target ${JSON.stringify(options.argonBits)} is not the real ladder 4`);
     }
     if (options.cache !== 'both') {
       reasons.push(`cache option ${JSON.stringify(options.cache)} is not 'both'`);
@@ -1046,7 +1254,7 @@ function main() {
     process.exit(1);
   }
   if (releaseMode) console.log(statusLine);
-  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length} release-required cells, budgets ${budgetsPath}${physicalClaim ? ', physical claim: per-device evidence on release tiers ' + (releaseTiers.join('+') || '(none)') : ''}${releaseMode ? ', release mode' : ''})`);
+  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length} release-required cells, ${ceilingCounts ? `${ceilingCounts.interactiveCells} interactive cell(s) under the absolute ceilings + ${ceilingCounts.nonInteractiveCells} non-interactive budgeted cell(s), ` : ''}budgets ${budgetsPath}${physicalClaim ? ', physical claim: per-device evidence on release tiers ' + (releaseTiers.join('+') || '(none)') : ''}${releaseMode ? ', release mode' : ''})`);
   for (const n of notes) console.log(`  note: ${n}`);
   process.exit(0);
 }

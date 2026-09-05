@@ -1173,7 +1173,7 @@ kiwi_captcha:
         #                                   # bounded by this ONE value;
         #                                   # risk escalates the TARGET
         #                                   # DIFFICULTY, never the memory
-        #     argon_escalation_target_bits: [1, 4, 8] # EXACTLY 3
+        #     argon_escalation_target_bits: [1, 2, 4] # EXACTLY 3
         #                                   # entries (Argon16/32/64), each
         #                                   # 1..20 — the expected nonce
         #                                   # search space escalation

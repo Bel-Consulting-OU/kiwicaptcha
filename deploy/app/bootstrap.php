@@ -188,7 +188,7 @@ function kiwiDeployment(): array
     // Optional difficulty/lifetime knobs with the bundle-mirroring
     // defaults; the core Config validates every bound anyway.
     $shaTargetBits = optionalInt('KIWI_SHA_TARGET_BITS', 18, 1, Config::MAX_SHA_TARGET_BITS);
-    $argon2TargetBits = optionalInt('KIWI_ARGON2_TARGET_BITS', 8, 1, Config::MAX_ARGON2_TARGET_BITS);
+    $argon2TargetBits = optionalInt('KIWI_ARGON2_TARGET_BITS', 4, 1, Config::MAX_ARGON2_TARGET_BITS);
     $ttlSecs = optionalInt('KIWI_TTL_SECS', 120, 1, Config::MAX_TTL_SECS);
     $rswT = optionalInt('KIWI_RSW_T', 75_000, Config::MIN_RSW_T, Config::MAX_RSW_T);
     // The memory-hard profile memory envelope (KiB); 65536 KiB is the

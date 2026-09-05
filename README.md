@@ -167,7 +167,7 @@ let config = ChallengeConfig {
     m_kib: 0,                        // Argon2id memory (KiB); ignored for SHA-256
     t: 1, p: 1,
     target_bits: 18,                 // SHA-256 difficulty (leading zero bits; 18 = ordinary default, 20 = elevated rung)
-    argon2_target_bits: 8,           // ignored for SHA-256
+    argon2_target_bits: 4,           // the Argon2id default since the round-5 retune (ignored for SHA-256)
     ttl_secs: 120,
     min_duration_ms: None,           // None => derived from the difficulty
     auto_tune: false,
@@ -228,8 +228,8 @@ Recommended profiles, both libsodium-verifiable and browser-feasible:
 
 | Profile | m_kib | t | p | argon2_target_bits |
 |---------|-------|---|---|--------------------|
-| Mobile / low-memory | 8192 (8 MiB) | 3 | 1 | 6 |
-| Desktop | 65536 (64 MiB, the WASM heap ceiling) | 3 | 1 | 8 |
+| Mobile / low-memory | 8192 (8 MiB) | 3 | 1 | 4 |
+| Desktop | 65536 (64 MiB, the WASM heap ceiling) | 3 | 1 | 4 |
 
 SHA-256 difficulty is capped at 20 bits; Argon2id difficulty at 10 bits.
 The core crate documents both profiles as complete `ChallengeConfig` values.

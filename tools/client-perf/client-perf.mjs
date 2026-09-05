@@ -274,7 +274,7 @@ const DIFFICULTIES = {
     assetModes: ['inline', 'files'],
   },
   argon2id: {
-    label: 'Argon2id (m=16384 KiB, t=3, p=1, target 8)',
+    label: 'Argon2id (m=16384 KiB, t=3, p=1, target 4)',
     query: (o) => `?algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
     dimension: 'argon',
     isArgon: true,
@@ -342,7 +342,7 @@ const DIFFICULTIES = {
     assetModes: ['files'],
   },
   execargon: {
-    label: 'execution + Argon2id (m=16384 KiB, t=3, p=1, target 8)',
+    label: 'execution + Argon2id (m=16384 KiB, t=3, p=1, target 4)',
     query: (o) => `?execution=1&algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
     dimension: 'execution',
     isArgon: true,
@@ -390,7 +390,7 @@ function parseArgs(argv) {
     noFixture: false,
     php: 'php',
     out: null,
-    argonBits: 8, // the real adaptive-risk ladder highest rung (not the fixture envelope default)
+    argonBits: 4, // the real adaptive-risk ladder highest rung (retuned from 8 to 4 by the round-5 audit: the 8-bit rung measured ~16 s p95 on the mainstream-desktop tier, above the absolute 5000 ms UX ceiling; not the fixture envelope default)
     argonMKib: 16384, // the real ladder envelope (16 MiB), not the 64 KiB fixture default
     multiWidget: true,
     multiWidgetReps: 3,
@@ -523,8 +523,9 @@ Options:
   --no-fixture            attach to an already-running fixture (e.g. the
                           playwright lane on 8085)
   --php BIN               php binary for the fixture (default php)
-  --argon-bits N          argon2id target bits for the argon tier (default 8,
-                          the real adaptive-risk ladder highest rung)
+  --argon-bits N          argon2id target bits for the argon tier (default 4,
+                          the real adaptive-risk ladder highest rung, retuned
+                          from 8 by the round-5 audit)
   --argon-m-kib N         argon2id memory KiB for the argon tier (default 16384,
                           the real ladder envelope; the fixture clamps to
                           8..65536 KiB, so 16384 is permitted)
@@ -1786,7 +1787,7 @@ function buildPayload(opts, ctx, completion) {
       argonLadder: {
         mKib: opts.argonMKib,
         targetBits: opts.argonBits,
-        note: 'the real adaptive-risk ladder (16 MiB envelope, target 8) as chosen by the server-side RiskProfileResolver, not the fixture envelope default.',
+        note: 'the real adaptive-risk ladder (16 MiB envelope, target 4, retuned from 8) as chosen by the server-side RiskProfileResolver, not the fixture envelope default.',
       },
       coldWarm: {
         note: 'cold = a fresh context per load with the HTTP cache disabled, so every byte is re-fetched; warm = one reused context whose cache is enabled and populated by the first rep, so reps 2+ are cache-hit loads. The repeat-navigation field after the warm reps measures the fully-cached load.',
@@ -1893,7 +1894,7 @@ function promoteBaseline(file, baselinePath) {
     if (o.cache !== 'both') reasons.push(`cache option ${o.cache} is not 'both'`);
     if (o.assets !== 'both') reasons.push(`assets option ${o.assets} is not 'both'`);
     if (o.argonMKib !== 16384) reasons.push(`argon envelope ${o.argonMKib} KiB is not the real ladder 16384`);
-    if (o.argonBits !== 8) reasons.push(`argon target ${o.argonBits} is not the real ladder 8`);
+    if (o.argonBits !== 4) reasons.push(`argon target ${o.argonBits} is not the real ladder 4`);
   }
   if (reasons.length) {
     console.error('promote-baseline refused:');

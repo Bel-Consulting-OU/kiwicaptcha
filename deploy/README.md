@@ -108,7 +108,12 @@ Optional:
   configured algorithm regardless of what a caller asks for.
 - `KIWI_SHA_TARGET_BITS` — SHA-256 difficulty, 1..20 (default 18, the
   bundle baseline; the CI e2e runs 8 for a low-cost solve).
-- `KIWI_ARGON2_TARGET_BITS` — Argon2id difficulty, 1..10 (default 8).
+- `KIWI_ARGON2_TARGET_BITS` — Argon2id difficulty, 1..10 (default 4, the
+  benchmark-selected ordinary baseline: the client-performance lab
+  measured the 8-bit rung at ≈16 s p95 on a mainstream desktop — above
+  the absolute 5000 ms UX ceiling — so the ordinary default is 4,
+  keeping the solve inside the ceiling with the elevated rungs still
+  reachable via adaptive risk escalation).
 - `KIWI_ARGON2_M_KIB` — the Argon2id memory envelope in KiB, 8..65536
   (default 65536, the documented argon64 rung).
 - `KIWI_TTL_SECS` — challenge lifetime in seconds, 1..300 (default

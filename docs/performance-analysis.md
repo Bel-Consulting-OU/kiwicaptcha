@@ -97,7 +97,8 @@ The browser-side lab is separate: `tools/client-perf/` drives the
 browser fixture over the real SHA-256, Argon2id and rsw ladders, with
 the Argon rung measured at the real adaptive-risk envelope (m=16384
 KiB,
-target 8) and the rsw rungs at T=75,000 / 150,000 / 300,000 squarings
+target 4, the round-5 retuned ladder rung) and the rsw rungs at
+T=75,000 / 150,000 / 300,000 squarings
 (the default rung, the midpoint and the protocol ceiling), plus the
 six ExecutionChallengeV1 cells (execvm: the
 execution VM on an ordinary challenge, execsha18: execution + SHA-256

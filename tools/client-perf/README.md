@@ -3,7 +3,8 @@
 A Playwright-based client benchmark that drives the browser fixture
 (`tests/browser/router.php`) and measures the widget's real browser
 costs per difficulty tier: SHA-256 at 16/18/20 leading zero bits,
-Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 8), the
+Argon2id at the real adaptive-risk ladder (m=16384 KiB, target 4, the
+round-5 retuned highest rung), the
 three rsw sequential time-lock rungs (T=75,000 / 150,000 / 300,000
 squarings: the default rung, the midpoint and the protocol ceiling of
 the 10,000..=300,000 range), and the six ExecutionChallengeV1 cells
@@ -125,7 +126,7 @@ construct.
 |---|---|---|
 | `execvm` | files | the execution VM on an ordinary fixture-default SHA challenge (no PoW change): interpreter fetch + iframe creation + VM run + digest, isolated from difficulty cost |
 | `execsha18` | files | the execution dimension on the ordinary 18-bit SHA rung |
-| `execargon` | files | the execution dimension on the real-ladder Argon2id rung (m=16384 KiB, target 8) |
+| `execargon` | files | the execution dimension on the real-ladder Argon2id rung (m=16384 KiB, target 4) |
 | `execchain` | files | the execution dimension on the chained-escalation path: the driver requests SHA-256 and the server issues the memory-hard rung at the real ladder (the lazy runtime fetch and worker startup are paid too) |
 | `execvminline` | inline | the VM-only profile with an inline bootstrap (glue and driver inlined, no PoW change): the one lazy interpreter fetch + VM run against the inline page |
 | `execsha18inline` | inline | the 18-bit SHA rung with an inline bootstrap |
@@ -270,7 +271,7 @@ warm across each cell's asset
 tiers: the files execution cells files-only and the inline execution
 cells inline-only by design). It also refuses runs recorded
 below the default sample sizes (50 SHA and 20 Argon repetitions) or
-with a non-real argon ladder (m=16384 KiB, target 8). Only a clean
+with a non-real argon ladder (m=16384 KiB, target 4). Only a clean
 full run can replace `results/baseline.json`, so the committed
 baseline is never overwritten by an interrupted or partial run.
 
@@ -281,7 +282,7 @@ baseline is never overwritten by an interrupted or partial run.
 # rungs (rsw75k, rsw150k, rsw300k) plus the six execution cells
 # (execvm, execsha18, execargon, execchain — files —
 # and execvminline, execsha18inline — inline) at the real
-# ladder (16 MiB, target 8), cold and warm, inline and files, plus the
+# ladder (16 MiB, target 4), cold and warm, inline and files, plus the
 # 3-widget page scenario. SHA-profile
 # cells run 50 reps, Argon cells 20. A committed full run takes many
 # hours on the recording Mac.
@@ -327,7 +328,7 @@ the fixture) and
 `?execution=1` (the execution arm) plus `?escalate=argon` (the chained
 escalation arm) on the challenge endpoint, and `?assets=files` plus
 `?widgets=N` on the widget page. The fixture clamps argon bits to
-1..10 and the memory envelope to 8..65536 KiB, so the real ladder (8
+1..10 and the memory envelope to 8..65536 KiB, so the real ladder (4
 bits, 16384 KiB) is permitted. The execution cells pass the real
 ladder knobs to the escalated challenge exactly like the argon cell,
 and the rsw cells pass their T the same way.
@@ -615,6 +616,48 @@ and release mode rejects it on the status reason alone. The committed
 file stays `lab` with no `physical_results` until physical-device
 data is recorded.
 
+## Absolute UX ceilings and the interactive/non-interactive split (audit finding 2)
+
+`release-budgets.json` carries an `absoluteP95Ceilings` block per
+qualified tier — the absolute wall-clock p95 a release may ask an
+ordinary interactive user to wait:
+
+```json
+{
+  "absoluteP95Ceilings": {
+    "mainstream-desktop": { "solveMsP95": 5000, "pageToVerifiedMsP95": 5000 }
+  }
+}
+```
+
+The committed value is 5000 ms on the mainstream-desktop tier: five
+seconds of p95 solve time is the product's UX ceiling, and it is the
+reason the Argon2id default was retuned from 8 to 4 target bits (the
+8-bit rung measured about 16 s p95 and could never meet it). The
+validator rejects a cell when its measured p95 exceeds its budget row
+OR when its budget row exceeds the tier's absolute ceiling — an
+inflated budget can never buy the ceiling out, and release
+certification refuses a tier without an `absoluteP95Ceilings` entry.
+
+`execchain` is the one explicitly non-interactive difficulty, declared
+in `nonInteractiveDifficulties`:
+
+```json
+{ "nonInteractiveDifficulties": ["execchain"] }
+```
+
+execchain models the composed chained-escalation flow (a SHA request
+escalated to the memory-hard rung by the server, with the execution
+dimension armed), so its p95 is not the experience of an ordinary
+interactive rung a user is sent to directly: it is budgeted and
+measured like every cell, but it is never counted as an ordinary
+interactive release cell and is not ceiling-checked. Every other
+difficulty (sha16/18/20, argon2id, the rsw rungs, execvm, execargon,
+execvminline, execsha18inline) is interactive and ceiling-subject. A
+cell that cannot meet the ceiling honestly must be re-measured,
+retuned, or explicitly classified non-interactive with the rationale
+recorded here — never silently left out of the gate.
+
 ## The validator's adversarial mutation suite
 
 `tools/ci/test-validate-release-baseline.mjs` is the validator's own
@@ -639,8 +682,19 @@ whose device belongs to another tier, an unmeasured registered
 device, a 100%-failure device next to a healthy one, a one-sample
 sha20 device, a p95 over budget, stale `tested_at`, a release tier
 without p95 budgets, `source: "lab"` rows, and a qualification date
-predating the evidence. The job is wired into CI as the
-self-contained "Release-validator mutation suite" job.
+predating the evidence. Round 5 added the absolute-ceiling cases
+(budget under the ceiling with measurements under budget passes; a
+measurement over its budget rejects; a budget over the 5000 ms
+absolute ceiling rejects; a 20-second inflated budget with 5 ms
+measurements still rejects on the ceiling; a tier without an
+absoluteP95Ceilings entry rejects in release mode) and the evidence
+time-validation cases (generated_at/qualified_at/tested_at a year in
+the future reject; qualified_at postdating generated_at by a day
+rejects; tested_at two minutes in the future passes within the skew
+allowance and six minutes rejects; a space-separated timestamp and a
+non-UTC offset timestamp reject as non-canonical RFC3339). The job is
+wired into CI as the self-contained "Release-validator mutation
+suite" job.
 
 ## Results store
 
@@ -677,14 +731,19 @@ and files asset modes on 2026-09-03/04: sha16/18/20 and argon2id from
 the completed run `results/run-2026-09-03.json` (12 SHA / 6 Argon
 reps per mode), and the execution cells plus the rsw75k/150k/300k
 rungs from the focused completed run
-`tools/client-perf/results/results-2026-09-04.json` (50 reps). The
-two runs and the merge procedure are documented inside the payload.
-This is lab evidence on the recording Mac (Apple M5 Pro, Chromium
-151), desktop-emulation tiers excluded from the qualified scope. The
-physical-device procedure remains the release boundary: emulation
-numbers, with or without a fresh full run, are calibration signals,
-never mobile claims, and the qualification status stays `lab` until
-physical-device data is recorded.
+`tools/client-perf/results/results-2026-09-04.json` (50 reps). On
+2026-09-05 the argon family (argon2id, execargon, execchain) was
+re-recorded at the round-5 retuned rung (target 4, 12 Argon reps per
+mode) from the completed run
+`tools/client-perf/results/results-2026-09-05.json` after the 8-bit
+rung measured about 16 s p95 — the numbers that drove the retune and
+the absolute UX ceiling. The merge procedure is documented inside the
+payload. This is lab evidence on the recording Mac (Apple M5 Pro,
+Chromium 151), desktop-emulation tiers excluded from the qualified
+scope. The physical-device procedure remains the release boundary:
+emulation numbers, with or without a fresh full run, are calibration
+signals, never mobile claims, and the qualification status stays
+`lab` until physical-device data is recorded.
 
 ## Server-side latency baselines and hosted-Redis anomalies (finding-9 note)
 
