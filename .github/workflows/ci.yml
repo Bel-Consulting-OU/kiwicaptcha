@@ -1696,27 +1696,45 @@ jobs:
         # validator with --release, where a non-physical qualification
         # status is a hard failure (the release boundary is physical-device
         # data, per tools/client-perf/README.md).
-        run: node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json
+        # A rejected evidence file no longer aborts the job: the step
+        # records the failure in a marker file and exits 0, so the
+        # diagnostic steps below still run and print the current
+        # measurements. The aggregation step at the end of the job
+        # fails the run when the marker exists, so a stale evidence
+        # file keeps this required check red while the diagnostics
+        # still ran.
+        run: node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json || echo gate_failed > "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed"
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
+        # This step and every benchmark step below it run even when the
+        # release-baseline gate above recorded a failure: the
+        # diagnostics are still collected on stale evidence. A benchmark
+        # failure stays advisory: continue-on-error keeps the later
+        # steps running and never blocks the merge lane on runner noise.
+        if: always()
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench.php
       - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, non-gating timing)
+        if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: php packages/kiwicaptcha/tools/perf-bench.php --redis
       - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, non-gating timing)
+        if: always()
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench.php --argon
       - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, non-gating timing)
+        if: always()
         continue-on-error: true
         run: php packages/kiwicaptcha/tools/perf-bench-risk.php
       - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, non-gating timing)
+        if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
       - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1 on the single-node service, advisory timings)
+        if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
@@ -1727,10 +1745,23 @@ jobs:
         # when they are missing (or the gate Redis is unreachable) the
         # script prints a loud note and exits 0. Advisory like every
         # other timing step: the fixture has no ratchet.
+        if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: php packages/kiwicaptcha/tools/perf-wait-replica.php
+      - name: fail the job when the release-baseline gate recorded a failure
+        # The gate step records a rejected evidence file in a marker
+        # instead of failing, so the diagnostics above still run. This
+        # step restores the gate semantics at the end of the job: it
+        # fails the run when the marker exists and passes otherwise.
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed" ]; then
+            echo "::error::release-baseline evidence gate rejected the committed baseline; the diagnostic steps still ran. See the gate step log."
+            exit 1
+          fi
+          echo "release-baseline evidence gate passed; the diagnostic steps above ran"
 
   perf-latency-quiet:
     # Manually dispatched hard-ratchet benchmark on a GitHub-hosted
