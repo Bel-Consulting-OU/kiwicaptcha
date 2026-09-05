@@ -31,6 +31,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { canonicalClientAssets } from '../client-perf/client-assets.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -203,6 +204,11 @@ function schema3Payload(results = fullMatrix()) {
     assets: 'both',
   };
   payload.results = results;
+  // The asset-identity contract (audit finding 2, asset bind): a
+  // schema-3 payload must carry the current canonical client asset
+  // set (full sha256 + bytes, as the harness records it), or the
+  // identity rule rejects it.
+  payload.clientAssets = canonicalClientAssets();
   return payload;
 }
 
@@ -719,6 +725,101 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   payload.generated_at = '2026-09-04T12:00:00.000+01:00';
   const res = runValidator(payload, baseBudgets(), false);
   reject('generated_at with +01:00 offset: reject as non-canonical (UTC designator required)', res, ['not a canonical UTC RFC3339']);
+}
+
+// ── Asset identity corpus (round 6 — audit finding 2, the asset
+// bind: performance evidence is bound to the exact client bytes it
+// certifies). ────────────────────────────────────────────────────────
+// assertAssetSetCurrent (shared client-assets module) compares the
+// payload's recorded clientAssets block against the current canonical
+// release asset set: name-set equality plus per-asset bytes/sha256
+// equality, in CI mode and release mode alike. A schema-3 payload MUST
+// carry the block; a legacy payload that carries one is bound to the
+// same comparison (the committed maintenance baseline is identity-
+// bound from its re-bind). The five hard states: missing clientAssets,
+// extra recorded asset, missing recorded asset, byte mismatch, sha256
+// mismatch.
+
+// 36. Schema-3 payload without a clientAssets block: an identity-less
+//     record cannot be certified.
+{
+  const payload = schema3Payload();
+  delete payload.clientAssets;
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('asset-identity (r6): schema-3 full matrix without clientAssets', res, ['clientAssets missing from the record']);
+}
+
+// 37. Schema-3 payload with an EXTRA recorded asset (a name the
+//     current release set does not carry): the name sets differ.
+{
+  const payload = schema3Payload();
+  payload.clientAssets['widget-ghost.js'] = { bytes: 1, sha256: '0'.repeat(64) };
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('asset-identity (r6): extra recorded client asset widget-ghost.js', res, ['client asset set differs from current release asset set', 'widget-ghost.js', 'extra asset']);
+}
+
+// 38. Schema-3 payload MISSING a recorded asset of the current
+//     release set (widget.css dropped): the name sets differ.
+{
+  const payload = schema3Payload();
+  delete payload.clientAssets['widget.css'];
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('asset-identity (r6): recorded set lacks widget.css of the current release set', res, ['client asset set differs from current release asset set', 'widget.css', 'missing asset']);
+}
+
+// 39. Byte-count mismatch on a recorded asset (same sha256): the
+//     record's bytes are not the current bytes.
+{
+  const payload = schema3Payload();
+  const driver = payload.clientAssets['widget-driver.js'];
+  payload.clientAssets['widget-driver.js'] = { bytes: driver.bytes + 1, sha256: driver.sha256 };
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('asset-identity (r6): widget-driver.js recorded byte count off by one', res, ['client asset widget-driver.js does not match current bytes', `recorded ${driver.bytes + 1} bytes`]);
+}
+
+// 40. sha256 mismatch on a recorded asset (same bytes, altered
+//     digest): a record can never certify different bytes under the
+//     same fingerprint.
+{
+  const payload = schema3Payload();
+  const driver = payload.clientAssets['widget-driver.js'];
+  const flipped = (driver.sha256[0] === 'a' ? 'b' : 'a') + driver.sha256.slice(1);
+  payload.clientAssets['widget-driver.js'] = { bytes: driver.bytes, sha256: flipped };
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('asset-identity (r6): widget-driver.js recorded sha256 differs at the same byte count', res, ['client asset widget-driver.js does not match current bytes', 'differs from the current']);
+}
+
+// 41. The identity rule binds in RELEASE mode too: a schema-3 payload
+//     whose recorded bytes drifted is rejected on the asset reason in
+//     release certification (on top of the lab-status reason).
+{
+  const payload = schema3Payload();
+  const driver = payload.clientAssets['widget-driver.js'];
+  payload.clientAssets['widget-driver.js'] = { bytes: driver.bytes + 1, sha256: driver.sha256 };
+  const res = runValidator(payload, baseBudgets(), true);
+  reject('asset-identity (r6): byte mismatch also rejects under --release', res, ['client asset widget-driver.js does not match current bytes']);
+}
+
+// 42. Schema-3 payload with the current clientAssets block: the
+//     identity rule passes (CI mode; the schema-3 completed-run guard
+//     already proved the rest).
+{
+  const payload = schema3Payload();
+  pass('asset-identity (r6): schema-3 payload bound to the current release asset set passes CI mode', runValidator(payload, baseBudgets(), false));
+}
+
+// 43. A legacy (schema-1) payload that carries the identity block is
+//     bound to the same comparison: tampering with the recorded bytes
+//     is a rejection on the legacy path too, so the committed
+//     maintenance baseline cannot drift from the tree it certifies.
+{
+  const payload = legacySchema1Payload();
+  if (payload.clientAssets && payload.clientAssets['widget-driver.js']) {
+    const driver = payload.clientAssets['widget-driver.js'];
+    payload.clientAssets['widget-driver.js'] = { bytes: driver.bytes + 1, sha256: driver.sha256 };
+    const res = runValidator(payload, baseBudgets(), false);
+    reject('asset-identity (r6): legacy schema-1 baseline with a tampered recorded asset', res, ['client asset widget-driver.js does not match current bytes']);
+  }
 }
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);

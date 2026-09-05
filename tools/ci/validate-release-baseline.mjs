@@ -147,6 +147,23 @@
  *      Chronology stays strict: tested_at <= qualified_at and
  *      tested_at <= generated_at, and qualified_at never precedes
  *      the newest physical tested_at.
+ *  11. client-asset identity (audit finding 2, asset bind): the
+ *      payload's performance rows must be bound to the exact client
+ *      bytes they certify. A current-harness (schema-3) payload must
+ *      carry the recorded clientAssets block (full sha256 + byte
+ *      counts over the canonical release asset set, the shape
+ *      tools/client-perf/client-assets.mjs computes and every run
+ *      records); a legacy payload that carries one is bound to it.
+ *      The recorded block must name exactly the current canonical
+ *      release asset set and every named asset must match the current
+ *      tree's bytes AND full sha256 (assertAssetSetCurrent): a
+ *      missing block, an extra or missing asset, a byte-count
+ *      mismatch or a sha256 mismatch are each hard reasons ('client
+ *      asset set differs from current release asset set' / 'client
+ *      asset <name> does not match current bytes'). The identity rule
+ *      runs in CI mode and in release mode alike, so evidence whose
+ *      assets drifted from the tree is rejected on every push and can
+ *      never be release-certified.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -221,6 +238,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertAssetSetCurrent, canonicalClientAssets } from '../client-perf/client-assets.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -1227,6 +1245,39 @@ function main() {
     }
     if (options.assets !== 'both') {
       reasons.push(`assets option ${JSON.stringify(options.assets)} is not 'both'`);
+    }
+  }
+
+  // ── Client-asset identity (audit finding 2, asset bind). ──────────
+  // The performance rows must be bound to the exact client bytes they
+  // certify. The shared client-assets module computes the current
+  // canonical release asset set (full sha256 + byte counts, the same
+  // fingerprints client-perf.mjs records into every run), and
+  // assertAssetSetCurrent() compares the payload's recorded block
+  // against it: name-set equality plus per-asset bytes/sha256
+  // equality, each difference a hard reason. A current-harness
+  // (schema-3) payload MUST carry the clientAssets block (an identity-
+  // less record cannot be certified); a legacy (pre-identity) payload
+  // that carries one is held to the same comparison, so the committed
+  // maintenance baseline is bound as soon as it carries the block.
+  // The rule runs in CI mode and release mode alike: on every push a
+  // payload whose assets drifted from the tree is a rejection, never
+  // a note, and release certification never skips the identity proof.
+  {
+    let currentAssets;
+    try {
+      currentAssets = canonicalClientAssets();
+    } catch (e) {
+      process.stderr.write(`validate-release-baseline: cannot fingerprint the current client assets: ${e.message}\n`);
+      process.exit(1);
+    }
+    const hasRecorded = !!(
+      payload.clientAssets &&
+      typeof payload.clientAssets === 'object' &&
+      !Array.isArray(payload.clientAssets)
+    );
+    if (payload.schema === schema || hasRecorded) {
+      assertAssetSetCurrent(hasRecorded ? payload.clientAssets : null, currentAssets, reasons);
     }
   }
 
