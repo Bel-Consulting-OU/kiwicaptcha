@@ -702,28 +702,26 @@ a browser.
 
 ### Adversarial benchmark: the browserless oracle
 
-Execution versions 1 through 4 (the live grammar ladder, up to the
-generator's `MAX_EXECUTION_VERSION`) are forgeable without a browser,
-and the regression suites pin that boundary on purpose. The test-only
-shadow solver decodes each program, replays the interpreter's own
-semantics, picks an arbitrary legal observed height (1 to 255), and
-emits a trace the verifier accepts. The oracle runs 100 generated
-programs per version at heights 1, 10, 17 and 255 and asserts every
-trace verifies and digests. Mirrors live in the PHP suite
+Every live grammar rung, versions 1 through the generator's
+`MAX_EXECUTION_VERSION` (the causal object-graph rung included), is
+forgeable without a browser, and the regression suites pin that
+boundary on purpose: the oracle fails mechanically if a future rung
+ever lands before the solver models it. The test-only shadow solver
+decodes each program, replays the interpreter's own semantics, picks
+an arbitrary legal observed height (1 to 255), and emits a trace the
+verifier accepts. The oracle runs 100 generated programs per version
+at heights 1, 10, 17 and 255 and asserts every trace verifies and
+digests. Mirrors live in the PHP suite
 (BrowserlessExecutionForgeryTest) and the Rust execution module with
 identical acceptance assertions.
 
 The trace is supplementary evidence, reproducible by any
 implementation of the public semantics, never a browser attestation.
-This oracle is the adversarial benchmark for the next grammar
-generation beyond version 4: a future object-graph grammar tests real
-Web Platform semantics: classList, selectors, traversal, fragments,
-clone and reparent, and event ordering. The same oracle must fail on
-that grammar unless the solver implements those semantics. Acceptance
-criterion: the oracle keeps accepting every trace up to the current
-maximum (version 4 today), and an object-graph extension is accepted
-only when it reproduces the tested Web Platform behavior instead of
-the shadow model.
+Acceptance criterion: the oracle keeps accepting every trace the
+generator mints at any live version up to its
+`MAX_EXECUTION_VERSION`, and a grammar extension beyond that maximum
+is accepted only when the solver reproduces the tested Web Platform
+behavior instead of the shadow model.
 
 ## Graceful shutdown sequence
 

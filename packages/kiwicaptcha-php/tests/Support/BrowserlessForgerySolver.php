@@ -7,9 +7,9 @@ namespace KiwiCaptcha\Tests\Support;
 /**
  * The browserless shadow solver of the execution grammars: a dev-only
  * oracle that forges verifier-accepted executed traces without a
- * browser for every live version up to the generator maximum
- * (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, the version-4
- * DOM_CHILD/DOM_DEPTH nested-tree grammar included).
+ * browser for every live grammar rung, versions 1 through the
+ * generator maximum (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
+ * the causal object-graph rung included.
  *
  * The solver replays the interpreter's own semantics over a decoded
  * program, which the caller obtains from
@@ -33,11 +33,9 @@ namespace KiwiCaptcha\Tests\Support;
  * version through the generator maximum and asserts every forged
  * trace verifies and digests. The trace is supplementary evidence,
  * reproducible by a pure implementation of the public semantics. A
- * future grammar beyond the live maximum (an object-graph grammar:
- * classList, selectors, traversal, fragments, clone and reparent,
- * event ordering) must make this solver fail until it implements
- * those real Web Platform semantics; the oracle extends only together
- * with them.
+ * grammar beyond the generator maximum must make this solver fail
+ * until it implements those real Web Platform semantics; the oracle
+ * extends only together with them.
  */
 final class BrowserlessForgerySolver
 {
