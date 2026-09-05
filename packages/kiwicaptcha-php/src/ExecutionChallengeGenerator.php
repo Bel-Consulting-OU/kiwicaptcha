@@ -46,11 +46,11 @@ namespace KiwiCaptcha;
  * parent, dispatch and serialize. The browser-observed probes close
  * the table: query real, geometry, point, event real, serialize real
  * and observe. Version 2 adds observe, version 3 the sibling-index
- * probe, version 4 the child and depth probes of the nested tree, and
- * version 5 the causal object-graph ops (fragment append, clone,
+ * probe, and version 4 the child and depth probes of the nested tree.
+ * Version 5 adds the causal object-graph ops: fragment append, clone,
  * reparent, attribute reflection, event phase, URL canonicalization,
- * text mutation and select-depth descent), whose integer entries flow
- * through the u8 cells of the causal array.
+ * text mutation and select-depth descent. The version-5 integer
+ * entries flow through the u8 cells of the causal array.
  *
  * String literals are printable ASCII (0x20..0x7E); ids and class
  * names come from fixed 64-char alphabets; u32 literals are raw
@@ -124,9 +124,9 @@ final class ExecutionChallengeGenerator
      * construction order. Version 5 adds the causal object-graph
      * grammar: the clone and reparent spine over the nested tree, the
      * observed URL-canon digest and the text-mutation serialization
-     * readback, with the integer entries flowing through the u8 cells
-     * (see the version-5 arms of simulateOp and the design record
-     * docs/execution-v5-design.md).
+     * readback. The integer entries flow through the u8 cells, see the
+     * version-5 arms of simulateOp and the design record
+     * docs/execution-v5-design.md.
      */
     public const MAX_EXECUTION_VERSION = 5;
 
@@ -1439,16 +1439,16 @@ final class ExecutionChallengeGenerator
      * it, so their traces are byte-identical to the pre-v5 engine; the
      * arms only touch the graph when $ctx is present. The version-5
      * integer-entry ops write their entry into the u8 cell the operand
-     * names (the observe replay rule), and the serialization ops hash
-     * or base64 the version-5 canonical node string (sorted attribute
-     * pairs, sorted dataset pairs, sorted class names, then the text
-     * segment) instead of the version-1..4 attribute-only string.
+     * names, the observe replay rule. The serialization ops hash or
+     * base64 the version-5 canonical node string instead of the
+     * version-1..4 attribute-only string, see
+     * {@see self::canonicalNodeString()}.
      *
      * @param array<string, mixed> $operands
      * @param list<int>            $u8    the u8 array state (by reference)
      * @param array|null           $cur   the current DOM node state
      * @param array<string, true>  $docIds appended ids
-     * @param array|null           $ctx   the version-5 object-graph state, null on versions 1-4
+     * @param array|null           $ctx   the version-5 graph, null on versions 1-4
      */
     private static function simulateOp(int $op, array $operands, array &$u8, ?array &$cur, array &$docIds, ?array &$ctx = null): string
     {
@@ -1575,11 +1575,11 @@ final class ExecutionChallengeGenerator
 
     /**
      * Canonical real-DOM readback digest: the shadow's current node's
-     * canonical string hashed — the interpreter builds the same string
-     * from the real node. The serialization grammar is rung-scoped:
-     * versions 1-4 hash the sorted attribute pairs, and a version-5
-     * program hashes the version-5 canonical node string (see
-     * {@see self::canonicalNodeString()}).
+     * canonical string hashed, the string the interpreter builds from
+     * the real node. The serialization grammar is rung-scoped.
+     * Versions 1-4 hash the sorted attribute pairs. A version-5
+     * program hashes the version-5 canonical node string of the same
+     * record, see {@see self::canonicalNodeString()}.
      *
      * @param array<string, true> $docIds
      * @param array|null          $cur
@@ -1837,12 +1837,12 @@ final class ExecutionChallengeGenerator
      * The mutation/readback op: appends the current node to the document
      * AND traces the canonical serialization of the current node record.
      *
-     * The serialization grammar is rung-scoped: versions 1-4 keep the
-     * attribute-only string (sorted by name, `name=value` joined with
-     * ';'), and a version-5 program hashes or base64s the version-5
-     * canonical node string (see {@see self::canonicalNodeString()})
-     * over the same record, so older challenges stay verifiable for
-     * their whole TTL.
+     * The serialization grammar is rung-scoped. Versions 1-4 keep the
+     * attribute-only string, sorted by name with `name=value` entries
+     * joined by ';'. A version-5 program hashes or base64s the
+     * version-5 canonical node string of the same record, see
+     * {@see self::canonicalNodeString()}. Older challenges stay
+     * verifiable for their whole TTL.
      *
      * @param array|null          $cur
      * @param array<string, true> $docIds
@@ -1864,11 +1864,11 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * The fresh version-5 execution graph: the node records (parent
-     * and ordered child-id lists per constructed element), the body
-     * child list (constructed nodes in append order; the interpreter's
-     * own script element is the implicit first child, never in the
-     * list) and the four fragment slots.
+     * The fresh version-5 execution graph: the node records with
+     * parent and ordered child-id lists per constructed element, the
+     * body child list and the four fragment slots. The body list holds
+     * the constructed nodes in append order; the interpreter's own
+     * script element is the implicit first child, never in the list.
      *
      * @return array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>}
      */
@@ -2077,10 +2077,10 @@ final class ExecutionChallengeGenerator
 
     /**
      * The event-phase arm (v5): dispatches a real bubbling event on
-     * the current node with listeners on every constructed element,
-     * and the entry is the number of constructed elements that
-     * received it: the target itself plus its constructed ancestors up
-     * to (excluding) the document body and the interpreter's script
+     * the current node with listeners on every constructed element.
+     * The entry is the number of constructed elements that received
+     * it: the target itself plus its constructed ancestors up to the
+     * document body, excluding the body and the interpreter's script
      * element. The graph parent chain is the exact model of that walk.
      *
      * @param array<string, mixed> $operands
@@ -2174,10 +2174,10 @@ final class ExecutionChallengeGenerator
 
     /**
      * The v5 integer-entry ops write their entry into the u8 cell the
-     * operand names, mirroring the observe replay rule: the write
-     * happens when the array exists and the cell is in range (every
+     * operand names, mirroring the observe replay rule. The write
+     * happens when the array exists and the cell is in range; every
      * issued program draws its cell bytes modulo the live array
-     * length, so the writes land in range).
+     * length, so the writes land in range.
      *
      * @param list<int> $u8
      */

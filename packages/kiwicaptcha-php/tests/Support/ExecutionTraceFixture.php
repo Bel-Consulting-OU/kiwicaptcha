@@ -14,7 +14,7 @@ use KiwiCaptcha\ExecutionChallengeGenerator;
  * submits, without a browser. The layout entries are fabricated with
  * the fixed reference height {@see self::OBSERVED_HEIGHT} (10), the
  * URL-canon entries with the fixed reference digest
- * {@see self::FABRICATED_URL_DIGEST}, and the observed byte is written
+ * {@see self::FABRICATED_URL_DIGEST}. The observed byte is written
  * through the u8 state exactly like the verifier's replay, so the
  * synthesized trace is accepted by
  * `ExecutionChallengeGenerator::verifyExecutedTrace`.
@@ -71,12 +71,11 @@ final class ExecutionTraceFixture
 
     /**
      * The fabricated canonical-URL digest of the version-5 URL-canon
-     * probe: the real entry is the SHA-256 of the canonicalized
-     * sandboxed document URL (environment evidence the verifier
-     * shape-validates and replays, never predicts), so the synthesizer
+     * probe. The real entry is the SHA-256 of the canonicalized
+     * sandboxed document URL, environment evidence the verifier
+     * shape-validates and replays, never predicts. The synthesizer
      * uses this fixed hex reference value exactly like the fixed
-     * observed height above. A fabricated reference value, never a
-     * browser's measurement.
+     * observed height above, a fabricated reference value.
      */
     private const FABRICATED_URL_DIGEST = 'e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7';
 
@@ -594,12 +593,12 @@ final class ExecutionTraceFixture
      * The mutation/readback op: appends the current node to the document
      * AND traces the canonical serialization of the current node record.
      *
-     * The serialization grammar is rung-scoped: versions 1-4 keep the
-     * attribute-only string (sorted by name, `name=value` joined with
-     * ';'), and a version-5 program hashes or base64s the version-5
-     * canonical node string (see {@see self::canonicalNodeString()})
-     * over the same record, so older challenges stay verifiable for
-     * their whole TTL.
+     * The serialization grammar is rung-scoped. Versions 1-4 keep the
+     * attribute-only string, sorted by name with `name=value` entries
+     * joined by ';'. A version-5 program hashes or base64s the
+     * version-5 canonical node string of the same record, see
+     * {@see self::canonicalNodeString()}. Older challenges stay
+     * verifiable for their whole TTL.
      *
      * @param array|null          $cur
      * @param array<string, true> $docIds
@@ -621,11 +620,11 @@ final class ExecutionTraceFixture
     }
 
     /**
-     * The fresh version-5 execution graph: the node records (parent
-     * and ordered child-id lists per constructed element), the body
-     * child list (constructed nodes in append order; the interpreter's
-     * own script element is the implicit first child, never in the
-     * list) and the four fragment slots.
+     * The fresh version-5 execution graph: the node records with
+     * parent and ordered child-id lists per constructed element, the
+     * body child list and the four fragment slots. The body list holds
+     * the constructed nodes in append order; the interpreter's own
+     * script element is the implicit first child, never in the list.
      *
      * @return array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>}
      */
@@ -834,10 +833,10 @@ final class ExecutionTraceFixture
 
     /**
      * The event-phase arm (v5): dispatches a real bubbling event on
-     * the current node with listeners on every constructed element,
-     * and the entry is the number of constructed elements that
-     * received it: the target itself plus its constructed ancestors up
-     * to (excluding) the document body and the interpreter's script
+     * the current node with listeners on every constructed element.
+     * The entry is the number of constructed elements that received
+     * it: the target itself plus its constructed ancestors up to the
+     * document body, excluding the body and the interpreter's script
      * element. The graph parent chain is the exact model of that walk.
      *
      * @param array<string, mixed> $operands
@@ -931,10 +930,10 @@ final class ExecutionTraceFixture
 
     /**
      * The v5 integer-entry ops write their entry into the u8 cell the
-     * operand names, mirroring the observe replay rule: the write
-     * happens when the array exists and the cell is in range (every
+     * operand names, mirroring the observe replay rule. The write
+     * happens when the array exists and the cell is in range; every
      * issued program draws its cell bytes modulo the live array
-     * length, so the writes land in range).
+     * length, so the writes land in range.
      *
      * @param list<int> $u8
      */
