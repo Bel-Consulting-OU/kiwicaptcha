@@ -306,10 +306,7 @@ fn issue_armed_execution(target_bits: u32) -> kiwicaptcha::challenge::Issued {
 /// The same issuance at an explicit execution version, so the
 /// register-maximum suite can arm the version-5 causal object-graph
 /// grammar.
-fn issue_armed_execution_at(
-    target_bits: u32,
-    version: u8,
-) -> kiwicaptcha::challenge::Issued {
+fn issue_armed_execution_at(target_bits: u32, version: u8) -> kiwicaptcha::challenge::Issued {
     issue_challenge_with_execution(
         &execution_config(target_bits),
         "login",

@@ -96,7 +96,8 @@ fn rust_mirror_reproduces_the_php_version_five_program() {
     assert_eq!(decoded.op_version, 5);
     let trace = execution::fixtures::executed_trace_for(&decoded);
     assert_eq!(
-        trace, php_vectors::TRACE_V5,
+        trace,
+        php_vectors::TRACE_V5,
         "the Rust executed trace must reproduce the PHP fixture trace byte-for-byte"
     );
     assert!(

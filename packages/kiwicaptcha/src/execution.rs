@@ -1338,7 +1338,9 @@ fn canonical_node_string(node: &DomNode, ctx: Option<&ExecutionGraph>) -> String
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        dataset.sort_by(|a, b| a.0.cmp(&b.0));
+        // The keys are unique, so the tuple order equals the PHP ksort
+        // key order.
+        dataset.sort();
         for (key, value) in dataset {
             parts.push(format!(
                 "{}{}{}",
@@ -1348,7 +1350,7 @@ fn canonical_node_string(node: &DomNode, ctx: Option<&ExecutionGraph>) -> String
             ));
         }
         let mut classes: Vec<Vec<u8>> = node.classes.iter().cloned().collect();
-        classes.sort_by(|a, b| a.cmp(b));
+        classes.sort();
         for cls in classes {
             parts.push(String::from_utf8_lossy(&cls).into_owned());
         }
@@ -1366,7 +1368,7 @@ fn canonical_node_string(node: &DomNode, ctx: Option<&ExecutionGraph>) -> String
 /// when the array exists and the cell is in range; every issued
 /// program draws its cell bytes modulo the live array length, so the
 /// writes land in range.
-fn write_v5_cell(u8arr: &mut Vec<u8>, cell: u64, entry: u64) {
+fn write_v5_cell(u8arr: &mut [u8], cell: u64, entry: u64) {
     if (cell as usize) < u8arr.len() {
         u8arr[cell as usize] = (entry & 0xFF) as u8;
     }
@@ -1820,8 +1822,8 @@ fn simulate_op(
                     // own descendants is refused (the real
                     // HierarchyRequestError); an absent target is a
                     // no-op.
-                    let valid = cur_id != target_id
-                        && !graph_node_is_ancestor_of(g, &cur_id, &target_id);
+                    let valid =
+                        cur_id != target_id && !graph_node_is_ancestor_of(g, &cur_id, &target_id);
                     if valid {
                         let target_attached = graph_is_attached(g, &target_id);
                         graph_detach(g, &cur_id);
@@ -2142,8 +2144,7 @@ pub mod fixtures {
                 // reference digest above.
                 entries.push(format!("durlc({FABRICATED_URL_DIGEST})"));
             } else {
-                let result =
-                    simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
+                let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
                 entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
             }
         }
@@ -2624,7 +2625,9 @@ mod tests {
         let mut seen_union = std::collections::HashSet::new();
         for i in 0..240u32 {
             let version = (3 + (i % 3)) as u8;
-            let nonce = B64.encode(sha2::Sha256::digest(format!("opcode-coverage-{i}").as_bytes()));
+            let nonce = B64.encode(sha2::Sha256::digest(
+                format!("opcode-coverage-{i}").as_bytes(),
+            ));
             let p = generate(KEY, &nonce, "login", "login-action", version).unwrap();
             let program = decode(&p).expect("the sampled program must parse");
             assert_eq!(
