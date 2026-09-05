@@ -1,54 +1,41 @@
 (function() {
   var encoder = new TextEncoder();
 
-  // ── Solver PROTOCOL id ───────────────────────────────────
-  // A protocol/ABI generation label, bumped manually when the solver
-  // protocol or the worker contract changes. The worker reports the
-  // SAME id in its ready/done handshake messages AND verifies the wasm
-  // glue's exported solver_protocol_id() before ready; the driver
-  // refuses any worker whose id differs (a stale cached worker must
-  // never contribute a solution). This establishes
-  // driver+worker+wasm protocol compatibility ONLY: exact-artifact
-  // identity is the release tag + SHA256SUMS + SRI + attestation, and
-  // integrators must serve the driver, worker and wasm from the SAME
-  // release (see SECURITY.md, versioned-resource expectation).
+  // ── Solver PROTOCOL id ──
+  // A protocol/ABI generation label, bumped when the solver protocol or
+  // worker contract changes. The worker reports the SAME id in its
+  // handshakes AND verifies the glue's solver_protocol_id() before ready;
+  // the driver refuses any worker whose id differs (a stale cached worker
+  // must never contribute). Protocol compatibility ONLY: exact-artifact
+  // identity is the release tag + SHA256SUMS + SRI + attestation.
   var KIWI_SOLVER_PROTOCOL_ID = "2026-09-r1";
 
-  // ── Challenge fetch timeout ──────────────────────────────
-  // A hung challenge endpoint must never leave the widget stuck: the
-  // fetch carries an AbortController whose timer aborts it after this
-  // many ms, routing the widget into the controlled error state
-  // (idle-resettable). data-kiwi-fetch-timeout-ms overrides the
-  // default per widget.
+  // ── Challenge fetch timeout ──
+  // A hung endpoint must never wedge the widget: the fetch carries an
+  // AbortController aborting after this many ms into the controlled
+  // error state. data-kiwi-fetch-timeout-ms overrides per widget.
   var KIWI_FETCH_TIMEOUT_MS = 15000;
 
-  // ── Solve deadline margin ────────────────────────────────
-  // The solver is governed by a deadline (challenge expiry estimate
-  // minus this margin): a solve that would outlive the challenge is
-  // waste, and the token would be rejected anyway. 500 ms covers the
-  // final chunk and the token-write path without eating meaningful
-  // solver headroom; the deadline only truncates over-long solves,
-  // never the normal fast path.
+  // ── Solve deadline margin ──
+  // The solver stops at (expiry estimate − this margin): a solve that
+  // would outlive the challenge is waste. 500 ms covers the final chunk
+  // and token-write path; only over-long solves truncate.
   var KIWI_SOLVE_DEADLINE_MARGIN_MS = 500;
 
-  // ── Abandonment-notify cooldown ──────────────────────────
-  // The abandoned-challenge cancellation notification is rate-limited
-  // per widget: once per nonce plus this cooldown window between
-  // notifications, so a retry loop can never spam the cancellation
-  // endpoint (which is per-source limited server-side too).
+  // ── Abandonment-notify cooldown ──
+  // The cancellation notification is rate-limited per widget: once per
+  // nonce plus this window, so a retry loop never spams the endpoint.
   var KIWI_CANCEL_COOLDOWN_MS = 5000;
 
-  // ── Argon2id / rsw worker source (the wasm glue carries it) ─
-  // The worker runs off the main thread (each 64 MiB hash blocks the
-  // UI for tens of ms). Its source is NOT embedded in this driver:
-  // the wasm glue (kiwicaptcha-wasm.js) carries the identical bytes
-  // as window.__kiwiCaptchaWasm.workerSource, GENERATED from
-  // assets/kiwi-worker.js by the kiwicaptcha-embed-worker tool (run
-  // by build.sh; CI --check fails on drift). Inline mode reads the
-  // copy off the glue and builds the historical Blob worker; files
-  // mode fetches the versioned worker.<hash>.js asset instead. The
-  // worker must not contain a closing-script-tag sequence (the glue
-  // is inlined into pages); the generator rejects one.
+  // ── Argon2id / rsw worker source (carried by the wasm glue) ──
+  // The worker runs off the main thread (each 64 MiB hash blocks the UI).
+  // Its source is NOT embedded here: the glue carries the identical
+  // bytes as window.__kiwiCaptchaWasm.workerSource, GENERATED from
+  // assets/kiwi-worker.js by the kiwicaptcha-embed-worker tool (CI
+  // --check fails on drift). Inline mode reads the copy off the glue;
+  // files mode fetches the versioned worker.<hash>.js asset. The worker
+  // must not contain a closing-script-tag sequence (the glue is inlined);
+  // the generator rejects one.
   function kiwiWorkerSourceFromGlue(glueText) {
     if (!glueText) return null;
     // The glue's generated section assigns the worker source as a single
@@ -62,10 +49,9 @@
       ? window.__kiwiCaptchaWasm.workerSource
       : null;
     if (g) return g;
-    // The glue's page object may be absent (compat loader: the glue part is
-    // fetched, never executed on the page) — extract the bytes from the glue
-    // text itself. kiwiFindGlueSource / the bridge's compat glue
-    // (widget-compat.js, kiwiCompatGlueValue) are resolved lazily.
+    // The glue's page object may be absent (compat loader: the glue is
+    // fetched, never executed on the page) — extract the bytes from the
+    // glue text; kiwiFindGlueSource / kiwiCompatGlueValue resolve lazily.
     return kiwiWorkerSourceFromGlue(kiwiFindGlueSource() || kiwiCompatGlueValue());
   }
 
@@ -176,13 +162,13 @@
   }
 
   var MAX_SHA_HASHES = 5000000;
-  // ── Time-budgeted SHA chunks ─────────────────────────────
+  // ── Time-budgeted SHA chunks ──────
   // Each chunk runs hashes until approximately this much wall time has
   // elapsed (the wasm solver enforces the same budget inside its loop
   // and reports partial progress; the pure-JS fallback checks
-  // performance.now() here). The synchronous work per yield is bounded
-  // by wall time (~8-12 ms), never by a hash count, and CHUNK remains
-  // the absolute max hashes per call (the hard bound alongside
+  // performance.now()). The synchronous work per yield is bounded by
+  // wall time (~8-12 ms), never by a hash count, and CHUNK stays the
+  // absolute max hashes per call (the hard bound alongside
   // MAX_SHA_HASHES).
   var SHA_CHUNK_TIME_BUDGET_MS = 10;
   function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p, onProgress, deadline) {
@@ -273,39 +259,27 @@
     });
   }
 
-  // ── Same-origin Argon2id/rsw Web Worker ──────────────────
-  // The memory-hard (argon2id) and sequential time-lock (rsw) solver
-  // runs ONLY in the same-origin worker, never on the main thread: a
-  // missing or failed worker enters the controlled
-  // kiwi:worker-unavailable state, with no main-thread Argon2 hash and
-  // no weaker-profile retry. The worker machinery (Blob-worker
-  // construction, the files-mode versioned worker/runtime fetches with
-  // their preflights, the build-id handshake and the driver-to-worker
-  // solve traffic) lives in the lazy widget-risk.js module, loaded
-  // when a memory-hard challenge arrives; the module owns the
-  // active-blob-URL revocation invariant and calls back into this core
-  // through the internal bridge. The core keeps only the
-  // glue/worker-source extraction helpers below (the public
-  // window.KiwiCaptcha.workerSource mirror and the module's Blob
-  // prelude both read them).
-  // postMessage BOUNDARY: the driver never posts to the parent page;
-  // every postMessage is worker-internal (driver-to-worker solve
-  // traffic, the MessageChannel yield, and the sandboxed execution
-  // iframe whose runner lives in widget-risk.js). The single window
-  // message listener accepts only messages whose event.source is that
-  // iframe's contentWindow and whose per-run id matches, so forged
-  // page traffic is ignored (the browser suite asserts forged payloads
-  // never mint a token).
+  // ── Same-origin Argon2id/rsw Web Worker ──
+  // Memory-hard (argon2id) and time-lock (rsw) solves run ONLY in the
+  // same-origin worker, never on the main thread; a missing or failed
+  // worker enters the controlled kiwi:worker-unavailable state with no
+  // weaker-profile retry. The worker machinery lives in the lazy
+  // widget-risk.js module (loaded when a memory-hard challenge arrives);
+  // the core keeps only the glue/worker-source extraction helpers below.
+  // postMessage BOUNDARY: the driver never posts to the parent page; all
+  // postMessage is worker-internal (solve traffic, the MessageChannel
+  // yield, the sandboxed execution iframe run by widget-risk.js). The
+  // single window message listener accepts only messages whose
+  // event.source is that iframe's contentWindow and whose per-run id
+  // matches, so forged page traffic is ignored.
   var kiwiInstanceCounter = 0;
   function kiwiFindGlueSource() {
-    // The renderers embed the wasm glue inline as a script element
-    // before this driver; its source contains the "var KIWI_WASM_B64"
-    // assignment (the unique marker, deliberately the assignment
-    // form: the driver's own comments mention the name without the
-    // assignment, so an inlined driver copy can never be mistaken for
-    // the glue). The glue is a self-contained IIFE, so its text can
-    // run inside the worker with a `var window = self` prelude to
-    // expose self.__kiwiCaptchaWasm.
+    // The renderers embed the wasm glue inline before this driver; its
+    // source contains the "var KIWI_WASM_B64" assignment — the unique
+    // marker, deliberately the assignment form, so an inlined driver copy
+    // can never be mistaken for the glue. The glue is a self-contained
+    // IIFE, so its text can run inside the worker with a `var window =
+    // self` prelude to expose self.__kiwiCaptchaWasm.
     try {
       var scripts = document.scripts || [];
       for (var i = 0; i < scripts.length; i++) {
@@ -320,9 +294,9 @@
 
 
 
-  // ── Same-origin enforcement ──────────────────────────────
+  // ── Same-origin enforcement ──
   // The challenge endpoint must resolve to the page's own origin — a
-  // cross-origin endpoint would leak the scope and the solve behavior to a
+  // cross-origin endpoint would leak the scope and solve behavior to a
   // third party, so it is refused outright.
   function kiwiEndpoint(raw) {
     var url = new URL(raw, window.location.href);
@@ -332,19 +306,17 @@
     return url.href;
   }
 
-  // ── Challenge response schema validation ─────────────────
-  // The same-origin endpoint's response bytes are untrusted input, so
-  // the widget only solves a well-formed issuance: algorithm one of
-  // sha256|argon2id|rsw, non-empty nonce/prefix/salt (base64, at least
-  // one byte), targetBits an integer within the algorithm's issuance
+  // ── Challenge response schema validation ──
+  // The same-origin endpoint's bytes are untrusted, so the widget only
+  // solves a well-formed issuance: sha256|argon2id|rsw, non-empty
+  // nonce/prefix/salt (base64), targetBits an integer in the issuance
   // ceiling (sha256/rsw 1..20, argon2id 1..10), argon2id parameters in
-  // range (t 3..6, p 1, mKib 8*p..65536), ttlSecs an integer 1..300
-  // when present, and for rsw a base64 modulus of exactly 256 bytes
-  // with the sequential cost T in the time-cost slot t (10,000..
-  // 300,000). A malformed response is a challenge-content failure that
-  // enters the controlled bounded-retry state, so a forged well-formed
-  // targetBits-0 response can never be "solved" into an unverifiable
-  // token and an out-of-contract ceiling can never burn the CPU budget.
+  // range (t 3..6, p 1, mKib 8*p..65536), ttlSecs 1..300, and for rsw a
+  // base64 modulus of exactly 256 bytes with the sequential cost T in
+  // the t slot (10,000..300,000). A malformed response is a
+  // challenge-content failure entering the bounded-retry state, so a
+  // forged targetBits-0 response can never be "solved" and an
+  // out-of-contract ceiling can never burn the CPU budget.
   function kiwiValidateChallenge(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Challenge malformed");
     var alg = data.algorithm === undefined ? "sha256" : data.algorithm;
@@ -388,10 +360,9 @@
       }
     }
     if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
-    // The optional ExecutionChallengeV1 program (base64 of the bytecode
-    // blob): bounded, non-empty, standard base64. When present the driver
-    // must run it (see kiwiRunExecution) — a malformed program is a
-    // challenge-content failure, never a solve.
+    // The optional ExecutionChallengeV1 program (base64): bounded,
+    // non-empty, standard base64. When present the driver must run it —
+    // a malformed program is a challenge-content failure, never a solve.
     if (data.execution_program !== undefined) {
       if (typeof data.execution_program !== "string" || data.execution_program.length < 1 || data.execution_program.length > 4096) throw new Error("Challenge malformed");
       try {
@@ -403,13 +374,11 @@
     }
   }
 
-  // ── Accessibility helpers ────────────────────────────────
-  // The dedicated role="status" announcer (data-kiwi-status) is the
-  // ONLY aria-live traffic: the widget itself carries no aria-live and
-  // no checkbox semantics (an auto-solving proof-of-work is not a
-  // checkbox), and the announcer reports ONLY meaningful transitions
-  // (Checking…, Verification complete, Verification failed, Worker
-  // unavailable); countdown/progress stay strictly visual.
+  // ── Accessibility helpers ──
+  // The role="status" announcer (data-kiwi-status) is the ONLY
+  // aria-live traffic: no checkbox semantics (an auto-solving proof of
+  // work is not a checkbox), and only meaningful transitions are
+  // announced; countdown/progress stay strictly visual.
   function createAnnouncer(W) {
     var s = document.createElement("span");
     s.className = "kiwi-status";
@@ -420,22 +389,18 @@
     if (main) main.appendChild(s); else W.appendChild(s);
     return s;
   }
-  // ── Localization (WCAG 3.1.2) ────────────────────────────
-  // `lang` is a first-class widget option (options.lang /
-  // data-kiwi-lang / navigator.language in that order); the resolved
-  // language is written to the widget subtree's lang attribute (dir
-  // for RTL packs), and an untranslated fallback stays English, marked
-  // lang="en" so the passage language is always determinable.
+  // ── Localization (WCAG 3.1.2) ──
+  // `lang` is a first-class option (options.lang / data-kiwi-lang /
+  // navigator.language in that order); the resolved language is written
+  // onto the widget subtree (dir for RTL packs) and the untranslated
+  // fallback stays English, marked lang="en".
   //
-  // The eager core ships the English pack and the fallback path only.
-  // The other packs (de, fr, es, it, nl, pl, pt, ar) live in the lazy
-  // widget-locales.js module, loaded once per page exactly when a
-  // widget's resolved language is non-default; a default-language page
-  // pays zero bytes for translations. A null placeholder per language
-  // keeps resolution synchronous: a widget whose pack is still pending
-  // paints the English fallback and re-paints the settled language
-  // when the module registers, or stays English (console warning) when
-  // the module cannot load.
+  // The eager core ships only the English pack and the fallback path;
+  // the other packs (de, fr, es, it, nl, pl, pt, ar) live in the lazy
+  // widget-locales.js module, loaded once per page only when a widget's
+  // resolved language is non-default. A null placeholder per language
+  // keeps resolution synchronous: a widget whose pack is pending paints
+  // the English fallback and re-paints when the module registers.
   var kiwiLocalePacks = {
     en: { dir: "ltr",
       label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
@@ -553,25 +518,22 @@
     }
     // Formal widget instances — widgetId == data-kiwi-instance.
     var widgetId = W.dataset.kiwiInstance;
-    // The generation COUNTER MUST CONTINUE across re-inits — a re-init
-    // that restarts at 1 would let a stale in-flight run see itself as
-    // current again after a reset cancelled it (the record is replaced,
-    // so a captured generation from before the reset must never match).
+    // The generation counter MUST CONTINUE across re-inits — a restart
+    // at 1 would let a stale in-flight run look current again after a
+    // reset cancelled it.
     var prevRecord = kiwiWidgets[widgetId];
     var newGen = prevRecord ? prevRecord.gen + 1 : 1;
-    // The decoy state is PRIVATE per widget (never exposed on the
-    // DOM): the authenticated name, the deferred flag, the strategy
-    // and wrapper-class picks, and the owned decoy nodes. It SURVIVES
-    // re-inits (an expiry-triggered re-solve must still see a filled
-    // decoy, and owned nodes must stay removable), so it is carried
+    // The decoy state is PRIVATE per widget (never on the DOM): the
+    // authenticated name, the deferred flag, the strategy/wrapper-class
+    // picks and the owned decoy nodes. It SURVIVES re-inits (an
+    // expiry-triggered re-solve must still see a filled decoy), carried
     // over from the previous record.
     var decoyState = (prevRecord && prevRecord.decoyState) ? prevRecord.decoyState : { name: null, deferred: false, nodes: [], className: null, variant: null };
     kiwiWidgets[widgetId] = { W: W, options: options, state: "solving", token: "", gen: newGen, abortController: null, abortTimer: null, worker: null, retryTimer: null, countdownTimer: null, expiryTimer: null, errorFired: false, responseKey: "hkey-" + Math.random().toString(36).slice(2, 10), start: null, decoyState: decoyState };
-    // Neutral role: the widget is a passive status/group, never a
-    // checkbox, and it is NOT focusable — the retry button is.
-    // Compatibility wrappers remain semantically neutral: accessibility
-    // attributes (role, lang, dir, name) belong on the visible Kiwi
-    // widget root, never on the provider wrapper.
+    // Neutral role: the widget is a passive status/group — not a
+    // checkbox and not focusable; the retry button is. Compatibility
+    // wrappers stay semantically neutral: role/lang/dir/name belong on
+    // the visible widget root, never on the provider wrapper.
     var compatInnerWidget = W.querySelector && W !== (W.querySelector("[data-kiwi-widget]") || W) ? W.querySelector("[data-kiwi-widget]") : null;
     var a11yRoot = compatInnerWidget || W;
     if (!compatInnerWidget && !W.getAttribute("role")) W.setAttribute("role", "group");
@@ -580,27 +542,22 @@
     // markup's static aria-label is replaced at init with the resolved
     // locale, so the name can never diverge from the visible UI language.
     var kiwiWidgetRoot = W;
-    // Resolve the widget language and write it onto the widget
-    // subtree (lang + dir for RTL packs). Preference order:
-    // options.lang -> data-kiwi-lang on the widget/container ->
-    // navigator.language; the untranslated fallback is explicitly
-    // lang="en". (document.currentScript is NULL during the async
-    // init, so the attribute is read from the subtree, not the script
-    // tag.)
+    // Resolve the language and write it onto the widget subtree (lang +
+    // dir for RTL packs): options.lang -> data-kiwi-lang on the widget /
+    // container -> navigator.language; the untranslated fallback is
+    // explicitly lang="en". document.currentScript is NULL during async
+    // init, so the attribute is read from the subtree.
     var kiwiLangAttr = (W.getAttribute ? W.getAttribute("data-kiwi-lang") : null)
       || (container && container.getAttribute ? container.getAttribute("data-kiwi-lang") : null);
-    // Language precedence: instance-level overrides (params.lang /
-    // data-kiwi-lang) -> provider language (Turnstile language) -> loader
-    // hl= -> navigator.language -> English.
+    // Precedence: instance overrides -> provider language (Turnstile
+    // language) -> loader hl= -> navigator.language -> English.
     var kiwiProviderLang = options && options.language ? String(options.language) : null;
     var kiwiWidgetLang = kiwiResolveLang({
       lang: (options && options.lang) || kiwiLangAttr || kiwiProviderLang || undefined
     });
-    // The pack is English while a non-default pack is still pending
-    // (the lazy widget-locales.js module has not arrived yet); the
-    // subtree language attribute mirrors what is actually on screen:
-    // the resolved language once its pack is registered, else
-    // lang="en" for the English fallback.
+    // The pack is English while a non-default pack is pending; the
+    // subtree lang mirrors what is on screen: the resolved language once
+    // registered, else lang="en" for the fallback.
     var kiwiWidgetPack = kiwiPackFor(kiwiWidgetLang);
     var kiwiLangMark = (kiwiWidgetLang === kiwiFallbackLang || kiwiLocalePacks[kiwiWidgetLang]) ? kiwiWidgetLang : kiwiFallbackLang;
     a11yRoot.setAttribute("lang", kiwiLangMark);
@@ -610,17 +567,14 @@
     function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
     var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
-    // The mascot is decorative next to the already-labelled widget: hide
-    // it from assistive technology. Set defensively so renderers that
-    // omit the attributes are still covered.
+    // The mascot is decorative next to the already-labelled widget:
+    // hide it from assistive technology, defensively.
     var iconSvg = W.querySelector(".kiwi-icon-wrapper svg");
     if (iconSvg) { iconSvg.setAttribute("aria-hidden", "true"); iconSvg.setAttribute("focusable", "false"); }
-    // The kiwi wink is an SVG SMIL <animate> element: CSS
-    // animation:none cannot stop SMIL, so reduced-motion users get
-    // the animate element REMOVED (not merely paused) on init, and a
-    // matchMedia change listener also removes it when the OS setting
-    // flips while the page is open (the reverse transition is not
-    // applied: a removed wink stays removed for the session).
+    // The wink is an SVG SMIL <animate>: CSS animation:none cannot stop
+    // SMIL, so reduced-motion users get the element REMOVED on init, and
+    // a matchMedia change listener also removes it when the OS setting
+    // flips (a removed wink stays removed).
     if (iconSvg && window.matchMedia) {
       var reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
       function kiwiRemoveWink() {
@@ -633,20 +587,14 @@
     }
     var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W, kiwiWidgetPack.retryButton);
     // Privacy-aware telemetry (widget-local, mode-gated): the session
-    // machinery lives in the lazy widget-telemetry.js module. An "off"
-    // widget (the default) never loads it; the stub below embeds the
-    // empty "{}" telemetry blob exactly like the historical eager
-    // session. An enabled mode (data-kiwi-telemetry on the widget
-    // element, then the container) starts the module load
-    // OPPORTUNISTICALLY at init, but the challenge flow NEVER awaits it
-    // (audit finding 1): telemetry is opt-in evidence, never a gate, and
-    // a slow or hung asset route must not delay issuance. The session
-    // attaches only when the module registers BEFORE this generation's
-    // challenge request went out (the requestSent flag, checked in the
-    // .then() below, plus the generation guard); once the request is
-    // sent, this generation solves with the normal empty telemetry stub
-    // — never a half-session mid-solve. An unloadable module degrades
-    // to the "off" stub the same way.
+    // machinery lives in the lazy widget-telemetry.js module; an "off"
+    // widget (the default) never loads it and the stub embeds the empty
+    // "{}" blob like the historical eager session. An enabled mode
+    // starts the load OPPORTUNISTICALLY at init, but the flow NEVER
+    // awaits it (audit finding 1): telemetry is opt-in evidence, never a
+    // gate. The session attaches only if the module registers BEFORE
+    // this generation's request went out (requestSent); otherwise this
+    // generation solves with the empty stub — never a half-session.
     var telemetryMode = "off";
     if (W) telemetryMode = W.getAttribute("data-kiwi-telemetry") || telemetryMode;
     if (container && container !== W) telemetryMode = container.getAttribute("data-kiwi-telemetry") || telemetryMode;
@@ -664,13 +612,12 @@
       build: function () { return kiwiTelemetrySession ? kiwiTelemetrySession.build() : {}; },
       stop: function () { if (kiwiTelemetrySession) kiwiTelemetrySession.stop(); }
     };
-    // options.scope is AUTHORITATIVE: the compatibility loader
-    // passes the data-sitekey as the scope and the server maps it
-    // through the allowlist to the intended policy scope; letting
-    // DOM/path heuristics override it would silently downgrade
-    // admin_login/financial_action challenges to the login policy.
-    // Explicit options.scope beats the container attribute beats the
-    // path heuristics.
+    // options.scope is AUTHORITATIVE: the compatibility loader passes
+    // the data-sitekey as the scope and the server maps it through the
+    // allowlist; DOM/path heuristics overriding it would silently
+    // downgrade admin_login/financial_action challenges to the login
+    // policy. Explicit options.scope beats the container attribute beats
+    // the path heuristics.
     var scope = (options && typeof options.scope === "string" && options.scope)
       || W.getAttribute("data-kiwi-scope")
       || container.getAttribute("data-kiwi-scope");
@@ -700,17 +647,13 @@
     var stateEl = (W.matches && W.matches(".kiwi-widget"))
       ? W
       : (W.querySelector ? W.querySelector("[data-kiwi-widget]") || W : W);
-    // ── Semantic display-state view model ─────────────────────────────
-    // The visible state of the widget is ONE view object
-    // {statusKey, badgeKey, domState, hintKey, replacements}, stored by
-    // kiwiSetView() and rendered by kiwiPaintView(). Every transition of
-    // the legacy independent status/hint writes funnels through it, so
-    // the painted DOM always matches the recorded view and a late
-    // language settlement can repaint exactly the CURRENT state (a
-    // translation is never a state regression). hintKey is optional: a
-    // transition that must not touch the hint (connecting/solving)
-    // records no hintKey. replacements expand {placeholder} spans of the
-    // hint template with kiwiT().
+    // ── Semantic display-state view model ──
+    // The visible state is ONE view object {statusKey, badgeKey,
+    // domState, hintKey, replacements} set by kiwiSetView() and rendered
+    // by kiwiPaintView(); every legacy status/hint write funnels through
+    // it, so the painted DOM always matches the recorded view and a late
+    // language settlement repaints exactly the CURRENT state. hintKey is
+    // optional; replacements expand {placeholder} spans with kiwiT().
     function kiwiExpandView(tpl, replacements) {
       if (!tpl || !replacements) return tpl;
       for (var k in replacements) {
@@ -734,35 +677,28 @@
       if (v.hintKey && hintEl) hintEl.textContent = kiwiExpandView(kiwiT(v.hintKey), v.replacements);
       if (retryEl) retryEl.textContent = kiwiWidgetPack.retryButton;
     }
-    // Paint the resolved language immediately (the static template is
-    // English until the driver runs; the widget subtree lang attribute was
-    // set above, so the English fallback is programmatically marked until
-    // localized).
+    // Paint the resolved language immediately: the static template is
+    // English until the driver runs; the fallback stays marked lang="en"
+    // until localized.
     kiwiSetView({ statusKey: "label", badgeKey: "badgeIdle", domState: "idle", hintKey: "hintProtected" });
-    // Explicit-execution mode (Turnstile execution: "execute"): the widget
-    // is rendered and registered but the challenge does NOT start until
-    // execute() is called on it. "pending" is a distinct state: "idle"
-    // means ready for MANUAL reacquisition AFTER a credential existed
-    // (expiry/error/reset), while "pending" means the challenge has never
-    // run and waits for execute().
+    // Explicit-execution mode (Turnstile execution: "execute"): the
+    // widget is rendered and registered but the challenge does NOT start
+    // until execute(). "pending" is distinct from "idle": idle means
+    // ready for MANUAL reacquisition after a credential existed; pending
+    // means the challenge has never run and waits for execute().
     var deferredExecution = (options && options.execution === "execute")
       || (W.getAttribute ? W.getAttribute("data-execution") === "execute" : false);
     if (deferredExecution) {
       kiwiRecordState("pending", "");
       kiwiSetView({ statusKey: "label", badgeKey: "badgeIdle", domState: "pending", hintKey: "hintProtected" });
     }
-    // Lazy non-default locale packs (WCAG 3.1.2): a widget whose
-    // resolved pack is not registered yet loads the lazy
-    // widget-locales.js module exactly here (the loader dedups the
-    // fetch across the page). Settlement is a pure language swap: the
-    // module replaces the pack and repaints the CURRENT view. The
-    // challenge flow NEVER awaits the module: the first run() proceeds
-    // immediately with the English fallback, and a late pack repaints
-    // whatever state is current (idle/pending/connecting/solving/
-    // done/failed/expired/...), which is exactly what the semantic
-    // view model guarantees. A failed or missing module keeps the
-    // English fallback (still marked lang="en"), warns, and the flow
-    // was never gated; a translation is never a gate.
+    // Lazy non-default locale packs (WCAG 3.1.2): a widget whose pack is
+    // not registered loads widget-locales.js here (the loader dedups).
+    // Settlement is a pure language swap repainting the CURRENT view.
+    // The flow NEVER awaits the module: run() proceeds immediately with
+    // the English fallback and a late pack repaints whatever state is
+    // current. A failed module keeps English (lang="en"), warns; a
+    // translation is never a gate.
     if (kiwiWidgetLang !== kiwiFallbackLang && !kiwiLocalePacks[kiwiWidgetLang]) {
       var kiwiLocalesAttrs = kiwiModuleAssetAttrs("locales", container, W);
       function kiwiApplyLangSettled() {
@@ -862,14 +798,12 @@
       }
       input.value = value || "";
     }
-    // Server-issued decoy (honeypot) machinery lives in the lazy
-    // widget-risk.js module (loaded when a decoy or execution program
-    // arrives). The widget record's decoyState stays CORE state: it
-    // survives re-inits (an expiry-triggered re-solve must still see
-    // a filled decoy) and every reset/destroy path clears it through
-    // the owned-node set below, so a re-solve never echoes a stale
-    // decoy name and an application field with the same name is never
-    // touched.
+    // Server-issued decoy machinery lives in the lazy widget-risk.js
+    // module (loaded when a decoy or execution program arrives). The
+    // record's decoyState stays CORE state: it survives re-inits and
+    // every reset/destroy path clears it through the owned-node set
+    // below, so a re-solve never echoes a stale decoy name and an
+    // application field with the same name is never touched.
     function kiwiClearDecoy() {
       kiwiClearDecoyState(decoyState);
     }
@@ -892,13 +826,11 @@
       kiwiSetView({ statusKey: "label", badgeKey: "badgeIdle", domState: "idle", hintKey: "hintProtected" });
       setProgress(0);
     }
-    // Abandoned-challenge notification (the exhaustion/deadline
-    // path): a bounded fire-and-forget POST to {endpoint}/cancel
-    // carries the abandoned nonce, so the server can retire the record
-    // and restore its issue-debt. Failures are ignored; the
-    // notification is rate-limited per widget (once per nonce plus a
-    // cooldown), and it always carries the nonce of the challenge this
-    // widget just abandoned, never a later one.
+    // Abandoned-challenge notification (the exhaustion/deadline path): a
+    // bounded fire-and-forget POST to {endpoint}/cancel carries the
+    // abandoned nonce so the server retires the record; failures are
+    // ignored and the notification is rate-limited (once per nonce plus
+    // a cooldown), always for the challenge just abandoned.
     var lastCancelNotifyAt = 0;
     var lastCancelNonce = "";
     function kiwiNotifyCancel(endpoint, nonce) {
@@ -908,10 +840,9 @@
       lastCancelNotifyAt = now;
       lastCancelNonce = nonce;
       try {
-        // The cancel endpoint is the challenge path plus the /cancel
-        // suffix. A query-bearing challenge endpoint must not swallow
-        // the suffix into the query string, or the notification misses
-        // the server's route and the abandoned record is never retired.
+        // The cancel endpoint is the challenge path plus /cancel: a
+        // query-bearing endpoint must not swallow the suffix, or the
+        // abandoned record is never retired.
         var cancelUrl = endpoint.split("?")[0] + "/cancel";
         fetch(cancelUrl, {
           method: "POST",
@@ -924,10 +855,9 @@
         }).catch(function () {});
       } catch (e) {}
     }
-    // Failure recovery: an error never leaves the widget stuck in
-    // "failed" — it resets to idle, retries a bounded number of times
-    // with backoff, then settles idle and reacquires on the next
-    // interaction (click the widget, the Retry button, or a page re-init).
+    // Failure recovery: an error never sticks in "failed" — reset to
+    // idle, bounded retries with backoff, then idle until the next
+    // interaction (click, Retry button, or page re-init).
     function fireErrorCallback(msg) {
       var r = kiwiWidgets[widgetId];
       if (!r || r.errorFired || !options.errorCallback) return;
@@ -962,10 +892,10 @@
         fireErrorCallback(msg);
       }
     }
-    // Build-id mismatch: the worker reported a solver protocol id
-    // different from this driver's constant. The stale worker must NEVER
-    // contribute a solution, and there is no fallback (retrying cannot
-    // change the cached worker the page was served).
+    // Build-id mismatch: the worker reported a different protocol id
+    // than this driver's constant. The stale worker must NEVER contribute
+    // a solution, and there is no fallback (retrying cannot change the
+    // cached worker the page was served).
     function solverMismatch() {
       clearInterval(countdownTimer);
       telemetry.stop();
@@ -976,12 +906,11 @@
       setProgress(0);
       fireErrorCallback("solver-mismatch");
     }
-    // Worker creation failure or a worker solve failure for a
-    // memory-hard challenge enters this controlled state: the token is
-    // cleared, nothing is solved on the main thread, and the profile
-    // is never downgraded. The widget stays reacquirable; a later
-    // attempt retries the worker from scratch or uses the configured
-    // data-kiwi-worker-src static worker.
+    // Worker creation or solve failure for a memory-hard challenge
+    // enters this controlled state: the token is cleared, nothing is
+    // solved on the main thread, the profile is never downgraded. The
+    // widget stays reacquirable; a later attempt retries the worker or
+    // uses the configured data-kiwi-worker-src static worker.
     function workerUnavailable(reason) {
       clearInterval(countdownTimer);
       telemetry.stop();
@@ -999,13 +928,11 @@
       // provider error callback fires immediately.
       fireErrorCallback("worker-unavailable");
     }
-    // ExecutionChallengeV1 interpreter failure (an armed challenge whose
-    // program could not run — asset fetch/integrity failure, iframe
-    // failure, timeout) enters this controlled state, the worker-
-    // unavailable pattern: the token is cleared, the solution is NEVER
-    // submitted without its execution digest (never a silent success,
-    // never a weaker-profile fallback), and the widget stays
-    // reacquirable (Retry re-runs the whole flow).
+    // ExecutionChallengeV1 interpreter failure (asset fetch/integrity,
+    // iframe or timeout) enters this controlled state: the token is
+    // cleared, the solution is NEVER submitted without its digest (never
+    // a silent success, never a weaker-profile fallback), and the widget
+    // stays reacquirable (Retry re-runs the whole flow).
     function executionUnavailable(reason) {
       clearInterval(countdownTimer);
       telemetry.stop();
@@ -1019,12 +946,11 @@
       delete W.dataset.kiwiStarted;
       fireErrorCallback("execution-unavailable");
     }
-    // BFCache restore: a persisted pageshow must NOT auto-solve; it
-    // clears the solved state and leaves the widget idle, ready to
-    // reacquire on the next interaction or page re-init. The restore
-    // also CANCELS the in-flight generation (abort fetch, terminate
-    // worker, clear timers), so a pre-restore solve can never write a
-    // token afterwards.
+    // BFCache restore: a persisted pageshow must NOT auto-solve — clear
+    // the solved state and leave the widget idle for the next
+    // interaction, and CANCEL the in-flight generation (abort fetch,
+    // terminate worker, clear timers) so a pre-restore solve can never
+    // write a token afterwards.
     function reset() {
       kiwiCancelGeneration(widgetId);
       resetToIdle();
@@ -1039,13 +965,12 @@
       retryEl.dataset.kiwiRetryBound = "1";
       kiwiAddListener(retryEl, "click", function () {
         if (W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
-        // Reacquisition MUST restore the FULL original configuration — a
-        // blank initWidget(W) would fall back to DOM attributes/URL
-        // heuristics/default "login", silently downgrading a sitekey that
-        // maps server-side to a sensitive scope, and would lose
-        // callbacks/response-field/language/action/cData. The widget
-        // record always carries the options from the INITIAL render;
-        // BFCache restore (reset) preserves them the same way.
+        // Reacquisition MUST restore the FULL original configuration —
+        // a blank initWidget(W) would fall back to DOM/URL heuristics and
+        // the default "login", silently downgrading a sensitive
+        // sitekey-mapped scope and losing callbacks/response-field/
+        // language/action/cData. The record always carries the INITIAL
+        // options; BFCache restore preserves them the same way.
         var preserved = (kiwiWidgets[widgetId] && kiwiWidgets[widgetId].options) || options;
         delete W.dataset.kiwiStarted;
         initWidget(W, preserved);
@@ -1057,45 +982,34 @@
     kiwiCleanups.set(W, function () { resetToIdle(); kiwiClearDecoy(); });
 
     async function run() {
-      // Every continuation is generation-guarded — a reset that lands
-      // while this run is in flight bumps the generation and
-      // aborts/terminates the handles; this run then bails without ever
-      // touching state.
+      // Every continuation is generation-guarded: a reset in flight
+      // bumps the generation and aborts/terminates the handles; this run
+      // bails without touching state.
       var gen = (kiwiWidgets[widgetId] || {}).gen || 1;
       if (!kiwiGenerationCurrent(widgetId, gen)) return;
       try {
         kiwiSetView({ statusKey: "statusConnecting", badgeKey: "badgeWait", domState: "connecting" });
-      // The challenge request is NEVER delayed by a lazy-module load
-      // (audit finding 1): telemetry attaches only opportunistically
-      // (see the init block; requestSent flips below, so a session
-      // module that registers after this request went out is refused
-      // for this generation), the locale pack settles by repainting
-      // whatever state is current, and the coarse client context is
-      // built in the eager core. The risk module is read from the
-      // registry here and loaded at its REQUIRED trigger points below
-      // (an armed response's worker/execution paths fail closed on a
-      // missing module).
+      // The request is NEVER delayed by a lazy-module load (audit
+      // finding 1): telemetry attaches only opportunistically (requestSent
+      // refuses a late session), the locale pack settles by repainting,
+      // the coarse client context is built in the eager core. The risk
+      // module is read from the registry and loaded at its REQUIRED
+      // trigger points below (an armed response's worker/execution paths
+      // fail closed on a missing module).
       var riskApi = kiwiModuleApi("risk");        var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
-        // Algorithm selection: the client may only select among the
-        // server-offered profiles (sha256 / argon2id / rsw); any other
-        // attribute value normalizes back to the default, and a
-        // solver failure never downgrades a challenge request (there
-        // is no capability-based fallback: failed paths retry the SAME
-        // profile, and difficulty parameters come from the server
-        // alone).
+        // Algorithm selection: the client may only choose among the
+        // server-offered profiles (sha256 / argon2id / rsw); anything
+        // else normalizes to the default, and a solver failure never
+        // downgrades a request (failed paths retry the SAME profile).
         var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
         if (algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw") algorithm = "sha256";
         var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
         var reqBody = { scope: scope };
-        // EXECUTION CAPABILITY ADVERTISEMENT: when the widget carries
-        // the configured execution interpreter asset (data-kiwi-
-        // execution-src + integrity), the driver declares the highest
-        // execution-program version it can run via the
-        // Kiwi-Execution-Max-Version request header (currently 5), so
-        // the server issues the current causal grammar only to
-        // advertising clients. The header is ignorable (an unknown
-        // header never fails a body-validating server); its absence
-        // means version 1, the construction-to-probe grammar.
+        // EXECUTION CAPABILITY ADVERTISEMENT: when the widget carries the
+        // configured interpreter asset (data-kiwi-execution-src +
+        // integrity), the driver declares the highest program version it
+        // can run via the Kiwi-Execution-Max-Version header (currently 5);
+        // the header is ignorable and its absence means version 1.
         var execSrcAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
           || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
         var execIntegrityAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
@@ -1104,31 +1018,25 @@
         if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "5";
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
-        // CHAIN TICKET: when the widget carries a server-issued
-        // chain ticket (data-kiwi-chain-ticket, or options.chainTicket),
-        // the challenge request presents it for the server's stage-2
-        // gate (bounded [A-Za-z0-9._:-]{1,256}; a malformed value is
-        // never sent). The ticket is CLEARED after the solve: a
-        // consumed ticket is one-shot and a re-solve must not re-
-        // present it.
+        // CHAIN TICKET: a server-issued ticket (data-kiwi-chain-ticket or
+        // options.chainTicket) is presented for the server's stage-2 gate
+        // (bounded [A-Za-z0-9._:-]{1,256}; a malformed value is never
+        // sent). It is CLEARED after the solve: one-shot, never re-
+        // presented by a re-solve.
         var chainTicket = (options && typeof options.chainTicket === "string" && options.chainTicket)
           || (container.getAttribute ? container.getAttribute("data-kiwi-chain-ticket") : null)
           || (W.getAttribute ? W.getAttribute("data-kiwi-chain-ticket") : null);
         if (typeof chainTicket === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(chainTicket)) {
           reqBody.chain_ticket = chainTicket;
         }
-        // RISK-V2 (the coarse client-context descriptor moved into the
-        // EAGER core in audit finding 1): the descriptor is built here
-        // from coarse navigator/window signals (sent ONLY under the
-        // explicit data-kiwi-risk-context="coarse" opt-in), so the
-        // opt-in never needs the lazy widget-risk.js module before
-        // issuance. The filled-decoy honeypot markers (the ownership-
-        // based read of this widget's own decoy node, truncated to the
-        // server's 256-byte bound by the core's kiwiBoundBytes) ride
-        // the challenge request as probabilistic evidence, never a
-        // gate; the module is consulted only when it already
-        // registered (rendering a decoy itself loads it), and an
-        // absent module degrades to the default no-signal state.
+        // RISK-V2 (the coarse descriptor moved into the EAGER core in
+        // audit finding 1): built from coarse navigator/window signals
+        // under the explicit data-kiwi-risk-context="coarse" opt-in, so
+        // the opt-in never needs the lazy module before issuance. The
+        // filled-decoy markers (ownership-based read of this widget's own
+        // decoy node, truncated to the server's 256-byte bound) ride the
+        // request as probabilistic evidence, never a gate; an absent
+        // module degrades to the default no-signal state.
         var riskContext = null;
         if (W) riskContext = W.getAttribute("data-kiwi-risk-context") || riskContext;
         if (container && container !== W) riskContext = container.getAttribute("data-kiwi-risk-context") || riskContext;
@@ -1143,11 +1051,9 @@
             reqBody.honeypot = honeypot.value;
           }
         }
-        // Provider-compatible challenge metadata is declared by the WIDGET
-        // at issuance (data-action / data-cdata on the container, or
-        // params.action/cData) — the server validates the provider shapes
-        // and binds them to the nonce; a Siteverify request can never
-        // supply them.
+        // Provider-compatible metadata is declared by the WIDGET at
+        // issuance (data-action / data-cdata, or params.action/cData); a
+        // Siteverify request can never supply it.
         var kiwiAction = (container.getAttribute ? container.getAttribute("data-action") : null)
           || (W.getAttribute ? W.getAttribute("data-action") : null)
           || (options && options.action ? String(options.action) : null);
@@ -1156,9 +1062,9 @@
           || (options && options.cData ? String(options.cData) : null);
         if (kiwiAction) reqBody.action = kiwiAction;
         if (kiwiCdata) reqBody.cdata = kiwiCdata;
-        // The public sitekey travels with the request so the server
-        // resolves (sitekey, action) -> security scope — the client never
-        // chooses protected scope names.
+        // The public sitekey rides the request so the server resolves
+        // (sitekey, action) -> security scope — the client never chooses
+        // protected scope names.
         if (options && options.sitekey) reqBody.sitekey = String(options.sitekey);
         var timeoutAttr = W.getAttribute("data-kiwi-fetch-timeout-ms") || container.getAttribute("data-kiwi-fetch-timeout-ms") || "";
         var fetchTimeoutMs = parseInt(timeoutAttr, 10);
@@ -1167,10 +1073,9 @@
         var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
         var rw = kiwiWidgets[widgetId];
         if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
-        // The challenge request is SENT from here on: an opportunistic
-        // telemetry module registering after this point is refused for
-        // this generation (the init .then() checks requestSent), so the
-        // token never carries a half-session started mid-solve.
+        // The request is SENT from here on: a telemetry module
+        // registering after this point is refused for this generation,
+        // so the token never carries a half-session.
         requestSent = true;
         var resp, data;
         try {
@@ -1179,10 +1084,9 @@
           try {
             data = await resp.json();
           } catch (e) {
-            // A non-JSON challenge body is a challenge-content failure —
-            // the browser parser's message would leak response text into
-            // the widget error surface, so it is replaced with a stable
-            // driver-owned message.
+            // A non-JSON body is a challenge-content failure — the
+            // parser's message would leak response text onto the error
+            // surface, so a stable driver-owned message replaces it.
             throw new Error("Challenge malformed");
           }
         } finally {
@@ -1191,26 +1095,22 @@
           if (rw2 && rw2.abortTimer === abortTimer) rw2.abortTimer = null;
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
-        // No weaker challenge: the response algorithm may only equal
-        // or exceed the request (a server downgrade is a FAILED
-        // challenge, never a weaker solve); an rsw request demands an
-        // rsw response exactly (the sequential and memory-hard rungs
-        // are incomparable).
+        // No weaker challenge: the response algorithm may only equal or
+        // exceed the request (a downgrade is a FAILED challenge); an rsw
+        // request demands an rsw response exactly.
         var returnedAlgorithm = data.algorithm || "sha256";
         if ((algorithm === "argon2id" && returnedAlgorithm !== "argon2id")
           || (algorithm === "rsw" && returnedAlgorithm !== "rsw")) throw new Error("Challenge downgraded");
         // The response shape gate: a forged or malformed challenge is a
-        // challenge-content failure (the controlled bounded-retry state),
-        // never a solve. The widget may only solve a well-formed issuance.
+        // challenge-content failure (the bounded-retry state), never a
+        // solve.
         kiwiValidateChallenge(data);
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
-        // RISK-V2 DECOY FIELD: the server-issued decoy name is
-        // rendered as a hidden form input next to the token (never
-        // auto-filled). The rendering lives in the lazy widget-risk.js
-        // module, ensured here (before the solve starts) when an armed
-        // response carries a valid decoy name or an execution program;
-        // an unloadable module degrades to the default no-honeypot
-        // state (evidence, never a gate).
+        // RISK-V2 DECOY FIELD: the server-issued decoy name is rendered
+        // as a hidden input next to the token (never auto-filled), in the
+        // lazy widget-risk.js module, ensured before the solve starts; an
+        // unloadable module degrades to the no-honeypot state (evidence,
+        // never a gate).
         if (!riskApi && kiwiRiskResponseNeeds(data)) {
           riskApi = await kiwiEnsureModule("risk", container, W);
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
@@ -1220,24 +1120,18 @@
         kiwiSetView({ statusKey: "statusVerifying", badgeKey: "badgeWorking", domState: "solving" });
         announce(kiwiT("checking"));
         dispatch("verifying");
-        // The solve deadline: the challenge expires ttlSecs after
-        // receipt (the countdown and expiry timers use the same
-        // convention); the solver aborts
-        // KIWI_SOLVE_DEADLINE_MARGIN_MS before that estimate, because
-        // a solve that would outlive the challenge is waste and the
-        // token would be rejected anyway. 0 = no deadline (missing
-        // ttl).
+        // The solve deadline: the challenge expires ttlSecs after receipt;
+        // the solver aborts KIWI_SOLVE_DEADLINE_MARGIN_MS before that
+        // estimate (a solve that would outlive the challenge is waste). 0
+        // = no deadline (missing ttl).
         var deadline = data.ttlSecs > 0 ? performance.now() + data.ttlSecs * 1000 - KIWI_SOLVE_DEADLINE_MARGIN_MS : 0;
         var result = null;
         if ((data.algorithm || "sha256") === "argon2id" || (data.algorithm || "sha256") === "rsw") {
-          // Memory-hard (argon2id) and sequential time-lock (rsw)
-          // challenges ALWAYS run in the same-origin worker: there is
-          // no synchronous fallback and no weaker-profile retry. A
-          // missing or failed worker (or an unloadable widget-risk.js
-          // module, which owns the worker machinery) enters the
-          // controlled kiwi:worker-unavailable state. The worker
-          // handle is stored on the widget record so a cancelled
-          // generation can terminate() it outright.
+          // Memory-hard (argon2id) and time-lock (rsw) challenges ALWAYS
+          // run in the same-origin worker: no synchronous fallback, no
+          // weaker-profile retry. A missing/failed worker (or unloadable
+          // widget-risk.js) enters kiwi:worker-unavailable. The handle is
+          // stored on the record so a cancelled generation terminates it.
           if (!riskApi || !riskApi.solveWorker) {
             riskApi = await kiwiEnsureModule("risk", container, W);
             if (!kiwiGenerationCurrent(widgetId, gen)) return;
@@ -1262,13 +1156,11 @@
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // EXECUTIONCHALLENGEV1: an armed response carries an
         // execution_program. The driver runs it in the sandboxed
-        // ephemeral interpreter (the lazily loaded
-        // execution.<hash>.js, deduped per page, SRI-preflight-
-        // verified) and appends the digest to the solution token. Any
-        // interpreter/fetch failure enters the controlled
-        // kiwi:execution-unavailable state, never a silent success or
-        // a weaker-profile fallback. A SHA-only challenge without a
-        // program pays zero bytes for the interpreter.
+        // ephemeral interpreter (lazily loaded execution.<hash>.js,
+        // deduped per page, SRI-preflight-verified) and appends the
+        // digest to the token. Any failure enters kiwi:execution-
+        // unavailable, never a silent success or weaker-profile fallback;
+        // a SHA-only challenge pays zero interpreter bytes.
         var executionDigest = null;
         var executionTrace = null;
         if (data.execution_program) {
@@ -1276,12 +1168,9 @@
           try {
             // The execution runner lives in the lazy widget-risk.js
             // module (the armed-evidence machinery; the risk-armed
-            // server issues the decoy and execution arms together, so
-            // the module is usually already registered when an armed
-            // response was rendered). An armed program whose module
-            // cannot load enters the controlled kiwi:execution-
-            // unavailable state, never a silent success or a
-            // weaker-profile fallback.
+            // server issues the decoy and execution arms together). An
+            // armed program whose module cannot load enters
+            // kiwi:execution-unavailable, never a silent success.
             if (!riskApi || !riskApi.runExecution) {
               riskApi = await kiwiEnsureModule("risk", container, W);
               if (!kiwiGenerationCurrent(widgetId, gen)) return;
@@ -1303,10 +1192,9 @@
         if (executionDigest && executionTrace) {
           execEvidence = executionDigest + ":" + btoa(executionTrace).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
         }
-        // The token shape: an rsw proof has no search counter, so the
+        // Token shape: an rsw proof has no search counter, so the
         // counter segment holds 0 and the final value rides as the final
-        // 512-hex segment (the server's wire discriminator); every other
-        // algorithm keeps the counter-segment proof.
+        // 512-hex segment; every other algorithm keeps the counter proof.
         var counterSegment = (data.algorithm || "sha256") === "rsw" ? 0 : result.counter;
         var proofSegment = (data.algorithm || "sha256") === "rsw"
           ? (typeof result.proof === "string" && /^[0-9a-f]{512}$/.test(result.proof) ? "." + result.proof : null)
@@ -1315,13 +1203,12 @@
         tokenEl.value = btoa(data.nonce + "." + counterSegment + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (execEvidence ? "." + execEvidence : "") + (proofSegment || ""));
         setBinding(requestBinding || "");
         // The deferred decoy strategy creates its input after the first
-        // solve completes (the widget-risk.js flushDecoy — the module is
-        // registered whenever a deferred state exists, because the
-        // module itself recorded it).
+        // solve (the module's flushDecoy — registered whenever a deferred
+        // state exists, because the module recorded it).
         if (riskApi && riskApi.flushDecoy) riskApi.flushDecoy(decoyState, tokenEl);
-        // CHAIN TICKET LIFECYCLE: the solve completed — the presented chain
-        // ticket was consumed by the server at issuance, so the attribute /
-        // option is cleared and a re-solve never re-presents it.
+        // CHAIN TICKET LIFECYCLE: the solve completed — the presented
+        // ticket was consumed at issuance, so the attribute/option is
+        // cleared and a re-solve never re-presents it.
         if (container && container.removeAttribute) container.removeAttribute("data-kiwi-chain-ticket");
         if (W && W.removeAttribute) W.removeAttribute("data-kiwi-chain-ticket");
         if (options && typeof options === "object") options.chainTicket = null;
@@ -1332,22 +1219,19 @@
         kiwiRecordState("verified", token);
         writeResponseAlias(token);
         dispatch("verified", { nonce: data.nonce, token: token });
-        // Provider-style solved-token expiry lifecycle. The server remains
-        // authoritative (an expired record is rejected); this client timer
-        // is UX convenience only and mirrors the incumbent providers'
-        // token lifetime.
+        // Provider-style solved-token expiry: the server stays
+        // authoritative (an expired record is rejected); this client
+        // timer is UX convenience mirroring incumbent token lifetimes.
         scheduleExpiry(data.ttlSecs || 0);
         if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
       } catch (e) {
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // The abandonment path: the bounded search exhausted or the
-        // solve deadline passed, so the challenge is abandoned. The
-        // server is informed (fire-and-forget, rate-limited) for the
-        // abandoned nonce only; a transport failure or a user reset
-        // never sends the notification (the challenge may still be
-        // pending, and a cancelled generation must not report a
-        // challenge it never owned).
+        // deadline passed — the challenge is abandoned. The server is
+        // informed (fire-and-forget, rate-limited) for the abandoned
+        // nonce only; a transport failure or a user reset never sends the
+        // notification.
         if (data && typeof data.nonce === "string" && (e.message === "Expired" || e.message === "Exhausted")) {
           kiwiNotifyCancel(endpoint, data.nonce);
         }
@@ -1355,11 +1239,9 @@
       }
     }
     // The flow start is NEVER gated on a lazy module (audit finding 1):
-    // the first run() proceeds immediately — the English fallback while
-    // a locale pack is still pending, the empty telemetry stub while an
-    // enabled session module is still loading — and a late settlement
-    // repaints whatever state is current (the semantic view model makes
-    // that paint exact). execute() starts the same ungated flow.
+    // run() proceeds immediately (English fallback, empty telemetry
+    // stub) and a late settlement repaints whatever state is current.
+    // execute() starts the same ungated flow.
     var kiwiFlowStarted = false;
     function kiwiStartFlow() {
       if (kiwiFlowStarted) return;
@@ -1373,22 +1255,18 @@
     return widgetId;
   }
 
-  // ── BFCache restore ──────────────────────────────────────
-  // A persisted pageshow restores the page WITHOUT re-running the driver
-  // init, so a solved widget would otherwise keep its stale token. Reset
-  // every live widget: clear the solved state and reacquire on the next
-  // interaction instead of auto-solving on restore.
+  // ── BFCache restore ──
+  // A persisted pageshow restores the page WITHOUT re-running init, so a
+  // solved widget would otherwise keep its stale token. Reset every live
+  // widget and reacquire on the next interaction instead.
   var kiwiResetHooks = [];
 
-  // ── Per-widget lifecycle bookkeeping ─────────────────────
+  // ── Per-widget lifecycle bookkeeping ──
   // The rendered server-issued decoy input is owned per widget: the
-  // authoritative set of created nodes lives in the PRIVATE decoy
-  // state on the widget record (carried across re-inits, so an
-  // expiry-triggered re-solve still sees a filled decoy as evidence),
-  // and every reset path (BFCache restore, the public reset API,
-  // destroy teardown) removes ONLY the nodes in that owned set, never
-  // a node identified by name match, so an application field with the
-  // same name is never touched.
+  // authoritative created-node set lives in the PRIVATE decoy state on
+  // the record (carried across re-inits), and every reset path removes
+  // ONLY the nodes in that owned set, never by name match, so an
+  // application field with the same name is never touched.
   function kiwiClearDecoyState(state) {
     if (!state) return;
     var nodes = state.nodes || [];
@@ -1403,12 +1281,11 @@
     state.className = null;
     state.variant = null;
   }
-  // destroy(element|selector) reverses EVERYTHING initWidget
-  // attached: listeners (registered per element so they can be
-  // removed by reference), the countdown/telemetry/blob-URL runtime
-  // state (one cleanup closure per widget) and the BFCache hook. A
-  // destroyed widget is marked data-kiwi-destroyed and initWidget
-  // refuses to resurrect it; the SPA owns the DOM node from then on.
+  // destroy(element|selector) reverses EVERYTHING initWidget attached:
+  // listeners (registered per element so they can be removed by
+  // reference), the countdown/telemetry/blob-URL runtime state and the
+  // BFCache hook. A destroyed widget is marked data-kiwi-destroyed and
+  // initWidget refuses to resurrect it; the SPA owns the DOM node.
   var kiwiCleanups = new WeakMap();
   var kiwiListenerRegistry = new WeakMap();
   function kiwiAddListener(el, type, fn, opts) {
@@ -1453,13 +1330,12 @@
     }
   });
 
-  // ── SPA lifecycle observer (OPT-IN) ──────────────────────
-  // Single-page apps that insert widgets dynamically call
-  // window.KiwiCaptcha.observe(document.body) once; the
-  // MutationObserver auto-inits every [data-kiwi-widget] that appears
-  // later. Not started automatically: opt-in only, so a page that
-  // wants strict control over init timing never gets surprise
-  // challenges.
+  // ── SPA lifecycle observer (OPT-IN) ──
+  // SPAs that insert widgets dynamically call
+  // window.KiwiCaptcha.observe(document.body) once; the MutationObserver
+  // auto-inits every [data-kiwi-widget] that appears later. Not started
+  // automatically: a page that wants strict init control never gets
+  // surprise challenges.
   var kiwiObserver = null;
   function kiwiScanNode(node) {
     if (!node || node.nodeType !== 1) return;
@@ -1487,11 +1363,10 @@
     return { disconnect: function () { if (kiwiObserver) kiwiObserver.disconnect(); } };
   }
 
-  // ── Provider-style public API ────────────────────────────
+  // ── Provider-style public API ──
   // Native KiwiCaptcha exposes the incumbent lifecycle: render() ->
-  // stable widget id, reset/getResponse/execute/remove/isExpired/ready.
-  // The compatibility globals (grecaptcha/hcaptcha/turnstile) delegate
-  // to the SAME instances: one widget, one token, one lifecycle.
+  // stable id, reset/getResponse/execute/remove/isExpired/ready. The
+  // compatibility globals delegate to the SAME instances.
   function kiwiResolveTarget(target) {
     if (!target) return null;
     if (typeof target === "string") {
@@ -1616,37 +1491,29 @@
     observe: kiwiObserve,
     destroy: kiwiDestroy
   };
-  // ── Lazy widget modules + internal bridge ────────────────
-  // The configuration- and server-armed machinery ships as lazy
-  // modules that register on the internal bridge below the moment they
-  // execute: widget-risk.js (the worker solve tier, the execution
-  // runner and the decoy/risk-v2 machinery), widget-locales.js (the
-  // non-default language packs), widget-telemetry.js (the opt-in
-  // session) and widget-compat.js (delivered inside the /api.js loader
-  // response, never fetched). A module already on the page registers
+  // ── Lazy widget modules + internal bridge ──────
+  // The server-armed machinery ships as lazy modules registering on
+  // the internal bridge: widget-risk.js (worker solve tier, execution
+  // runner, decoy/risk-v2), widget-locales.js (non-default packs),
+  // widget-telemetry.js (opt-in session), widget-compat.js (inside the
+  // /api.js response, never fetched). A module on the page registers
   // itself; otherwise the core injects a same-origin SRI-pinned
-  // <script src integrity=...> element for the page-issued
-  // content-addressed URL (data-kiwi-risk-src/-integrity, data-kiwi-
-  // telemetry-src/-integrity, data-kiwi-locales-src/-integrity) only
-  // when a trigger fires. Native SRI fails closed on a digest
+  // <script src integrity=...> for the page-issued content-addressed
+  // URL only when a trigger fires. Native SRI fails closed on a digest
   // mismatch, the immutable URL serves only the pinned bytes, the
-  // browser cache dedups the asset per page (one fetch per kind,
-  // asserted by the request-accounting specs), the load is bounded to
-  // three attempts and a hung request cannot wedge a REQUIRED load
-  // forever (10 s watchdog). Audit finding 1: only the REQUIRED module
-  // loads (the worker/execution paths of an armed response) are ever
-  // awaited; the opportunistic loads (locale packs, telemetry, coarse
-  // client context) never gate the challenge request, so their 10 s
-  // watchdog can never stall issuance.
+  // cache dedups per page (one fetch per kind), the load is bounded to
+  // three attempts and a hung REQUIRED load cannot wedge forever
+  // (10 s watchdog). Audit finding 1: only the REQUIRED loads (an
+  // armed response's worker/execution paths) are awaited; the
+  // opportunistic loads never gate the challenge request.
   var kiwiModuleApis = {};
   var kiwiModuleLoads = {};
   function kiwiModuleApi(kind) {
     return kiwiModuleApis[kind] || null;
   }
-  // The armed-response trigger predicate: a server-issued decoy field
-  // with a valid authenticated name, or an execution program. Mirrors
-  // the widget-risk.js validation, so a decoy-less SHA-256 page never
-  // loads the module.
+  // The armed-response trigger predicate: a valid authenticated decoy
+  // name or an execution program. Mirrors widget-risk.js, so a
+  // decoy-less SHA-256 page never loads the module.
   function kiwiRiskResponseNeeds(data) {
     return !!(data && typeof data === "object" && !Array.isArray(data)
       && ((typeof data.decoy_field === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(data.decoy_field))
@@ -1681,9 +1548,8 @@
         script.onload = function () {
           // The module registers synchronously while its IIFE executes,
           // so the registry entry at the load event is the completion
-          // signal — a loaded asset that never registered is refused
-          // (a wrong artifact can never satisfy the content-addressed
-          // URL, so this is defense in depth).
+          // signal; a loaded asset that never registered is refused
+          // (defense in depth over the content-addressed URL).
           var api = kiwiModuleApis[kind] || null;
           if (!api) console.warn("KiwiCaptcha: " + kind + " module loaded but did not register; refusing it");
           finish(api);
@@ -1707,8 +1573,8 @@
     });
   }
   // Ensure a module kind is registered, loading its page-issued asset on
-  // demand. Resolves the module API, or null when the page issued no
-  // module URL or the load failed (callers degrade per channel above).
+  // demand; resolves the module API or null when no URL was issued or
+  // the load failed (callers degrade per channel above).
   function kiwiEnsureModule(kind, container, W) {
     var api = kiwiModuleApis[kind];
     if (api) return Promise.resolve(api);
@@ -1719,24 +1585,21 @@
     }
     return kiwiModuleLoads[kind];
   }
-  // ── Coarse client-context descriptor + byte-bounded truncation ───────
-  // These lived in the lazy widget-risk.js module and moved into the
-  // EAGER core (audit finding 1): the coarse descriptor rides every
-  // challenge request under the explicit data-kiwi-risk-context="coarse"
-  // opt-in, and the issuance must never wait for the lazy module. The
-  // context is built ONCE per page load from coarse navigator/window
-  // signals (the server accepts /^[a-z0-9+_,=:-]{1,64}$/D) ONLY when the
-  // widget container or widget element carries the opt-in (the app
-  // renders it when the operator enables risk.client_context) — the
-  // default is off, so no device-capability or screen-size signal ever
-  // leaves the page without it. Deliberately COARSE: viewport class,
-  // touch capability, language family and a timezone-offset class — no
+  // ── Coarse client-context descriptor + byte-bounded truncation ─
+  // Moved from the lazy widget-risk.js module into the EAGER core
+  // (audit finding 1): the descriptor rides every challenge request
+  // under the explicit data-kiwi-risk-context="coarse" opt-in, and
+  // issuance must never wait for the lazy module. Built ONCE per page
+  // from coarse navigator/window signals (the server accepts
+  // /^[a-z0-9+_,=:-]{1,64}$/D) ONLY under the opt-in (default off, so
+  // no device-capability or screen-size signal ever leaves the page
+  // without it). Deliberately COARSE: viewport class, touch
+  // capability, language family, timezone-offset class — no
   // canvas/audio/font-list/GPU fingerprinting, no stable IDs, nothing
-  // that identifies a device across sessions. A missing capability
-  // contributes nothing; when nothing is available the field is omitted
-  // entirely. The core exposes both helpers on the internal bridge so
-  // the lazy widget-risk.js module can still READ the same context and
-  // reuse the byte-bound truncation for its decoy/honeypot evidence.
+  // identifying across sessions. Missing capability contributes
+  // nothing; nothing available omits the field. The bridge exposes
+  // both helpers so the lazy module reads the same context and reuses
+  // the byte-bound truncation for its decoy/honeypot evidence.
   var kiwiClientContext = null;
   function kiwiBuildClientContext() {
     if (kiwiClientContext !== null) return kiwiClientContext;
@@ -1765,10 +1628,10 @@
     kiwiClientContext = parts.join(",");
     return kiwiClientContext;
   }
-  // Truncate a string to the server's BYTE bound (e.g. the 256-byte
-  // honeypot value ceiling): code units are truncated with a binary
-  // search over the UTF-8 byte length, so a multi-byte filler can never
-  // exceed the server's bound and 422 the challenge request.
+  // Truncate to the server's BYTE bound (e.g. the 256-byte honeypot
+  // ceiling): code units are cut with a binary search over the UTF-8
+  // byte length, so a multi-byte filler can never exceed the bound and
+  // 422 the request.
   function kiwiBoundBytes(s, maxBytes) {
     if (encoder.encode(s).length <= maxBytes) return s;
     var lo = 0, hi = s.length;
@@ -1779,14 +1642,11 @@
     return s.slice(0, lo);
   }
   // The internal module bridge (window.__kiwiCaptchaCore): the lazy
-  // module files run as separate scripts with no closure state shared
-  // with the core, so the core exposes the small internal surface they
-  // need: register() (first-wins per kind; a module that executed
-  // before the core is inert), the worker/glue helpers, and the
+  // module files run as separate scripts with no shared closure state,
+  // so the core exposes the small surface they need: register()
+  // (first-wins per kind), the worker/glue helpers and the
   // provider-compatible functions widget-compat.js delegates to. The
   // bridge is deliberately NOT the public window.KiwiCaptcha surface.
-  // The compat chunk of the /api.js response publishes the loader's
-  // glue part on compatGlue, where the worker path reads it.
   var kiwiBridge = null;
   function kiwiCompatGlueValue() {
     return kiwiBridge ? kiwiBridge.compatGlue : null;
@@ -1798,9 +1658,8 @@
     register: function (kind, api) {
       if (kind && api && typeof api === "object" && !kiwiModuleApis[kind]) {
         kiwiModuleApis[kind] = api;
-        // The widget-locales.js module also registers its packs
-        // here (register is the executed signal the asset loader
-        // waits for); the merge fills the null placeholders.
+        // widget-locales.js also registers its packs here (register is
+        // the executed signal the asset loader waits for).
         if (kind === "locales" && api.packs) kiwiAddLocalePacks(api.packs);
       }
     },
@@ -1826,12 +1685,13 @@
   window.__kiwiCaptchaCore = kiwiBridge;
   var runInit = function() {
     document.querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
-      // No pointerdown-only activation. After a reset or a settled
-      // failure the widget is idle; the native Retry button (visible in
-      // idle/failed/unavailable states via data-state CSS) is the
+      // No pointerdown-only activation: after a reset or settled
+      // failure the widget is idle; the native Retry button is the
       // reacquire control for EVERY input method.
       initWidget(W);
     });
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runInit); else runInit();
 })();
+
+
