@@ -253,10 +253,21 @@ function threePartInsteadOfModes(payload, difficulty, cache) {
   return next;
 }
 
-/** Legacy schema-1 store: the committed baseline with a fresh timestamp. */
+/**
+ * Legacy schema-1 store: the committed baseline with a fresh timestamp
+ * and a CURRENT identity block. The committed maintenance file's
+ * recorded clientAssets describe the release bytes of its own
+ * recording; a stale block (the file drifts whenever a client asset
+ * changes, until the re-bind agent refreshes it) would make these
+ * legacy-ROW fixtures fail on the unrelated identity rule. The
+ * fixture is rebuilt identity-current exactly like the schema-3
+ * helper: the identity bind is exercised by its own corpus block
+ * below, never accidentally by this fixture.
+ */
 function legacySchema1Payload() {
   const payload = clone(JSON.parse(readFileSync(LEGACY_BASELINE_SRC, 'utf8')));
   payload.generated_at = nowIso();
+  payload.clientAssets = canonicalClientAssets();
   return payload;
 }
 
@@ -576,12 +587,17 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 }
 
 // 21. Healthy physical claim: CI mode passes (proves the committed
-//     physical claim is fully provable in ordinary CI) and release
-//     mode certifies it (per-device sha20 floor met).
+//     physical claim is fully provable in ordinary CI). Release mode
+//     cannot certify the same claim while the committed sha20 budget
+//     rows sit above the 4250 ms engineering target (4426 cold / 4734
+//     warm, 89-95% of the absolute 5000 ms wall) — that rejection is
+//     the honest verdict the engineering-target block below records; a
+//     release-certifiable margin is exercised there.
 {
   const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
   pass('healthy physical claim (one device, every cell): CI mode proves the claim', runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false));
-  pass('healthy physical claim: release mode certifies it (per-device sha20 floor met)', runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true));
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  reject('healthy physical claim at the committed sha20 margins: release mode rejects on the engineering target (per-device sha20 floor met)', res, ['exceeds the engineering target 4250 ms'], ['is not "physical"']);
 }
 
 // 22. Physical claim with an empty evidence index: the claim without
@@ -983,6 +999,146 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
     reject('asset-identity (r6): legacy schema-1 baseline with a tampered recorded asset', res, ['client asset widget-driver.js does not match current bytes']);
   }
 
+}
+
+// ── Engineering-target cases (audit finding 3, engineering target). ─
+// release-budgets.json now declares engineeringTargetP95 per tier
+// ({ solveMsP95, pageToVerifiedMsP95 }: 4250 ms for
+// mainstream-desktop = 85% of the absolute 5000 ms UX wall): the
+// normal engineering ceiling of an interactive release BUDGET row, so
+// an interactive release budget can no longer sit at 94-95% of the
+// human-facing wall. The validator enforces it in RELEASE
+// certification (a hard reason naming the cell when an interactive
+// budget row exceeds the target, e.g. 'sha20 warm solveMsP95 budget
+// 4734 ms exceeds the engineering target 4250 ms'); in CI mode the
+// target is ADVISORY (a warning line per violating cell, never a
+// failure). The hard enforcement sits behind the qualification gate:
+// while status is "lab", release mode rejects on the qualification
+// reason alone and never fires an engineering-target reason. The
+// absolute ceiling keeps its role as the hard wall for measured p95
+// in both modes. Cells of a non-interactive difficulty (execchain,
+// harness interactive: false) are exempt from the engineering target,
+// exactly as they are ceiling-exempt. The committed sha20 rows (cold
+// 4426, warm 4734) sit between the engineering target and the
+// absolute ceiling: not release-certifiable at current margins, which
+// is the intended honest verdict (budgets note + client-perf README).
+
+// 46. Committed sha20 margins in CI mode: the sha20 budget rows sit
+//     above the engineering target and under the absolute ceiling, so
+//     CI prints one advisory warning per violating row and still
+//     passes.
+{
+  const payload = schema3Payload();
+  const res = runValidator(payload, baseBudgets(), false);
+  check('engineering target: sha20 rows above the target in CI mode pass with the advisory warning printed', res, {
+    status: 0,
+    mustInclude: ['engineering-target advisory', 'sha20 warm solveMsP95 budget 4734 ms exceeds the engineering target 4250 ms'],
+  });
+}
+
+// 47. Healthy physical claim at the committed sha20 margins (a budget
+//     between 85% and 100% of the absolute ceiling) in release mode:
+//     the status gate passed (status "physical"), so the rejection is
+//     the engineering-target reason alone — no status reason, no
+//     absolute-ceiling reason, no measured-vs-budget reason. sha20 is
+//     not release-certifiable at the committed margins.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  reject('engineering target: sha20 budget 4734 ms (89-95% of the wall) rejects in release mode on the engineering-target reason', res, [
+    'exceeds the engineering target 4250 ms',
+    'mainstream-desktop:sha20:warm',
+  ], [
+    'is not "physical"',
+    'exceeds the absolute interactive ceiling',
+    'exceeds the budget',
+  ]);
+}
+
+// 48. The same healthy physical claim at the committed sha20 margins
+//     in CI mode: advisory only — passes with the warning printed.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false);
+  check('engineering target: sha20 above the target in CI mode with a physical claim passes (advisory only)', res, {
+    status: 0,
+    mustInclude: ['engineering-target advisory', 'sha20 warm', 'exceeds the engineering target 4250 ms'],
+  });
+}
+
+// 49. Healthy physical claim whose interactive budget rows all sit
+//     UNDER the engineering target (sha20 re-budgeted to 4100 ms):
+//     release mode certifies, with no engineering-target reason.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  for (const cache of CACHE_STATES) {
+    for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
+      budgets.budgets[RELEASE_TIER].sha20[cache][metric] = 4100;
+    }
+  }
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  check('engineering target: healthy physical claim with sha20 budget rows under the target certifies in release mode', res, {
+    status: 0,
+    mustExclude: ['exceeds the engineering target'],
+  });
+}
+
+// 50. Budget rows exactly AT the engineering target (4250 ms): the
+//     at-or-under bound is inclusive — release mode certifies.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  for (const cache of CACHE_STATES) {
+    for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
+      budgets.budgets[RELEASE_TIER].sha20[cache][metric] = 4250;
+    }
+  }
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  check('engineering target: sha20 budget exactly 4250 ms (the boundary) certifies in release mode', res, {
+    status: 0,
+    mustExclude: ['exceeds the engineering target'],
+  });
+}
+
+// 51. execchain (harness interactive: false) budget above the
+//     engineering target in release mode: allowed — the engineering
+//     target binds ordinary interactive release cells only, exactly
+//     like the absolute ceiling.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  for (const cache of CACHE_STATES) {
+    for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
+      budgets.budgets[RELEASE_TIER].sha20[cache][metric] = 4100;
+    }
+    budgets.budgets[RELEASE_TIER].execchain[cache].solveMsP95 = 6000;
+    budgets.budgets[RELEASE_TIER].execchain[cache].pageToVerifiedMsP95 = 6000;
+  }
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  check('engineering target: execchain budget 6000 ms above the target in release mode is allowed (non-interactive)', res, {
+    status: 0,
+    mustExclude: ['exceeds the engineering target', 'exceeds the absolute interactive ceiling'],
+  });
+}
+
+// 52. Lab status in release mode with committed sha20 rows above the
+//     engineering target: the release fails on the qualification
+//     reason ALONE — the engineering-target rule never fires behind
+//     the status gate (the committed state's honest single reason).
+{
+  const payload = legacySchema1Payload();
+  const res = runValidator(payload, baseBudgets(), true);
+  reject('engineering target: lab status + sha20 rows above the target in release mode rejects on the lab-status reason only', res, ['is not "physical"'], ['exceeds the engineering target']);
+}
+
+// 53. Release-mode certification of a physical claim whose budget
+//     file drops the engineeringTargetP95 block entirely: a release
+//     ladder without a normal engineering target is a hard reason
+//     (the block is what keeps interactive release budgets away from
+//     the absolute wall).
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  delete budgets.engineeringTargetP95;
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  reject('engineering target: physical release ladder without an engineeringTargetP95 entry rejects', res, ['has no engineeringTargetP95 entry']);
 }
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
