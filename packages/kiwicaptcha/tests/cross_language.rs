@@ -1123,12 +1123,12 @@ echo $ch->nonce . "\n" . $token;
 
     // 1b. The current-register-maximum direction: PHP issues an armed
     //    challenge at its MAX_EXECUTION_VERSION (the ceiling of the PHP
-    //    record/issuer gate, currently 4), solves it and serializes the
+    //    record/issuer gate, currently 5), solves it and serializes the
     //    real digest:trace token. Rust must read the stored record,
     //    accept its execution_version through the widened record
     //    register and verify it end to end through the production
     //    verifier — the PHP-to-Rust direction proof for the current
-    //    maximum grammar.
+    //    maximum grammar (the version-5 causal object-graph rung).
     let issued_at_max = php_script(&php_issue_armed(
         false,
         "\\KiwiCaptcha\\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION",
@@ -1261,6 +1261,71 @@ echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
         "PHP must verify a Rust-issued armed v4 challenge through real Redis: {php_v4_result}"
     );
     println!("PHP_VERIFIES_RUST_ARMED_V4_EXECUTION: OK (counter={reverse_counter})");
+
+    // 4. The reverse direction at the register maximum: Rust issues an
+    //    execution-armed (protocol v4) record at
+    //    execution::MAX_EXECUTION_VERSION (the version-5 causal
+    //    object-graph grammar), stores and solves it, and serializes
+    //    the real digest:trace token. PHP decodes the token, recomputes
+    //    the executed trace and its digest from the stored program with
+    //    its own twin engine, and asserts both halves byte-equal to the
+    //    Rust serialization before verifying through the real verifier
+    //    — the v5 trace and digest byte-equality proof in the
+    //    Rust-to-PHP direction.
+    let reverse_max = issue_v4_execution_for_interop_at(
+        "127.0.0.1",
+        false,
+        kiwicaptcha::execution::MAX_EXECUTION_VERSION,
+    );
+    assert_eq!(
+        reverse_max.execution_version,
+        Some(kiwicaptcha::execution::MAX_EXECUTION_VERSION),
+        "the reverse record rides the register maximum"
+    );
+    store
+        .store(&reverse_max)
+        .expect("Rust must store the reverse max-register armed record");
+    let reverse_max_counter =
+        solve_for_test(&reverse_max).expect("Rust solver for the reverse max-register record");
+    let reverse_max_token = digest_trace_token(&reverse_max, reverse_max_counter);
+    let php_verify_v5_armed = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$token = trim(stream_get_contents(STDIN));
+$decoded = KiwiCaptcha\SolutionToken::decode($token);
+$record = $storage->find($decoded->nonce);
+if ($record === null) { fwrite(STDERR, 'PHP must load the Rust max-register record'); exit(30); }
+$program = KiwiCaptcha\ExecutionChallengeGenerator::decode($record->executionProgram);
+if ($program === null) { fwrite(STDERR, 'the Rust max-register program must parse in PHP'); exit(31); }
+$trace = KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
+$digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
+if ($digest === null || $decoded->executionDigest === null) { fwrite(STDERR, 'the recomputed digest must exist'); exit(32); }
+if (!hash_equals($digest, $decoded->executionDigest)) { fwrite(STDERR, 'the Rust-serialized digest must equal the PHP recomputation'); exit(33); }
+if ($decoded->executionTrace === null) { fwrite(STDERR, 'the Rust token must carry the trace'); exit(34); }
+$outcome = (new KiwiCaptcha\Verifier($storage))->verify($token, '0123456789abcdef0123456789abcdef', 'login', '127.0.0.1');
+echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code(), 'digest' => $digest]);
+"#;
+    let php_v5_result = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_verify_v5_armed,
+        reverse_max_token.as_bytes(),
+    )
+    .expect("PHP must verify the Rust max-register armed record");
+    let php_v5: serde_json::Value =
+        serde_json::from_str(&php_v5_result).expect("the PHP v5 verifier result is JSON");
+    assert_eq!(
+        php_v5["ok"], true,
+        "PHP must verify a Rust-issued armed v5 challenge through real Redis: {php_v5_result}"
+    );
+    println!(
+        "PHP_VERIFIES_RUST_ARMED_V5_EXECUTION_AT_MAX_REGISTER: OK (digest={})",
+        php_v5["digest"]
+            .as_str()
+            .expect("the PHP script echoes the recomputed digest")
+    );
 }
 
 #[cfg(feature = "redis")]
@@ -1326,6 +1391,19 @@ fn issue_v4_execution_for_interop(
     client_ip: &str,
     arm_decoy_field: bool,
 ) -> kiwicaptcha::challenge::ChallengeRecord {
+    issue_v4_execution_for_interop_at(client_ip, arm_decoy_field, 1)
+}
+
+/// The same issuance surface at an explicit execution version, so the
+/// interop suites can mint at the register maximum
+/// [`kiwicaptcha::execution::MAX_EXECUTION_VERSION`] (the version-5
+/// causal object-graph grammar) in addition to the version-1 baseline.
+#[cfg(feature = "redis")]
+fn issue_v4_execution_for_interop_at(
+    client_ip: &str,
+    arm_decoy_field: bool,
+    execution_version: u8,
+) -> kiwicaptcha::challenge::ChallengeRecord {
     use kiwicaptcha::challenge::{
         issue_challenge_with_execution, BindingMode, ChallengeConfig, PoWAlgorithm,
     };
@@ -1370,7 +1448,7 @@ fn issue_v4_execution_for_interop(
         None,
         true,
         Some("login-action"),
-        Some(1),
+        Some(execution_version),
         arm_decoy_field,
     )
     .expect("v4 execution issue")
