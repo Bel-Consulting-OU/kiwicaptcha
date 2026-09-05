@@ -619,16 +619,16 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 
 // 21. Healthy physical claim: CI mode passes (proves the committed
 //     physical claim is fully provable in ordinary CI). Release mode
-//     cannot certify the same claim while the committed sha20 budget
-//     rows sit above the 4250 ms engineering target (4426 cold / 4734
-//     warm, 89-95% of the absolute 5000 ms wall) — that rejection is
-//     the honest verdict the engineering-target block below records; a
-//     release-certifiable margin is exercised there.
+//     cannot certify the same claim while its sha20 budget rows are
+//     synthetically inflated above the 4250 ms engineering target —
+//     that rejection is the honest verdict the engineering-target
+//     block below records; a release-certifiable margin is exercised
+//     there.
 {
   const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   pass('healthy physical claim (one device, every cell): CI mode proves the claim', runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
-  reject('healthy physical claim at the committed sha20 margins: release mode rejects on the engineering target (per-device sha20 floor met)', res, ['exceeds the engineering target 4250 ms'], ['is not "physical"']);
+  reject('healthy physical claim at the synthetically inflated sha20 margins: release mode rejects on the engineering target (per-device sha20 floor met)', res, ['exceeds the engineering target 4250 ms'], ['is not "physical"']);
 }
 
 // 22. Physical claim with an empty evidence index: the claim without
@@ -1049,15 +1049,16 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 // absolute ceiling keeps its role as the hard wall for measured p95
 // in both modes. Cells of a non-interactive difficulty (execchain,
 // harness interactive: false) are exempt from the engineering target,
-// exactly as they are ceiling-exempt. The committed sha20 rows (cold
-// 4426, warm 4734) sit between the engineering target and the
-// absolute ceiling: not release-certifiable at current margins, which
-// is the intended honest verdict (budgets note + client-perf README).
+// exactly as they are ceiling-exempt. The cases below use
+// synthetically inflated sha20 budget rows that sit between the
+// engineering target and the absolute ceiling: a cell at those
+// margins is not release-certifiable, which is the intended honest
+// verdict (budgets note + client-perf README).
 
-// 46. Committed sha20 margins in CI mode: the sha20 budget rows sit
-//     above the engineering target and under the absolute ceiling, so
-//     CI prints one advisory warning per violating row and still
-//     passes.
+// 46. Synthetically inflated sha20 margins in CI mode: the sha20
+//     budget rows sit above the engineering target and under the
+//     absolute ceiling, so CI prints one advisory warning per
+//     violating row and still passes.
 {
   const payload = schema3Payload();
   const res = runValidator(payload, inflateSha20(baseBudgets()), false);
@@ -1067,12 +1068,13 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   });
 }
 
-// 47. Healthy physical claim at the committed sha20 margins (a budget
-//     between 85% and 100% of the absolute ceiling) in release mode:
-//     the status gate passed (status "physical"), so the rejection is
-//     the engineering-target reason alone — no status reason, no
-//     absolute-ceiling reason, no measured-vs-budget reason. sha20 is
-//     not release-certifiable at the committed margins.
+// 47. Healthy physical claim whose sha20 budget rows are synthetically
+//     inflated above the engineering target (a budget between 85% and
+//     100% of the absolute ceiling) in release mode: the status gate
+//     passed (status "physical"), so the rejection is the
+//     engineering-target reason alone — no status reason, no
+//     absolute-ceiling reason, no measured-vs-budget reason. A cell
+//     above the target is not release-certifiable at those margins.
 {
   const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
@@ -1086,8 +1088,9 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   ]);
 }
 
-// 48. The same healthy physical claim at the committed sha20 margins
-//     in CI mode: advisory only — passes with the warning printed.
+// 48. The same healthy physical claim at the synthetically inflated
+//     sha20 margins in CI mode: advisory only — passes with the
+//     warning printed.
 {
   const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false);
@@ -1150,10 +1153,11 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   });
 }
 
-// 52. Lab status in release mode with committed sha20 rows above the
-//     engineering target: the release fails on the qualification
-//     reason ALONE — the engineering-target rule never fires behind
-//     the status gate (the committed state's honest single reason).
+// 52. Lab status in release mode with sha20 budget rows synthetically
+//     inflated above the engineering target: the release fails on the
+//     qualification reason ALONE — the engineering-target rule never
+//     fires behind the status gate (a lab claim's honest single
+//     reason).
 {
   const payload = legacySchema1Payload();
   const res = runValidator(payload, baseBudgets(), true);

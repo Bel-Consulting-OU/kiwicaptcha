@@ -606,19 +606,17 @@ non-empty, it does not enumerate the vocabulary.
   match the current release asset bytes (the identity contract above —
   a baseline whose assets drifted from the tree is a rejection, never
   a note). It prints the current qualification
-  status line (e.g. `performance qualification status=lab —
-  physical-device data required before release certification`) and
-  does not fail solely on the status. The engineering target is
-  ADVISORY in CI mode: an interactive budget row above
-  `engineeringTargetP95` prints a warning line and never fails the
-  run (the committed sha20 rows warn on every CI run until sha20
-  carries materially more margin — see the engineering-target
-  section). Once the committed file claims
-  `status: "physical"`, every physical-authority proof below binds in
-  CI mode too, and the release-required scope widens to the union of
-  the budget `tiers` and `qualification.release_tiers` — a malformed
-  committed claim cannot survive ordinary CI and wait for release
-  mode to catch it.
+  status line (e.g. `performance qualification status=physical
+  (qualified_at ..., N device(s) recorded, M physical device(s) on
+  release tiers ...)` for the committed claim) and does not fail
+  solely on the status. The engineering target is ADVISORY in CI
+  mode: an interactive budget row above `engineeringTargetP95` prints
+  a warning line and never fails the run. When the committed file
+  claims `status: "physical"`, every physical-authority proof below
+  binds in CI mode too, and the release-required scope widens to the
+  union of the budget `tiers` and
+  `qualification.release_tiers` — a malformed committed claim cannot
+  survive ordinary CI and wait for release mode to catch it.
 - Release mode (`--release` or `RELEASE_PERFORMANCE=1`) is the
   release-certification gate. It refuses to certify unless
   `qualification.status` is `"physical"` (with a qualified_at date and
@@ -634,27 +632,25 @@ non-empty, it does not enumerate the vocabulary.
   `qualification.release_tiers`, and every interactive budget row
   must sit at or under the tier's `engineeringTargetP95` (a hard
   reason naming the cell otherwise; the rule fires only behind the
-  qualification gate). In the committed state (status
-  `lab`), release mode fails with the qualification reason and no
-  other, which is the honest state: no physical-device data exists
-  yet, so no release can be performance-certified.
+  qualification gate). A lab claim cannot certify a release; a
+  physical claim certifies only when the complete physical-authority
+  contract passes for every declared release tier.
 
 ```sh
 # CI mode (the every-push check):
 node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json
 
-# Release mode (must fail today with the qualification-status reason):
-node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
+# Release mode (the release-certification gate):
+node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json tools/client-perf/release-budgets.json
 ```
 
-The outstanding requirement before any release can be
-performance-certified is the physical-device qualification: run the
-matrix on real devices (the procedure below), record the rows in a
-clean completed run, promote it, and re-record the budget rows and the
-qualification block (`status: "physical"`, `qualified_at`,
-`release_tiers`, the physical device rows) from the physical
-measurements. Until then the gate prints status `lab` in CI and
-refuses certification in release mode.
+Release certification is the physical-device procedure below applied
+to real devices: run the matrix, record the rows in a clean completed
+run, promote it, and re-record the budget rows and the qualification
+block (`status: "physical"`, `qualified_at`, `release_tiers`, the
+physical device rows) from the physical measurements. The committed
+file carries that physical claim for the mainstream-desktop release
+tier; a lab claim can never certify a release.
 
 ## The physical-authority contract (what "physical" must prove)
 

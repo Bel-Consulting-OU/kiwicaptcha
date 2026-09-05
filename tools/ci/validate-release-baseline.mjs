@@ -157,7 +157,7 @@
  *      exempt, exactly as it is ceiling-exempt) whose budget row
  *      exceeds the tier's engineering target is a hard reason naming
  *      the cell and the target (e.g. 'sha20 warm ... exceeds the
- *      engineering target 4250 ms (budget 4734 ms)'); the
+ *      engineering target 4250 ms (e.g. budget 4734 ms on a synthetic fixture)'); the
  *      engineering-target rule only fires once the qualification
  *      gate has passed (status "physical"), so a lab-status file
  *      keeps failing release on the qualification reason alone. In CI
