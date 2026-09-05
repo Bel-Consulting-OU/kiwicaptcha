@@ -333,7 +333,7 @@ challenge_size() {
 # The deterministic largest-wire execution-armed issuance, per
 # algorithm: protocol v4 at the live execution-grammar maximum —
 # executionVersion: ExecutionChallengeGenerator::MAX_EXECUTION_VERSION
-# by NAME, never the positional grammar-v1 default — over the max-valid
+# by name, never the positional grammar-v1 default — over the max-valid
 # wire context the bundle endpoint accepts (a 128-byte scope, a 32-byte
 # execution action, the 64-byte decoy-name ceiling, decoy armed), with
 # issuances iterated until the stamped op count draws the version-5
