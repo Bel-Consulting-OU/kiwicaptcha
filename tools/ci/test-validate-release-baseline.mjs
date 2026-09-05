@@ -287,6 +287,15 @@ function physicalDevice(id, tier = RELEASE_TIER, opts = {}) {
   };
 }
 
+function inflateSha20(budgets) {
+  for (const cache of CACHE_STATES) {
+    for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
+      budgets.budgets[RELEASE_TIER].sha20[cache][metric] = 4734;
+    }
+  }
+  return budgets;
+}
+
 function physicalBudgets({ devices, status = 'physical', qualifiedAt = nowIso(), releaseTiers = [RELEASE_TIER], budgets = null }) {
   const file = budgets || baseBudgets();
   file.qualification = {
@@ -594,7 +603,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 //     the honest verdict the engineering-target block below records; a
 //     release-certifiable margin is exercised there.
 {
-  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   pass('healthy physical claim (one device, every cell): CI mode proves the claim', runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
   reject('healthy physical claim at the committed sha20 margins: release mode rejects on the engineering target (per-device sha20 floor met)', res, ['exceeds the engineering target 4250 ms'], ['is not "physical"']);
@@ -1029,7 +1038,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 //     passes.
 {
   const payload = schema3Payload();
-  const res = runValidator(payload, baseBudgets(), false);
+  const res = runValidator(payload, inflateSha20(baseBudgets()), false);
   check('engineering target: sha20 rows above the target in CI mode pass with the advisory warning printed', res, {
     status: 0,
     mustInclude: ['engineering-target advisory', 'sha20 warm solveMsP95 budget 4734 ms exceeds the engineering target 4250 ms'],
@@ -1043,7 +1052,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 //     absolute-ceiling reason, no measured-vs-budget reason. sha20 is
 //     not release-certifiable at the committed margins.
 {
-  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
   reject('engineering target: sha20 budget 4734 ms (89-95% of the wall) rejects in release mode on the engineering-target reason', res, [
     'exceeds the engineering target 4250 ms',
@@ -1058,7 +1067,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 // 48. The same healthy physical claim at the committed sha20 margins
 //     in CI mode: advisory only — passes with the warning printed.
 {
-  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const budgets = inflateSha20(physicalBudgets({ devices: [physicalDevice('dev-a')] }));
   const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false);
   check('engineering target: sha20 above the target in CI mode with a physical claim passes (advisory only)', res, {
     status: 0,
