@@ -379,6 +379,61 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
   });
 
+  test('audit-1 watchdog: a HELD risk-module asset ends in the controlled worker-unavailable state, never a SHA downgrade', async ({ page }) => {
+    // The lazy widget-risk.js module is REQUIRED for the argon2id solve
+    // tier (audit finding 1 keeps the required loads fail-closed). A
+    // hung risk asset must not stall the widget forever: the module
+    // watchdog bounds the wait and the flow enters the controlled
+    // kiwi:worker-unavailable state — one argon2id request, no
+    // weaker-profile re-request, no token, and no retry storm (the
+    // held route receives exactly one request).
+    const bodies = [];
+    await page.route('**/challenge', async (route) => {
+      bodies.push(route.request().postDataJSON() ?? {});
+      await route.continue();
+    });
+    let riskHits = 0;
+    const held = [];
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      held.push(route);
+    });
+    await page.goto('/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
+    expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+    // Exactly one hung attempt: the watchdog resolves the required load
+    // instead of retrying a route that never answers.
+    expect(riskHits).toBe(1);
+    expect(bodies, 'the worker-unavailable flow must not re-request a weaker challenge').toHaveLength(1);
+    expect(bodies[0].algorithm, 'the single challenge request must stay argon2id').toBe('argon2id');
+    for (const route of held.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+  });
+
+  test('audit-1 required chunk absent: an execution-armed challenge whose risk module cannot load mints no token (execution-unavailable)', async ({ page }) => {
+    // The ExecutionChallengeV1 runner lives in the lazy widget-risk.js
+    // module: a files-tier page whose risk asset 404s through the
+    // bounded retries must fail closed at the execution step — the
+    // controlled kiwi:execution-unavailable state, an empty token, and
+    // never a silent success. The interpreter is never fetched because
+    // the runner never loaded.
+    let riskHits = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+    });
+    const interpreterRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/assets/execution.')) interpreterRequests.push(req.url());
+    });
+    await page.goto('/?assets=files&execution=1');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:execution-unavailable', { timeout: 60_000 });
+    expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+    await expect.poll(() => riskHits, 'the missing module must repeat through the bounded retries').toBe(3);
+    expect(interpreterRequests, 'the interpreter must never be fetched when its runner cannot load').toEqual([]);
+  });
+
   test('a cross-origin lookalike runtime URL is refused by the worker origin guard (parsed origin equality, never a prefix check)', async ({ page }) => {
     // Serve the files-mode widget page from the http://localhost origin
     // (route-fulfilled; the same-origin assets and the challenge are
