@@ -380,7 +380,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
   });
 
   test('audit-1 watchdog: a HELD risk-module asset ends in the controlled worker-unavailable state, never a SHA downgrade', async ({ page }) => {
-    // The lazy widget-risk.js module is REQUIRED for the argon2id solve
+    // The lazy widget-risk.js module is required for the argon2id solve
     // tier (audit finding 1 keeps the required loads fail-closed). A
     // hung risk asset must not stall the widget forever: the module
     // watchdog bounds the wait and the flow enters the controlled

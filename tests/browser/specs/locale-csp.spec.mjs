@@ -404,7 +404,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
 
   // ── Audit finding 1: the challenge flow is never gated on the pack ──
   // The locale settlement is a pure language swap that repaints the
-  // CURRENT view. The first run() proceeds immediately with the English
+  // current view. The first run() proceeds immediately with the English
   // fallback; a late pack (the held route below) must switch the text
   // language without regressing the data-state the widget is in. Every
   // case drives the fixture in the strict files tier, holding the
@@ -455,7 +455,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     // module for its worker solve tier; holding the risk asset parks
     // the widget in the solving state for a deterministic window (the
     // module watchdog bounds it), which is when the released locale
-    // pack must repaint the CURRENT view.
+    // pack must repaint the current view.
     const heldLocale = [];
     await page.route('**/assets/locales*.js', async (route) => {
       heldLocale.push(route);
@@ -475,7 +475,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
 
     // The settle must repaint the solving view in French: the label is
     // the verifying key, the badge the working key, and the data-state
-    // attribute must REMAIN solving at the very instant the language
+    // attribute must remain solving at the very instant the language
     // switched — a settlement that regressed to idle would never show
     // this combination. (The hint element is not part of the
     // connecting/solving views — those transitions never rewrite it —

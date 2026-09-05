@@ -2,8 +2,8 @@ import { test, expect } from '@playwright/test';
 
 // Audit finding 1: an enabled telemetry mode (data-kiwi-telemetry="full"
 // or "minimal" on the container) starts the lazy widget-telemetry.js
-// module load OPPORTUNISTICALLY at init, but the challenge flow NEVER
-// awaits it. The session attaches only when the module registers BEFORE
+// module load opportunistically at init, but the challenge flow never
+// awaits it. The session attaches only when the module registers before
 // this generation's challenge request went out (the driver's requestSent
 // flag, checked in the load's .then()); once the request is sent, the
 // generation solves with the normal empty "{}" telemetry stub — never a
@@ -52,7 +52,7 @@ test.describe('Lazy telemetry module acquisition (audit finding 1)', () => {
     expect(token.length, 'the solve must mint a token while the module is held').toBeGreaterThan(0);
     expect(tokenTelemetry(token), 'a generation that sent its request before the module registered must embed the empty telemetry stub').toEqual({});
 
-    // Release the module: it registers AFTER the request was sent, so
+    // Release the module: it registers after the request was sent, so
     // the requestSent guard refuses the attach for this generation.
     for (const route of held.splice(0)) {
       await route.continue().catch(() => {});
