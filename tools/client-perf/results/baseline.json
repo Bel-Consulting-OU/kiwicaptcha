@@ -11,6 +11,44 @@
     "cpus": "18 x Apple M5 Pro",
     "php": "PHP 8.5.4 (cli) (built: Mar 10 2026 23:15:23) (NTS)"
   },
+  "clientAssets": {
+    "kiwicaptcha-wasm.js": {
+      "bytes": 97815,
+      "sha256": "a6a950b574e173bfe47597e4bab9d9e34ded61618780db86a58156b0f119f12f"
+    },
+    "kiwi-worker.js": {
+      "bytes": 24819,
+      "sha256": "f0a2d3cf72a24dedd78fb9fbd8fd1e6e72f3fb1599418f50d3b613d2cbf57e8b"
+    },
+    "widget-driver.js": {
+      "bytes": 99146,
+      "sha256": "bd57133de2737fa7921126ab9e12edbbc48e0045674e9fa85efe506edbf2f142"
+    },
+    "widget-risk.js": {
+      "bytes": 31644,
+      "sha256": "fbbbc24558c6eed1612c6dd225bc8831bc45d9b7e7066bdbd603bf4cf938a98e"
+    },
+    "widget-telemetry.js": {
+      "bytes": 2922,
+      "sha256": "f68a76fdb727859ebefb39dce2a70a15b2c3e1cbb54383249ad4e13126e2f9af"
+    },
+    "widget-locales.js": {
+      "bytes": 13395,
+      "sha256": "aade1c8561c3180ad5a2c9e919454b326de86e6f3535449b641cac9c11e7037d"
+    },
+    "widget-compat.js": {
+      "bytes": 27078,
+      "sha256": "b8b5ceaa1214feff84cea486c9601384984ac22c2d4406238847ab5c1a03352c"
+    },
+    "widget.css": {
+      "bytes": 13863,
+      "sha256": "7bae1a85eb1e141a8a2a704075907b2eb84b7eaadec4371647ed734e37bfbe19"
+    },
+    "execution-interpreter.js": {
+      "bytes": 35728,
+      "sha256": "1064c519515ce4825231e1bcef7bcd18d29ee83da7561e3fe6581e757d474806"
+    }
+  },
   "fixture": {
     "router": "tests/browser/router.php",
     "port": 8091,
