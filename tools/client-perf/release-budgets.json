@@ -22,7 +22,7 @@
       }
     ]
   },
-  "note": "Real measured p95 budgets, recorded on the lab rig (MacBook-Pro.local, 18 x Apple M5 Pro, Chromium 151.0.7922.34; the unthrottled mainstream-desktop tier IS the actual recording machine) at the real challenge configurations: Argon2id at the round-5 retuned adaptive-risk ladder (m=16384 KiB, t=3, p=1, target 4; the 8-bit rung of the earlier rows measured ~16 s p95, above the absolute 5000 ms UX ceiling that made the retune necessary), the rsw time-lock rungs at T=75,000 / 150,000 / 300,000 squarings (the default rung, the midpoint and the protocol ceiling of 10,000..=300,000), SHA-256 at 16/18/20 bits, and the ExecutionChallengeV1 cells (the files-tier execvm/execsha18/execargon/execchain and the inline-tier execvminline/execsha18inline). Every row is ceil(1.2 x merged p95) of the measurements in tools/client-perf/results/baseline.json: the p95 is computed over the concatenated repetitions of the cell's asset modes (the harness percentile semantics), and the fixed 20% margin is the documented allowance for the CDP-emulation noise this lab itself measures, not a placeholder factor. Evidence runs: results/run-2026-09-03.json (desktop real-ladder run, 12 SHA / 6 Argon reps per mode), tools/client-perf/results/results-2026-09-04.json (focused run, 50 reps, the rsw rungs and the inline execution cells), tools/client-perf/results/results-2026-09-05.json (the round-5 target-4 re-record of the argon family, argon2id/execargon/execchain, 12 Argon reps per mode: argon2id p95 621/850 ms, execargon p95 1179/877 ms, execchain p95 709/1111 ms cold/warm), and tools/client-perf/results/results-2026-09-05-exec-v5.json (the live-grammar execution re-record, audit finding 1: every armed cell ran with ?exec_cap=5, the protocol/execution-v1.json manifest maximum — the earlier execution rows measured the fixture's historical v3 default — 20 SHA-profile / 12 Argon reps per mode, every rep decoding executionVersion 5; execvm p95 16/22 ms, execsha18 p95 1446/1471 ms, execargon p95 912/615 ms, execchain p95 556/860 ms, execvminline p95 19/19 ms, execsha18inline p95 320/363 ms cold/warm). absoluteP95Ceilings declares the absolute interactive UX ceiling of every certified tier (5000 ms solve and page-to-verified p95 on mainstream-desktop): a budget row above the ceiling is a hard rejection even when measurements are below it. The interactive/non-interactive classification derives from the harness difficulty profiles in tools/client-perf/client-perf.mjs (audit finding 4): execchain carries interactive: false — it is budgeted and measured like every cell but is never counted as an ordinary interactive release cell (it models the composed chained-escalation flow, a SHA request escalated to the memory-hard rung, whose p95 is not the experience of an interactive rung a user is sent to directly) — and every other difficulty is interactive and ceiling-subject. The budgets file itself declares no classification and cannot change one. The qualified tier scope is mainstream-desktop only: it is the tier that represents the actual lab hardware. The five emulation tiers (low-android, mid-android, flagship-android, older-iphone, current-iphone) and low-desktop carry no budget rows because no real-ladder qualification evidence exists for them; emulation tiers are calibration signals, never release boundaries. The release-gate procedure (physical-device qualification replacing this file tier by tier) is documented in tools/client-perf/README.md. qualification.release_tiers names the release-certification ladder (mainstream-desktop today, the only tier with real-harness evidence); extending the ladder means adding that tier's p95 budget rows, its absoluteP95Ceilings entry and its physical-device evidence, never an invented tier name.",
+  "note": "Real measured p95 budgets, recorded on the lab rig (MacBook-Pro.local, 18 x Apple M5 Pro, Chromium 151.0.7922.34; the unthrottled mainstream-desktop tier IS the actual recording machine) at the real challenge configurations: Argon2id at the round-5 retuned adaptive-risk ladder (m=16384 KiB, t=3, p=1, target 4; the 8-bit rung of the earlier rows measured ~16 s p95, above the absolute 5000 ms UX ceiling that made the retune necessary), the rsw time-lock rungs at T=75,000 / 150,000 / 300,000 squarings (the default rung, the midpoint and the protocol ceiling of 10,000..=300,000), SHA-256 at 16/18/20 bits, and the ExecutionChallengeV1 cells (the files-tier execvm/execsha18/execargon/execchain and the inline-tier execvminline/execsha18inline). Every row is ceil(1.2 x merged p95) of the measurements in tools/client-perf/results/baseline.json: the p95 is computed over the concatenated repetitions of the cell's asset modes (the harness percentile semantics), and the fixed 20% margin is the documented allowance for the CDP-emulation noise this lab itself measures, not a placeholder factor. Evidence runs: results/run-2026-09-03.json (desktop real-ladder run, 12 SHA / 6 Argon reps per mode), tools/client-perf/results/results-2026-09-04.json (focused run, 50 reps, the rsw rungs and the inline execution cells), tools/client-perf/results/results-2026-09-05.json (the round-5 target-4 re-record of the argon family, argon2id/execargon/execchain, 12 Argon reps per mode: argon2id p95 621/850 ms, execargon p95 1179/877 ms, execchain p95 709/1111 ms cold/warm), and tools/client-perf/results/results-2026-09-05-exec-v5.json (the live-grammar execution re-record, audit finding 1: every armed cell ran with ?exec_cap=5, the protocol/execution-v1.json manifest maximum \u2014 the earlier execution rows measured the fixture's historical v3 default \u2014 20 SHA-profile / 12 Argon reps per mode, every rep decoding executionVersion 5; execvm p95 16/22 ms, execsha18 p95 1446/1471 ms, execargon p95 912/615 ms, execchain p95 556/860 ms, execvminline p95 19/19 ms, execsha18inline p95 320/363 ms cold/warm). absoluteP95Ceilings declares the absolute interactive UX ceiling of every certified tier (5000 ms solve and page-to-verified p95 on mainstream-desktop): a budget row above the ceiling is a hard rejection even when measurements are below it. The interactive/non-interactive classification derives from the harness difficulty profiles in tools/client-perf/client-perf.mjs (audit finding 4): execchain carries interactive: false \u2014 it is budgeted and measured like every cell but is never counted as an ordinary interactive release cell (it models the composed chained-escalation flow, a SHA request escalated to the memory-hard rung, whose p95 is not the experience of an interactive rung a user is sent to directly) \u2014 and every other difficulty is interactive and ceiling-subject. The budgets file itself declares no classification and cannot change one. The qualified tier scope is mainstream-desktop only: it is the tier that represents the actual lab hardware. The five emulation tiers (low-android, mid-android, flagship-android, older-iphone, current-iphone) and low-desktop carry no budget rows because no real-ladder qualification evidence exists for them; emulation tiers are calibration signals, never release boundaries. The release-gate procedure (physical-device qualification replacing this file tier by tier) is documented in tools/client-perf/README.md. qualification.release_tiers names the release-certification ladder (mainstream-desktop today, the only tier with real-harness evidence); extending the ladder means adding that tier's p95 budget rows, its absoluteP95Ceilings entry and its physical-device evidence, never an invented tier name.",
   "recordAgeDays": 90,
   "minShaReps": 12,
   "minArgonReps": 6,
@@ -53,132 +53,132 @@
     "mainstream-desktop": {
       "argon2id": {
         "cold": {
-          "solveMsP95": 746,
-          "pageToVerifiedMsP95": 757
+          "solveMsP95": 985,
+          "pageToVerifiedMsP95": 997
         },
         "warm": {
-          "solveMsP95": 1020,
-          "pageToVerifiedMsP95": 1031
+          "solveMsP95": 1153,
+          "pageToVerifiedMsP95": 1163
         }
       },
       "execargon": {
         "cold": {
-          "solveMsP95": 1095,
-          "pageToVerifiedMsP95": 1118
+          "solveMsP95": 1149,
+          "pageToVerifiedMsP95": 1173
         },
         "warm": {
-          "solveMsP95": 738,
-          "pageToVerifiedMsP95": 748
+          "solveMsP95": 1534,
+          "pageToVerifiedMsP95": 1543
         }
       },
       "execchain": {
         "cold": {
-          "solveMsP95": 667,
-          "pageToVerifiedMsP95": 687
+          "solveMsP95": 1096,
+          "pageToVerifiedMsP95": 1119
         },
         "warm": {
-          "solveMsP95": 1033,
-          "pageToVerifiedMsP95": 1042
+          "solveMsP95": 1474,
+          "pageToVerifiedMsP95": 1498
         }
       },
       "execsha18": {
         "cold": {
-          "solveMsP95": 1735,
-          "pageToVerifiedMsP95": 1755
+          "solveMsP95": 2228,
+          "pageToVerifiedMsP95": 2252
         },
         "warm": {
-          "solveMsP95": 1766,
-          "pageToVerifiedMsP95": 1776
+          "solveMsP95": 1820,
+          "pageToVerifiedMsP95": 1830
         }
       },
       "execsha18inline": {
         "cold": {
-          "solveMsP95": 384,
-          "pageToVerifiedMsP95": 394
+          "solveMsP95": 622,
+          "pageToVerifiedMsP95": 633
         },
         "warm": {
-          "solveMsP95": 435,
-          "pageToVerifiedMsP95": 445
+          "solveMsP95": 430,
+          "pageToVerifiedMsP95": 440
         }
       },
       "execvm": {
         "cold": {
-          "solveMsP95": 20,
-          "pageToVerifiedMsP95": 41
+          "solveMsP95": 22,
+          "pageToVerifiedMsP95": 52
         },
         "warm": {
-          "solveMsP95": 26,
-          "pageToVerifiedMsP95": 37
+          "solveMsP95": 28,
+          "pageToVerifiedMsP95": 39
         }
       },
       "execvminline": {
         "cold": {
-          "solveMsP95": 23,
-          "pageToVerifiedMsP95": 33
+          "solveMsP95": 25,
+          "pageToVerifiedMsP95": 35
         },
         "warm": {
-          "solveMsP95": 24,
-          "pageToVerifiedMsP95": 33
+          "solveMsP95": 30,
+          "pageToVerifiedMsP95": 42
         }
       },
       "rsw150k": {
         "cold": {
-          "solveMsP95": 288,
-          "pageToVerifiedMsP95": 318
+          "solveMsP95": 218,
+          "pageToVerifiedMsP95": 230
         },
         "warm": {
-          "solveMsP95": 349,
-          "pageToVerifiedMsP95": 382
+          "solveMsP95": 224,
+          "pageToVerifiedMsP95": 235
         }
       },
       "rsw300k": {
         "cold": {
-          "solveMsP95": 579,
-          "pageToVerifiedMsP95": 606
+          "solveMsP95": 375,
+          "pageToVerifiedMsP95": 395
         },
         "warm": {
-          "solveMsP95": 852,
-          "pageToVerifiedMsP95": 873
+          "solveMsP95": 350,
+          "pageToVerifiedMsP95": 360
         }
       },
       "rsw75k": {
         "cold": {
-          "solveMsP95": 170,
-          "pageToVerifiedMsP95": 205
+          "solveMsP95": 117,
+          "pageToVerifiedMsP95": 139
         },
         "warm": {
-          "solveMsP95": 255,
-          "pageToVerifiedMsP95": 277
+          "solveMsP95": 119,
+          "pageToVerifiedMsP95": 139
         }
       },
       "sha16": {
         "cold": {
-          "solveMsP95": 272,
-          "pageToVerifiedMsP95": 291
+          "solveMsP95": 306,
+          "pageToVerifiedMsP95": 330
         },
         "warm": {
-          "solveMsP95": 236,
-          "pageToVerifiedMsP95": 246
+          "solveMsP95": 315,
+          "pageToVerifiedMsP95": 328
         }
       },
       "sha18": {
         "cold": {
-          "solveMsP95": 869,
-          "pageToVerifiedMsP95": 890
+          "solveMsP95": 1426,
+          "pageToVerifiedMsP95": 1450
         },
         "warm": {
-          "solveMsP95": 2182,
-          "pageToVerifiedMsP95": 2195
+          "solveMsP95": 958,
+          "pageToVerifiedMsP95": 972
         }
       },
       "sha20": {
         "cold": {
-          "solveMsP95": 3954,
-          "pageToVerifiedMsP95": 3975
+          "solveMsP95": 4426,
+          "pageToVerifiedMsP95": 4448
         },
         "warm": {
-          "solveMsP95": 4543,
-          "pageToVerifiedMsP95": 4554
+          "solveMsP95": 4734,
+          "pageToVerifiedMsP95": 4746
         }
       }
     }
