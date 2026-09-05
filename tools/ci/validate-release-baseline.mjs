@@ -124,13 +124,19 @@
  *      rejected when its measured p95 exceeds its budget row or when
  *      its interactive budget row exceeds the tier's absolute
  *      ceiling; a budget above the ceiling can never be bought out
- *      by low measurements. execchain is the one explicitly
- *      non-interactive difficulty (budgets.nonInteractiveDifficulties,
- *      documented in the budget notes and the lab README): it models
- *      the composed chained-escalation flow, so it is measured and
- *      budgeted like every cell but never counted as an ordinary
- *      interactive release cell and never ceiling-checked. Every
- *      other difficulty is interactive and subject to the ceiling.
+ *      by low measurements. The interactive/non-interactive
+ *      classification derives from the HARNESS difficulty profiles
+ *      (client-perf.mjs: execchain carries `interactive: false` —
+ *      audit finding 4 — it models the composed chained-escalation
+ *      flow, so it is measured and budgeted like every cell but never
+ *      counted as an ordinary interactive release cell and never
+ *      ceiling-checked; every other difficulty is interactive and
+ *      ceiling-subject, and a profile without an explicit flag
+ *      defaults to interactive). The budgets file declares no
+ *      classification: an unknown/deprecated nonInteractiveDifficulties
+ *      field in the budget file is itself a hard reason, because
+ *      changing only the budgets must never be able to change a
+ *      difficulty's interactive classification.
  *      In release mode (and for a committed physical claim in CI
  *      mode), every certified tier must carry an
  *      absoluteP95Ceilings entry: a release ladder without absolute
@@ -147,6 +153,21 @@
  *      Chronology stays strict: tested_at <= qualified_at and
  *      tested_at <= generated_at, and qualified_at never precedes
  *      the newest physical tested_at.
+ *  11. execution-version evidence (audit finding 1): the execution
+ *      manifest protocol/execution-v1.json is the authority for the
+ *      live execution grammar. Every execution result row (a row
+ *      whose difficulty is an execution-dimension harness profile —
+ *      execvm/execsha18/execargon/execchain/execvminline/
+ *      execsha18inline) must record the executionVersion the row
+ *      actually ran: the version byte the harness decoded from the
+ *      armed /challenge responses of the row's repetitions, which
+ *      must equal the manifest's max_execution_version. A row whose
+ *      executionVersion is absent, or is below the manifest maximum,
+ *      is evidence of an execution grammar that is not the live one
+ *      (the fixture's historical v3 default when ?exec_cap is not
+ *      raised) and is a hard reason naming the cell. Non-execution
+ *      rows (sha/argon/rsw) carry no executionVersion field and are
+ *      unaffected.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -226,6 +247,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 const HARNESS_FILE = join(REPO_ROOT, 'tools', 'client-perf', 'client-perf.mjs');
 const DEFAULT_BUDGETS = join(REPO_ROOT, 'tools', 'client-perf', 'release-budgets.json');
+const EXECUTION_MANIFEST_FILE = join(REPO_ROOT, 'protocol', 'execution-v1.json');
 
 const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/2';
 const RELEASE_STATUSES = ['lab', 'physical'];
@@ -310,7 +332,7 @@ function harnessDifficulties(source) {
   return names;
 }
 
-/** {difficulty -> {isArgon, assetModes}} from the harness source. */
+/** {difficulty -> {isArgon, dimension, interactive, assetModes}} from the harness source. */
 function harnessDifficultyProfiles(source) {
   const names = harnessDifficulties(source);
   const profiles = {};
@@ -322,12 +344,26 @@ function harnessDifficultyProfiles(source) {
     const end = source.indexOf('\n  }', start);
     const block = source.slice(start, end);
     const isArgon = /isArgon: true/.test(block);
+    const dimensionMatch = block.match(/dimension: '([a-z]+)'/);
+    if (!dimensionMatch) {
+      throw new Error(`validate-release-baseline: difficulty ${name} has no parseable dimension in ${HARNESS_FILE}; update the validator`);
+    }
     const modesMatch = block.match(/assetModes: \[([^\]]*)\]/);
     if (!modesMatch) {
       throw new Error(`validate-release-baseline: difficulty ${name} has no parseable assetModes in ${HARNESS_FILE}; update the validator`);
     }
     const assetModes = [...modesMatch[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
-    profiles[name] = { isArgon, assetModes };
+    profiles[name] = {
+      isArgon,
+      dimension: dimensionMatch[1],
+      // The interactive classification (audit finding 4) derives from
+      // the harness profile alone: interactive unless the profile
+      // explicitly declares `interactive: false` (execchain is the
+      // only such difficulty). The budgets file cannot declare or
+      // change a classification.
+      interactive: !/interactive: false/.test(block),
+      assetModes,
+    };
   }
   return profiles;
 }
@@ -437,6 +473,23 @@ function main() {
 
   const budgets = loadJson(budgetsPath, 'release budgets');
   const payload = loadJson(baselinePath, 'baseline');
+
+  // The live execution-grammar authority (audit finding 1):
+  // protocol/execution-v1.json declares max_execution_version; every
+  // execution result row must record that version (see the
+  // execution-version evidence rule below). A malformed manifest is a
+  // hard reason, never a silent pass.
+  const executionManifest = loadJson(EXECUTION_MANIFEST_FILE, 'execution manifest');
+  let executionMaxVersion = null;
+  if (
+    executionManifest.$schema !== 'kiwicaptcha.execution-v1/1' ||
+    !Number.isInteger(executionManifest.max_execution_version) ||
+    executionManifest.max_execution_version < 1
+  ) {
+    reasons.push(`execution manifest ${EXECUTION_MANIFEST_FILE} is not the kiwicaptcha.execution-v1/1 authority (schema ${JSON.stringify(executionManifest.$schema)}, max_execution_version ${JSON.stringify(executionManifest.max_execution_version)})`);
+  } else {
+    executionMaxVersion = executionManifest.max_execution_version;
+  }
 
   const reasons = [];
   const notes = [];
@@ -630,27 +683,26 @@ function main() {
     return absoluteCeilings[tier] || null;
   };
 
-  // The explicit non-interactive difficulty set (audit finding 2):
-  // execchain models the composed chained-escalation flow (SHA
-  // request escalated to the memory-hard rung mid-flow), so it is
-  // measured and budgeted like every cell but never counted as an
-  // ordinary interactive release cell and never subjected to the
-  // absolute UX ceiling. Every other difficulty is interactive and
-  // ceiling-subject. Unknown entries are rejections: a file cannot
-  // invent a difficulty to exempt from the ceiling.
-  const nonInteractiveDifficulties = Array.isArray(budgets.nonInteractiveDifficulties)
-    ? budgets.nonInteractiveDifficulties
-    : [];
-  if (!Array.isArray(budgets.nonInteractiveDifficulties)) {
-    reasons.push(`budget file ${budgetsPath}: nonInteractiveDifficulties must be an array of harness difficulties (e.g. ["execchain"]) that are budgeted but never counted as ordinary interactive release cells`);
-  } else {
-    for (const d of nonInteractiveDifficulties) {
-      if (!Object.prototype.hasOwnProperty.call(difficultyProfiles, d)) {
-        reasons.push(`budget file ${budgetsPath}: nonInteractiveDifficulties names unknown difficulty ${JSON.stringify(d)} (only harness difficulties may be classified non-interactive)`);
-      }
-    }
+  // The interactive/non-interactive classification (audit finding 4):
+  // it derives from the HARNESS difficulty profiles — execchain models
+  // the composed chained-escalation flow (a SHA request escalated to
+  // the memory-hard rung mid-flow), so its profile declares
+  // `interactive: false`: it is measured and budgeted like every cell
+  // but never counted as an ordinary interactive release cell and
+  // never subjected to the absolute UX ceiling. Every other difficulty
+  // is interactive and ceiling-subject (a profile without an explicit
+  // flag defaults to interactive). The budgets file must NOT carry its
+  // own classification: the deprecated nonInteractiveDifficulties
+  // field of the earlier rounds was the audit's escape hatch — it
+  // lived in the very file whose budgets it relaxed. Its presence is
+  // an unknown/deprecated field and a hard reason: changing only the
+  // release budgets can never change a difficulty's interactive
+  // classification.
+  if (Object.prototype.hasOwnProperty.call(budgets, 'nonInteractiveDifficulties')) {
+    reasons.push(`budget file ${budgetsPath}: nonInteractiveDifficulties is an unknown/deprecated field — the interactive/non-interactive classification derives from the harness difficulty profiles (client-perf.mjs, execchain interactive: false), never from the budgets file; remove the field`);
   }
-  const isNonInteractive = (difficulty) => nonInteractiveDifficulties.includes(difficulty);
+  const isNonInteractive = (difficulty) =>
+    difficultyProfiles[difficulty] ? difficultyProfiles[difficulty].interactive === false : false;
 
   // The released-mode set: the budget difficulty list must equal the
   // harness's difficulty set. A mode the harness solves but the budget
@@ -814,9 +866,9 @@ function main() {
   // same cell space: an interactive cell whose budget row exceeds the
   // tier's absoluteP95Ceilings is rejected whether or not the
   // measurements are below the budget. Cells of a non-interactive
-  // difficulty (budgets.nonInteractiveDifficulties, execchain) are
-  // budgeted normally but exempt from the interactive ceiling and
-  // counted separately in the summary.
+  // difficulty (the harness profile's interactive: false — execchain,
+  // audit finding 4) are budgeted normally but exempt from the
+  // interactive ceiling and counted separately in the summary.
   //
   // When the file claims physical qualification, the release-tier
   // cells are governed by the physical-evidence contract below
@@ -1132,14 +1184,16 @@ function main() {
     }
   }
   // ── Absolute UX ceiling compliance (audit finding 2). ──────────────
-  // Interactive budget rows (every difficulty except the documented
-  // non-interactive class, budgets.nonInteractiveDifficulties) must
-  // sit at or under the tier's absoluteP95Ceilings: a budget above
-  // the absolute ceiling is rejected even when the measurements are
-  // below it, so an inflated budget can never buy the ceiling out.
-  // Non-interactive cells (execchain) are measured and budgeted
-  // normally but are not ordinary interactive release cells and are
-  // not ceiling-checked.
+  // Interactive budget rows (every difficulty whose harness profile is
+  // not interactive: false — execchain is the only non-interactive
+  // profile, audit finding 4) must sit at or under the tier's
+  // absoluteP95Ceilings: a budget above the absolute ceiling is
+  // rejected even when the measurements are below it, so an inflated
+  // budget can never buy the ceiling out. Non-interactive cells
+  // (execchain) are measured and budgeted normally but are not
+  // ordinary interactive release cells and are not ceiling-checked.
+  // The classification is read from the harness profiles, so a budget
+  // file mutation alone can never change it.
   {
     const ceilingViolations = [];
     let interactiveCells = 0;
@@ -1167,6 +1221,62 @@ function main() {
   }
   if (budgetViolations.length) {
     reasons.push(`${budgetViolations.length} p95 budget violation(s) (${budgetViolations.slice(0, 6).join('; ')}${budgetViolations.length > 6 ? '; ...' : ''})`);
+  }
+
+  // ── Execution-version evidence (audit finding 1). ──────────────────
+  // The execution manifest (protocol/execution-v1.json) declares the
+  // live grammar maximum. Every execution result row — a row whose
+  // difficulty is one of the harness's execution-dimension profiles —
+  // must carry an executionVersion equal to that maximum: the program
+  // version byte the harness decoded from the armed /challenge
+  // responses the row's repetitions exercised. A missing or
+  // below-maximum executionVersion is evidence recorded against an
+  // older grammar (the fixture's historical version-3 default when an
+  // armed page does not raise ?exec_cap) and is a hard reason naming
+  // the cell. Non-execution rows (sha/argon/rsw) carry no
+  // executionVersion field and are unaffected. The scan covers the
+  // payload results and, when present, the per-device physical
+  // evidence index.
+  if (executionMaxVersion !== null) {
+    const executionDifficulties = Object.keys(difficultyProfiles).filter(
+      (d) => difficultyProfiles[d].dimension === 'execution',
+    );
+    if (executionDifficulties.length === 0) {
+      reasons.push(`harness ${HARNESS_FILE} defines no execution-dimension difficulty; the execution-version evidence rule cannot bind`);
+    }
+    const executionRows = [];
+    const collectExecutionRows = (rowsByKey, labelFor) => {
+      for (const [key, row] of Object.entries(rowsByKey)) {
+        if (key.startsWith('multi-widget') || !row || typeof row !== 'object') continue;
+        const segments = key.split(':');
+        const difficulty =
+          typeof row.difficulty === 'string'
+            ? row.difficulty
+            : segments.length >= 2
+              ? segments[1]
+              : null;
+        if (difficulty !== null && executionDifficulties.includes(difficulty)) {
+          executionRows.push({ label: labelFor(key), row });
+        }
+      }
+    };
+    collectExecutionRows(results, (key) => `baseline row ${key}`);
+    const physicalIndex = payload.physical_results;
+    if (physicalIndex && typeof physicalIndex === 'object' && !Array.isArray(physicalIndex)) {
+      for (const [deviceId, index] of Object.entries(physicalIndex)) {
+        if (!index || typeof index !== 'object' || Array.isArray(index)) continue;
+        collectExecutionRows(index, (key) => `physical device ${deviceId} row ${key}`);
+      }
+    }
+    for (const { label, row } of executionRows) {
+      const actual = row.executionVersion;
+      if (actual === executionMaxVersion) continue;
+      if (typeof actual === 'number') {
+        reasons.push(`${label}: executionVersion ${actual} is not the live grammar version ${executionMaxVersion} (the execution manifest max_execution_version) — execution evidence must be recorded at the manifest maximum, audit finding 1`);
+      } else {
+        reasons.push(`${label}: executionVersion is not recorded — an execution result row must carry the program version byte its repetitions decoded from the armed /challenge responses, equal to the manifest max_execution_version ${executionMaxVersion}, audit finding 1`);
+      }
+    }
   }
 
   // ── Completed-run guards: current-harness (schema 3) payloads only. ─
