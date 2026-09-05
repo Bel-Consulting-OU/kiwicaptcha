@@ -1173,6 +1173,7 @@ jobs:
           set -euo pipefail
           bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
       - name: docs-lint (prose lint, baseline integrity)
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         # The comparison base is the PR base branch or the push's
         # previous head, so a whole proposed change may only decrease the
         # baseline; a single-commit comparison is insufficient. The
@@ -1187,20 +1188,24 @@ jobs:
         # regenerating the baseline. The adoption manifest is one-shot:
         # every entry must be absent from the base baseline, and an entry
         # that already has a row there is stale (its adoption landed) and
-        # fails the step, forcing its removal. If no comparison base is
-        # resolvable the step fails closed: a baseline that cannot be
-        # compared cannot be trusted.
+        # fails the step, forcing its removal. The step-level gate runs
+        # the comparison only on push and pull_request, the events with
+        # a defined base; a workflow_dispatch has no base commit, so a
+        # manual run skips this step instead of failing on it. Within
+        # the gated events an unresolvable base still fails closed: a
+        # baseline that cannot be compared cannot be trusted.
         run: |
           set -euo pipefail
           # The comparison base is resolved from the explicit event
           # context only: a pull_request compares against its base branch
-          # head, a push against the previous head. Any other trigger
-          # (workflow_dispatch, schedule, merge_group) has no defined
-          # base — the step fails closed with a clear message instead of
-          # silently comparing against an arbitrary commit (an
-          # environment-variable probe with unconditional parent
-          # fallbacks could compare a single-commit window and understate
-          # a whole change).
+          # head, a push against the previous head. The step-level gate
+          # above keeps this step off workflow_dispatch and every other
+          # event with no defined base, so the fallback below is a
+          # defensive guard: it fails closed with a clear message
+          # instead of silently comparing against an arbitrary commit
+          # (an environment-variable probe with unconditional parent
+          # fallbacks could compare a single-commit window and
+          # understate a whole change).
           case "${{ github.event_name }}" in
             pull_request)
               BASE_SHA="${{ github.event.pull_request.base.sha }}"
@@ -1742,12 +1747,24 @@ jobs:
     # baseline is not a hard ratchet. The noisy CI timing steps in the
     # "Performance budgets" job never set the flag and keep the note
     # degradation. The byte budgets are not part of this job; they stay
-    # gating in "Performance budgets" on every push.
+    # gating in "Performance budgets" on every push. The job publishes
+    # the same digest-pinned Redis service as the "Performance budgets"
+    # job, mapped to the 6399 host port that the benchmark scripts
+    # hard-code: the default KC_REDIS_URL of a manual run
+    # (redis://127.0.0.1:6399) reaches a live instance instead of a
+    # connection refusal. A dispatch that supplies an external redis_url
+    # still benchmarks that external instance; the local service then
+    # simply sits idle.
     if: github.event_name == 'workflow_dispatch'
     name: Performance latency (manual hard-ratchet benchmark)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6399:6379
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
