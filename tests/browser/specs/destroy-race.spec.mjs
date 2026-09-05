@@ -10,7 +10,7 @@ import { test, expect } from '@playwright/test';
 // (data-kiwi-destroyed), cancels the generation record, tears the
 // listeners/timers down and clears the token — but a solve already in
 // flight keeps running to completion in the background and keeps calling
-// setProgress() for every chunk after the destroy. The race is a P2
+// setProgress() for every chunk after the destroy. The race is a
 // race on CI where those queued progress writes landed on a destroyed —
 // but still in-DOM — widget. The fix: setProgress() no-ops when the
 // widget is destroyed, the same dataset flag destroy sets first, so a
