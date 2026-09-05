@@ -16,8 +16,8 @@
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 29778,
-      "gzip_bytes_zlib13": 29778
+      "gzip_bytes_zlib12": 26788,
+      "gzip_bytes_zlib13": 26788
     },
     "widget_worker": {
       "raw_bytes": 24819,
@@ -42,8 +42,8 @@
       "brotli_cap_bytes": 9500,
       "copies_identical": true,
       "note": "The execution interpreter asset, the lazy module the armed execution dimension fetches. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields and the hard caps are authoritative.",
-      "gzip_bytes_zlib12": 10380,
-      "gzip_bytes_zlib13": 10380
+      "gzip_bytes_zlib12": 9738,
+      "gzip_bytes_zlib13": 9738
     },
     "challenge_response_json": {
       "sha256_bytes_min": 1014,
