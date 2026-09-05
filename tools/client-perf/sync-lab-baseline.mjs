@@ -21,7 +21,15 @@
  *   - the argon family (argon2id, execargon, execchain) was
  *     re-recorded at the retuned ladder rung (target 4) on
  *     2026-09-05 (results-2026-09-05.json, 12 Argon reps per mode),
- *     replacing the target-8 rows of the earlier runs.
+ *     replacing the target-8 rows of the earlier runs,
+ *   - the six ExecutionChallengeV1 cells were re-recorded at the LIVE
+ *     execution grammar on 2026-09-05
+ *     (results-2026-09-05-exec-v5.json, 20 SHA-profile / 12 Argon
+ *     reps per mode): every armed query carries
+ *     ?exec_cap=<protocol/execution-v1.json max_execution_version>
+ *     (audit finding 1 — the earlier execution rows measured the
+ *     fixture's historical v3 default), and the merged rows carry the
+ *     executionVersion decoded from the armed /challenge responses.
  *
  * merged per (tier, difficulty, cache) exactly like the legacy row
  * shape (asset modes folded; every summary statistic recomputed over
@@ -29,6 +37,12 @@
  * semantics). Every OTHER row (the non-desktop emulation tiers, all
  * legacy-labelled) is preserved byte-for-byte: the script asserts the
  * untouched rows round-trip JSON.stringify identically.
+ *
+ * Execution-version honesty (audit finding 1): when the merged reps
+ * carry a decoded executionVersion (the execution cells), EVERY rep
+ * must decode the SAME version and the merged row records it; reps
+ * that disagree, or an execution row whose reps only partially
+ * decode, abort the surgery — a mixed-grammar merge is never silent.
  *
  * --difficulties restricts the surgery to the named difficulties (the
  * rows of those difficulties found in the runs replace the committed
@@ -52,6 +66,12 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 const BASELINE_PATH = join(REPO_ROOT, 'tools', 'client-perf', 'results', 'baseline.json');
+// The live execution-grammar authority (audit finding 1): the merged
+// execution rows must carry the manifest maximum, so the payload's
+// execution metadata records the same authority the rows attest to.
+const EXECUTION_MANIFEST = JSON.parse(
+  readFileSync(join(REPO_ROOT, 'protocol', 'execution-v1.json'), 'utf8'),
+);
 
 function percentile(sorted, p) {
   if (sorted.length === 0) return null;
@@ -139,6 +159,26 @@ for (const [mapKey, aggs] of [...merged.entries()].sort()) {
   row.longTaskCount = summarize(reps.map((s) => s.longTaskCount).filter((v) => v !== null));
   row.timedOutCount = reps.filter((s) => s.timedOut).length;
   row.errorCount = reps.filter((s) => s.errorCount > 0).length;
+  // Execution-version evidence (audit finding 1): when the merged reps
+  // carry a decoded executionVersion (the execution cells), every rep
+  // must decode the same version and the merged row records it. A
+  // disagreement — or an execution row whose reps only partially
+  // decoded — aborts the surgery: a mixed-grammar merge is never
+  // silent. Rows whose reps carry no executionVersion (sha/argon/rsw)
+  // simply skip the stamp.
+  const decodedVersions = reps
+    .map((s) => (s && typeof s.executionVersion === 'number' ? s.executionVersion : null))
+    .filter((v) => v !== null);
+  if (decodedVersions.length > 0) {
+    const distinct = [...new Set(decodedVersions)];
+    if (distinct.length !== 1 || decodedVersions.length !== reps.length) {
+      console.error(
+        `row ${difficulty}:${cache} execution reps disagree on executionVersion (${JSON.stringify(distinct)}, ${decodedVersions.length}/${reps.length} reps decoded); aborting — a mixed-grammar merge is never silent`,
+      );
+      process.exit(1);
+    }
+    row.executionVersion = distinct[0];
+  }
   newRows.push(row);
 }
 
@@ -220,12 +260,17 @@ payload.options = {
   argonBits: 4,
   argonMKib: 16384,
   mergedRuns: runDates,
-  note: 'the mainstream-desktop rows were recorded at the real adaptive-risk ladder (m=16384 KiB, t=3, p=1) and merged per cache across asset modes; the argon family (argon2id/execargon/execchain) was re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from results-2026-09-05.json; the emulation-tier rows remain the legacy pre-matrix recording and are not release-required',
+  note: 'the mainstream-desktop rows were recorded at the real adaptive-risk ladder (m=16384 KiB, t=3, p=1) and merged per cache across asset modes; the argon family (argon2id/execargon/execchain) was re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from results-2026-09-05.json; the execution cells were re-recorded at the LIVE execution grammar on 2026-09-05 from results-2026-09-05-exec-v5.json (audit finding 1: every armed query carries ?exec_cap=5, the protocol/execution-v1.json manifest maximum, and each execution rep and merged row records the issued executionVersion 5 decoded from the /challenge responses — the earlier execution rows measured the fixture\'s historical v3 default); the emulation-tier rows remain the legacy pre-matrix recording and are not release-required',
 };
 payload.generated_at = new Date().toISOString();
+payload.execution = {
+  maxVersion: EXECUTION_MANIFEST.max_execution_version,
+  manifestSchema: EXECUTION_MANIFEST.$schema,
+  note: 'the execution rows of this baseline were recorded at the manifest maximum (the harness arms every execution query with ?exec_cap=<maxVersion>; audit finding 1) and every execution result row records the executionVersion its repetitions decoded from the armed /challenge responses',
+};
 payload.legacy_note =
-  'LEGACY PRE-ROUND-105 RECORDING for the emulation tiers, surgically extended on 2026-09-04 and 2026-09-05: the mainstream-desktop rows (sha16/18/20, argon2id, execvm, execsha18, execargon, execchain, execvminline, execsha18inline, rsw75k, rsw150k, rsw300k) carry real-ladder measurements (Argon m=16384 KiB, rsw T=75,000/150,000/300,000) merged per cache across the inline and files asset modes: sha16/18/20 and the execution/rsw rows from the completed runs results/run-2026-09-03.json and tools/client-perf/results/results-2026-09-04.json (measured at the pre-retune Argon target 8 for the argon cells), and the argon family (argon2id/execargon/execchain) re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from the completed run tools/client-perf/results/results-2026-09-05.json (12 Argon reps per mode). Every other row is byte-for-byte the original legacy recording at the old fixture envelope (64 KiB Argon, fixture SHA default), which is not release-required evidence. The physical-device procedure in tools/client-perf/README.md remains the release boundary; qualification status is lab until physical-device data is recorded.';
-payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline.json (legacy pre-matrix recording; real-ladder lab rows merged 2026-09-04, argon family re-recorded at target 4 on 2026-09-05)';
+  'LEGACY PRE-ROUND-105 RECORDING for the emulation tiers, surgically extended on 2026-09-04 and 2026-09-05: the mainstream-desktop rows (sha16/18/20, argon2id, execvm, execsha18, execargon, execchain, execvminline, execsha18inline, rsw75k, rsw150k, rsw300k) carry real-ladder measurements (Argon m=16384 KiB, rsw T=75,000/150,000/300,000) merged per cache across the inline and files asset modes: sha16/18/20 and the execution/rsw rows from the completed runs results/run-2026-09-03.json and tools/client-perf/results/results-2026-09-04.json (measured at the pre-retune Argon target 8 for the argon cells), and the argon family (argon2id/execargon/execchain) re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from the completed run tools/client-perf/results/results-2026-09-05.json (12 Argon reps per mode). On 2026-09-05 the six ExecutionChallengeV1 cells were re-recorded at the LIVE execution grammar (?exec_cap=5 = the protocol/execution-v1.json manifest maximum) from the completed run tools/client-perf/results/results-2026-09-05-exec-v5.json (audit finding 1: the earlier execution rows measured the fixture\'s historical v3-era default): every execution rep and merged row records executionVersion 5, the program version byte decoded from the armed /challenge responses the reps exercised. Every other row is byte-for-byte the original legacy recording at the old fixture envelope (64 KiB Argon, fixture SHA default), which is not release-required evidence. The physical-device procedure in tools/client-perf/README.md remains the release boundary; qualification status is lab until physical-device data is recorded.';
+payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline.json (legacy pre-matrix recording; real-ladder lab rows merged 2026-09-04, argon family re-recorded at target 4 on 2026-09-05, execution cells re-recorded at the live grammar v5 on 2026-09-05)';
 
 const out = JSON.stringify(payload, null, 2) + '\n';
 if (write) {

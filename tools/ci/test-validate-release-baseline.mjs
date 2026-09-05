@@ -47,7 +47,7 @@ function harnessConst(source, label, pattern) {
   return m[1];
 }
 
-/** Tier names and difficulty profiles ({isArgon, assetModes}) in source order. */
+/** Tier names and difficulty profiles ({isArgon, dimension, interactive, assetModes}) in source order. */
 function harnessFacts(source) {
   const tiers = [];
   const tiersMatch = source.match(/const TIERS = \{([\s\S]*?)\n\};/);
@@ -69,8 +69,12 @@ function harnessFacts(source) {
       const body = source.slice(start, end);
       const modesMatch = body.match(/assetModes: \[([^\]]*)\]/);
       if (!modesMatch) throw new Error(`test-validate-release-baseline: difficulty ${name} has no parseable assetModes`);
+      const dimensionMatch = body.match(/dimension: '([a-z]+)'/);
+      if (!dimensionMatch) throw new Error(`test-validate-release-baseline: difficulty ${name} has no parseable dimension`);
       difficulties[name] = {
         isArgon: /isArgon: true/.test(body),
+        dimension: dimensionMatch[1],
+        interactive: !/interactive: false/.test(body),
         assetModes: [...modesMatch[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]),
       };
     }
@@ -90,6 +94,13 @@ const ARGON_BITS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'argon bits def
 const { tiers: TIERS, difficulties: DIFFICULTIES } = harnessFacts(HARNESS_SOURCE);
 const CACHE_STATES = ['cold', 'warm'];
 const RELEASE_TIER = 'mainstream-desktop';
+
+// The live execution-grammar authority (audit finding 1): the suite
+// reads the manifest maximum exactly like the validator, so every
+// fixture row of an execution-dimension difficulty carries an
+// executionVersion at the manifest maximum.
+const EXECUTION_MANIFEST = JSON.parse(readFileSync(join(REPO_ROOT, 'protocol', 'execution-v1.json'), 'utf8'));
+const EXECUTION_MAX_VERSION = EXECUTION_MANIFEST.max_execution_version;
 
 // ── Fixture helpers. ────────────────────────────────────────────────
 
@@ -152,6 +163,12 @@ function modeRow(device, tier, difficulty, cache, mode, samples) {
     errorCount: samples.filter((s) => s.errorCount > 0).length,
     timedOutCount: samples.filter((s) => s.timedOut).length,
   };
+  // Execution rows (audit finding 1) carry the live grammar version:
+  // the validator requires every execution result row's
+  // executionVersion to equal the execution manifest maximum.
+  if (DIFFICULTIES[difficulty] && DIFFICULTIES[difficulty].dimension === 'execution') {
+    row.executionVersion = EXECUTION_MAX_VERSION;
+  }
   if (device) {
     row.source = 'physical';
     row.device_id = device;
@@ -298,6 +315,15 @@ function physicalPayload(deviceIndexes) {
   payload.results = {};
   payload.physical_results = deviceIndexes;
   return payload;
+}
+
+/** Result-row keys whose difficulty is an execution-dimension profile. */
+function executionRowKeys(results) {
+  return Object.keys(results).filter((k) => {
+    const segments = k.split(':');
+    const difficulty = segments.length >= 2 ? segments[1] : null;
+    return difficulty !== null && DIFFICULTIES[difficulty] && DIFFICULTIES[difficulty].dimension === 'execution';
+  });
 }
 
 // ── Subprocess harness. ─────────────────────────────────────────────
@@ -719,6 +745,142 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   payload.generated_at = '2026-09-04T12:00:00.000+01:00';
   const res = runValidator(payload, baseBudgets(), false);
   reject('generated_at with +01:00 offset: reject as non-canonical (UTC designator required)', res, ['not a canonical UTC RFC3339']);
+}
+
+// ── Execution-version evidence cases (audit finding 1, round 6). ────
+// The live grammar is the execution manifest's max_execution_version
+// (read from protocol/execution-v1.json, currently 5). Every
+// execution result row must record executionVersion equal to that
+// maximum; a missing or lower version is evidence of an older-grammar
+// run (the fixture's historical version-3 default) and rejects naming
+// the cell. Non-execution rows (sha/argon/rsw) need no field.
+
+// 36. All execution rows recorded at the current manifest maximum:
+//     accepted (a clean schema-3 matrix whose execution rows carry
+//     executionVersion = <manifest max> and whose sha/argon rows carry
+//     none).
+{
+  const payload = schema3Payload();
+  const execKeys = executionRowKeys(payload.results);
+  const shaKeys = Object.keys(payload.results).filter(
+    (k) => !k.startsWith('multi-widget') && !execKeys.includes(k)
+  );
+  if (shaKeys.length === 0) throw new Error('test fixture regression: schema-3 matrix has no non-execution rows');
+  const res = runValidator(payload, baseBudgets(), false);
+  pass(`all execution rows at the manifest max (${EXECUTION_MAX_VERSION}) + non-execution rows without executionVersion: accepted`, res);
+}
+
+// 37. Every execution row recorded at version 3 while the manifest
+//     maximum is higher: the grammar-v3-era evidence is rejected.
+{
+  const payload = schema3Payload();
+  for (const k of executionRowKeys(payload.results)) payload.results[k].executionVersion = 3;
+  const res = runValidator(payload, baseBudgets(), false);
+  reject(`manifest max ${EXECUTION_MAX_VERSION} + all execution rows at executionVersion 3: reject`, res, [`executionVersion 3 is not the live grammar version ${EXECUTION_MAX_VERSION}`]);
+}
+
+// 38. One execution cell below the manifest maximum: the rejection
+//     names that cell.
+{
+  const payload = schema3Payload();
+  const key = `${RELEASE_TIER}:execvm:cold:files`;
+  payload.results[key].executionVersion = 4;
+  const res = runValidator(payload, baseBudgets(), false);
+  reject(`manifest max ${EXECUTION_MAX_VERSION} + one exec cell at 4: reject naming the cell`, res, [key, 'executionVersion 4 is not the live grammar version']);
+}
+
+// 39. Execution rows without an executionVersion field (current
+//     schema): missing evidence rejects.
+{
+  const payload = schema3Payload();
+  for (const k of executionRowKeys(payload.results)) delete payload.results[k].executionVersion;
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('execution rows with executionVersion missing (current schema): reject', res, ['executionVersion is not recorded']);
+}
+
+// 40. Non-execution SHA/Argon rows without executionVersion: accepted
+//     (the field is execution evidence only).
+{
+  const payload = schema3Payload();
+  const execKeys = executionRowKeys(payload.results);
+  for (const k of Object.keys(payload.results)) {
+    if (!k.startsWith('multi-widget') && !execKeys.includes(k)) delete payload.results[k].executionVersion;
+  }
+  pass('non-execution SHA/Argon rows without executionVersion: accepted', runValidator(payload, baseBudgets(), false));
+}
+
+// ── Interactive-classification cases (audit finding 4, round 6). ────
+// The interactive/non-interactive classification derives from the
+// harness difficulty profiles (execchain interactive: false, the one
+// difficulty never counted as an ordinary interactive release cell;
+// every other profile defaults to interactive). The budgets file can
+// no longer declare a classification: nonInteractiveDifficulties is an
+// unknown/deprecated field, and changing only release-budgets.json can
+// never change a difficulty's classification.
+
+// 41. A budgets file that reintroduces nonInteractiveDifficulties
+//     (even naming a real difficulty): rejected as unknown/deprecated.
+{
+  const budgets = baseBudgets();
+  budgets.nonInteractiveDifficulties = ['execchain'];
+  const res = runValidator(schema3Payload(), budgets, false);
+  reject('budgets file reintroducing nonInteractiveDifficulties: reject as unknown/deprecated', res, ['nonInteractiveDifficulties is an unknown/deprecated field']);
+}
+
+// 42. execchain (non-interactive by harness profile) budget above the
+//     5 s absolute ceiling: allowed — it is budgeted and measured like
+//     every cell but never ceiling-checked.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  for (const cache of CACHE_STATES) {
+    budgets.budgets[RELEASE_TIER].execchain[cache].solveMsP95 = 6000;
+    budgets.budgets[RELEASE_TIER].execchain[cache].pageToVerifiedMsP95 = 6000;
+  }
+  pass('execchain (interactive: false in the harness) budget 6000 ms above the absolute ceiling: allowed', runValidator(payload, budgets, false));
+}
+
+// 43. argon2id (interactive) budget above the 5 s absolute ceiling:
+//     rejected.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  for (const cache of CACHE_STATES) {
+    budgets.budgets[RELEASE_TIER].argon2id[cache].solveMsP95 = 6000;
+    budgets.budgets[RELEASE_TIER].argon2id[cache].pageToVerifiedMsP95 = 6000;
+  }
+  const res = runValidator(payload, budgets, false);
+  reject('argon2id budget 6000 ms above the absolute ceiling: reject', res, ['argon2id', 'exceeds the absolute interactive ceiling'], ['exceeds the budget']);
+}
+
+// 44. sha20 (interactive) budget above the 5 s absolute ceiling:
+//     rejected.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  for (const cache of CACHE_STATES) {
+    budgets.budgets[RELEASE_TIER].sha20[cache].solveMsP95 = 6000;
+    budgets.budgets[RELEASE_TIER].sha20[cache].pageToVerifiedMsP95 = 6000;
+  }
+  const res = runValidator(payload, budgets, false);
+  reject('sha20 budget 6000 ms above the absolute ceiling: reject', res, ['sha20', 'exceeds the absolute interactive ceiling'], ['exceeds the budget']);
+}
+
+// 45. The classification invariant: a budget file mutation trying to
+//     flip sha20 to non-interactive (deprecated field + inflated
+//     budget) rejects on BOTH reasons — the unknown/deprecated field
+//     AND the still-binding interactive ceiling. Changing only the
+//     release budgets can never change the interactive classification.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  budgets.nonInteractiveDifficulties = ['sha20'];
+  for (const cache of CACHE_STATES) {
+    budgets.budgets[RELEASE_TIER].sha20[cache].solveMsP95 = 6000;
+    budgets.budgets[RELEASE_TIER].sha20[cache].pageToVerifiedMsP95 = 6000;
+  }
+  const res = runValidator(payload, budgets, false);
+  reject('budgets-only mutation trying to classify sha20 non-interactive (deprecated field + 6000 ms budget): reject on the deprecated field AND the still-binding ceiling', res, ['nonInteractiveDifficulties is an unknown/deprecated field', 'sha20', 'exceeds the absolute interactive ceiling']);
 }
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);

@@ -142,7 +142,18 @@ status is `lab`: the committed baseline rows for the mainstream-desktop
 tier were re-recorded at the real ladder on 2026-09-03/04 (the runs
 `results/run-2026-09-03.json` and
 `tools/client-perf/results/results-2026-09-04.json`, merged per cache
-across asset modes), and no physical-device data exists yet. The
+across asset modes), the argon family at the round-5 retuned rung on
+2026-09-05, and the six ExecutionChallengeV1 cells at the live
+execution grammar (manifest maximum) on 2026-09-05 from
+`tools/client-perf/results/results-2026-09-05-exec-v5.json` — the
+earlier execution rows had measured the fixture's historical v3
+default, so the harness now arms every execution query at the current
+grammar and records the decoded program version byte
+(`executionVersion`) on every execution result row, which the
+validator requires to equal the execution manifest maximum. The
+interactive/non-interactive ceiling classification derives from the
+harness difficulty profiles (execchain only), never from the budgets
+file. No physical-device data exists yet. The
 physical-device tiers remain the release boundary for
 the widget and the difficulty ladder, and the budget file's
 qualification block documents the outstanding physical-device
