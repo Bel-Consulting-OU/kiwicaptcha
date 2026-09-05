@@ -5,6 +5,15 @@
 # Usage:
 #   bash tools/ci/version-prose-lint.sh
 #
+# The live execution-grammar maximum is DERIVED at runtime from the
+# protocol manifest (protocol/execution-v1.json, the max_execution_version
+# row), never hardcoded: the manifest row is the single authored
+# authority the parity lanes pin against the PHP and Rust constants
+# (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION and
+# execution::MAX_EXECUTION_VERSION), so every ladder numeral in this
+# tool's patterns and reports comes from that row and can never
+# describe yesterday's maximum.
+#
 # Scans SECURITY.md, packages/ and docs/ (any CHANGELOG* is excluded,
 # as are vendor, node_modules and target trees) and exits 1 on any
 # match of the banned stale claims:
@@ -21,26 +30,40 @@
 #     holds a bypass" are not claims of a live bypass).
 #
 # Group 5 bans stale CURRENT claims about the live execution-grammar
-# ladder (the generator's maximum is ExecutionChallengeGenerator::
-# MAX_EXECUTION_VERSION / execution::MAX_EXECUTION_VERSION, today 4):
+# ladder. Two families of patterns run under it:
 #
-#   - "execution version ... exactly 1" (also spelled as
-#     "execution_version ... exactly 1"), e.g. "the canonical numeric
-#     byte: exactly 1",
-#   - "execution_version ... 1 or 2",
-#   - "maximum execution version 2" / "maximum execution version 3",
-#   - "future version-4" / "future v4" (version 4 is live),
-#   - bare "versions? 1..3" describing the supported set,
-#   - "v1/v2/v3" describing the supported set.
+#   - static frozen-era calibrations, the exact stale strings the
+#     earlier governance reviews found: "execution version ... exactly
+#     1" (also spelled "execution_version ... exactly 1" or "the
+#     canonical numeric byte: exactly 1"), "execution_version ... 1 or
+#     2", bare "versions? 1..3" describing the supported set, and
+#     "v1/v2/v3" describing the supported set; and
+#   - derived below-maximum families, generated for every execution
+#     grammar numeral n below the manifest maximum, so the current top
+#     rung can never be claimed stale while it is live, and any rung
+#     the register has moved past is banned the moment it is no longer
+#     the maximum:
+#       - "future v4" / "future version 4" / "future version-4"
+#         (the rung is live, so a future-tense claim is stale),
+#       - "future grammar beyond version 4"
+#         (a rung already inside the live ladder is never beyond it),
+#       - "version 4 is the current boundary" and "version 4 is live"
+#         (the boundary and the live top are the manifest maximum),
+#       - "the current maximum ... version 4" / "the live maximum is 4"
+#         / "today 4" / "version 4 today"
+#         (the maximum is the manifest row, never a frozen numeral),
+#       - "maximum execution version 2" style claims and a "versions
+#         1..4" supported-set claim.
 #
 # Group 6 bans stale claims that the driver's execution-capability
-# advertisement carries the value 2. The live widget driver sends the
-# `Kiwi-Execution-Max-Version` request header with its current driver
-# maximum (the generator's MAX_EXECUTION_VERSION, today 4), pinned by
-# an executable parity test (WidgetDriverCapabilityParityTest reads
-# the driver literal and asserts it equals the generator maximum), so
-# prose pairing the header name or the "execution capability" term
-# with "value 2" on the same line is the version-2-era stale claim:
+# advertisement carries a value below the manifest maximum. The live
+# widget driver sends the `Kiwi-Execution-Max-Version` request header
+# with its current maximum (the generator's MAX_EXECUTION_VERSION),
+# pinned by an executable parity test (WidgetDriverCapabilityParityTest
+# reads the driver literal and asserts it equals the generator
+# maximum), so prose pairing the header name or the "execution
+# capability" term with a below-maximum value on the same line is a
+# stale claim:
 #
 #   - 'Kiwi-Execution-Max-Version ... value 2'
 #   - 'execution capability ... value 2'
@@ -63,6 +86,17 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+
+# The live execution-grammar maximum comes from the protocol manifest,
+# the canonical register the parity lanes read (see
+# tools/ci/protocol-manifest-check.sh). A missing or unreadable row is
+# a hard failure: the ratchet must never silently disarm itself.
+manifest="$repo_root/protocol/execution-v1.json"
+live_max="$(sed -n -E 's/^  "max_execution_version": ([0-9]+),?$/\1/p' "$manifest" | head -n 1)"
+if [ -z "$live_max" ] || ! [ "$live_max" -ge 1 ] 2>/dev/null; then
+  echo "version prose lint FAILED: cannot read max_execution_version from $manifest" >&2
+  exit 1
+fi
 
 # Optional ripgrep for multiline-capable searching; plain grep -rE
 # otherwise (the patterns below are single-line by construction).
@@ -150,43 +184,58 @@ while IFS= read -r line; do
   fi
 done <<<"$candidates"
 
-# 5. stale CURRENT claims about the live execution-grammar ladder
-# (version 4 is live; the generator maximum is the authority). Files
-# carrying the historical-compat marker are exempt.
+# 5. stale CURRENT claims about the live execution-grammar ladder: the
+# static frozen-era calibrations plus one derived family per numeral
+# below the manifest maximum. Files carrying the historical-compat
+# marker are exempt.
+ladder_patterns=(
+  -e 'execution[-_ ]version[^.!?]{0,80}exactly[[:space:]]+1([^0-9]|$)'
+  -e 'execution_version[^.!?]{0,60}1 or 2([^0-9]|$)'
+  -e 'execution-dimension[^.!?]{0,60}exactly[[:space:]]+1([^0-9]|$)'
+  -e 'the canonical numeric byte[^.!?]{0,30}exactly[[:space:]]+1([^0-9]|$)'
+  -e '(versions?|version)[[:space:]]+1\.\.3([^0-9.]|$)'
+  -e 'v1/v2/v3'
+)
+for n in $(seq 2 $((live_max - 1))); do
+  ladder_patterns+=(
+    -e "future[[:space:]]+(version[[:space:]-]?|v)${n}([^0-9]|$)"
+    -e "future[[:space:]]+grammar[^.!?\n]{0,40}beyond[^.!?\n]{0,20}version[[:space:]-]?${n}([^0-9]|$)"
+    -e "version[[:space:]-]?${n}[[:space:]]+is[[:space:]]+the[[:space:]]+current[[:space:]]+boundary([^A-Za-z0-9]|$)"
+    -e "version[[:space:]-]?${n}[[:space:]]+is[[:space:]]+live([^A-Za-z0-9]|$)"
+    -e "version[[:space:]-]?${n}[[:space:]]+today([^A-Za-z0-9]|$)"
+    -e "current[[:space:]]+maximum[^.!?\n]{0,60}version[[:space:]-]?${n}([^0-9]|$)"
+    -e "(current|live)[[:space:]]+maximum[^.!?\n]{0,50}(is|remains)[[:space:]]+${n}([^0-9]|$)"
+    -e "([^A-Za-z0-9]|^)today[[:space:]]+${n}([^0-9]|$)"
+    -e "maximum[[:space:]]+execution[[:space:]]+version[[:space:]]+${n}([^0-9]|$)"
+  )
+done
 ladder_matches="$(
-  search \
-    -e 'future[[:space:]]+version-4' \
-    -e 'future[[:space:]]+v4' \
-    -e 'execution[-_ ]version[^.!?]{0,80}exactly[[:space:]]+1([^0-9]|$)' \
-    -e 'execution_version[^.!?]{0,60}1 or 2([^0-9]|$)' \
-    -e 'execution-dimension[^.!?]{0,60}exactly[[:space:]]+1([^0-9]|$)' \
-    -e 'the canonical numeric byte[^.!?]{0,30}exactly[[:space:]]+1([^0-9]|$)' \
-    -e 'maximum[[:space:]]+execution[[:space:]]+version[[:space:]]+2([^0-9]|$)' \
-    -e 'maximum[[:space:]]+execution[[:space:]]+version[[:space:]]+3([^0-9]|$)' \
-    -e '(versions?|version)[[:space:]]+1\.\.3([^0-9.]|$)' \
-    -e 'v1/v2/v3' \
-    "${scan_roots[@]}"
+  search "${ladder_patterns[@]}" "${scan_roots[@]}"
 )"
 ladder_matches="$(printf '%s\n' "$ladder_matches" | drop_compat_files)"
 if [ -n "$ladder_matches" ]; then
-  report "stale claim: the live execution-grammar ladder is described with a frozen 1..3-era phrase (the live maximum is MAX_EXECUTION_VERSION, today 4; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
+  report "stale claim: the live execution-grammar ladder is described with a below-maximum or frozen phrase (the live maximum is MAX_EXECUTION_VERSION, manifest max_execution_version = ${live_max}; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
   printf '%s\n' "$ladder_matches"
 fi
 
-# 6. the driver's execution-capability advertisement claimed as the
-# value 2 (the live driver sends Kiwi-Execution-Max-Version with its
-# current maximum, today 4, pinned by the executable
-# WidgetDriverCapabilityParityTest). Files carrying the
+# 6. the driver's execution-capability advertisement claimed as a
+# value below the manifest maximum (the live driver sends
+# Kiwi-Execution-Max-Version with its current maximum, pinned by the
+# executable WidgetDriverCapabilityParityTest). Files carrying the
 # historical-compat marker are exempt, like group 5.
+capability_patterns=()
+for n in $(seq 2 $((live_max - 1))); do
+  capability_patterns+=(
+    -e "Kiwi-Execution-Max-Version[^.!?\n]{0,100}value[[:space:]]+${n}([^0-9]|$)"
+    -e "execution capability[^.!?\n]{0,100}value[[:space:]]+${n}([^0-9]|$)"
+  )
+done
 capability_matches="$(
-  search \
-    -e 'Kiwi-Execution-Max-Version[^.!?\n]{0,100}value[[:space:]]+2' \
-    -e 'execution capability[^.!?\n]{0,100}value[[:space:]]+2' \
-    "${scan_roots[@]}"
+  search "${capability_patterns[@]}" "${scan_roots[@]}"
 )"
 capability_matches="$(printf '%s\n' "$capability_matches" | drop_compat_files)"
 if [ -n "$capability_matches" ]; then
-  report "stale claim: the driver's execution-capability advertisement is described as value 2 (the live driver sends the header with its current maximum, today 4; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
+  report "stale claim: the driver's execution-capability advertisement is described with a below-maximum value (the live driver sends the header with its current maximum, manifest max_execution_version = ${live_max}; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
   printf '%s\n' "$capability_matches"
 fi
 
@@ -195,4 +244,4 @@ if [ "$hits" -ne 0 ]; then
   exit 1
 fi
 
-echo "version prose lint PASS: no stale execution-version, capability-header or bypass-governance claims in SECURITY.md, packages/, docs/"
+echo "version prose lint PASS: no stale execution-version, capability-header or bypass-governance claims in SECURITY.md, packages/, docs/ (live execution maximum derived from the protocol manifest: ${live_max})"

@@ -12,17 +12,15 @@ use PHPUnit\Framework\TestCase;
  * The browserless execution forgery regression oracle.
  *
  * The shadow solver must succeed on every live grammar the generator
- * emits, versions 1 through ExecutionChallengeGenerator::MAX_EXECUTION_VERSION.
- * For every generated program the forged trace verifies and digests at
- * several chosen observed heights. Version 4 is the current boundary:
- * the DOM_CHILD/DOM_DEPTH nested-tree grammar, whose ancestor-depth
- * walk the fixture models like any other op. The sweep therefore runs
- * to the generator maximum and pins the forgeability boundary on
- * purpose: the trace is supplementary evidence, reproducible by any
- * implementation of the public semantics, never a browser attestation.
- * A future grammar beyond version 4 (an object-graph grammar testing
- * classList, selectors, traversal, fragments, clone and reparent,
- * event ordering) must make this oracle fail until the solver
+ * emits, versions 1 through
+ * ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, the causal
+ * object-graph rung included. For every generated program the forged
+ * trace verifies and digests at several chosen observed heights. The
+ * sweep therefore runs to the generator maximum and pins the
+ * forgeability boundary there on purpose: the trace is supplementary
+ * evidence, reproducible by any implementation of the public
+ * semantics, never a browser attestation. A grammar beyond the
+ * generator maximum must make this oracle fail until the solver
  * implements those real Web Platform semantics. The sweep is extended
  * only together with them.
  */

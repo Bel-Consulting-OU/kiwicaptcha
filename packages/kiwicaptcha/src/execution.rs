@@ -3327,17 +3327,14 @@ mod tests {
     fn browserless_shadow_solver_forges_every_live_version_trace() {
         // The adversarial regression oracle: a pure shadow solver must
         // forge verifier-accepted traces for every live grammar, versions
-        // 1 through MAX_EXECUTION_VERSION (the version-5 causal
-        // object-graph grammar included: the clone and reparent spine,
-        // the fragment slots, the observed URL-canon digest and the
-        // text-mutation readback), at several chosen observed heights.
-        // The trace is supplementary evidence, reproducible by a pure
-        // implementation of the public semantics. A future object-graph
-        // grammar beyond the live maximum tests real Web Platform
-        // semantics (classList, selectors, traversal, fragments, clone
-        // and reparent, event ordering), so extending this solver to
-        // that grammar must fail until those semantics are implemented.
-        // The mirror test lives in the PHP suite as
+        // 1 through MAX_EXECUTION_VERSION (the causal object-graph rung
+        // included: the clone and reparent spine, the fragment slots,
+        // the observed URL-canon digest and the text-mutation readback),
+        // at several chosen observed heights. The trace is supplementary
+        // evidence, reproducible by a pure implementation of the public
+        // semantics; a grammar beyond the live maximum must make this
+        // solver fail until those semantics are implemented. The mirror
+        // test lives in the PHP suite as
         // testBrowserlessShadowSolverForgesEveryLiveVersionTrace.
         let heights = [1u8, 10, 17, 255];
         let mut solved = 0u64;
