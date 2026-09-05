@@ -25,7 +25,7 @@ fn config() -> ChallengeConfig {
         t: 1,
         p: 1,
         target_bits: 8, // low difficulty so the example solves instantly
-        argon2_target_bits: 8,
+        argon2_target_bits: 4, // the Argon2id default since the round-5 retune (unused for SHA-256)
         ttl_secs: 120,
         min_duration_ms: Some(0), // disable the timing floor for the example
         auto_tune: false,

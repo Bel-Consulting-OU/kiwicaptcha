@@ -120,7 +120,16 @@ final class Config
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
      * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
-     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10).
+     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10;
+     *                                      default 4, the benchmark-selected ordinary
+     *                                      baseline: the client-performance lab measured
+     *                                      the adaptive-risk ladder and 8-bit Argon2id
+     *                                      (16 MiB, t=3, p=1) at ≈16 s p95 on a
+     *                                      mainstream desktop — above the absolute
+     *                                      5000 ms UX ceiling — so the ordinary default
+     *                                      is 4, keeping the solve inside the ceiling
+     *                                      with the elevated rungs 6/8/10 still
+     *                                      reachable via adaptive risk escalation).
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
@@ -187,7 +196,7 @@ final class Config
         public readonly int $t = 3,
         public readonly int $p = 1,
         public readonly int $targetBits = 18,
-        public readonly int $argon2TargetBits = 8,
+        public readonly int $argon2TargetBits = 4,
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,
         public readonly int $solverMaxHashes = 5_000_000,

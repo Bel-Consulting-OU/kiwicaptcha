@@ -244,8 +244,8 @@ final class Configuration implements ConfigurationInterface
                     ->max(Config::MAX_SHA_TARGET_BITS)
                 ->end()
                 ->integerNode('argon2_difficulty_bits')
-                    ->info('Leading zero bits for Argon2id challenges (default 8, max 10).')
-                    ->defaultValue(8)
+                    ->info('Leading zero bits for Argon2id challenges (default 4, max 10). The default was retuned from 8 after the client-performance lab measured the 8-bit rung (16 MiB, t=3, p=1) at ≈16 s p95 on a mainstream desktop — above the absolute 5000 ms UX ceiling; 4 keeps the ordinary solve inside the ceiling, with the elevated rungs reachable via adaptive risk escalation (never the default).')
+                    ->defaultValue(4)
                     ->min(1)
                     // Same ceiling as the core's Argon2id target-bits max.
                     ->max(10)
@@ -599,9 +599,9 @@ final class Configuration implements ConfigurationInterface
                             ->max(65536)
                         ->end()
                         ->arrayNode('argon_escalation_target_bits')
-                            ->info('Target-difficulty escalation ladder of the three adaptive Argon actions: EXACTLY 3 entries — Argon16, Argon32, Argon64 — strictly increasing within 1..Config::MAX_ARGON2_TARGET_BITS (default [1, 4, 8]). The Argon2id memory stays at risk.argon_verification_memory_kib for every action (t=3, p=1); only the expected nonce search space escalates, so the server verification cost ceiling is risk-independent. A ladder violating 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS is refused at configuration time (the rungs must be strictly increasing and bounded by the core\'s Argon2id widget ceiling).')
+                            ->info('Target-difficulty escalation ladder of the three adaptive Argon actions: EXACTLY 3 entries — Argon16, Argon32, Argon64 — strictly increasing within 1..Config::MAX_ARGON2_TARGET_BITS (default [1, 2, 4]). The Argon2id memory stays at risk.argon_verification_memory_kib for every action (t=3, p=1); only the expected nonce search space escalates, so the server verification cost ceiling is risk-independent. The default was retuned from [1, 4, 8] after the client-performance lab measured the 8-bit rung (16 MiB, t=3, p=1) at ≈16 s p95 on a mainstream desktop — above the absolute 5000 ms UX ceiling; 4 keeps the highest ordinary rung inside the ceiling (rungs above it remain reachable, but only under adaptive escalation, never as the default). A ladder violating 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS is refused at configuration time (the rungs must be strictly increasing and bounded by the core\'s Argon2id widget ceiling).')
                             ->integerPrototype()->min(1)->max(Config::MAX_ARGON2_TARGET_BITS)->end()
-                            ->defaultValue([1, 4, 8])
+                            ->defaultValue([1, 2, 4])
                             ->validate()
                                 ->ifTrue(static fn (array $v): bool => \count($v) !== 3
                                     || $v[0] >= $v[1]
