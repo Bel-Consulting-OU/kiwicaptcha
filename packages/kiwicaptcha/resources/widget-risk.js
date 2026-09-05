@@ -37,14 +37,20 @@
   //     live here),
   //   - a challenge response carrying an argon2id/rsw challenge while a
   //     weaker one was requested (adaptive escalation),
-  //   - data-kiwi-risk-context="coarse" on the widget container/element
-  //     (the coarse client-context opt-in that rides challenge requests),
   //   - a challenge response carrying a server-issued decoy (honeypot)
   //     field name or a strategy hint,
   //   - a challenge response carrying an execution_program (the
   //     ExecutionChallengeV1 dimension: decoy + execution arms are
   //     issued together by the risk-armed server and share the lazy
   //     trigger).
+  //
+  // The coarse client-context descriptor (the explicit
+  // data-kiwi-risk-context="coarse" opt-in) moved INTO the eager core
+  // (audit finding 1): the core builds it and exposes it plus the
+  // byte-bounded truncation helper on the internal bridge
+  // (bridge.core.buildClientContext / bridge.core.boundBytes), so the
+  // issuance never waits for this module and this module can still
+  // READ the context and reuse the truncation for its decoy evidence.
   //
   // The core delivers this file the way it delivers the worker asset in
   // files mode: the page issues the versioned content-addressed URL and
@@ -58,9 +64,9 @@
   // (the widget record's private decoy state and the token element), so
   // the module is stateless across widgets.
   //
-  // Failure semantics: client-context and decoy/honeypot evidence are
-  // probabilistic signals, never gates — an unloadable module degrades
-  // to their default absent state (console.warn). The solve tiers are
+  // Failure semantics: decoy/honeypot evidence is probabilistic
+  // signals, never gates — an unloadable module degrades to their
+  // default absent state (console.warn). The solve tiers are
   // different: a memory-hard challenge whose module cannot load enters
   // the controlled kiwi:worker-unavailable state, and an armed program
   // that cannot run enters the controlled kiwi:execution-unavailable
@@ -628,62 +634,6 @@
     });
     return { promise: promise, terminate: terminateHandle };
   }
-  // ── Coarse client-context descriptor (risk-v2 evidence) ─────────────
-  // Built ONCE per page load from coarse navigator/window signals and sent
-  // with every challenge request as the `client_context` field (the server
-  // accepts /^[a-z0-9+_,=:-]{1,64}$/D) ONLY when the widget container or
-  // widget element carries the explicit opt-in attribute
-  // data-kiwi-risk-context="coarse" (the app renders it when the operator
-  // enables risk.client_context) — the default is off, so no
-  // device-capability or screen-size signal ever leaves the page without
-  // it. Deliberately COARSE: viewport class, touch capability, language
-  // family and a timezone-offset class — no canvas/audio/font-list/GPU
-  // fingerprinting, no stable IDs, nothing that identifies a device across
-  // sessions. A missing capability contributes nothing; when nothing is
-  // available the field is omitted entirely.
-  var kiwiClientContext = null;
-  function kiwiBuildClientContext() {
-    if (kiwiClientContext !== null) return kiwiClientContext;
-    var parts = [];
-    var viewport = 0;
-    if (typeof window !== "undefined" && window.innerWidth) viewport = window.innerWidth;
-    parts.push(viewport < 600 ? "v1" : (viewport < 1200 ? "v2" : "v3"));
-    var coarsePointer = false;
-    try {
-      var pm = window.matchMedia ? window.matchMedia("(pointer: coarse)") : null;
-      coarsePointer = !!(pm && pm.matches);
-    } catch (e) {}
-    parts.push("t" + (coarsePointer ? "1" : "0"));
-    if (navigator && typeof navigator.language === "string" && navigator.language) {
-      var family = navigator.language.trim().toLowerCase().split(/[_-]/)[0] || "";
-      if (family.length > 3) family = family.slice(0, 3);
-      if (/^[a-z]{2,3}$/.test(family)) parts.push("l" + family);
-    }
-    try {
-      if (typeof Date !== "undefined" && typeof Date.prototype.getTimezoneOffset === "function") {
-        var offsetHours = Math.round(-new Date().getTimezoneOffset() / 60);
-        parts.push(offsetHours < -8 ? "z0" : (offsetHours < -2 ? "z1" : (offsetHours <= 2 ? "z2" : (offsetHours <= 8 ? "z3" : "z4"))));
-      }
-    } catch (e) {}
-    if (parts.length === 0) { kiwiClientContext = null; return null; }
-    kiwiClientContext = parts.join(",");
-    return kiwiClientContext;
-  }
-
-  // Truncate a string to the server's BYTE bound (e.g. the 256-byte
-  // honeypot value ceiling): code units are truncated with a binary search
-  // over the UTF-8 byte length, so a multi-byte filler can never exceed
-  // the server's bound and 422 the challenge request.
-  function kiwiBoundBytes(s, maxBytes) {
-    if (encoder.encode(s).length <= maxBytes) return s;
-    var lo = 0, hi = s.length;
-    while (lo < hi) {
-      var mid = (lo + hi + 1) >> 1;
-      if (encoder.encode(s.slice(0, mid)).length <= maxBytes) lo = mid; else hi = mid - 1;
-    }
-    return s.slice(0, lo);
-  }
-
   // ── Server-issued decoy (honeypot) field ───────────────────────────
   // After a successful challenge response, the server may name a decoy
   // field (bounded [A-Za-z0-9_-]{1,64} — validated before trusting; a
@@ -864,13 +814,18 @@
   // when the widget's own decoy input is still in the form and FILLED,
   // the decoy field name + a bounded value ride the request as honeypot
   // evidence — NEVER a gate, and the value is truncated to the server's
-  // 256-byte bound. An empty decoy contributes nothing. The read is
-  // ownership-based (the widget's own decoy node, never a name query).
+  // 256-byte bound by the core's kiwiBoundBytes (bridge.core.boundBytes,
+  // the truncation helper the eager core owns since audit finding 1).
+  // An empty decoy contributes nothing. The read is ownership-based (the
+  // widget's own decoy node, never a name query).
   function kiwiReadHoneypot(decoyState, tokenEl) {
     if (!decoyState || !decoyState.name || !tokenEl) return null;
     var decoyInput = kiwiOwnedDecoyInput(decoyState);
     if (decoyInput && decoyInput.parentNode && typeof decoyInput.value === "string" && decoyInput.value !== "") {
-      return { name: decoyState.name, value: kiwiBoundBytes(decoyInput.value, 256) };
+      var truncate = (kiwiBridge && kiwiBridge.core && typeof kiwiBridge.core.boundBytes === "function")
+        ? kiwiBridge.core.boundBytes
+        : function (s) { return s; };
+      return { name: decoyState.name, value: truncate(decoyInput.value, 256) };
     }
     return null;
   }
@@ -882,7 +837,6 @@
   var kiwiBridge = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
   if (kiwiBridge && typeof kiwiBridge.register === "function") {
     kiwiBridge.register("risk", {
-      buildClientContext: kiwiBuildClientContext,
       readHoneypot: kiwiReadHoneypot,
       renderDecoy: kiwiRenderDecoy,
       flushDecoy: kiwiFlushDecoy,

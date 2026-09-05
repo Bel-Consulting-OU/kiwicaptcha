@@ -207,8 +207,11 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
 
     // The bounded loader: the initial attempt plus two retries, then
-    // the degrade-to-English path, never a translation gate.
-    expect(hits, 'the missing module must repeat through the bounded retries').toBe(3);
+    // the degrade-to-English path, never a translation gate. The
+    // retries outlive the (ungated) solve — audit finding 1 removed the
+    // settle gate, so the flow no longer waits for the module's bounded
+    // attempts to exhaust; the count settles shortly after the solve.
+    await expect.poll(() => hits, 'the missing module must repeat through the bounded retries').toBe(3);
     await expect(widget).toHaveAttribute('lang', 'en');
     await expect(widget).toHaveAttribute('aria-label', EN.label);
     await expect(page.locator('[data-kiwi-label]')).toHaveText(EN.label);
@@ -245,7 +248,12 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     const widget = page.locator('[data-kiwi-widget]');
     await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
 
-    expect(hits, 'each SRI refusal must repeat through the bounded retries').toBe(3);
+    // The bounded loader: the initial attempt plus two retries, then
+    // the degrade-to-English path, never a translation gate. The
+    // retries outlive the (ungated) solve — audit finding 1 removed the
+    // settle gate, so the flow no longer waits for the module's bounded
+    // attempts to exhaust; the count settles shortly after the solve.
+    await expect.poll(() => hits, 'each SRI refusal must repeat through the bounded retries').toBe(3);
     await expect(widget).toHaveAttribute('lang', 'en');
     await expect(widget).toHaveAttribute('aria-label', EN.label);
     await expect(page.locator('[data-kiwi-label]')).toHaveText(EN.label);
@@ -392,5 +400,194 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(token.length, 'the German re-solve must mint a token').toBeGreaterThan(0);
     const result = await verifyToken(page, await fixtureOrigin(page), token);
     expect(result.body.ok, `the German re-solve must verify (got ${result.body.code})`).toBe(true);
+  });
+
+  // ── Audit finding 1: the challenge flow is never gated on the pack ──
+  // The locale settlement is a pure language swap that repaints the
+  // current view. The first run() proceeds immediately with the English
+  // fallback; a late pack (the held route below) must switch the text
+  // language without regressing the data-state the widget is in. Every
+  // case drives the fixture in the strict files tier, holding the
+  // content-addressed widget-locales.js request and releasing it at a
+  // chosen point of the lifecycle.
+  const FR_EXTRA = {
+    verifying: 'V\u00e9rification\u2026',
+    badgeWorking: 'Traitement',
+  };
+
+  test('audit-1 locale: the challenge POST fires while the locale request is held (issuance never waits for the pack)', async ({ page }) => {
+    const held = [];
+    await page.route('**/assets/locales*.js', async (route) => {
+      held.push(route);
+    });
+    const challengeSeen = page.waitForRequest(
+      (r) => r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'),
+      { timeout: 30_000 }
+    );
+    await page.goto('/?assets=files&csp=strict&lang=fr', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the locale fetch must be in flight').toBe(1);
+
+    // The flow must run to a started state while the pack is still held
+    // — the settle gate is gone, so the widget leaves idle on its own.
+    await challengeSeen;
+    await expect
+      .poll(() => page.evaluate(() => document.querySelector('[data-kiwi-widget]').getAttribute('data-state')))
+      .not.toBe('idle');
+
+    // Release the module: the settlement repaints the current state.
+    for (const route of held.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+    const widget = page.locator('[data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    await expect(widget).toHaveAttribute('lang', 'fr');
+    await expect(widget).toHaveAttribute('aria-label', FR.label);
+    await expect(page.locator('[data-kiwi-label]')).toHaveText(FR.label);
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText(FR.badgeDone);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the French solve must mint a token').toBeGreaterThan(0);
+    const result = await verifyToken(page, await fixtureOrigin(page), token);
+    expect(result.body.ok, `the French solve must verify (got ${result.body.code})`).toBe(true);
+  });
+
+  test('audit-1 locale: released while solving, the pack switches the text language and data-state stays solving', async ({ page }) => {
+    // A files-mode argon2id challenge needs the lazy widget-risk.js
+    // module for its worker solve tier; holding the risk asset parks
+    // the widget in the solving state for a deterministic window (the
+    // module watchdog bounds it), which is when the released locale
+    // pack must repaint the current view.
+    const heldLocale = [];
+    await page.route('**/assets/locales*.js', async (route) => {
+      heldLocale.push(route);
+    });
+    const heldRisk = [];
+    await page.route('**/assets/risk*.js', async (route) => {
+      heldRisk.push(route);
+    });
+    await page.goto('/?assets=files&lang=fr&algorithm=argon2id', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => heldLocale.length, 'the locale fetch must be in flight').toBe(1);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'solving', { timeout: 30_000 });
+    await expect.poll(() => heldRisk.length, 'the required risk fetch must be in flight').toBe(1);
+
+    for (const route of heldLocale.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+
+    // The settle must repaint the solving view in French: the label is
+    // the verifying key, the badge the working key, and the data-state
+    // attribute must remain solving at the very instant the language
+    // switched — a settlement that regressed to idle would never show
+    // this combination. (The hint element is not part of the
+    // connecting/solving views — those transitions never rewrite it —
+    // so only the label, badge and retry text switch language here.)
+    await expect
+      .poll(async () => {
+        const snap = await page.evaluate(() => {
+          const w = document.querySelector('[data-kiwi-widget]');
+          return {
+            label: w.querySelector('[data-kiwi-label]').textContent,
+            badge: w.querySelector('[data-kiwi-badge]').textContent,
+            state: w.getAttribute('data-state'),
+          };
+        });
+        return snap;
+      }, { timeout: 20_000, intervals: [50, 100, 200] })
+      .toEqual({ label: FR_EXTRA.verifying, badge: FR_EXTRA.badgeWorking, state: 'solving' });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('lang', 'fr');
+
+    // Release the required risk module: the awaited worker tier loads
+    // and the solve completes in the now-French widget.
+    for (const route of heldRisk.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+    const widget = page.locator('[data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    await expect(widget).toHaveAttribute('lang', 'fr');
+    await expect(page.locator('[data-kiwi-label]')).toHaveText(FR.label);
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText(FR.badgeDone);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the delayed-French argon solve must still mint a token').toBeGreaterThan(0);
+    const result = await verifyToken(page, await fixtureOrigin(page), token);
+    expect(result.body.ok, `the delayed-French argon solve must verify (got ${result.body.code})`).toBe(true);
+  });
+
+  test('audit-1 locale: released after verified, the pack localizes the success strings and the token stays byte-identical', async ({ page }) => {
+    const held = [];
+    await page.route('**/assets/locales*.js', async (route) => {
+      held.push(route);
+    });
+    await page.goto('/?assets=files&csp=strict&lang=fr', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the locale fetch must be in flight').toBe(1);
+
+    const widget = page.locator('[data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    const tokenBefore = await page.locator('[data-kiwi-token]').inputValue();
+    expect(tokenBefore.length, 'the English solve must mint a token').toBeGreaterThan(0);
+    const before = await page.evaluate((id) => window.KiwiCaptcha.getResponse(id), widgetId);
+    expect(before, 'getResponse must return the English-minted token').toBe(tokenBefore);
+
+    for (const route of held.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+
+    // The settlement repaints the done view in French: state remains
+    // done, the strings localize, and the credential is untouched.
+    await expect(widget).toHaveAttribute('lang', 'fr');
+    await expect(widget).toHaveAttribute('aria-label', FR.label);
+    await expect(page.locator('[data-kiwi-label]')).toHaveText(FR.label);
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText(FR.badgeDone);
+    await expect(page.locator('[data-kiwi-info]')).toHaveText(FR.hintDone);
+    await expect(widget).toHaveAttribute('data-state', 'done');
+    const tokenAfter = await page.locator('[data-kiwi-token]').inputValue();
+    expect(tokenAfter, 'the released pack must never rewrite the token').toBe(tokenBefore);
+    const after = await page.evaluate((id) => window.KiwiCaptcha.getResponse(id), widgetId);
+    expect(after, 'getResponse must stay byte-identical after the settlement').toBe(tokenBefore);
+  });
+
+  test('audit-1 locale: released after terminal failure, the pack localizes the error text and the Retry button still re-solves', async ({ page }) => {
+    const held = [];
+    await page.route('**/assets/locales*.js', async (route) => {
+      held.push(route);
+    });
+    let failing = true;
+    await page.route('**/challenge', async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"down"}' });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto('/?assets=files&csp=strict&lang=fr', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the locale fetch must be in flight').toBe(1);
+
+    const widget = page.locator('[data-kiwi-widget]');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', { timeout: 30_000 });
+    await expect(widget).toHaveAttribute('data-state', 'failed');
+    await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
+
+    for (const route of held.splice(0)) {
+      await route.continue().catch(() => {});
+    }
+
+    // The failed view repaints in French: the state stays failed and
+    // the error/retry hint carries the pack's text.
+    await expect(widget).toHaveAttribute('lang', 'fr');
+    await expect(page.locator('[data-kiwi-label]')).toHaveText(FR.label);
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText('\u00c9chec');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('appuyez sur le bouton R\u00e9essayer');
+    await expect(widget).toHaveAttribute('data-state', 'failed');
+
+    // The Retry button stays usable: it re-inits and re-solves against
+    // the recovered endpoint, ending in the localized done view.
+    failing = false;
+    await page.locator('[data-kiwi-retry]').click();
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await expect(page.locator('[data-kiwi-label]')).toHaveText(FR.label);
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText(FR.badgeDone);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the French retry must mint a token').toBeGreaterThan(0);
+    const result = await verifyToken(page, await fixtureOrigin(page), token);
+    expect(result.body.ok, `the French retry solve must verify (got ${result.body.code})`).toBe(true);
   });
 });

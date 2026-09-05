@@ -1714,6 +1714,14 @@ if ($path === '/' || $path === '/index.html') {
     $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
     $chainAttr = ($_GET['chain'] ?? '') !== '' ? ' data-kiwi-chain-ticket="'.htmlspecialchars((string) $_GET['chain'], ENT_QUOTES).'"' : '';
     $riskContextAttr = ($_GET['risk-context'] ?? '') === 'coarse' ? ' data-kiwi-risk-context="coarse"' : '';
+    // ?telemetry=full|minimal seeds the container with the explicit
+    // data-kiwi-telemetry opt-in attribute (absent = the default off);
+    // the fixture emits the lazy module descriptor in the files tier,
+    // so an enabled mode is a real lazy load in the spec.
+    $telemetryValue = (string) ($_GET['telemetry'] ?? '');
+    $telemetryAttr = $telemetryValue === 'full' || $telemetryValue === 'minimal'
+        ? ' data-kiwi-telemetry="'.$telemetryValue.'"'
+        : '';
     // Files-mode variant (?assets=files): mirrors the bundle theme's
     // files tier — the stylesheet link and the driver script are emitted
     // once (the page-level dedup registry), the runtime and the worker
@@ -1824,7 +1832,7 @@ if ($path === '/' || $path === '/index.html') {
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

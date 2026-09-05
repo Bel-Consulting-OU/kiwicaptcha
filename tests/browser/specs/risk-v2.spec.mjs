@@ -81,6 +81,39 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.honeypot).toBeUndefined();
   });
 
+  test('audit-1 coarse context: the files-tier opt-in never fetches the risk module before issuance, and client_context still rides the request', async ({ page }) => {
+    // The coarse client-context descriptor moved into the eager core:
+    // with data-kiwi-risk-context="coarse" the files-tier widget must
+    // send the challenge request immediately — no data-kiwi-risk-src
+    // module fetch of its own before (or after) the issuance — while
+    // the request body still carries the coarse descriptor.
+    const riskRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/assets/risk.')) riskRequests.push(req.url());
+    });
+    const challengeSeen = page.waitForRequest(
+      (r) => r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'),
+      { timeout: 30_000 }
+    );
+    await page.goto('/?assets=files&risk-context=coarse&capture=ccfiles');
+    await challengeSeen;
+    // At the moment of issuance the risk module must not even be in
+    // flight: the coarse opt-in is fully served by the eager core.
+    expect(riskRequests, 'no risk-module fetch may precede the challenge request').toEqual([]);
+
+    await solve(page);
+    expect(riskRequests, 'the unarmed lifecycle must never need the risk module').toEqual([]);
+    const body = JSON.parse(await readCapture(page, 'ccfiles'));
+    expect(body, 'the challenge request must be captured').toBeTruthy();
+    expect(typeof body.client_context).toBe('string');
+    expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
+    expect(body.client_context).toMatch(/v[123]/);
+    expect(body.client_context).toMatch(/t[01]/);
+    expect(body.client_context).toMatch(/z[0-4]/);
+    expect(body.decoy_field).toBeUndefined();
+    expect(body.honeypot).toBeUndefined();
+  });
+
   test('a decoy_field response renders one hidden non-interactive decoy input inside the token form host', async ({ page }) => {
     const nameP = challengeDecoyName(page);
     await page.goto('/?decoy=1');
