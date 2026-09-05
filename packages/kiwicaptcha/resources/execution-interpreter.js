@@ -1,82 +1,39 @@
 /*!
 * KiwiCaptcha execution interpreter — ExecutionChallengeV1 (the
-* Cap-style dimension). FIXED, AUDITED asset: lazy-loaded by the widget
-* driver (execution.<sha256>.js) ONLY when a challenge response carries
-* an execution program; a SHA-only page never fetches this file.
+* Cap-style dimension). FIXED, AUDITED asset, lazy-loaded by the driver
+* (execution.<sha256>.js) ONLY when a challenge response carries an
+* execution program; a SHA-only page never fetches this file.
 *
-* THIS FILE MUST NEVER CONTAIN eval / new Function / setTimeout-driven
-* code generation: the browser test suite asserts this with a spec grep
-* (the interpreter is a small deterministic bytecode VM, nothing more).
-* There is deliberately no Math.random and no Date.readout in the op
-* semantics — the executed program is a pure function of its bytes, so
-* the server recomputes the identical canonical op trace.
+* A small deterministic bytecode VM: no dynamic code construction (the
+* browser suite asserts its absence), no Math.random, no Date in the op
+* semantics — a program is a pure function of its bytes, so the server
+* mirrors recompute the identical canonical op trace and digest.
 *
-* ── How it runs ───────────────────────────────────────────────────────
-* The driver creates a SANDBOXED EPHEMERAL IFRAME per armed challenge
-* (srcdoc with a minimal document; sandbox="allow-scripts
-* allow-same-origin" — allow-same-origin is REQUIRED because a
-* sandboxed opaque-origin document cannot load a same-origin script
-* under the recommended CSP `script-src 'self'`; the sandbox flags that
-* are not granted — forms, popups, top-navigation, pointer lock — stay
-* blocked). The iframe loads THIS asset via <script src integrity=...>
-* (same-origin, CSP-clean, SRI-pinned by the browser), the interpreter
-* announces ready, the driver posts the program, the interpreter runs
-* the VM and posts back the execution digest (64 lowercase hex). The
-* driver validates message.source === the iframe it created and the
-* per-run id before accepting anything.
+* The driver runs it in a SANDBOXED EPHEMERAL IFRAME per armed
+* challenge (srcdoc, sandbox="allow-scripts allow-same-origin";
+* allow-same-origin is required because an opaque-origin document
+* cannot load a same-origin script under the recommended CSP; forms,
+* popups, top-navigation and pointer lock stay blocked). The iframe
+* loads this asset via <script src integrity=...> (CSP-clean,
+* SRI-pinned), announces ready, and after the driver posts the program
+* sends back the digest (64 lowercase hex) plus the canonical trace;
+* the driver accepts messages only from the iframe it created.
 *
-* ── The compute/DOM split ─────────────────────────────────────────────
-* The opcode set is split into the COMPUTE SUBSET (opcodes 0-15:
-* integer arithmetic, typed-array ops, string/UTF-8 ops — pure
-* functions of their operands, no DOM) and the DOM SUBSET (opcodes
-* 16-27: createElement/setAttribute/appendChild/querySelector/
-* getAttribute/dataset/classList/parent/dispatch/serialize against the
-* sandboxed iframe document; opcodes 28-33: the real-DOM evidence
-* probes — real query readback, layout geometry, the topmost-node
-* point probe, a real event dispatch readback, the canonical
-* serialization digest and the causal observe probe (the measured
-* height of the constructed node, written into the u8 state) —
-* validated by the verifier's invariants (exact for
-* QUERY_REAL/EVENT_REAL/SERIALIZE_REAL, monotonic geometry with
-* height >= 1, the point probe naming the topmost constructed node,
-* and the observe entry replaying the reported height). The compute
-* subset is worker-portable by
-* design: it never touches the document, so it can move into the
-* existing worker architecture (kiwi-worker.js) without any protocol
-* change. In THIS implementation the whole VM runs inside the ephemeral
-* iframe, because the op-count bound (8..24 ops, enforced on every
-* program) keeps the wall-clock cost ~0.1 ms on a low-end device —
-* orders of magnitude below the ~20 ms budget the dimension documents —
-* and a worker hop would add latency, not safety. The budget is a
-* documented bound, never a runtime timer: the interpreter enforces the
-* OLD-COUNT bound (the deterministic proxy for the wall-clock cap).
+* Opcode split: COMPUTE (0-15: pure arithmetic/typed-array/string ops,
+* worker-portable) and DOM (16-27: element ops; 28-36: the real-DOM
+* evidence probes). The op-count bound (8..24 ops) keeps a whole run
+* ~0.1 ms on a low-end device.
 *
-* ── Determinism contract ──────────────────────────────────────────────
-* The interpreter computes the canonical op trace exactly like the
-* server mirrors (PHP KiwiCaptcha\ExecutionChallengeGenerator, Rust
-* crate::execution): one `opname(result)` entry per op joined with ';',
-* results being decimal integers, "1"/"0", or standard base64 of a
-* byte string. The single browser-observed entry is 'obs(<dst>,<h>)':
-* the height h is the real text-metric layout measurement of the
-* constructed node (a fixed-width block rendering a canonical text
-* line in the engine's default font), written into the VM u8 state at
-* dst, and replayed by the verifier from the trace itself. The
-* mirrors never predict the observed height: the value is engine and
-* platform specific, so their browser-equivalent traces carry the
-* same entry shape over a fabricated reference value. The digest is hex
-* HMAC-SHA256 keyed by the PROGRAM
-* BYTES (the content-derived key; the secret execution_key never
+* Trace format: one `opname(result)` entry per op joined with ';';
+* results are decimal integers, "1"/"0", or standard base64. The only
+* browser-observed entry is 'obs(<dst>,<h>)' (the real layout height
+* written into the u8 state and replayed by the verifier). Digest:
+* hex HMAC-SHA256 keyed by the PROGRAM BYTES (the execution_key never
 * leaves the server) over
-* `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`
-* with scope/action/version read from the program blob itself. The
-* digest binds the submission to the issued program and challenge
-* context; the server recomputes the expected value from the STORED
-* program and compares in constant time.
-*
-* The interpreter runs its own tiny SHA-256 + HMAC-SHA256 (no
-* crypto.subtle dependency: the sandboxed iframe may run in contexts
-* where the WebCrypto API is unavailable, and a synchronous
-* implementation keeps the digest computation deterministic).
+* `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`.
+* The VM runs its own SHA-256 + HMAC-SHA256: the sandboxed iframe may
+* run where crypto.subtle is unavailable, and synchronous code keeps
+* the digest deterministic.
 */
 (function () {
  "use strict";
@@ -101,7 +58,7 @@
   "cadd", "ccont", "dparent", "ddispatch", "dserialize",
   "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth"
  ];
- // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
+ // ── Minimal SHA-256 (FIPS 180-4) ───────────────────────────────────
  var K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -191,7 +148,7 @@
   opad.set(inner, blockSize);
   return sha256Bytes(opad);
  }
- // ── Tiny base64 / utf8 helpers (byte-exact) ─────────────────────────
+ // ── Tiny base64 / utf8 helpers ─────────────────────────────────────
  var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  function b64Encode(bytes) {
   var out = "";
@@ -230,11 +187,8 @@
   for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
   return out;
  }
- // ── The program parser ──────────────────────────────────────────────
- // Mirrors the PHP/Rust parsers byte-for-byte: length bytes carry the
- // ACTUAL length; the raw-byte operands (int literals, U8_CREATE,
- // U8_WRITE/READ/ROTATE, tag/name indexes, slice start/count) derive
- // the same value both sides derive.
+ // ── The program parser ─────────────────────────────────────────────
+ // Mirrors the PHP/Rust parsers byte-for-byte.
  function parseProgram(bytes) {
   var pos = 0;
   function take(n) {
@@ -258,13 +212,9 @@
   var actionBytes = take(actionLen);
   if (actionBytes === null) return null;
   var opVersion = byte();
-  // Execution versions 1..4 are accepted (the compat window: old
-  // challenges stay executable for their whole TTL; 4 is the live
-  // maximum, mirroring the core's MAX_EXECUTION_VERSION); each version
-  // bounds its own opcode space below — version 1 never carries the
-  // version-2 observe opcode (33), versions below 3 never carry the
-  // version-3 sibling-index opcode (34), versions below 4 never carry
-  // the version-4 child/depth opcodes (35/36).
+  // Versions 1..4 are accepted (the compat window; 4 is the live
+  // maximum); each bounds its own opcode space (33 only from v2, 34
+  // from v3, 35/36 from v4).
   if (opVersion < 1 || opVersion > 4) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
@@ -279,7 +229,6 @@
   for (var i = 0; i < opCount; i++) {
    var opcode = byte();
    if (opcode === null) return null;
-   // Version 1 programs never carry the version-2 observe opcode.
    var maxOpcode = opVersion === 1 ? 33 : (opVersion === 2 ? 34 : (opVersion === 3 ? 35 : OP_COUNT));
    if (opcode >= maxOpcode) return null;
    var operands = [];
@@ -397,8 +346,8 @@
      break;
     }
     case 28: case 29: case 31: {
-     // Real-DOM probes: QUERY_REAL/GEOMETRY/EVENT_REAL carry a
-     // constructed id (4..16 bytes, like the plain query op).
+     // Real-DOM probes (QUERY_REAL/GEOMETRY/EVENT_REAL): a constructed
+     // id of 4..16 bytes, like the plain query op.
      var idReal = readLenBytes(16);
      if (!idReal || idReal.length < 4) return null;
      operands.push({ k: "id", v: idReal });
@@ -415,8 +364,7 @@
     case 32:
      break;
     case 33: {
-     // OBSERVE: the constructed id (4..16 bytes, like the real
-     // probes) then one raw byte for the u8 destination index.
+     // OBSERVE: the constructed id then one raw byte for the u8 index.
      var obsId = readLenBytes(16);
      if (!obsId || obsId.length < 4) return null;
      var obsByte = byte();
@@ -426,16 +374,14 @@
      break;
     }
     case 34: {
-     // DSIB: the constructed id (4..16 bytes), the sibling-index
-     // traversal probe operand.
+     // DSIB: the constructed id (4..16 bytes).
      var dsibId = readLenBytes(16);
      if (!dsibId || dsibId.length < 4) return null;
      operands.push({ k: "id", v: dsibId });
      break;
     }
     case 35: {
-     // DCHILD: a tag byte then the new child's id (created under the
-     // current node).
+     // DCHILD: a tag byte then the new child's id.
      var chTag = byte();
      if (chTag === null) return null;
      var chId = readLenBytes(16);
@@ -456,8 +402,7 @@
    }
    ops.push({ opcode: opcode, operands: operands });
   }
-  // Exact EOF: the op list must consume the whole blob (the mirrors'
-  // strict-parser parity — a trailing byte is a foreign blob).
+  // Exact EOF: a trailing byte is a foreign blob (strict-parser parity).
   if (pos !== bytes.length) return null;
   return {
    scope: bytesToAscii(scopeBytes),
@@ -478,26 +423,20 @@
   return undefined;
  }
  // ── The deterministic state machine ─────────────────────────────────
- // DOM state mirrors the real sandboxed iframe document. The
- // interpreter keeps its OWN attribute record (setAttribute ops + the
- // reflected id) — serialization reads that record, never
- // getAttributeNames, so dataset writes can never leak into the
- // canonical serialization.
+ // Serialization reads this module's OWN attribute record, never
+ // getAttributeNames, so dataset writes never leak into it.
  function runProgram(program, doc) {
   var u8 = new Uint8Array(0);
   var cur = null; // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
   var docIds = {}; // id -> true for appended nodes
   var entries = [];
-  // The POINT probe's whole-program predicate (the verifier checks
-  // "any DOM_APPEND op", never the probe's position): the browser
-  // answers 'div' exactly when the program constructs a node.
+  // POINT probe: 'div' iff the program appends any node (whole-program
+  // predicate, never the probe's position).
   var hasAppend = false;
   for (var pre = 0; pre < program.ops.length; pre++) {
    if (program.ops[pre].opcode === 18) { hasAppend = true; break; }
   }
-  // GEOMETRY tops must be monotonic across the whole trace (the
-  // verifier's invariant); a real layout offset can never decrease,
-  // and an absent probe reports the previous top.
+  // GEOMETRY tops stay monotonic; an absent probe reports the previous.
   var geomTop = -1;
   function checksum() {
    var sum = 0;
@@ -660,10 +599,8 @@
      break;
     }
     case 28: {
-     // Real querySelectorById readback: 'none' unless the probed
-     // id is the current appended node, then the canonical
-     // 'div|name=value;...' attribute pairs (the dataset writes
-     // never leak into the canonical record).
+     // Real query readback: canonical 'div|...' for the current appended
+     // node, 'none' otherwise (dataset writes never leak in).
      var qrId = bytesToAscii(opValue(ops, "id"));
      if (!docIds[qrId]) {
       value = "none";
@@ -675,10 +612,7 @@
      break;
     }
     case 29: {
-     // Layout geometry of the constructed node: real offsetTop /
-     // offsetHeight (clamped to the verifier invariants: height
-     // >= 1, tops never decreasing). A probe of a node that is
-     // not (yet) in the document reports the previous top.
+     // Real layout geometry, clamped to the verifier's invariants.
      var gmEl = doc.getElementById(bytesToAscii(opValue(ops, "id")));
      var gmTop = gmEl ? gmEl.offsetTop : 0;
      if (gmTop < geomTop) gmTop = geomTop;
@@ -689,15 +623,12 @@
      break;
     }
     case 30: {
-     // The topmost-node point probe: 'div' when the program
-     // constructs any node, 'none' otherwise (the verifier's
-     // whole-program predicate; x/y are the probe coordinates).
+     // The topmost-node point probe: 'div'/'none'.
      value = hasAppend ? "div" : "none";
      break;
     }
     case 31: {
-     // Real event readback: the canonical 'kiwi-ev:tag' for the
-     // current appended node, 'none' for a foreign id.
+     // Real event readback: 'kiwi-ev:tag' for the current node.
      var evId = bytesToAscii(opValue(ops, "id"));
      if (!docIds[evId]) {
       value = "none";
@@ -707,24 +638,17 @@
      break;
     }
     case 32: {
-     // Canonical real serialization digest: hex SHA-256 of the
-     // current node's sorted canonical attribute pairs, or of the
-     // empty string when nothing is appended (the interpreter's
-     // own sha256 keeps the digest deterministic).
+     // Canonical serialization digest: hex SHA-256 of the sorted
+     // canonical attribute pairs ("" when nothing is appended).
      var srParts = (cur && cur.appended) ? serializeAttrs(cur) : "";
      value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
      break;
     }
     case 33: {
-     // OBSERVE: the measured real layout height of the constructed
-     // node, written into the u8 state like U8_WRITE. The probe
-     // pins the layout to a fixed-width block that renders a
-     // canonical text line, so the measurement is the engine's own
-     // text metrics (its default font and line height): a value a
-     // pure function of the program cannot compute, since it
-     // varies across engines and platforms. The verifier replays
-     // this entry from the trace itself; it never predicts the
-     // height. An absent node reports 1.
+     // OBSERVE: the real layout height of the constructed node (a
+     // fixed-width block rendering a canonical line), written into the
+     // u8 state. Engine-specific — the verifier replays it from the
+     // trace, never predicting it. Absent node: 1.
      var obsId = bytesToAscii(opValue(ops, "id"));
      var obsIdx = opValue(ops, "idx");
      var obsEl = doc.getElementById(obsId);
@@ -743,11 +667,8 @@
      break;
     }
     case 34: {
-     // DSIB: the real sibling index of the constructed node — the
-     // length of its previousElementSibling chain in the sandboxed
-     // document (its position among the body children the program
-     // appended). The verifier computes the exact expected value from
-     // the append order; an absent node reports 0.
+     // DSIB: the real previousElementSibling chain length (the
+     // verifier computes the exact value; an absent node reports 0).
      var dsibId = bytesToAscii(opValue(ops, "id"));
      var dsibEl = doc.getElementById(dsibId);
      var dsibIdx = 0;
@@ -759,8 +680,8 @@
      break;
     }
     case 35: {
-     // DCHILD: create a new element as a real child of the current
-     // node and make it current (a real nested tree edge).
+     // DCHILD: create a real child of the current node; it becomes
+     // current (a real nested tree edge).
      var chId = bytesToAscii(opValue(ops, "id"));
      var chEl = doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
      chEl.id = chId;
@@ -770,8 +691,7 @@
      break;
     }
     case 36: {
-     // DDEPTH: the real ancestor-chain length of the probed node up
-     // to (excluding) the document body.
+     // DDEPTH: the real ancestor-chain length up to body.
      var ddId = bytesToAscii(opValue(ops, "id"));
      var ddEl = doc.getElementById(ddId);
      var ddDepth = 0;
@@ -790,9 +710,9 @@
   return entries.join(";");
  }
  // ── The digest ──────────────────────────────────────────────────────
- // digest = hex(HMAC-SHA256(program_bytes,
- //   "kiwi-execution-v1|" nonce "|" scope "|" action "|" version "|" trace))
  function computeDigest(programBytes, program, nonce, trace) {
+  // digest = hex(HMAC-SHA256(program_bytes,
+  //   "kiwi-execution-v1|" nonce "|" scope "|" action "|" version "|" trace))
   var msg = asciiBytes(
    KIWI_EXECUTION_PROTOCOL + "|" + nonce + "|" + program.scope + "|" +
    program.action + "|" + program.opVersion + "|" + trace
@@ -805,17 +725,10 @@
   var parent = window.parent;
   function post(type, payload) {
    try {
-    // The parent is the driver's page; the srcdoc iframe is
-    // same-origin (sandbox allow-scripts allow-same-origin), so the
-    // target is same-origin. The explicit "/" target is the
-    // sender-origin shorthand (the document's own origin): inside a
-    // sandboxed srcdoc document `window.location.origin` reports
-    // the literal string "null" even though the document's real
-    // origin IS the parent's, so posting with "null" would silently
-    // drop the message. "/" delivers to the real same-origin parent
-    // and is never a "*" wildcard (the driver validates the message
-    // source on its side; the payload carries no secrets, only the
-    // digest).
+    // The srcdoc iframe is same-origin; "/" (the sender-origin
+    // shorthand) reaches the real parent — posting to the literal
+    // "null" that window.location.origin reports here would drop the
+    // message. "/" is never a "*" wildcard.
     parent.postMessage({ type: type, protocol: KIWI_EXECUTION_PROTOCOL, payload: payload || {} }, "/");
    } catch (e) {}
   }
