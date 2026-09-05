@@ -142,7 +142,7 @@ final class Rsw
     /**
      * The cap of the validated-pair cache: at most this many distinct
      * validated (n, lambda) pairs are retained per process. When the
-     * cap is full, the oldest inserted validated pair is evicted;
+     * cap is full, the earliest inserted validated pair is evicted;
      * cache hits do not alter eviction order. A deployment configures one pair, so the cap
      * engages only in a process that serves several distinct rsw
      * configurations. Eviction is deterministic and never changes a

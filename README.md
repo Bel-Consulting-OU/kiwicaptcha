@@ -167,7 +167,7 @@ let config = ChallengeConfig {
     m_kib: 0,                        // Argon2id memory (KiB); ignored for SHA-256
     t: 1, p: 1,
     target_bits: 18,                 // SHA-256 difficulty (leading zero bits; 18 = ordinary default, 20 = elevated rung)
-    argon2_target_bits: 4,           // the Argon2id default since the round-5 retune (ignored for SHA-256)
+    argon2_target_bits: 4,           // the Argon2id default, target 4 (ignored for SHA-256)
     ttl_secs: 120,
     min_duration_ms: None,           // None => derived from the difficulty
     auto_tune: false,

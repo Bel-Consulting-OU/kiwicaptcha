@@ -121,7 +121,7 @@ final class Config
      * @param int      $p                   Argon2id parallelism.
      * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
      * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10;
-     *                                      default 4). The round-5 client-performance lab
+     *                                      default 4). The client-performance lab
      *                                      measured the 8-bit rung at ~16 s p95 on a
      *                                      mainstream desktop, above the absolute 5000 ms
      *                                      UX ceiling. The default is therefore 4, with

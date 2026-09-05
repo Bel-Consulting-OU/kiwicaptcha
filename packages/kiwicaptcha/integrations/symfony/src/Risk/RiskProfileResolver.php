@@ -60,7 +60,7 @@ final class RiskProfileResolver
      * Calibration note: the highest Argon rung (target 4, about 16
      * expected Argon2id evaluations at the fixed 16 MiB envelope). The
      * ladder was retuned from [1, 4, 8] to [1, 2, 4] after the
-     * client-performance lab measured the old 8-bit rung at ~16 s p95
+     * client-performance lab measured the 8-bit rung at ~16 s p95
      * on a mainstream desktop, above the absolute 5000 ms UX ceiling.
      * Calibrate the rung against physical low-end mobile hardware:
      * cheap and mid-range Android, older and recent iPhone,

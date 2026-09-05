@@ -410,7 +410,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(3, $max->t);
         self::assertSame(1, $max->p);
         self::assertLessThanOrEqual(20, $max->targetBits, 'the challenge target difficulty stays within the widget-solvable ceiling');
-        self::assertSame(4, $max->targetBits, "the default ladder's highest rung is 4 since the round-5 retune");
+        self::assertSame(4, $max->targetBits, "the default ladder's highest rung is 4");
 
         // A custom envelope is honored across ALL rungs — the ceiling is the
         // configured envelope, never the action.
@@ -510,7 +510,7 @@ final class RiskIntegrationTest extends TestCase
         // The fixed Argon2id verification-memory envelope and the
         // target-difficulty escalation ladder.
         self::assertSame(16384, $risk['argon_verification_memory_kib'], 'the adaptive Argon memory envelope defaults to 16384 KiB');
-        self::assertSame([1, 2, 4], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 2, 4] since the round-5 retune');
+        self::assertSame([1, 2, 4], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 2, 4]');
         // The security-epoch monitor's short cache window.
         self::assertSame(1, $risk['security_epoch_cache_secs'], 'the central security-epoch read is cached 1 s by default');
         // The Ed25519 receipt signer is OFF by default.

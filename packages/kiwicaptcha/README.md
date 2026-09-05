@@ -90,7 +90,7 @@ let config = ChallengeConfig {
     t: 1,                    // time cost; irrelevant for SHA-256
     p: 1,                    // parallelism; irrelevant for SHA-256
     target_bits: 18,         // SHA-256 difficulty (leading zero bits; 18 = ordinary default, 20 = elevated rung)
-    argon2_target_bits: 4,   // the Argon2id default since the round-5 retune (ignored for SHA-256)
+    argon2_target_bits: 4,   // the Argon2id default, target 4 (ignored for SHA-256)
     ttl_secs: 120,
     min_duration_ms: None,   // None => derived from the difficulty
     auto_tune: false,        // scale target_bits with active solver load?
@@ -112,7 +112,7 @@ let config = ChallengeConfig {
 // browser-feasible (64 MiB is the WASM heap ceiling):
 
 // Low-memory / mobile — 8 MiB memory, 4 bits (~16 Argon2id hashes, the
-// round-5 retuned default):
+// the target-4 default):
 let argon2_mobile = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(),
     algorithm: PoWAlgorithm::Argon2id,
