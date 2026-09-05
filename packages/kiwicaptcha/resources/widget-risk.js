@@ -475,8 +475,8 @@
   // never types into it.
   var KIWI_DECOY_VARIANT_COUNT = 6;
   var KIWI_DECOY_WRAP_CLASSES = ["kiwi-form-aux", "kiwi-form-aux-alt", "kiwi-field-aux", "kiwi-aux-group"];
-  // Client-side CSPRNG word; the Math.random fallback is presentation-
-  // only (the strategy and wrapper class are never security boundaries).
+  // Client-side CSPRNG word; the engine fallback is presentation-only
+  // (the strategy and wrapper class are never security boundaries).
   function kiwiCspUint32() {
     if (window.crypto && typeof window.crypto.getRandomValues === "function") {
       var buf = new Uint32Array(1);

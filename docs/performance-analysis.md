@@ -222,7 +222,7 @@ perf-budget.sh): every eager-core driver copy is
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 31,650 bytes raw, 9,074 bytes gzip and 7,774 bytes
+module) is 31,644 bytes raw, 9,073 bytes gzip and 7,772 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
@@ -253,7 +253,7 @@ coarse client-context descriptor having moved into the core;
 compressed sizes measured with `gzip -n -9`
 and `brotli -q 11`), and re-recorded again the same day after the
 comment compaction of the two near-cap lazy assets (widget-risk.js
-at 31,650 raw / 9,074 gzip / 7,774 brotli and
+at 31,644 raw / 9,073 gzip / 7,772 brotli and
 execution-interpreter.js at 27,634 raw / 8,392 gzip / 7,255 brotli,
 code byte-identical, caps unchanged), and perf-budget.sh verifies the recorded
 raw_bytes EQUAL the current measured bytes (an equality gate, not
@@ -290,7 +290,7 @@ record's budget rows, equality-gated):
   worker solve tier (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge or an armed response (31,650 raw / 9,074 gzip / 7,774
+  challenge or an armed response (31,644 raw / 9,073 gzip / 7,772
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
