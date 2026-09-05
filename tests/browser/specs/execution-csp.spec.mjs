@@ -87,6 +87,49 @@ test.describe('ExecutionChallengeV1 under real CSP headers', () => {
     expect(iframes, 'the sandboxed execution iframe must be removed after the run').toBe(0);
   });
 
+  test('the documented strict CSP permits a version-5 armed execution challenge end to end', async ({ page }) => {
+    // The version-5 causal grammar under the real strict header: the
+    // fixture cap knob (?exec_cap=5) makes the driver's
+    // Kiwi-Execution-Max-Version 5 advertisement issue the v5 program,
+    // and the interpreter executes its object-graph ops inside the
+    // same policy-inheriting srcdoc iframe. The durlc entry reads the
+    // iframe's about:srcdoc URL, which is not governed by frame-src in
+    // any engine — the same property that keeps frame-src 'none'
+    // compatible with the ephemeral execution iframe.
+    const execResponses = [];
+    page.on('response', (response) => {
+      if (response.url().includes('/assets/execution.')) execResponses.push(response);
+    });
+
+    const response = await page.goto('/?assets=files&execution=1&exec_cap=5&csp=strict');
+    const policy = response.headers()['content-security-policy'] || '';
+    expect(policy, 'the fixture must send a real Content-Security-Policy header').toContain("script-src 'self'");
+
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 120_000,
+    });
+
+    expect(execResponses, 'the strict policy must permit the one interpreter fetch').toHaveLength(1);
+    expect(execResponses[0].status(), 'the interpreter asset must be served').toBe(200);
+
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'an armed v5 solve under the strict policy must mint a token').toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const parts = plain.split('.');
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    const standard = evidence[1].replace(/-/g, '+').replace(/_/g, '/');
+    const trace = Buffer.from(standard, 'base64').toString('utf8');
+    for (const marker of ['dclone(', 'drepar(', 'durlc(', 'dmutate(']) {
+      expect(trace.includes(marker), `the v5 spine entry ${marker} must be present under the strict policy`).toBe(true);
+    }
+
+    const result = await verifyToken(page, await fixtureOrigin(page), token);
+    expect(result.body.ok, `the v5 armed solve must verify (got ${result.body.code})`).toBe(true);
+  });
+
   test('blocking the execution asset fails closed: no token, no unarmed fallback, no version downgrade', async ({ page }) => {
     // The challenge requests of this lifecycle: the count must stay at
     // one (no retry storm) and the issuance must be execution-armed, so
@@ -122,7 +165,7 @@ test.describe('ExecutionChallengeV1 under real CSP headers', () => {
     // response carried the execution_program, so the widget was never
     // downgraded to an unarmed or version-1-only issuance.
     expect(challengeRequests, 'exactly one challenge request, no retry storm').toHaveLength(1);
-    expect(challengeRequests[0].headers()['kiwi-execution-max-version'], 'the driver must advertise its execution capability').toBe('4');
+    expect(challengeRequests[0].headers()['kiwi-execution-max-version'], 'the driver must advertise its execution capability').toBe('5');
     expect(challengeResponses, 'the armed challenge response must have arrived').toHaveLength(1);
     const issuance = await challengeResponses[0].json();
     expect(typeof issuance.execution_program, 'the issuance must be execution-armed').toBe('string');

@@ -1089,9 +1089,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // execution-version cap and the central fleet floor are confirmed
     // at 3: ?execution=1 stands in for the whole execution rollout
     // state, and no SecurityEpochMonitor or {kiwi:<ns>}:security-policy
-    // hash is wired in the fixture. The effective grammar version
-    // therefore equals the client's advertised maximum (capped at 3)
-    // when the client advertised Kiwi-Execution-Max-Version on the
+    // hash is wired in the fixture. The additive ?exec_cap=<1..5> knob
+    // raises that simulated cap (the version-5 browser cases exercise
+    // the causal object-graph grammar through it); absent, garbage or
+    // an out-of-range value keeps the historical v3-capable fixture.
+    // The effective grammar version therefore equals the client's
+    // advertised maximum (capped at the simulated deployment cap) when
+    // the client advertised Kiwi-Execution-Max-Version on the
     // challenge request; the current driver sends that header when the
     // execution tier is configured. Absence, an empty value or garbage
     // issues version 1, since an older driver never sends the header,
@@ -1102,8 +1106,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // read.
     $executionMaxVersion = 1;
     $headerCapability = (string) ($_SERVER['HTTP_KIWI_EXECUTION_MAX_VERSION'] ?? '');
+    $executionFixtureCap = 3;
+    if (preg_match('/^[1-5]$/D', (string) ($_GET['exec_cap'] ?? '')) === 1) {
+        $executionFixtureCap = (int) $_GET['exec_cap'];
+    }
     if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $headerCapability) === 1) {
-        $executionMaxVersion = min(3, (int) $headerCapability);
+        $executionMaxVersion = min($executionFixtureCap, (int) $headerCapability);
     }
     $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion, $rswT);
     if ($challenge === null) {
@@ -1686,6 +1694,11 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
     if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
+    // ?exec_cap=<1..5> raises the fixture's simulated execution-version
+    // cap for the version-5 browser cases (see the challenge route).
+    if (($_GET['exec_cap'] ?? '') !== '' && preg_match('/^[1-5]$/D', (string) $_GET['exec_cap']) === 1) {
+        $endpointQuery[] = 'exec_cap='.rawurlencode((string) $_GET['exec_cap']);
+    }
     // The rsw fixture knob: ?rsw_t=<T> forwards the sequential cost to
     // the challenge endpoint (default 10000, the smallest allowed T).
     if (($_GET['rsw_t'] ?? '') !== '' && ctype_digit((string) $_GET['rsw_t'])) {
