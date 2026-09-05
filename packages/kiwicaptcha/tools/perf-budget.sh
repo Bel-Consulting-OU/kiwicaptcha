@@ -51,9 +51,18 @@
 # The challenge-response JSON is measured by issuing real challenges
 # through the PHP core (sha256 and argon2id, decoy armed) and encoding
 # the wire shape of the bundle's /challenge response. The
-# execution-armed protocol-v4 response, where the authenticated decoy
-# rides along (the largest wire shape the bundle emits), is measured
-# the same way in both algorithms. Each cap is read from the budgets
+# execution-armed protocol-v4 response (protocol v4, whose record
+# carries the execution dimension at the live grammar maximum — today
+# ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, the version-5
+# causal object-graph grammar, never the grammar-v1 default) is
+# measured with the deterministic largest-wire probe: the max-valid
+# context (128-byte scope, 32-byte action, the 64-byte decoy-name
+# ceiling) at the grammar-max op count (24, reached by iterating the
+# issuance until the stamped count draws the v5 21 + byte % 4 formula
+# to its cap), in sha256, argon2id and — when gmp and the committed
+# RswFixture pair are available, which is only a measure-if-cheap
+# bonus row — rsw, whose modulus rides the response and makes it the
+# largest execution document. Each cap is read from the budgets
 # section too. The php-core vendor must be installed before this
 # script runs (the CI job installs it).
 set -euo pipefail
@@ -295,7 +304,7 @@ for pair in widget_driver/widget-driver.js widget_risk/widget-risk.js \
 done
 
 CHALLENGE_JSON_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json.cap_bytes")
-CHALLENGE_JSON_V4_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json_v4.cap_bytes")
+CHALLENGE_JSON_EXECUTION_CAP=$(json_get "$BASELINES_FILE" "budgets.challenge_response_json_execution.cap_bytes")
 
 challenge_size() {
   "$PHP_BIN" -r '
@@ -321,35 +330,105 @@ challenge_size() {
   ' "packages/kiwicaptcha-php" "$1"
 }
 
-# The protocol-v4 armed issuance: the execution dimension plus the
-# authenticated decoy, the full decoy-capable canonical the bundle
-# emits when both arms are on. Arming needs the configured
-# execution_key; the program and the decoy name vary per issuance.
-challenge_size_v4() {
+# The deterministic largest-wire execution-armed issuance, per
+# algorithm: protocol v4 at the live execution-grammar maximum —
+# executionVersion: ExecutionChallengeGenerator::MAX_EXECUTION_VERSION
+# by NAME, never the positional grammar-v1 default — over the max-valid
+# wire context the bundle endpoint accepts (a 128-byte scope, a 32-byte
+# execution action, the 64-byte decoy-name ceiling, decoy armed), with
+# issuances iterated until the stamped op count draws the version-5
+# 21 + byte % 4 count formula to its 24-op grammar cap (bounded at 64
+# attempts; an iteration that never draws 24 fails the probe, because a
+# below-cap sample would under-gate the budget). The reported size is
+# the largest wire shape measured across the attempts. The rsw row
+# reuses the committed PHP test fixture pair (the autoloaded
+# KiwiCaptcha\Tests\Support\RswFixture of the same php-core vendor) and
+# is a measure-if-cheap variant: when the gmp extension or the fixture
+# class is unavailable the row prints "unavailable" and the
+# sha256/argon2id execution rows still gate.
+challenge_size_execution() {
   "$PHP_BIN" -r '
     require $argv[1]."/vendor/autoload.php";
     use KiwiCaptcha\Config;
     use KiwiCaptcha\Issuer;
     use KiwiCaptcha\PoWAlgorithm;
     use KiwiCaptcha\Storage\ArrayStorage;
-    $algo = $argv[2] === "argon2id" ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    use KiwiCaptcha\ExecutionChallengeGenerator;
+    $algo = $argv[2];
+    $isRsw = $algo === "rsw";
+    if ($isRsw && (!extension_loaded("gmp") || !class_exists("KiwiCaptcha\\Tests\\Support\\RswFixture"))) {
+        echo "unavailable";
+        exit(0);
+    }
+    $rswFixture = "KiwiCaptcha\\Tests\\Support\\RswFixture";
     $config = new Config(
         secretKey: "0123456789abcdef0123456789abcdef",
         executionKey: "fedcba9876543210fedcba9876543210",
-        algorithm: $algo,
+        algorithm: $isRsw ? PoWAlgorithm::Rsw : ($algo === "argon2id" ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256),
         ttlSecs: 120,
-        mKib: $algo === PoWAlgorithm::Argon2id ? 64 : 0,
-        t: $algo === PoWAlgorithm::Argon2id ? 3 : 1,
+        mKib: $algo === "argon2id" ? 64 : 0,
+        t: $algo === "argon2id" ? 3 : 1,
         p: 1,
         targetBits: 8,
         argon2TargetBits: 4,
         minDurationMs: 0,
+        rswModulusN: $isRsw ? $rswFixture::MODULUS_N_B64 : null,
+        rswLambda: $isRsw ? $rswFixture::LAMBDA_B64 : null,
+        rswT: 10000,
     );
-    $challenge = (new Issuer($config, new ArrayStorage()))->issueWithExecutionField("login", "198.51.100.7", true, null, null, null, 1, true);
-    echo strlen(json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES));
+    $issuer = new Issuer($config, new ArrayStorage());
+    $largest = 0;
+    $largestOps = 0;
+    for ($attempt = 0; $attempt < 64; $attempt++) {
+        $challenge = $issuer->issueWithExecutionField(
+            scope: str_repeat("s", 128),
+            clientIp: "198.51.100.7",
+            armExecution: true,
+            executionAction: str_repeat("a", 32),
+            executionVersion: ExecutionChallengeGenerator::MAX_EXECUTION_VERSION,
+            armDecoyField: true,
+            decoyNameOverride: str_repeat("d", 64),
+        );
+        $size = strlen(json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES));
+        $program = ExecutionChallengeGenerator::decode((string) $challenge->executionProgram);
+        $opCount = $program === null ? 0 : count($program["ops"]);
+        if ($opCount > $largestOps) {
+            $largestOps = $opCount;
+        }
+        if ($size > $largest) {
+            $largest = $size;
+        }
+        if ($opCount === ExecutionChallengeGenerator::MAX_OPS) {
+            break;
+        }
+    }
+    if ($largestOps !== ExecutionChallengeGenerator::MAX_OPS) {
+        fwrite(STDERR, "perf-budget: the execution probe never drew the ".ExecutionChallengeGenerator::MAX_OPS."-op grammar cap in 64 issuances (largest draw was $largestOps)\n");
+        exit(2);
+    }
+    echo $largest;
   ' "packages/kiwicaptcha-php" "$1"
 }
 
+largest_execution=0
+for algo in sha256 argon2id rsw; do
+  size=$(challenge_size_execution "$algo")
+  if [ "$size" = "unavailable" ]; then
+    echo "challenge-response execution budget NOTE: the rsw execution variant is not measured on this machine (rsw needs the gmp extension and the committed RswFixture pair); the sha256 and argon2id execution rows still gate the cap"
+    continue
+  fi
+  echo "challenge-response execution budget ($algo, deterministic largest wire): $size bytes (cap $CHALLENGE_JSON_EXECUTION_CAP)"
+  if [ "$size" -gt "$largest_execution" ]; then
+    largest_execution=$size
+  fi
+done
+if [ "$largest_execution" -gt "$CHALLENGE_JSON_EXECUTION_CAP" ]; then
+  echo "perf budget FAILED: the execution-armed challenge-response JSON is $largest_execution bytes (cap $CHALLENGE_JSON_EXECUTION_CAP)" >&2
+  FAILED=1
+fi
+
+# The decoy-armed (no execution dimension) issuance: the plain
+# challenge-response row, one issuance per algorithm.
 largest=0
 for algo in sha256 argon2id; do
   size=$(challenge_size "$algo")
@@ -360,19 +439,6 @@ for algo in sha256 argon2id; do
 done
 if [ "$largest" -gt "$CHALLENGE_JSON_CAP" ]; then
   echo "perf budget FAILED: the challenge-response JSON is $largest bytes (cap $CHALLENGE_JSON_CAP)" >&2
-  FAILED=1
-fi
-
-largest_v4=0
-for algo in sha256 argon2id; do
-  size=$(challenge_size_v4 "$algo")
-  echo "challenge-response v4 budget ($algo): $size bytes (cap $CHALLENGE_JSON_V4_CAP)"
-  if [ "$size" -gt "$largest_v4" ]; then
-    largest_v4=$size
-  fi
-done
-if [ "$largest_v4" -gt "$CHALLENGE_JSON_V4_CAP" ]; then
-  echo "perf budget FAILED: the v4 execution-armed challenge-response JSON is $largest_v4 bytes (cap $CHALLENGE_JSON_V4_CAP)" >&2
   FAILED=1
 fi
 

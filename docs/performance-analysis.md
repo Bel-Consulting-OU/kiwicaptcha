@@ -12,7 +12,11 @@ measured on 2026-08-30 on a local Apple silicon Mac (PHP 8.5.4, Redis
 HEAD b3ddc978, and the core and bundle suites were validated on the
 same day under PHP 8.2.33 with the same loopback Redis. The
 deterministic budgets-section byte figures were re-recorded on
-2026-09-02 against the current widget assets; see the budgets
+2026-09-05 against the current widget assets and the current php-core
+issuance (the audit-1 rework, the comment compaction and the
+version-5 causal object-graph rung re-recorded the widget rows, and
+the audit-3 probe rewrite re-recorded the execution-armed challenge
+row); see the budgets
 paragraph below. The recorded
 values live in the machine-readable record
 `packages/kiwicaptcha/tools/perf-baselines.json`, the single source of
@@ -252,24 +256,39 @@ rsw sequential solver living inside the worker asset; the
 decoy-armed challenge-response JSON (the wire shape of the bundle's
 /challenge response) is 1,014-1,045 bytes for sha256 and 1,025-1,046
 bytes for argon2id (the grammar-composed name length varies the size
-between issuances), against the 4,096-byte cap, and the v4
+between issuances), against the 4,096-byte cap, and the
 execution-armed response (the same wire shape carrying
-`execution_program`, the authenticated decoy riding along) is
-1,293-1,667 bytes for sha256 and 1,301-1,633 bytes for argon2id,
-against the 1,900-byte cap. The byte fields of the budgets section
-were re-recorded on 2026-09-05 after the audit-1 acquisition rework
-(the eager core at 99,146 raw / 29,774 gzip / 25,078 brotli and the
-widget-risk row at 45,305 raw / 13,456 gzip / 11,532 brotli, the
-coarse client-context descriptor having moved into the core;
-compressed sizes measured with `gzip -n -9`
-and `brotli -q 11`), and re-recorded again the same day after the
-comment compaction of the two near-cap lazy assets (widget-risk.js
-at 31,644 raw / 9,073 gzip / 7,772 brotli and
+`execution_program`, the authenticated decoy riding along, protocol
+v4) is measured by perf-budget.sh's deterministic largest-wire probe
+at the live execution-grammar maximum — the audit-3 fix: issuance by
+named `executionVersion` at the generator's MAX_EXECUTION_VERSION
+(the version-5 grammar, never the positional grammar-v1 default),
+iterated until the stamped op count draws the version-5 21 + byte % 4
+formula to its 24-op grammar cap, over the max-valid context the
+endpoint accepts (a 128-byte scope, a 32-byte action and the 64-byte
+decoy-name ceiling): 2,066-2,266 bytes for sha256 and 2,093-2,265
+bytes for argon2id against the 3,000-byte cap; the optional rsw
+execution response (the committed RswFixture trapdoor pair; the
+modulus rides the document) measures 2,448-2,656 bytes — the largest
+execution document, gated by the same 3,000-byte cap (the
+deterministic largest measurement demanded the raise from the
+1,900-byte cap of the grammar-v1-era record, and the raise is
+reported with the audit-3 probe rewrite, never silent). The byte
+fields of the budgets section were re-recorded on 2026-09-05 after
+the audit-1 acquisition rework (the eager core at 99,146 raw /
+29,774 gzip / 25,078 brotli and the widget-risk row at 45,305 raw /
+13,456 gzip / 11,532 brotli, the coarse client-context descriptor
+having moved into the core; compressed sizes measured with
+`gzip -n -9` and `brotli -q 11`), and re-recorded again the same day
+after the comment compaction of the two near-cap lazy assets
+(widget-risk.js at 31,644 raw / 9,073 gzip / 7,772 brotli and
 execution-interpreter.js at 27,634 raw / 8,392 gzip / 7,255 brotli,
 code byte-identical, caps unchanged), and again after the version-5
 causal object-graph rung (execution-interpreter.js at 35,728 raw /
 10,380 gzip / 8,989 brotli, the eight new opcodes 37-44 executed
-against the real srcdoc document, caps unchanged), and perf-budget.sh
+against the real srcdoc document, caps unchanged), and the
+challenge-response execution row was re-recorded the same day with
+the audit-3 deterministic largest-wire probe; perf-budget.sh
 verifies the recorded
 raw_bytes EQUAL the current measured bytes (an equality gate, not
 just cap compliance), so a drifted record fails the budget job. A
@@ -438,7 +457,7 @@ itself.
 
 The deterministic byte budgets of perf-budget.sh must stay gating. The
 widget-driver and widget-execution raw, gzip and brotli caps and the
-two challenge-response JSON caps (decoy armed and v4 execution armed)
+two challenge-response JSON caps (decoy armed and execution armed)
 are byte measurements with zero runner noise; a regression there is a
 fact, not a statistic. The caps are
 defined once, in the `budgets` section of
@@ -448,9 +467,12 @@ authority that could drift. The recorded sizes (99,146 / 29,774 /
 25,078 bytes for the eager driver core and 35,728 / 10,380 / 8,989
 bytes for the execution interpreter) gate against the widget caps
 with the recorded-gzip/brotli equality checks, and the
-challenge-response budgets (1,014-1,046 bytes decoy armed,
-1,293-1,667 bytes v4 execution armed) gate their own 4,096-byte
-and 1,900-byte caps; a legitimate addition lands
+challenge-response budgets (1,014-1,046 bytes decoy armed against the
+4,096-byte cap; the deterministic largest-wire execution-armed
+measurement of 2,066-2,266 bytes for sha256 and 2,093-2,265 bytes for
+argon2id, up to 2,656 bytes when the rsw row rides, against the
+3,000-byte cap) gate their own
+caps; a legitimate addition lands
 inside them and an accidental bloating regression trips them.
 
 The timing ratchets must stay advisory. All three timing tools
