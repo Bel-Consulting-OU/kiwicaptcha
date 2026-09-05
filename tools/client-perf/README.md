@@ -488,7 +488,8 @@ only records, `tools/client-perf/release-budgets.json` declares, and
 (schema `kiwicaptcha.release-budgets/2`) carries an explicit p95 budget
 row (solveMsP95 and pageToVerifiedMsP95) for every released solver mode
 x every qualified tier x cold/warm, the per-mode failure-rate limits,
-the physical sha20 sample floor, and a top-level `qualification`
+the physical sha20 sample floor, the absolute UX ceiling and the normal
+engineering target per certified tier, and a top-level `qualification`
 block:
 
 ```json
@@ -506,7 +507,12 @@ desktop-lab evidence recorded by the harness on the rigs listed in
 `devices` (the current file names the recording Mac). `physical` means
 the budgets come from the physical-device procedure below, with
 `qualified_at` and the device rows recorded, and the validator proves
-the claim (see the physical-authority contract section).
+the claim (see the physical-authority contract section). Budget-file
+prose describes what the current evidence means (the harness
+percentile semantics, the real challenge configurations, the split
+between the absolute wall and the engineering target); history
+(re-records, retunes, earlier audit rounds) belongs in the changelog,
+not in the budgets prose or in this README's narrative.
 
 ### `qualification.release_tiers` — the declared release ladder
 
@@ -602,7 +608,12 @@ non-empty, it does not enumerate the vocabulary.
   a note). It prints the current qualification
   status line (e.g. `performance qualification status=lab —
   physical-device data required before release certification`) and
-  does not fail solely on the status. Once the committed file claims
+  does not fail solely on the status. The engineering target is
+  ADVISORY in CI mode: an interactive budget row above
+  `engineeringTargetP95` prints a warning line and never fails the
+  run (the committed sha20 rows warn on every CI run until sha20
+  carries materially more margin — see the engineering-target
+  section). Once the committed file claims
   `status: "physical"`, every physical-authority proof below binds in
   CI mode too, and the release-required scope widens to the union of
   the budget `tiers` and `qualification.release_tiers` — a malformed
@@ -620,7 +631,10 @@ non-empty, it does not enumerate the vocabulary.
   describe — and the per-device sha20 evidence must meet
   `minSha20SamplesPhysical`. Release mode widens the
   release-required cells to the union of the budget `tiers` and
-  `qualification.release_tiers`. In the committed state (status
+  `qualification.release_tiers`, and every interactive budget row
+  must sit at or under the tier's `engineeringTargetP95` (a hard
+  reason naming the cell otherwise; the rule fires only behind the
+  qualification gate). In the committed state (status
   `lab`), release mode fails with the qualification reason and no
   other, which is the honest state: no physical-device data exists
   yet, so no release can be performance-certified.
@@ -776,6 +790,56 @@ honestly must be re-measured, retuned, or explicitly classified
 non-interactive in the harness profile with the rationale recorded in
 the profile comment — never silently left out of the gate.
 
+## Normal engineering targets (`engineeringTargetP95`)
+
+The absolute ceiling is the hard UX wall: five seconds of p95 solve
+time is what a release may ask an ordinary interactive user to wait,
+and a budget row may never exceed it. It should not be the normal
+operating point either: `release-budgets.json` therefore also declares
+a per-tier normal engineering target, the tightest ceiling an
+interactive release budget row may carry:
+
+```json
+{
+  "engineeringTargetP95": {
+    "mainstream-desktop": { "solveMsP95": 4250, "pageToVerifiedMsP95": 4250 }
+  }
+}
+```
+
+4250 ms is 85% of the absolute 5000 ms wall: the engineering target is
+what keeps an interactive release budget from sitting at 94-95% of the
+human-facing wall, and routine challenges should target well below it.
+The split:
+
+- **Release certification (hard).** The validator enforces, in release
+  mode, that every INTERACTIVE cell's budget row sits at or under the
+  tier's `engineeringTargetP95`; a violating cell is a hard reason
+  naming the cell and the target (e.g. `sha20 warm solveMsP95 budget
+  4734 ms exceeds the engineering target 4250 ms`). The rule fires
+  only once the qualification gate has passed (status `physical`): a
+  lab-status file keeps failing release on the qualification reason
+  alone, never on an engineering-target reason. The absolute ceiling
+  remains the hard failure for MEASURED p95 in both validator modes;
+  the engineering target binds the release budget row only. Cells of a
+  non-interactive difficulty (`execchain`) are exempt exactly as they
+  are ceiling-exempt.
+- **CI mode (advisory).** CI prints one warning line per violating
+  cell and never fails on the engineering target. The committed
+  sha20 rows (cold 4426 ms, warm 4734 ms, 89-95% of the wall)
+  therefore produce advisory warnings on every CI run of the committed
+  budgets until sha20 carries materially more margin.
+
+The consequence is intended and honest: sha20 at the current margins
+is above the engineering target and is NOT release-certifiable at
+current margins. sha20 needs real slower-device evidence with
+materially more margin (and budget rows re-derived from it) before
+interactive release certification — the retune or re-measurement path
+is the same one the absolute ceiling demands of any cell that cannot
+meet it, applied one rung earlier. In release certification a
+certified tier without an `engineeringTargetP95` entry is a hard
+reason, exactly like a tier without an `absoluteP95Ceilings` entry.
+
 ## The validator's adversarial mutation suite
 
 `tools/ci/test-validate-release-baseline.mjs` is the validator's own
@@ -822,9 +886,7 @@ unknown/deprecated; an execchain budget above the absolute ceiling is
 allowed because the harness classifies it non-interactive; argon2id
 and sha20 budgets above the ceiling reject; and a budgets-only
 mutation cannot flip sha20 to non-interactive — it rejects on the
-deprecated field AND the still-binding interactive ceiling). The job
-is wired into CI as the self-contained "Release-validator mutation
-
+deprecated field AND the still-binding interactive ceiling). Round 6
 added the client-asset identity cases (the asset bind): a schema-3
 payload without a `clientAssets` block rejects, an extra recorded
 asset rejects on the set difference, a recorded asset missing from
@@ -832,10 +894,26 @@ the current release set rejects, a byte-count mismatch and a sha256
 mismatch each reject on the per-asset reason (in CI and in
 `--release` mode alike), a schema-3 payload bound to the current set
 passes, and a legacy payload with a tampered identity block rejects.
-The job is
-wired into CI as the self-contained "Release-validator mutation
-
-suite" job.
+The engineering-target round added the cases behind `engineeringTargetP95`
+(4250 ms for mainstream-desktop): the committed sha20 margins
+(cold 4426 / warm 4734 ms) pass CI mode with one advisory warning per
+violating row; the same margins on a healthy physical claim reject in
+release mode on the engineering-target reason alone (no status, ceiling
+or measured-vs-budget reason — sha20 is not release-certifiable at the
+committed margins); the same fixture passes CI mode (advisory only); a
+healthy physical claim whose sha20 rows sit under the target (4100 ms)
+and exactly AT the target (4250 ms) both certify in release mode; an
+execchain budget above the target is allowed in release mode
+(non-interactive, harness-owned); a lab-status release run with sha20
+above the target rejects on the lab-status reason alone (the
+engineering target never fires behind the status gate); and a physical
+release ladder whose budget file drops `engineeringTargetP95` rejects.
+The legacy schema-1 fixtures rebuild their `clientAssets` identity
+block from the current release assets at clone time, so the legacy-row
+cases never depend on the maintenance baseline's recorded identity
+being current (its staleness is the validator's CI-mode job, exercised
+against the committed file itself). The job is wired into CI as the
+self-contained "Release-validator mutation suite" job.
 
 ## Results store
 
