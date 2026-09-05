@@ -21,13 +21,16 @@
 *
 * Opcode split: COMPUTE (0-15: pure arithmetic/typed-array/string ops,
 * worker-portable) and DOM (16-27: element ops; 28-36: the real-DOM
-* evidence probes). The op-count bound (8..24 ops) keeps a whole run
-* ~0.1 ms on a low-end device.
+* evidence probes; 37-44: the version-5 causal object-graph ops). The
+* op-count bound (8..24 ops) keeps a whole run ~0.1 ms on a low-end
+* device.
 *
 * Trace format: one `opname(result)` entry per op joined with ';';
-* results are decimal integers, "1"/"0", or standard base64. The only
-* browser-observed entry is 'obs(<dst>,<h>)' (the real layout height
-* written into the u8 state and replayed by the verifier). Digest:
+* results are decimal integers, "1"/"0", or standard base64. The
+* browser-observed entries are 'obs(<dst>,<h>)' (a real layout
+* height replayed by the verifier) and, from version 5,
+* 'durlc(<64 hex>)' (the SHA-256 of the canonicalized document URL,
+* replayed the same way). Digest:
 * hex HMAC-SHA256 keyed by the PROGRAM BYTES (the execution_key never
 * leaves the server) over
 * `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`.
@@ -44,7 +47,7 @@
  var KIWI_EXECUTION_ERROR = "kiwi-execution-error";
  var MIN_OPS = 8;
  var MAX_OPS = 24;
- var OP_COUNT = 37;
+ var OP_COUNT = 45;
  var FORMAT_VERSION = 1;
  var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  var CLASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -56,7 +59,8 @@
   "slen", "schar", "scode", "sslice",
   "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
   "cadd", "ccont", "dparent", "ddispatch", "dserialize",
-  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth"
+  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth",
+  "dfrag", "dclone", "drepar", "dreflec", "dphase", "durlc", "dmutate", "dsdep"
  ];
  // ── Minimal SHA-256 (FIPS 180-4) ───────────────────────────────────
  var K = [
@@ -212,10 +216,10 @@
   var actionBytes = take(actionLen);
   if (actionBytes === null) return null;
   var opVersion = byte();
-  // Versions 1..4 are accepted (the compat window; 4 is the live
+  // Versions 1..5 are accepted (the compat window; 5 is the live
   // maximum); each bounds its own opcode space (33 only from v2, 34
-  // from v3, 35/36 from v4).
-  if (opVersion < 1 || opVersion > 4) return null;
+  // from v3, 35/36 from v4, 37..44 from v5).
+  if (opVersion < 1 || opVersion > 5) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
   function readLenBytes(maxLen) {
@@ -229,7 +233,7 @@
   for (var i = 0; i < opCount; i++) {
    var opcode = byte();
    if (opcode === null) return null;
-   var maxOpcode = opVersion === 1 ? 33 : (opVersion === 2 ? 34 : (opVersion === 3 ? 35 : OP_COUNT));
+   var maxOpcode = opVersion === 1 ? 33 : (opVersion === 2 ? 34 : (opVersion === 3 ? 35 : (opVersion === 4 ? 37 : OP_COUNT)));
    if (opcode >= maxOpcode) return null;
    var operands = [];
    switch (opcode) {
@@ -397,6 +401,56 @@
      operands.push({ k: "id", v: ddId });
      break;
     }
+    case 37: {
+     // DFRAG: the fragment slot byte (s % 4) then a raw cell byte.
+     var fgA = byte(), fgB = byte();
+     if (fgA === null || fgB === null) return null;
+     operands.push({ k: "s", v: fgA % 4 });
+     operands.push({ k: "cell", v: fgB % 64 });
+     break;
+    }
+    case 38: case 39: {
+     // DCLONE/DREPAR: the target id then a raw cell byte.
+     var clId = readLenBytes(16);
+     if (!clId || clId.length < 4) return null;
+     var clCell = byte();
+     if (clCell === null) return null;
+     operands.push({ k: "id", v: clId });
+     operands.push({ k: "cell", v: clCell % 64 });
+     break;
+    }
+    case 40: {
+     var rfByte = byte();
+     if (rfByte === null) return null;
+     operands.push({ k: "name", v: rfByte % 5 });
+     break;
+    }
+    case 41: {
+     var phByte = byte();
+     if (phByte === null) return null;
+     operands.push({ k: "cell", v: phByte % 64 });
+     break;
+    }
+    case 42:
+     break;
+    case 43: {
+     // DMUTATE: a printable value then a raw cell byte.
+     var dmVal = readLenBytes(32);
+     if (!dmVal) return null;
+     var dmCell = byte();
+     if (dmCell === null) return null;
+     operands.push({ k: "val", v: dmVal });
+     operands.push({ k: "cell", v: dmCell % 64 });
+     break;
+    }
+    case 44: {
+     var dsA = byte(), dsB = byte(), dsC = byte();
+     if (dsA === null || dsB === null || dsC === null) return null;
+     operands.push({ k: "b0", v: dsA });
+     operands.push({ k: "b1", v: dsB });
+     operands.push({ k: "b2", v: dsC });
+     break;
+    }
     default:
      return null;
    }
@@ -430,6 +484,8 @@
   var cur = null; // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
   var docIds = {}; // id -> true for appended nodes
   var entries = [];
+var v5 = program.opVersion >= 5;
+var frags = [null, null, null, null]; // v5: the four fragment slots
   // POINT probe: 'div' iff the program appends any node (whole-program
   // predicate, never the probe's position).
   var hasAppend = false;
@@ -448,6 +504,56 @@
    var parts = [];
    for (var i = 0; i < names.length; i++) {
     parts.push(names[i] + "=" + node.attrs[names[i]]);
+   }
+   return parts.join(";");
+  }
+  // The v5 cell rule: the entry lands in the u8 cell when in range.
+  function writeCell(cell, entry) {
+   if (cell < u8.length) u8[cell] = entry & 0xff;
+  }
+  function copyMap(src) {
+   var out = {};
+   for (var key in src) {
+    if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = src[key];
+   }
+   return out;
+  }
+  // URL-standard canonicalization: scheme and host lowercased, the
+  // fragment dropped (deterministic for the srcdoc document URL).
+  function canonicalUrl(href) {
+   var h = String(href);
+   var cut = h.indexOf("#");
+   if (cut >= 0) h = h.substr(0, cut);
+   var colon = h.indexOf(":");
+   if (colon > 0) {
+    var scheme = h.substr(0, colon).toLowerCase();
+    var rest = h.substr(colon + 1);
+    if (rest.substr(0, 2) === "//") {
+     var end = rest.length;
+     for (var i = 2; i < rest.length; i++) {
+      var c = rest.charAt(i);
+      if (c === "/" || c === "?") { end = i; break; }
+     }
+     rest = rest.substr(0, end).toLowerCase() + rest.substr(end);
+    }
+    h = scheme + ":" + rest;
+   }
+   return h;
+  }
+  // The rung-scoped canonical node string: sorted attribute pairs then
+  // (version 5 only) the sorted dataset pairs, classes and text.
+  function canonicalNodeString(node) {
+   var names = Object.keys(node.attrs).sort();
+   var parts = [];
+   for (var i = 0; i < names.length; i++) {
+    parts.push(names[i] + "=" + node.attrs[names[i]]);
+   }
+   if (v5) {
+    var dnames = Object.keys(node.dataset || {}).sort();
+    for (var j = 0; j < dnames.length; j++) parts.push(dnames[j] + "=" + node.dataset[dnames[j]]);
+    var cnames = Object.keys(node.classes || {}).sort();
+    for (var k = 0; k < cnames.length; k++) parts.push(cnames[k]);
+    if (node.text !== undefined && node.text !== "") parts.push(node.text);
    }
    return parts.join(";");
   }
@@ -594,7 +700,7 @@
       cur.appended = true;
       docIds[cur.id] = true;
      }
-     var serialized = cur ? serializeAttrs(cur) : "";
+     var serialized = cur ? canonicalNodeString(cur) : "";
      value = b64Encode(asciiBytes(serialized));
      break;
     }
@@ -638,9 +744,9 @@
      break;
     }
     case 32: {
-     // Canonical serialization digest: hex SHA-256 of the sorted
-     // canonical attribute pairs ("" when nothing is appended).
-     var srParts = (cur && cur.appended) ? serializeAttrs(cur) : "";
+     // Canonical serialization digest: hex SHA-256 of the rung-scoped
+     // canonical node string ("" when nothing is appended).
+     var srParts = (cur && cur.appended) ? canonicalNodeString(cur) : "";
      value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
      break;
     }
@@ -700,6 +806,130 @@
        ddEl = ddEl.parentElement;
      }
      value = "" + ddDepth;
+     break;
+    }
+    case 37: {
+     // DFRAG: move the current subtree into the detached fragment slot.
+     var fgEntry = 0;
+     if (cur && cur.el) {
+      var fgS = opValue(ops, "s");
+      if (!frags[fgS]) frags[fgS] = doc.createDocumentFragment();
+      frags[fgS].appendChild(cur.el);
+      cur.appended = false;
+      if (docIds[cur.id]) delete docIds[cur.id];
+      fgEntry = frags[fgS].children.length;
+     }
+     writeCell(opValue(ops, "cell"), fgEntry);
+     value = String(fgEntry);
+     break;
+    }
+    case 38: {
+     // DCLONE: real deep clone, re-id the copy, insert it after the
+     // original and make the copy current.
+     var clId = bytesToAscii(opValue(ops, "id"));
+     var clEntry = 0;
+     if (cur && cur.el) {
+      clEntry = cur.el.getElementsByTagName("*").length + 1;
+      var copyEl = cur.el.cloneNode(true);
+      copyEl.id = clId;
+      if (cur.appended && cur.el.parentNode) cur.el.parentNode.insertBefore(copyEl, cur.el.nextSibling);
+      var rec = { el: copyEl, id: clId, attrs: copyMap(cur.attrs), dataset: copyMap(cur.dataset), classes: copyMap(cur.classes), appended: cur.appended };
+      rec.attrs.id = clId;
+      if (cur.text !== undefined) rec.text = cur.text;
+      if (cur.appended) docIds[clId] = true;
+      cur = rec;
+     }
+     writeCell(opValue(ops, "cell"), clEntry);
+     value = String(clEntry);
+     break;
+    }
+    case 39: {
+     // DREPAR: real appendChild of the current subtree under the
+     // constructed target (a self/cycle move is the real no-op).
+     var rpEntry = 0;
+     if (cur && cur.el) {
+      var rpEl = doc.getElementById(bytesToAscii(opValue(ops, "id")));
+      if (rpEl) {
+       try {
+        rpEl.appendChild(cur.el);
+        cur.appended = !!rpEl.isConnected;
+        if (cur.appended) docIds[cur.id] = true;
+        else { if (docIds[cur.id]) delete docIds[cur.id]; }
+       } catch (e) {}
+       rpEntry = rpEl.children.length;
+      }
+     }
+     writeCell(opValue(ops, "cell"), rpEntry);
+     value = String(rpEntry);
+     break;
+    }
+    case 40: {
+     // DREFLEC: the indexed reflected attribute value, standard base64.
+     var rfName = ATTR_NAMES[opValue(ops, "name")];
+     var rfVal = cur ? (cur.attrs[rfName] || "") : "";
+     value = b64Encode(asciiBytes(rfVal));
+     break;
+    }
+    case 41: {
+     // DPHASE: real bubbling dispatch; the count of constructed
+     // elements that received it.
+     var phCount = 0;
+     if (cur && cur.el) {
+      var phH = function () { phCount++; };
+      var phEl = cur.el;
+      while (phEl && phEl !== doc.body) {
+       phEl.addEventListener("kiwi-exec-phase", phH, false);
+       phEl = phEl.parentElement;
+      }
+      try {
+       cur.el.dispatchEvent(new doc.defaultView.Event("kiwi-exec-phase", { bubbles: true }));
+      } catch (e) {}
+      phEl = cur.el;
+      while (phEl && phEl !== doc.body) {
+       phEl.removeEventListener("kiwi-exec-phase", phH, false);
+       phEl = phEl.parentElement;
+      }
+     }
+     writeCell(opValue(ops, "cell"), phCount);
+     value = String(phCount);
+     break;
+    }
+    case 42: {
+     // DURLC: SHA-256 hex of the canonicalized document URL.
+     value = bytesToHex(sha256Bytes(asciiBytes(canonicalUrl(doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : doc.URL))));
+     break;
+    }
+    case 43: {
+     // DMUTATE: real textContent replacement; the entry is the text
+     // byte length.
+     var dmVal = bytesToAscii(opValue(ops, "val"));
+     var dmLen = 0;
+     if (cur && cur.el) {
+      var dmGone = [];
+      for (var dmi = 0; dmi < cur.el.children.length; dmi++) dmGone.push(cur.el.children[dmi].id);
+      cur.el.textContent = dmVal;
+      cur.text = dmVal;
+      dmLen = dmVal.length;
+      for (var dmj = 0; dmj < dmGone.length; dmj++) {
+       if (docIds[dmGone[dmj]]) delete docIds[dmGone[dmj]];
+      }
+     }
+     writeCell(opValue(ops, "cell"), dmLen);
+     value = String(dmLen);
+     break;
+    }
+    case 44: {
+     // DSDEP: descend real child elements by the three index bytes.
+     var sdLevel = (cur && cur.el) ? cur.el : null;
+     var sdDone = 0;
+     var sdBytes = [opValue(ops, "b0"), opValue(ops, "b1"), opValue(ops, "b2")];
+     while (sdLevel && sdDone < 3) {
+      var sdKids = sdLevel.children;
+      if (!sdKids.length) break;
+      sdLevel = sdKids[sdBytes[sdDone] % sdKids.length];
+      sdDone++;
+     }
+     value = String(sdDone);
      break;
     }
     default:

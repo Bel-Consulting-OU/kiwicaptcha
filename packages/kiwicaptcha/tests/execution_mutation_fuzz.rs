@@ -29,7 +29,7 @@
 //! set of the PHP record/verifier gate); the fixture-level corpus spans
 //! the full execution-version range. The last section pins the
 //! cross-language differential corpus shared with the PHP suite: the
-//! classifications of 16 adversarial program/trace cases must match
+//! classifications of 19 adversarial program/trace cases must match
 //! `ExecutionDifferentialCorpusTest` case for case.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -455,6 +455,12 @@ fn op_content_len(blob: &[u8], opcode: u8, content_at: usize) -> usize {
         }
         30 => 2,
         33 => 1 + byte(0) + 1,
+        37 => 2,
+        38 | 39 => 2 + byte(0),
+        40 | 41 => 1,
+        42 => 0,
+        43 => 1 + byte(0) + 1,
+        44 => 3,
         _ => 0,
     }
 }
@@ -475,6 +481,8 @@ fn var_operand_spans(blob: &[u8], opcode: u8, content_at: usize) -> Vec<(usize, 
             vec![key, span(1 + key.2)]
         }
         33 => vec![span(0)],
+        38 | 39 => vec![span(0)],
+        43 => vec![span(0)],
         _ => Vec::new(),
     }
 }
@@ -679,8 +687,8 @@ fn trace_mutations_never_panic_and_reject_deterministically() {
     }
     eprintln!("trace mutation corpus: {cases} cases, all deterministic");
     assert_eq!(
-        cases, 813,
-        "the deterministic trace corpus totals: v1 6, v2 265, v3 271, v4 271"
+        cases, 1084,
+        "the deterministic trace corpus totals: v1 6, v2 265, v3 271, v4 271, v5 271"
     );
 }
 
@@ -1094,7 +1102,7 @@ fn record_execution_version_register_matches_the_php_gate_sweep() {
 
 /// The differential corpus shared with the PHP suite. Each case pins a
 /// program blob, a trace and the expected decode/verify classification
-/// (malformed, execution_mismatch or valid). The same 16 entries live
+/// (malformed, execution_mismatch or valid). The same 19 entries live
 /// in `ExecutionDifferentialCorpusTest`; both suites must land on the
 /// same verdict for every case.
 struct CorpusCase {
@@ -1105,7 +1113,7 @@ struct CorpusCase {
     expected: &'static str,
 }
 
-const CORPUS: [CorpusCase; 16] = [
+const CORPUS: [CorpusCase; 19] = [
     CorpusCase {
         name: "v1-valid",
         version: 1,
@@ -1133,6 +1141,27 @@ const CORPUS: [CorpusCase; 16] = [
         program: "AQVsb2dpbgxsb2dpbi1hY3Rpb24EExCjDWxzM0JqblJlVG92Rk4VBHh6b2EcR0EvalpQVmZWSi9DZUsoYVlvPUIzJnNbaUBZYhIQuQdXTXZ2SXZXEfUDPHdLEiPWDGhKMTlmOGtDeW9keCN8B2JHT0NtU1IIYCENbHMzQmpuUmVUb3ZGThMKEwlW3B8NbHMzQmpuUmVUb3ZGTiIHV012dkl2VyQHYkdPQ21TUh8NbHMzQmpuUmVUb3ZGTiAgAHgKyiaEMcDn",
         trace: "dcreate(bHMzQmpuUmVUb3ZGTg==);dset(eHpvYQ==);dappend(1);dcreate(V012dkl2Vw==);dattr(ZGF0YS1raXdp);dappend(1);dchild(aEoxOWY4a0N5b2R4);dchild(YkdPQ21TUg==);u8c(0);obs(19,10);u8r(10);u8w(230);evreal(kiwi-ev:span);dsib(2);ddepth(2);evreal(kiwi-ev:span);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);add(4231826189)",
         expected: "valid",
+    },
+    CorpusCase {
+        name: "v5-valid",
+        version: 5,
+        program: "AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==",
+        trace: "dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)",
+        expected: "valid",
+    },
+    CorpusCase {
+        name: "v5-fragment-append",
+        version: 5,
+        program: "AQVsb2dpbgxsb2dpbi1hY3Rpb24FCBAABEFBQUERAAFaEhAABEJCQkISCAAKACUAAA==",
+        trace: "dcreate(QUFBQQ==);dattr(ZGF0YS1raXdp);dappend(1);dcreate(QkJCQg==);dappend(1);u8c(0);u8r(0);dfrag(1)",
+        expected: "valid",
+    },
+    CorpusCase {
+        name: "v5-urlc-forged",
+        version: 5,
+        program: "AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==",
+        trace: "dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(000000000000000000000000000000000000000000000000000000000000000g);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)",
+        expected: "execution_mismatch",
     },
     CorpusCase {
         name: "op-count-too-large",
@@ -1279,8 +1308,8 @@ fn differential_corpus_verdicts_match_the_php_suite() {
         }
     }
     assert_eq!(
-        valid_digests, 4,
-        "the corpus pins one valid case per version"
+        valid_digests, 6,
+        "the corpus pins one valid case per version plus the version-5 fragment append"
     );
 }
 

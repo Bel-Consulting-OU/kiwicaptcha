@@ -68,6 +68,30 @@ final class ExecutionDifferentialCorpusTest extends TestCase
         ],
 
         [
+            'name' => 'v5-valid',
+            'version' => 5,
+            'program' => 'AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==',
+            'trace' => 'dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)',
+            'expected' => 'valid',
+        ],
+
+        [
+            'name' => 'v5-fragment-append',
+            'version' => 5,
+            'program' => 'AQVsb2dpbgxsb2dpbi1hY3Rpb24FCBAABEFBQUERAAFaEhAABEJCQkISCAAKACUAAA==',
+            'trace' => 'dcreate(QUFBQQ==);dattr(ZGF0YS1raXdp);dappend(1);dcreate(QkJCQg==);dappend(1);u8c(0);u8r(0);dfrag(1)',
+            'expected' => 'valid',
+        ],
+
+        [
+            'name' => 'v5-urlc-forged',
+            'version' => 5,
+            'program' => 'AQVsb2dpbgxsb2dpbi1hY3Rpb24FGBCuB1JVL0ZoMlEVA3h5ZRhbcHReK0AkOTwwKmRPdFkvaE4jTld6WVcSEDIHWkdpZEZ5UxEIED5kPzI2QkFwYGpCUXkqVkESI7kFSWxlZlojLgVHeUV3aQjHIQdSVS9GaDJRAAoACW4GHwdSVS9GaDJRIgdaR2lkRnlTJAVHeUV3aSYEeHorTxQnB1pHaWRGeVMOCg4qKxoiMGhZRTBFSCMoJS9qdVQ0T1Aie2FjPllULAwgIB4YAAQwO2IhdS8Ddg==',
+            'trace' => 'dcreate(UlUvRmgyUQ==);dset(eHll);dappend(1);dcreate(WkdpZEZ5Uw==);dattr(dGl0bGU=);dappend(1);dchild(SWxlZlo=);dchild(R3lFd2k=);u8c(0);obs(0,10);u8r(10);u8w(10);evreal(kiwi-ev:span);dsib(2);ddepth(2);dclone(1);drepar(2);u8r(2);durlc(000000000000000000000000000000000000000000000000000000000000000g);dmutate(26);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);sreal(9b5d5921b44c155a1158e759306b670558b30865e11e604bbd721f255c3e6c0c);point(div);and(808124960)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
             'name' => 'op-count-too-large',
             'version' => 1,
             'program' => 'AQVsb2dpbgxsb2dpbi1hY3Rpb24B/xA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEh8PclZwc2VUeXZNVHhMbXMrHA9yVnBzZVR5dk1UeExtcysdD3JWcHNlVHl2TVR4TG1zKyAXCzJBcUxDOXNKQjR2BZbLHEPX1bDYB/KirhATuo0oGxILsBkQUA8xV2JFc3cvWGFsSkdSUlAJt5MaEOAQZFNIazI0RkFsM1diODVDMxQkFgVySmkjWQdwo5mMcPosjwLkcZPOX9oyWQ==',
@@ -168,10 +192,10 @@ final class ExecutionDifferentialCorpusTest extends TestCase
     {
         $manifest = $this->manifest();
         $maxVersion = $manifest['max_execution_version'];
-        self::assertSame(4, $maxVersion, 'the manifest register ceiling at HEAD');
+        self::assertSame(5, $maxVersion, 'the manifest register ceiling at HEAD');
 
         $cases = self::CORPUS;
-        self::assertCount(16, $cases, 'the embedded corpus is pinned to 16 cases');
+        self::assertCount(19, $cases, 'the embedded corpus is pinned to 19 cases');
         foreach ($cases as $case) {
             $version = $case['version'];
             self::assertGreaterThanOrEqual(1, $version, $case['name'].' version below the floor');

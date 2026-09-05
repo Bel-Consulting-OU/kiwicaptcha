@@ -1090,7 +1090,7 @@
         // the configured execution interpreter asset (data-kiwi-
         // execution-src + integrity), the driver declares the highest
         // execution-program version it can run via the
-        // Kiwi-Execution-Max-Version request header (currently 4), so
+        // Kiwi-Execution-Max-Version request header (currently 5), so
         // the server issues the current causal grammar only to
         // advertising clients. The header is ignorable (an unknown
         // header never fails a body-validating server); its absence
@@ -1100,7 +1100,7 @@
         var execIntegrityAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
           || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
         var reqHeaders = { "Accept": "application/json", "Content-Type": "application/json" };
-        if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "4";
+        if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "5";
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
         // CHAIN TICKET: when the widget carries a server-issued
