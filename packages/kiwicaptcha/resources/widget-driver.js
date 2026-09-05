@@ -782,8 +782,9 @@
       });
     }
     function setProgress(pct) {
+      if (!fillEl || W.dataset.kiwiDestroyed) return;
       var clamped = Math.max(0, Math.min(100, pct));
-      if (fillEl) fillEl.setAttribute("data-progress", String(clamped));
+      fillEl.setAttribute("data-progress", String(clamped));
     }
     
     var countdownTimer = null;

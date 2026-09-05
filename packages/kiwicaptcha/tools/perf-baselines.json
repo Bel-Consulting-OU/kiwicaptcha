@@ -9,15 +9,15 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 99146,
-      "brotli_bytes": 25078,
+      "raw_bytes": 99188,
+      "brotli_bytes": 25087,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies at 99,146 bytes raw / 29,774 gzip / 25,078 brotli (measured 2026-09-05 with gzip -n -9 and brotli -q 11 after the audit-1 acquisition rework: the semantic display-state view model, the ungated locale/telemetry/coarse acquisition and the coarse client-context descriptor moved into the core). The raw 160,000-byte cap is carried forward onto the always-loaded core; the compressed caps are the ordinary-bootstrap target of 30,720 gzip / 28,000 brotli bytes. The lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes.",
-      "gzip_bytes_zlib12": 29774,
-      "gzip_bytes_zlib13": 29774
+      "gzip_bytes_zlib12": 29778,
+      "gzip_bytes_zlib13": 29778
     },
     "widget_worker": {
       "raw_bytes": 24819,
@@ -64,7 +64,7 @@
       "op_count": 24,
       "execution_version": 5,
       "cap_bytes": 3000,
-      "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (protocol v4; the authenticated decoy rides along), measured 2026-09-05 with the deterministic largest-wire probe of perf-budget.sh: issuance by named executionVersion at ExecutionChallengeGenerator::MAX_EXECUTION_VERSION (the version-5 causal object-graph grammar, never the grammar-v1 positional default the audit-3 finding flagged), iterated until the stamped op count draws the version-5 21 + byte % 4 count formula to its 24-op grammar cap, over the max-valid context the endpoint accepts (a 128-byte scope, a 32-byte execution action, the 64-byte decoy-name ceiling). The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs (the probe reports the largest wire shape of its bounded iteration; the recorded largest_execution_response_bytes is the hand-recorded maximum). The rsw row reuses the committed PHP test fixture pair (tests/Support/RswFixture.php); the modulus rides the response, so rsw is the largest execution document. The 3,000-byte cap replaces the 1,900 bytes of the old grammar-v1-era record — the deterministic largest measurement demands the raise (reported with the audit-3 probe rewrite, never a silent re-baseline)."
+      "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (protocol v4; the authenticated decoy rides along), measured 2026-09-05 with the deterministic largest-wire probe of perf-budget.sh: issuance by named executionVersion at ExecutionChallengeGenerator::MAX_EXECUTION_VERSION (the version-5 causal object-graph grammar, never the grammar-v1 positional default the audit-3 finding flagged), iterated until the stamped op count draws the version-5 21 + byte % 4 count formula to its 24-op grammar cap, over the max-valid context the endpoint accepts (a 128-byte scope, a 32-byte execution action, the 64-byte decoy-name ceiling). The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs (the probe reports the largest wire shape of its bounded iteration; the recorded largest_execution_response_bytes is the hand-recorded maximum). The rsw row reuses the committed PHP test fixture pair (tests/Support/RswFixture.php); the modulus rides the response, so rsw is the largest execution document. The 3,000-byte cap replaces the 1,900 bytes of the old grammar-v1-era record \u2014 the deterministic largest measurement demands the raise (reported with the audit-3 probe rewrite, never a silent re-baseline)."
     },
     "widget_risk": {
       "raw_bytes": 31644,

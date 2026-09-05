@@ -233,7 +233,7 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-99,146 bytes raw, 29,774 bytes gzip and 25,078 bytes brotli, against
+99,188 bytes raw, 29,778 bytes gzip and 25,087 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
@@ -275,8 +275,8 @@ deterministic largest measurement demanded the raise from the
 1,900-byte cap of the grammar-v1-era record, and the raise is
 reported with the audit-3 probe rewrite, never silent). The byte
 fields of the budgets section were re-recorded on 2026-09-05 after
-the audit-1 acquisition rework (the eager core at 99,146 raw /
-29,774 gzip / 25,078 brotli and the widget-risk row at 45,305 raw /
+the audit-1 acquisition rework (the eager core at 99,188 raw /
+29,778 gzip / 25,087 brotli and the widget-risk row at 45,305 raw /
 13,456 gzip / 11,532 brotli, the coarse client-context descriptor
 having moved into the core; compressed sizes measured with
 `gzip -n -9` and `brotli -q 11`), and re-recorded again the same day
@@ -304,8 +304,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 99,146 bytes
-raw, 29,774 gzip and 25,078 brotli (the record's
+any memory-hard challenge — is the eager core alone: 99,188 bytes
+raw, 29,778 gzip and 25,087 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 numbers are inside the **sub-30 KB compressed** target, with the
 gzip figure now at 97% of its 30,720-byte cap (the audit-1
@@ -319,7 +319,7 @@ record's budget rows, equality-gated):
 - `widget-driver.js`, the eager core: bootstrap, challenge request,
   the SHA-256 solve, the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (99,146 raw / 29,774 gzip / 25,078 brotli);
+  lazy-module loader (99,188 raw / 29,778 gzip / 25,087 brotli);
 - `widget-risk.js`, the lazy adaptive-risk module: the argon2id/rsw
   worker solve tier (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
@@ -463,8 +463,8 @@ fact, not a statistic. The caps are
 defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
-authority that could drift. The recorded sizes (99,146 / 29,774 /
-25,078 bytes for the eager driver core and 35,728 / 10,380 / 8,989
+authority that could drift. The recorded sizes (99,188 / 29,778 /
+25,087 bytes for the eager driver core and 35,728 / 10,380 / 8,989
 bytes for the execution interpreter) gate against the widget caps
 with the recorded-gzip/brotli equality checks, and the
 challenge-response budgets (1,014-1,046 bytes decoy armed against the
