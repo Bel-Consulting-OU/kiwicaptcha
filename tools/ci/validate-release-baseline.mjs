@@ -141,6 +141,34 @@
  *      mode), every certified tier must carry an
  *      absoluteP95Ceilings entry: a release ladder without absolute
  *      ceilings is a hard reason.
+ *   9b. normal engineering targets (audit finding 3, engineering
+ *      target): the budget file declares engineeringTargetP95 per
+ *      tier ({ solveMsP95, pageToVerifiedMsP95 } in ms; 4250 ms for
+ *      mainstream-desktop, 85% of the absolute 5000 ms wall) — the
+ *      normal engineering ceiling of an interactive release budget
+ *      row. The absolute ceiling is the hard UX wall a release may
+ *      ask an ordinary interactive user to wait; the engineering
+ *      target is the tighter normal ceiling a release budget row may
+ *      carry, so an interactive release budget can no longer sit at
+ *      94-95% of the human-facing wall (routine challenges should
+ *      target well below it). The validator enforces it in RELEASE
+ *      certification: every INTERACTIVE cell (the harness
+ *      classification of rule 9: execchain interactive: false is
+ *      exempt, exactly as it is ceiling-exempt) whose budget row
+ *      exceeds the tier's engineering target is a hard reason naming
+ *      the cell and the target (e.g. 'sha20 warm ... exceeds the
+ *      engineering target 4250 ms (budget 4734 ms)'); the
+ *      engineering-target rule only fires once the qualification
+ *      gate has passed (status "physical"), so a lab-status file
+ *      keeps failing release on the qualification reason alone. In CI
+ *      mode the engineering target is ADVISORY: a violating cell
+ *      prints a warning line and never fails the run. The absolute
+ *      ceiling stays the hard wall for MEASURED p95 in both modes;
+ *      the engineering target binds the release budget row only. The
+ *      consequence is intended and honest: sha20 at the committed
+ *      margins sits above the engineering target and is NOT
+ *      release-certifiable until real slower-device evidence carries
+ *      materially more margin.
  *  10. evidence time validation (audit finding 3): payload
  *      generated_at, qualification.qualified_at and every device
  *      tested_at must be canonical UTC RFC3339 timestamps
@@ -703,6 +731,44 @@ function main() {
     return absoluteCeilings[tier] || null;
   };
 
+  // Normal engineering targets (audit finding 3, engineering target):
+  // the budget authority declares, per tier, the engineeringTargetP95
+  // block ({ solveMsP95, pageToVerifiedMsP95 } in ms) — the normal
+  // engineering ceiling an interactive release BUDGET row may carry
+  // (4250 ms for mainstream-desktop: 85% of the absolute 5000 ms UX
+  // wall, so an interactive release budget can no longer sit at
+  // 94-95% of the human-facing wall; routine challenges should target
+  // well below it). The absolute ceiling remains the hard wall for
+  // measured p95 in both modes; the engineering target binds the
+  // release budget row and is enforced in release certification only
+  // (advisory in CI mode — see the compliance block below).
+  const engineeringTargets = budgets.engineeringTargetP95;
+  if (engineeringTargets !== undefined) {
+    if (!engineeringTargets || typeof engineeringTargets !== 'object' || Array.isArray(engineeringTargets)) {
+      reasons.push(`budget file ${budgetsPath}: engineeringTargetP95 must be an object { "<tier>": { solveMsP95: ms, pageToVerifiedMsP95: ms } } (the normal engineering ceiling of every interactive release budget row)`);
+    } else {
+      for (const [tier, target] of Object.entries(engineeringTargets)) {
+        if (!tierNames.includes(tier)) {
+          reasons.push(`budget file ${budgetsPath}: engineeringTargetP95 names unknown tier ${JSON.stringify(tier)} (not a harness tier)`);
+          continue;
+        }
+        if (!target || typeof target !== 'object' || Array.isArray(target)) {
+          reasons.push(`budget file ${budgetsPath}: engineeringTargetP95[${tier}] is not an object { solveMsP95, pageToVerifiedMsP95 }`);
+          continue;
+        }
+        for (const metric of BUDGET_METRICS.map((m) => m[0])) {
+          if (!(typeof target[metric] === 'number' && target[metric] > 0)) {
+            reasons.push(`budget file ${budgetsPath}: engineeringTargetP95[${tier}].${metric} ${JSON.stringify(target[metric])} is not a positive ms engineering target`);
+          }
+        }
+      }
+    }
+  }
+  const engineeringTargetForTier = (tier) => {
+    if (!engineeringTargets || typeof engineeringTargets !== 'object' || Array.isArray(engineeringTargets)) return null;
+    return engineeringTargets[tier] || null;
+  };
+
   // The interactive/non-interactive classification (audit finding 4):
   // it derives from the HARNESS difficulty profiles — execchain models
   // the composed chained-escalation flow (a SHA request escalated to
@@ -811,6 +877,19 @@ function main() {
             ? `release tier ${t} has no absoluteP95Ceilings entry (a committed physical claim must carry the absolute UX ceiling of every certified tier in the same file)`
             : `release tier ${t} has no absoluteP95Ceilings entry (every interactive release cell must sit under an absolute UX ceiling in release certification)`
         );
+      }
+    }
+  }
+  // The engineering-target presence requirement binds where the
+  // engineering-target rule itself binds: release certification of a
+  // physical-qualified ladder (audit finding 3, engineering target).
+  // A lab-status file never carries this reason — it fails release on
+  // the qualification reason alone — and CI mode never fails on the
+  // engineering target (advisory only): both are deliberate.
+  if (releaseMode && physicalClaim) {
+    for (const t of certTiers) {
+      if (!engineeringTargetForTier(t)) {
+        reasons.push(`release tier ${t} has no engineeringTargetP95 entry (every interactive release cell must sit at or under a normal engineering target in release certification, so a release budget can never approach the absolute UX wall)`);
       }
     }
   }
@@ -1238,6 +1317,50 @@ function main() {
     }
     for (const v of ceilingViolations) budgetViolations.push(v);
     ceilingCounts = { interactiveCells, nonInteractiveCells };
+  }
+
+  // ── Engineering-target compliance (audit finding 3, engineering
+  // target). ─────────────────────────────────────────────────────────
+  // The engineering target is the tighter normal ceiling of an
+  // interactive release BUDGET row (4250 ms for mainstream-desktop,
+  // 85% of the absolute 5000 ms UX wall), so an interactive release
+  // budget can no longer sit at 94-95% of the human-facing wall. It
+  // binds the same interactive cell space as the absolute ceiling
+  // (the harness interactive classification: execchain is exempt) but
+  // with a different mode split: in RELEASE certification it is a
+  // hard reason naming the cell and the target; in CI mode it is
+  // ADVISORY (a warning line per violating cell, never a failure).
+  // The hard enforcement additionally requires the qualification gate
+  // to have passed (status "physical"): a lab-status file fails
+  // release on the qualification reason alone, never on an
+  // engineering-target reason. The absolute ceiling keeps its role as
+  // the hard wall for measured p95 in both modes; the engineering
+  // target binds the release budget row only.
+  {
+    const engineeringViolations = [];
+    for (const cell of allRequiredCells) {
+      const budget = budgetRows(cell);
+      if (!budget) continue; // budget-row gaps already reported
+      const target = engineeringTargetForTier(cell.tier);
+      if (!target) continue; // missing-target tiers reported where required
+      if (isNonInteractive(cell.difficulty)) continue;
+      for (const [metric] of BUDGET_METRICS) {
+        if (budget[metric] > target[metric]) {
+          engineeringViolations.push(
+            `${cell.difficulty} ${cell.cache} ${metric} budget ${budget[metric]} ms exceeds the engineering target ${target[metric]} ms (${aggregateCellKey(cell)}: interactive release budget rows must sit at or under the normal engineering target; only measured outliers may approach the absolute UX ceiling, never the release budget)`
+          );
+        }
+      }
+    }
+    if (engineeringViolations.length > 0) {
+      if (releaseMode && physicalClaim) {
+        for (const v of engineeringViolations) reasons.push(v);
+      } else if (!releaseMode) {
+        for (const v of engineeringViolations) notes.push(`engineering-target advisory: ${v}`);
+      }
+      // Release mode with a lab status prints nothing: the release
+      // fails on the qualification-status reason alone.
+    }
   }
   if (budgetViolations.length) {
     reasons.push(`${budgetViolations.length} p95 budget violation(s) (${budgetViolations.slice(0, 6).join('; ')}${budgetViolations.length > 6 ? '; ...' : ''})`);
