@@ -57,6 +57,19 @@
  * stay files-only by matrix scope: the inline-execution evidence this
  * matrix carries is the SHA-profile pair.
  *
+ * The execution cells measure the LIVE grammar, never the fixture's
+ * historical default (audit finding 1): every armed query carries
+ * ?exec_cap=<EXECUTION_MAX_VERSION>, the manifest maximum read from
+ * protocol/execution-v1.json at harness start (the fixture's simulated
+ * deployment cap otherwise stays at its v3-era default, so an armed
+ * page whose driver advertises version 5 would be issued a version-3
+ * program). The version actually issued is read from the /challenge
+ * response itself — every execution repetition decodes the
+ * execution_program blob's grammar version byte and records it as
+ * executionVersion on the rep and the cell row, so the evidence is
+ * attributable to the grammar it measured and the release-baseline
+ * validator can require the current manifest maximum.
+ *
  * The KEY benchmark cell is files + warm + ordinary SHA (16-20 bits):
  * the returning-user path, which must be extremely cheap (all assets
  * cached, no runtime fetch, no worker).
@@ -144,6 +157,35 @@ const SCHEMA = 'kiwicaptcha.client-perf/3';
 // The baseline loader (--promote-baseline) refuses any results file
 // that does not carry this marker with status "completed".
 const COMPLETION_MARKER = 'kiwicaptcha.client-perf.completed.v1';
+
+// The live execution-grammar authority (audit finding 1):
+// protocol/execution-v1.json is the single source of the current
+// maximum execution-program version. The fixture's simulated deployment
+// cap defaults to its historical v3 era, so every armed query of the
+// harness carries ?exec_cap=<EXECUTION_MAX_VERSION>: without it the
+// execution cells would benchmark the version-3 grammar while the
+// product ships the manifest maximum. The harness never hardcodes the
+// version; a malformed or missing manifest is a startup error.
+let EXECUTION_MANIFEST;
+try {
+  EXECUTION_MANIFEST = JSON.parse(
+    readFileSync(join(REPO_ROOT, 'protocol', 'execution-v1.json'), 'utf8'),
+  );
+} catch (e) {
+  console.error(`client-perf: cannot read the execution manifest protocol/execution-v1.json: ${e.message}`);
+  process.exit(2);
+}
+if (
+  EXECUTION_MANIFEST.$schema !== 'kiwicaptcha.execution-v1/1' ||
+  !Number.isInteger(EXECUTION_MANIFEST.max_execution_version) ||
+  EXECUTION_MANIFEST.max_execution_version < 1
+) {
+  console.error(
+    `client-perf: protocol/execution-v1.json is not the kiwicaptcha.execution-v1/1 manifest (schema ${JSON.stringify(EXECUTION_MANIFEST.$schema)}, max_execution_version ${JSON.stringify(EXECUTION_MANIFEST.max_execution_version)})`,
+  );
+  process.exit(2);
+}
+const EXECUTION_MAX_VERSION = EXECUTION_MANIFEST.max_execution_version;
 
 // Fixed-work throughput defaults (see the header comment): a fixed-N
 // SHA-256 loop on the page main thread and a fixed-N Argon2id
@@ -251,12 +293,24 @@ const TIERS = {
   },
 };
 
+// The armed execution query shared by every ExecutionChallengeV1 cell
+// (audit finding 1): ?execution=1 arms the fixture's execution
+// dimension, and ?exec_cap=<EXECUTION_MAX_VERSION> raises the fixture's
+// simulated deployment cap to the current manifest maximum so the
+// effective grammar version equals the live one. `extra` carries the
+// cell's PoW arms (&bits=18, &algorithm=argon2id&argon_bits=...&m_kib=...
+// for execargon, &escalate=argon&argon_bits=...&m_kib=... for execchain).
+function executionQuery(extra) {
+  return `?execution=1&exec_cap=${EXECUTION_MAX_VERSION}${extra || ''}`;
+}
+
 const DIFFICULTIES = {
   sha16: {
     label: 'SHA-256, 16 leading zero bits',
     query: () => '?bits=16',
     dimension: 'sha',
     isArgon: false,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   sha18: {
@@ -264,6 +318,7 @@ const DIFFICULTIES = {
     query: () => '?bits=18',
     dimension: 'sha',
     isArgon: false,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   sha20: {
@@ -271,6 +326,7 @@ const DIFFICULTIES = {
     query: () => '?bits=20',
     dimension: 'sha',
     isArgon: false,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   argon2id: {
@@ -278,6 +334,7 @@ const DIFFICULTIES = {
     query: (o) => `?algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
     dimension: 'argon',
     isArgon: true,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   // The rsw sequential time-lock rungs: T deterministic modular
@@ -295,6 +352,7 @@ const DIFFICULTIES = {
     dimension: 'rsw',
     isArgon: false,
     sequential: true,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   rsw150k: {
@@ -303,6 +361,7 @@ const DIFFICULTIES = {
     dimension: 'rsw',
     isArgon: false,
     sequential: true,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   rsw300k: {
@@ -311,6 +370,7 @@ const DIFFICULTIES = {
     dimension: 'rsw',
     isArgon: false,
     sequential: true,
+    interactive: true,
     assetModes: ['inline', 'files'],
   },
   // The ExecutionChallengeV1 cells. The fixture arms the execution
@@ -318,41 +378,55 @@ const DIFFICULTIES = {
   // risk.execution_challenge gate); the challenge response then carries
   // an execution program the driver runs in a sandboxed ephemeral
   // iframe (the lazy execution.<sha256>.js interpreter asset) and the
-  // execution digest rides the solution token. The interpreter asset
-  // is delivered in both asset tiers: the bundle theme emits the
-  // SRI-linked data-kiwi-execution-src on the container in inline mode
-  // exactly as in files mode (the interpreter is never embedded), and
-  // the fixture mirrors that — so the files-tier cells below are
-  // joined by the inline-tier cells execvminline/execsha18inline. The
-  // interpreter fetch is lazy in both tiers: a cell that arms execution
-  // records the single fetch (network layer), a SHA-only page pays
-  // zero bytes.
+  // execution digest rides the solution token. Every armed query also
+  // carries ?exec_cap=<EXECUTION_MAX_VERSION> (executionQuery): the
+  // fixture's simulated deployment cap must be raised to the live
+  // manifest maximum or the armed page is issued the historical
+  // version-3 grammar (audit finding 1). The interactive flag is the
+  // release-gate classification (audit finding 4): execchain —
+  // interactive: false — is the one difficulty that is measured and
+  // budgeted like every cell but is never counted as an ordinary
+  // interactive release cell (it models the composed chained-escalation
+  // flow); every other profile is interactive (default true), so the
+  // exemption derives from the harness difficulty profiles, never from
+  // the budgets file. The interpreter asset is delivered in both asset
+  // tiers: the bundle theme emits the SRI-linked data-kiwi-execution-src
+  // on the container in inline mode exactly as in files mode (the
+  // interpreter is never embedded), and the fixture mirrors that — so
+  // the files-tier cells below are joined by the inline-tier cells
+  // execvminline/execsha18inline. The interpreter fetch is lazy in both
+  // tiers: a cell that arms execution records the single fetch (network
+  // layer), a SHA-only page pays zero bytes.
   execvm: {
     label: 'execution VM only (armed, fixture SHA default, no PoW change)',
-    query: () => '?execution=1',
+    query: () => executionQuery(''),
     dimension: 'execution',
     isArgon: false,
+    interactive: true,
     assetModes: ['files'],
   },
   execsha18: {
     label: 'execution + SHA-256, 18 leading zero bits',
-    query: () => '?execution=1&bits=18',
+    query: () => executionQuery('&bits=18'),
     dimension: 'execution',
     isArgon: false,
+    interactive: true,
     assetModes: ['files'],
   },
   execargon: {
     label: 'execution + Argon2id (m=16384 KiB, t=3, p=1, target 4)',
-    query: (o) => `?execution=1&algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
+    query: (o) => executionQuery(`&algorithm=argon2id&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`),
     dimension: 'execution',
     isArgon: true,
+    interactive: true,
     assetModes: ['files'],
   },
   execchain: {
     label: 'execution + chained escalation (SHA request, Argon issued at the real ladder)',
-    query: (o) => `?execution=1&escalate=argon&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`,
+    query: (o) => executionQuery(`&escalate=argon&argon_bits=${o.argonBits}&m_kib=${o.argonMKib}`),
     dimension: 'execution',
     isArgon: true,
+    interactive: false,
     assetModes: ['files'],
   },
   // The inline-tier execution cells: the same SHA-profile execution
@@ -364,16 +438,18 @@ const DIFFICULTIES = {
   // inline bootstrap instead of a files one.
   execvminline: {
     label: 'execution VM only, inline assets (armed, fixture SHA default, no PoW change)',
-    query: () => '?execution=1',
+    query: () => executionQuery(''),
     dimension: 'execution',
     isArgon: false,
+    interactive: true,
     assetModes: ['inline'],
   },
   execsha18inline: {
     label: 'execution + SHA-256 18 bits, inline assets',
-    query: () => '?execution=1&bits=18',
+    query: () => executionQuery('&bits=18'),
     dimension: 'execution',
     isArgon: false,
+    interactive: true,
     assetModes: ['inline'],
   },
 };
@@ -575,6 +651,34 @@ function summarize(samples) {
     p95: percentile(sorted, 95),
     p99: percentile(sorted, 99),
   };
+}
+
+/**
+ * Decode the grammar version byte of an issued execution program
+ * (audit finding 1). The armed /challenge response carries
+ * execution_program as the base64 of the program blob whose layout is
+ * format(1) scopeLen(1) scope actionLen(1) action opVersion(1)
+ * opCount(1) ... (the layout the browser specs pin); the byte after
+ * scope+action is the actual grammar version the server issued — the
+ * minimum of the driver's advertised capability and the fixture's
+ * simulated deployment cap. Returns null on any malformed blob so the
+ * caller records an honest absence, never a guess.
+ */
+function decodeExecutionProgramVersion(programB64) {
+  try {
+    const buf = Buffer.from(programB64, 'base64');
+    let pos = 1; // format byte
+    const scopeLen = buf[pos++];
+    if (typeof scopeLen !== 'number' || buf.length < pos + scopeLen + 2) return null;
+    pos += scopeLen;
+    const actionLen = buf[pos++];
+    if (typeof actionLen !== 'number' || buf.length < pos + actionLen + 1) return null;
+    pos += actionLen;
+    const version = buf[pos];
+    return typeof version === 'number' ? version : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Seeded PRNG (mulberry32) for the cell execution order: the same seed
@@ -1303,6 +1407,33 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
         } catch (e) {}
       }
     });
+    // The actual grammar version the fixture issued (audit finding 1):
+    // every execution repetition decodes the execution_program of the
+    // armed /challenge response it exercised (the driver's challenge
+    // fetch; the chained-escalation flow issues a second challenge, and
+    // the last armed response is the program the driver runs). The
+    // decoded version byte is stamped on the rep as executionVersion,
+    // so the measured evidence is attributable to the grammar it ran.
+    let executionVersion = null;
+    if (difficulty.dimension === 'execution') {
+      page.on('response', (resp) => {
+        if (executionVersion !== null || !/\/challenge/.test(resp.url())) return;
+        resp
+          .json()
+          .then((body) => {
+            if (
+              executionVersion === null &&
+              body &&
+              typeof body.execution_program === 'string' &&
+              body.execution_program.length > 0
+            ) {
+              const version = decodeExecutionProgramVersion(body.execution_program);
+              if (typeof version === 'number') executionVersion = version;
+            }
+          })
+          .catch(() => {});
+      });
+    }
     await page.addInitScript(INIT_SCRIPT);
     const cdpSession = await context.newCDPSession(page);
     await cdpSession.send('Emulation.setCPUThrottlingRate', { rate: tier.cpuThrottle });
@@ -1335,6 +1466,13 @@ async function runLoad(browser, opts, tierName, difficultyName, assetMode, warmC
         };
     const raw = await collectPageMetrics(page);
     const metrics = computeMetrics(raw);
+    // The grammar version this repetition actually exercised (audit
+    // finding 1): decoded from the armed /challenge response's
+    // execution_program. Present on execution reps only; absent (not
+    // stamped) when the decode failed, so a cell row without a
+    // unanimous executionVersion is an honest absence the
+    // release-baseline validator rejects, never a guess.
+    if (typeof executionVersion === 'number') metrics.executionVersion = executionVersion;
     if (executionFetch && typeof raw.timeOrigin === 'number') {
       const startMs = executionFetch.epochStartMs - raw.timeOrigin;
       if (startMs >= 0) metrics.executionFetchStartMs = startMs;
@@ -1590,6 +1728,19 @@ async function runCell(browser, opts, cell, results) {
   agg.longTaskCount = summarize(samples.map((s) => s.longTaskCount).filter((v) => v !== null));
   agg.timedOutCount = samples.filter((s) => s.timedOut).length;
   agg.errorCount = samples.filter((s) => s.errorCount > 0).length;
+  // The row-level executionVersion (audit finding 1): the execution
+  // reps of one cell all exercise the same issued grammar, so the row
+  // records the single distinct decoded version. A row whose reps
+  // decoded no version, or disagreed, carries no executionVersion —
+  // the release-baseline validator turns that absence into a hard
+  // reason, which is the honest outcome for evidence whose grammar is
+  // unproven.
+  if (DIFFICULTIES[difficultyName].dimension === 'execution') {
+    const versions = [
+      ...new Set(samples.map((s) => s.executionVersion).filter((v) => typeof v === 'number')),
+    ];
+    if (versions.length === 1) agg.executionVersion = versions[0];
+  }
   if (repeatNav) {
     agg.repeatNavigation = repeatNav;
   }
@@ -1796,12 +1947,17 @@ function buildPayload(opts, ctx, completion) {
         inline: 'the fixture inlines the wasm glue and the driver in the page HTML; the container still carries the SRI-linked execution interpreter attrs (data-kiwi-execution-src + integrity) in both tiers, mirroring the bundle theme, so an armed inline page lazily fetches the interpreter exactly once',
         files: 'the ?assets=files fixture variant: versioned SRI-linked external assets, page-level dedup, a lazy Argon runtime that is fetched only when a memory-hard challenge arrives, and the lazy execution interpreter that is fetched only when an armed challenge arrives',
       },
+      execution: {
+        maxVersion: EXECUTION_MAX_VERSION,
+        manifestSchema: EXECUTION_MANIFEST.$schema,
+        note: 'every armed execution query carries ?exec_cap=<maxVersion> (executionQuery), raising the fixture\'s simulated deployment cap to the live execution manifest maximum (audit finding 1): the cells measure the current grammar, never the fixture\'s historical v3 default. The version the fixture actually issued is decoded from each armed /challenge response\'s execution_program blob (layout format/scopeLen/scope/actionLen/action/opVersion) and recorded per repetition and per cell row as executionVersion, so the evidence is attributable to the grammar it ran and the release-baseline validator requires the manifest maximum.',
+      },
     },
     fixture: {
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
       php: opts.php,
-      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib, algorithm=rsw with rsw_t for the time-lock rungs), the assets=files knob, and the execution arms (?execution=1 armed challenges, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
+      note: 'opt-in difficulty knobs (bits/argon_bits/m_kib, algorithm=rsw with rsw_t for the time-lock rungs), the assets=files knob, and the execution arms (?execution=1 armed challenges raised to the live grammar by ?exec_cap=<manifest max>, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
     },
     tiers: Object.fromEntries(
       tierNames.map((t) => [
