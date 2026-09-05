@@ -52,6 +52,7 @@ else. Each control is described in detail below.
 | `runtimeLazyFetchStartMs` | files-mode Argon2id: when the lazy wasm runtime fetch starts relative to navigation (the fetch happens only when a memory-hard challenge arrives) |
 | `driverFetchStartMs` | files mode: when the external driver asset starts loading relative to navigation |
 | `executionFetchStartMs` / `executionFetchDurationMs` | execution cells: when the lazy `execution.<sha256>.js` interpreter fetch starts relative to navigation and how long it takes. The fetch happens inside the driver's sandboxed ephemeral iframe, which is removed after the run, so the top document's resource timing never sees it; the harness captures it from the network layer (request start anchored to `performance.timeOrigin`, duration from `requestfinished`) |
+| `executionVersion` | execution cells: the grammar version the cell actually exercised. Every armed repetition decodes the `execution_program` blob of its `/challenge` response (layout format/scopeLen/scope/actionLen/action/opVersion) and records the version byte; a cell row records the single unanimous decoded version. The release-baseline validator requires it to equal `protocol/execution-v1.json` `max_execution_version` (see the execution-cells section) |
 | `longTaskCount` / `longTaskTotalMs` | Long Task API: main-thread blocks > 50 ms |
 | `peakHeapMb` / `finalHeapMb` | `performance.memory.usedJSHeapSize` sampled every 50 ms plus the final sample |
 | `domContentLoadedMs` / `loadMs` | Navigation Timing |
@@ -141,6 +142,29 @@ ordinary solve/parse/wasm/
 worker/fixed-work metrics plus the interpreter fetch start and
 duration, so the execution marginal cost is separable from the
 difficulty cost in the same file.
+
+### The execution cells measure the live grammar (audit finding 1)
+
+Every armed query of the execution cells carries
+`?exec_cap=<EXECUTION_MAX_VERSION>`, the `max_execution_version` of
+`protocol/execution-v1.json` read once at harness start. The fixture's
+simulated deployment cap otherwise defaults to its historical v3 era,
+so an armed page whose driver advertises version 5 is issued a
+version-3 program: without the knob the cells would benchmark the
+old grammar while the product ships the manifest maximum. The version
+the fixture actually issues is not assumed — every execution
+repetition intercepts its `/challenge` response, decodes the issued
+`execution_program` blob's grammar version byte, and records it as
+`executionVersion` on the rep and on the cell row (the row records the
+single unanimous decoded version; a row without a unanimous decode
+carries no field). The payload methodology records the manifest
+authority (`execution.maxVersion` + `execution.manifestSchema`), and
+the release-baseline validator requires every execution result row to
+carry the manifest maximum — evidence recorded against an older
+grammar is a hard rejection. The 2026-09-05 live-grammar re-record
+(`results-2026-09-05-exec-v5.json`, every rep decoding version 5)
+replaced the earlier execution rows, which had been measured against
+the fixture's v3 default.
 
 ## Device tiers
 
@@ -325,7 +349,9 @@ Fixture knobs used by the harness (opt-in, defaults byte-identical to
 the historical fixture): `?bits=`, `?argon_bits=`, `?m_kib=`,
 `?algorithm=rsw&rsw_t=` (the rsw arm, T clamped to 10,000..300,000 by
 the fixture) and
-`?execution=1` (the execution arm) plus `?escalate=argon` (the chained
+`?execution=1&exec_cap=<manifest max>` (the execution arm, raised to
+the live grammar maximum — audit finding 1) plus `?escalate=argon`
+(the chained
 escalation arm) on the challenge endpoint, and `?assets=files` plus
 `?widgets=N` on the widget page. The fixture clamps argon bits to
 1..10 and the memory envelope to 8..65536 KiB, so the real ladder (4
@@ -616,7 +642,7 @@ and release mode rejects it on the status reason alone. The committed
 file stays `lab` with no `physical_results` until physical-device
 data is recorded.
 
-## Absolute UX ceilings and the interactive/non-interactive split (audit finding 2)
+## Absolute UX ceilings and the interactive/non-interactive split (audit findings 2 and 4)
 
 `release-budgets.json` carries an `absoluteP95Ceilings` block per
 qualified tier — the absolute wall-clock p95 a release may ask an
@@ -639,11 +665,14 @@ OR when its budget row exceeds the tier's absolute ceiling — an
 inflated budget can never buy the ceiling out, and release
 certification refuses a tier without an `absoluteP95Ceilings` entry.
 
-`execchain` is the one explicitly non-interactive difficulty, declared
-in `nonInteractiveDifficulties`:
+The interactive/non-interactive classification derives from the
+HARNESS difficulty profiles in `client-perf.mjs`, never from the
+budgets file (audit finding 4). `execchain` is the one difficulty
+declared `interactive: false`; every other profile is interactive (a
+profile without the flag defaults to interactive):
 
-```json
-{ "nonInteractiveDifficulties": ["execchain"] }
+```js
+execchain: { label: '...', dimension: 'execution', ..., interactive: false, ... }
 ```
 
 execchain models the composed chained-escalation flow (a SHA request
@@ -651,12 +680,19 @@ escalated to the memory-hard rung by the server, with the execution
 dimension armed), so its p95 is not the experience of an ordinary
 interactive rung a user is sent to directly: it is budgeted and
 measured like every cell, but it is never counted as an ordinary
-interactive release cell and is not ceiling-checked. Every other
+interactive release cell and is not ceiling-checked (its budget rows
+may legitimately exceed 5000 ms). Every other
 difficulty (sha16/18/20, argon2id, the rsw rungs, execvm, execargon,
-execvminline, execsha18inline) is interactive and ceiling-subject. A
-cell that cannot meet the ceiling honestly must be re-measured,
-retuned, or explicitly classified non-interactive with the rationale
-recorded here — never silently left out of the gate.
+execvminline, execsha18inline) is interactive and ceiling-subject. The
+early-rounds `nonInteractiveDifficulties` field of the budgets file is
+gone — it was the audit's escape hatch (it lived in the very file
+whose budgets it relaxed), so its presence is now an
+unknown/deprecated field the validator rejects as a hard reason:
+changing only the release budgets can never change a difficulty's
+interactive classification. A cell that cannot meet the ceiling
+honestly must be re-measured, retuned, or explicitly classified
+non-interactive in the harness profile with the rationale recorded in
+the profile comment — never silently left out of the gate.
 
 ## The validator's adversarial mutation suite
 
@@ -692,8 +728,20 @@ time-validation cases (generated_at/qualified_at/tested_at a year in
 the future reject; qualified_at postdating generated_at by a day
 rejects; tested_at two minutes in the future passes within the skew
 allowance and six minutes rejects; a space-separated timestamp and a
-non-UTC offset timestamp reject as non-canonical RFC3339). The job is
-wired into CI as the self-contained "Release-validator mutation
+non-UTC offset timestamp reject as non-canonical RFC3339). Round 6
+added the live-grammar evidence cases (audit finding 1: execution
+rows at the manifest maximum pass; all execution rows at version 3
+reject; one exec cell below the maximum rejects naming the cell;
+execution rows without `executionVersion` reject for the current
+schema; non-execution SHA/Argon rows need no field) and the
+classification-authority cases (audit finding 4: a budgets file
+reintroducing `nonInteractiveDifficulties` rejects as
+unknown/deprecated; an execchain budget above the absolute ceiling is
+allowed because the harness classifies it non-interactive; argon2id
+and sha20 budgets above the ceiling reject; and a budgets-only
+mutation cannot flip sha20 to non-interactive — it rejects on the
+deprecated field AND the still-binding interactive ceiling). The job
+is wired into CI as the self-contained "Release-validator mutation
 suite" job.
 
 ## Results store
@@ -715,7 +763,8 @@ suite" job.
   through `--promote-baseline` from a completed full-matrix run. The
   current file is the maintenance file the release gate validates: it
   started as the legacy-labelled pre-matrix recording and was
-  surgically extended on 2026-09-04 (see the honest-status section).
+  surgically extended on 2026-09-04/05 (see the honest-status
+  section).
 
 Compare a run against the baseline by diffing the aggregated cells
 (`solveMs.p95`, `transferredBytes.p50`, `pageToVerifiedMs.p95`, ...).
@@ -737,8 +786,18 @@ re-recorded at the round-5 retuned rung (target 4, 12 Argon reps per
 mode) from the completed run
 `tools/client-perf/results/results-2026-09-05.json` after the 8-bit
 rung measured about 16 s p95 — the numbers that drove the retune and
-the absolute UX ceiling. The merge procedure is documented inside the
-payload. This is lab evidence on the recording Mac (Apple M5 Pro,
+the absolute UX ceiling. Later on 2026-09-05 the six
+ExecutionChallengeV1 cells were re-recorded at the LIVE execution
+grammar from the completed run
+`tools/client-perf/results/results-2026-09-05-exec-v5.json` (audit
+finding 1): every armed query carried `?exec_cap=5` (the
+protocol/execution-v1.json manifest maximum; the earlier execution
+rows measured the fixture's historical v3 default), 20 SHA-profile /
+12 Argon reps per mode, every rep decoding `executionVersion` 5 from
+its `/challenge` response, and the merged rows record it too — the
+`release-budgets.json` execution rows were regenerated from those
+measurements. The merge procedure is documented inside the payload.
+This is lab evidence on the recording Mac (Apple M5 Pro,
 Chromium 151), desktop-emulation tiers excluded from the qualified
 scope. The physical-device procedure remains the release boundary:
 emulation numbers, with or without a fresh full run, are calibration
