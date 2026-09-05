@@ -90,7 +90,7 @@
     },
     "widget_compat": {
       "raw_bytes": 26597,
-      "brotli_bytes": 7150,
+      "brotli_bytes": 7151,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,
       "brotli_cap_bytes": 10000,
