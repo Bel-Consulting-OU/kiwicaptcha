@@ -702,11 +702,11 @@ a browser.
 
 ### Adversarial benchmark: the browserless oracle
 
-Every live grammar rung, versions 1 through the generator's
-`MAX_EXECUTION_VERSION` (the causal object-graph rung included), is
-forgeable without a browser, and the regression suites pin that
-boundary on purpose: the oracle fails mechanically if a future rung
-ever lands before the solver models it. The test-only shadow solver
+Every live grammar rung is forgeable without a browser, versions 1
+through the generator's `MAX_EXECUTION_VERSION`, the causal
+object-graph rung included. The regression suites pin that boundary on
+purpose: the oracle fails mechanically if a future rung ever lands
+before the solver models it. The test-only shadow solver
 decodes each program, replays the interpreter's own semantics, picks
 an arbitrary legal observed height (1 to 255), and emits a trace the
 verifier accepts. The oracle runs 100 generated programs per version
@@ -719,8 +719,8 @@ The trace is supplementary evidence, reproducible by any
 implementation of the public semantics, never a browser attestation.
 Acceptance criterion: the oracle keeps accepting every trace the
 generator mints at any live version up to its
-`MAX_EXECUTION_VERSION`, and a grammar extension beyond that maximum
-is accepted only when the solver reproduces the tested Web Platform
+`MAX_EXECUTION_VERSION`. A grammar extension beyond that maximum is
+accepted only when the solver reproduces the tested Web Platform
 behavior instead of the shadow model.
 
 ## Graceful shutdown sequence
