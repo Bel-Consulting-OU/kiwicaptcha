@@ -114,9 +114,31 @@ function clone(src) {
   return JSON.parse(JSON.stringify(src));
 }
 
-/** The committed release-budgets.json as a mutable fixture base. */
+/** The committed release-budgets.json as a mutable fixture base.
+ *  The committed file now carries the physical release claim; the
+ *  corpus's lab-oriented cases must start from the LAB authority (the
+ *  pre-certification state), so baseBudgets() normalizes the
+ *  qualification block to a lab rig. Cases that deliberately exercise
+ *  physical claims construct them via physicalBudgets(). */
 function baseBudgets() {
   const budgets = clone(JSON.parse(readFileSync(BUDGETS_SRC, 'utf8')));
+  budgets.qualification = {
+    status: 'lab',
+    qualified_at: null,
+    harness_schema: SCHEMA,
+    release_tiers: [RELEASE_TIER],
+    devices: [
+      {
+        id: 'lab-rig-macbook-pro-m5',
+        kind: 'lab',
+        tier: RELEASE_TIER,
+        hardware: 'Apple MacBook Pro (18 x Apple M5 Pro)',
+        os: 'macOS Darwin 25.5.0 (arm64)',
+        browser: 'Chromium 151.0.7922.34',
+        role: 'recording rig for the committed lab evidence',
+      },
+    ],
+  };
   return budgets;
 }
 
