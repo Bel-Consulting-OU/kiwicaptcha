@@ -243,8 +243,8 @@ widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
 widget-locales.js copy (the lazy non-default locale packs) is 13,395
 bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
-16,384 / 6,000 / 5,000; every widget-compat.js copy is 27,078 bytes
-raw, 8,573 bytes gzip and 7,367 bytes brotli against caps of
+16,384 / 6,000 / 5,000; every widget-compat.js copy is 26,597 bytes
+raw, 8,357 bytes gzip and 7,150 bytes brotli against caps of
 32,768 / 12,000 / 10,000; every execution-interpreter copy
 (execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
 32,378 bytes raw, 9,738 bytes gzip and 8,466 bytes brotli, against
@@ -344,7 +344,7 @@ record's budget rows, equality-gated):
   a widget enables one (2,922 raw / 1,229 gzip / 992 brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (27,078 raw / 8,573 gzip / 7,367 brotli).
+  (26,597 raw / 8,357 gzip / 7,150 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:
