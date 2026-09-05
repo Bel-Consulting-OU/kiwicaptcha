@@ -816,7 +816,7 @@ The split:
   mode, that every INTERACTIVE cell's budget row sits at or under the
   tier's `engineeringTargetP95`; a violating cell is a hard reason
   naming the cell and the target (e.g. `sha20 warm solveMsP95 budget
-  4734 ms exceeds the engineering target 4250 ms`). The rule fires
+  4600 ms exceeds the engineering target 4250 ms`). The rule fires
   only once the qualification gate has passed (status `physical`): a
   lab-status file keeps failing release on the qualification reason
   alone, never on an engineering-target reason. The absolute ceiling
@@ -826,19 +826,19 @@ The split:
   are ceiling-exempt.
 - **CI mode (advisory).** CI prints one warning line per violating
   cell and never fails on the engineering target. The committed
-  sha20 rows (cold 4426 ms, warm 4734 ms, 89-95% of the wall)
-  therefore produce advisory warnings on every CI run of the committed
-  budgets until sha20 carries materially more margin.
+  budgets sit under the target today; the advisory path is exercised
+  by the mutation corpus with fixtures inflated above the target.
 
-The consequence is intended and honest: sha20 at the current margins
-is above the engineering target and is NOT release-certifiable at
-current margins. sha20 needs real slower-device evidence with
-materially more margin (and budget rows re-derived from it) before
-interactive release certification — the retune or re-measurement path
-is the same one the absolute ceiling demands of any cell that cannot
-meet it, applied one rung earlier. In release certification a
-certified tier without an `engineeringTargetP95` entry is a hard
-reason, exactly like a tier without an `absoluteP95Ceilings` entry.
+The consequence is intended and honest: a cell whose derived budget
+cannot sit at or under the engineering target is not
+release-certifiable at those margins — it needs real slower-device
+evidence with materially more margin (and budget rows re-derived from
+it) before interactive release certification. The retune or
+re-measurement path is the same one the absolute ceiling demands of
+any cell that cannot meet it, applied one rung earlier. In release
+certification a certified tier without an `engineeringTargetP95`
+entry is a hard reason, exactly like a tier without an
+`absoluteP95Ceilings` entry.
 
 ## The validator's adversarial mutation suite
 
@@ -895,12 +895,12 @@ mismatch each reject on the per-asset reason (in CI and in
 `--release` mode alike), a schema-3 payload bound to the current set
 passes, and a legacy payload with a tampered identity block rejects.
 The engineering-target round added the cases behind `engineeringTargetP95`
-(4250 ms for mainstream-desktop): the committed sha20 margins
-(cold 4426 / warm 4734 ms) pass CI mode with one advisory warning per
-violating row; the same margins on a healthy physical claim reject in
-release mode on the engineering-target reason alone (no status, ceiling
-or measured-vs-budget reason — sha20 is not release-certifiable at the
-committed margins); the same fixture passes CI mode (advisory only); a
+(4250 ms for mainstream-desktop): fixtures that inflate sha20 budget
+rows above the target pass CI mode with one advisory warning per
+violating row; the inflated margins on a healthy physical claim reject
+in release mode on the engineering-target reason alone (no status,
+ceiling or measured-vs-budget reason — a cell above the target is not
+release-certifiable); the same fixture passes CI mode (advisory only); a
 healthy physical claim whose sha20 rows sit under the target (4100 ms)
 and exactly AT the target (4250 ms) both certify in release mode; an
 execchain budget above the target is allowed in release mode
