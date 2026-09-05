@@ -111,9 +111,9 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -539,9 +539,11 @@ Options:
                           t=3 p=1 (default 3)
   --promote-baseline FILE validate a completed results file (completion marker
                           present, full default matrix covered, default sample
-                          sizes and the real argon ladder) and write it as
-                          tools/client-perf/results/baseline.json; refuses any
-                          file without the marker (the incomplete-run guard)
+                          sizes and the real argon ladder, and clientAssets
+                          equal to the current release asset set: a run measured
+                          against other bytes is refused, never warned) and write
+                          it as tools/client-perf/results/baseline.json; refuses
+                          any file without the marker (the incomplete-run guard)
   --no-multi-widget       skip the multiple-widget scenario
   --quick                 iteration mode: low-android + mainstream-desktop,
                           3 SHA / 2 Argon reps, cold and warm, inline and files
@@ -1707,27 +1709,14 @@ function environment() {
 /**
  * Fingerprint the served client assets at measurement time: the harness
  * measures whatever the working tree serves, so the results carry the
- * exact bytes (sha256 + sizes) they were measured against. The driver and
- * glue are edited by the delivery workstream, so this attribution is what
- * makes a re-measurement reconciliation possible.
+ * exact bytes (full sha256 + sizes) they were measured against. The
+ * fingerprint implementation is the shared client-assets module (the
+ * single authority also used by sync-lab-baseline.mjs, merge-cells.mjs
+ * and the release validator); this wrapper keeps the payload builder's
+ * call site readable.
  */
 function clientAssets() {
-  const assetsDir = join(REPO_ROOT, 'packages', 'kiwicaptcha-wasm', 'assets');
-  const names = ['widget-driver.js', 'widget-risk.js', 'widget-telemetry.js', 'widget-locales.js', 'widget-compat.js', 'kiwicaptcha-wasm.js', 'kiwi-worker.js', 'execution-interpreter.js'];
-  const out = {};
-  for (const name of names) {
-    const file = join(assetsDir, name);
-    try {
-      const bytes = readFileSync(file);
-      out[name] = {
-        bytes: bytes.length,
-        sha256: createHash('sha256').update(bytes).digest('hex').slice(0, 16),
-      };
-    } catch (e) {
-      out[name] = null;
-    }
-  }
-  return out;
+  return canonicalClientAssets();
 }
 
 // ── Incomplete-run guard ─────────────────────────────────────────────
@@ -1851,6 +1840,14 @@ function buildPayload(opts, ctx, completion) {
  * then is the file copied to results/baseline.json. The current
  * committed baseline.json stays untouched by every run; it is replaced
  * only through this loader.
+ *
+ * The loader also binds the promoted evidence to the client bytes it
+ * certifies (audit finding 2, asset bind): the run's recorded
+ * clientAssets block must name exactly the current canonical release
+ * asset set and match the current tree's per-asset bytes and full
+ * sha256, or the promotion is REFUSED (a hard reason, never a
+ * warning) — a baseline can only be replaced by a run measured against
+ * the bytes the release gate validates.
  */
 function promoteBaseline(file, baselinePath) {
   let payload;
@@ -1896,21 +1893,25 @@ function promoteBaseline(file, baselinePath) {
     if (o.argonMKib !== 16384) reasons.push(`argon envelope ${o.argonMKib} KiB is not the real ladder 16384`);
     if (o.argonBits !== 4) reasons.push(`argon target ${o.argonBits} is not the real ladder 4`);
   }
+  // ── Client-asset identity guard (audit finding 2, asset bind). ────
+  // A baseline promotion BINDS the recorded performance rows to the
+  // client bytes they were measured against: the recorded clientAssets
+  // block must name exactly the current canonical release asset set
+  // and every recorded asset must match the current tree's bytes and
+  // full sha256. A run recorded against any other bytes (an edited
+  // driver, a stale interpreter, a changed asset set) is refused — the
+  // promotion is never a warning that lets mismatched evidence in, it
+  // is a re-bind that requires a fresh measurement of the current
+  // bytes. The same comparison is the release validator's identity
+  // rule, so a promoted baseline passes CI only while the tree serves
+  // the exact bytes it certifies.
+  const identityReasons = [];
+  assertAssetSetCurrent(payload.clientAssets, clientAssets(), identityReasons);
+  for (const r of identityReasons) reasons.push(r);
   if (reasons.length) {
     console.error('promote-baseline refused:');
     for (const r of reasons) console.error(`  - ${r}`);
     return false;
-  }
-  const cur = clientAssets();
-  const rec = payload.clientAssets || {};
-  for (const name of Object.keys(cur)) {
-    const a = cur[name];
-    const b = rec[name];
-    if (b && (a.bytes !== b.bytes || a.sha256 !== b.sha256)) {
-      console.warn(
-        `promote-baseline: warning — ${name} differs from the measured run (${b.bytes} bytes/${b.sha256} then, ${a.bytes} bytes/${a.sha256} now); the baseline stays historical evidence of the recorded bytes`,
-      );
-    }
   }
   mkdirSync(dirname(baselinePath), { recursive: true });
   writeFileSync(baselinePath, JSON.stringify(payload, null, 2) + '\n');

@@ -51,8 +51,34 @@
  * default merged mode (one device's merged rows at a time; the
  * release file's budget rows must cover the slowest qualified device,
  * which the validator checks against this index).
+ *
+ * Run-combination guard (audit finding 2, asset bind): before any
+ * repetition is concatenated, every --run file must have been
+ * measured against the SAME measurement context:
+ *
+ *   - the canonical client asset set: each run's recorded
+ *     clientAssets block must name exactly the current canonical
+ *     release asset set (packages/kiwicaptcha-wasm/release-assets.txt)
+ *     with per-asset bytes and full sha256 equal to the current tree
+ *     (the canonicalClientAssets/assertAssetSetCurrent checks of the
+ *     shared client-assets module — a run recorded against other
+ *     bytes is refused),
+ *   - the harness schema,
+ *   - the Argon parameters (options.argonBits / options.argonMKib),
+ *   - the execution maximum (options.executionMaxVersion, the
+ *     execution-version ceiling the run's interpreter/profile was
+ *     measured against; absent on pre-versioned payloads),
+ *   - the difficulty definitions (payload.difficulties),
+ *   - the asset mode (options.assets).
+ *
+ * Any difference throws 'cannot merge performance runs measured
+ * against different client assets' with the naming detail: merging
+ * repetitions recorded against different bytes, ladders or grammar
+ * versions would fabricate a percentile over incomparable
+ * measurements.
  */
 import { readFileSync } from 'node:fs';
+import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
 
 function percentile(sorted, p) {
   if (sorted.length === 0) return null;
@@ -123,9 +149,62 @@ const SUMMARY_METRICS = [
   'argonDerivationsPerSec', 'argonFixedWorkMs',
 ];
 
+// ── Run-combination guard (audit finding 2, asset bind) ─────────────
+// Every --run payload is loaded once and checked before any repetition
+// is concatenated: canonical client asset equality (each run measured
+// against the current release asset bytes), identical harness schema,
+// Argon parameters, execution maximum, difficulty definitions and
+// asset mode. Any difference throws the audit's refusal naming the
+// run and the field.
+const runPayloads = runs.map((runPath) => {
+  let payload;
+  try {
+    payload = JSON.parse(readFileSync(runPath, 'utf8'));
+  } catch (e) {
+    console.error(`merge-cells: cannot read run file ${runPath}: ${e.message}`);
+    process.exit(1);
+  }
+  return { runPath, payload };
+});
+
+const currentAssets = canonicalClientAssets();
+for (const { runPath, payload } of runPayloads) {
+  const reasons = [];
+  assertAssetSetCurrent(payload.clientAssets, currentAssets, reasons);
+  if (reasons.length) {
+    const detail = reasons.map((r) => `  - ${r}`).join('\n');
+    throw new Error(
+      `cannot merge performance runs measured against different client assets: ${runPath} was not measured against the current canonical client asset set\n${detail}`
+    );
+  }
+}
+
+const firstPayload = runPayloads[0].payload;
+const contextFields = [
+  ['harness schema', (p) => p.schema],
+  ['Argon bits', (p) => (p.options || {}).argonBits],
+  ['Argon memory KiB', (p) => (p.options || {}).argonMKib],
+  ['execution maximum version', (p) => (p.options || {}).executionMaxVersion],
+  ['difficulty definitions', (p) => JSON.stringify(p.difficulties || null)],
+  ['asset mode', (p) => (p.options || {}).assets],
+];
+const mergeContextValues = new Map(
+  contextFields.map(([label, pick]) => [label, pick(firstPayload)]),
+);
+for (const { runPath, payload } of runPayloads.slice(1)) {
+  for (const [label, pick] of contextFields) {
+    const a = mergeContextValues.get(label);
+    const b = pick(payload);
+    if (JSON.stringify(a) !== JSON.stringify(b)) {
+      throw new Error(
+        `cannot merge performance runs measured against different client assets: ${runPath} ${label} ${JSON.stringify(b)} differs from ${JSON.stringify(a)} of ${runPayloads[0].runPath}`
+      );
+    }
+  }
+}
+
 const perRunRows = [];
-for (const runPath of runs) {
-  const payload = JSON.parse(readFileSync(runPath, 'utf8'));
+for (const { payload } of runPayloads) {
   const results = payload.results || {};
   for (const [key, agg] of Object.entries(results)) {
     if (key.startsWith('multi-widget')) continue;

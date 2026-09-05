@@ -37,17 +37,35 @@
  *
  * The payload header is updated honestly: generated_at is the surgery
  * date, legacy_note describes the hybrid construction, and the
- * options/difficulties fields document the merged evidence.
+ * options/difficulties fields document the merged evidence. The
+ * payload's clientAssets identity block comes from the shared
+ * client-assets module (canonicalClientAssets): the fingerprint set
+ * and the full-sha256 policy are computed in ONE place for every
+ * consumer of the client-performance authority.
+ *
+ * Asset-identity guard (audit finding 2, asset bind): every --run file
+ * must carry a clientAssets block naming exactly the current canonical
+ * release asset set with per-asset bytes and full sha256 equal to the
+ * current tree — a run recorded against other bytes can never be
+ * merged into the baseline, because the surgery would launder old
+ * measurements under a fresh identity. When the guard passes, the
+ * written baseline records canonicalClientAssets() (identical to the
+ * runs' blocks).
  *
  * Usage:
  *   node tools/client-perf/sync-lab-baseline.mjs --run results/run-2026-09-03.json \
  *     --run tools/client-perf/results/results-2026-09-04.json [--write]
  *   node tools/client-perf/sync-lab-baseline.mjs --run tools/client-perf/results/results-2026-09-05.json \
  *     --difficulties argon2id,execargon,execchain --argon-reps 12 --write
+ *
+ * (The invocation shapes above are historical; those exact run files
+ * predate the identity contract and are refused today — a rebuild
+ * needs runs recorded against the current release asset bytes.)
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -105,6 +123,25 @@ const LEGACY_SUMMARY_FIELDS = [
 
 const payload = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
 const results = payload.results || {};
+
+// ── Asset-identity guard (audit finding 2, asset bind) ──────────────
+// Every run merged into the baseline must have been measured against
+// the current canonical client asset bytes; the shared comparison
+// appends the hard reasons (missing/extra asset, byte or sha256
+// mismatch). A stale run would silently re-bind old measurements to a
+// fresh identity — refused here, never warned.
+const currentAssets = canonicalClientAssets();
+for (const runPath of runs) {
+  const run = JSON.parse(readFileSync(runPath, 'utf8'));
+  const reasons = [];
+  assertAssetSetCurrent(run.clientAssets, currentAssets, reasons);
+  if (reasons.length) {
+    console.error(`sync-lab-baseline refused: ${runPath} was not measured against the current client assets:`);
+    for (const r of reasons) console.error(`  - ${r}`);
+    console.error('  the baseline can only be rebuilt from runs recorded against the current release asset bytes (re-record, then retry)');
+    process.exit(1);
+  }
+}
 
 // Collect the per-mode schema-3 rows for the lab tier.
 const modeRows = [];
@@ -226,6 +263,11 @@ payload.generated_at = new Date().toISOString();
 payload.legacy_note =
   'LEGACY PRE-ROUND-105 RECORDING for the emulation tiers, surgically extended on 2026-09-04 and 2026-09-05: the mainstream-desktop rows (sha16/18/20, argon2id, execvm, execsha18, execargon, execchain, execvminline, execsha18inline, rsw75k, rsw150k, rsw300k) carry real-ladder measurements (Argon m=16384 KiB, rsw T=75,000/150,000/300,000) merged per cache across the inline and files asset modes: sha16/18/20 and the execution/rsw rows from the completed runs results/run-2026-09-03.json and tools/client-perf/results/results-2026-09-04.json (measured at the pre-retune Argon target 8 for the argon cells), and the argon family (argon2id/execargon/execchain) re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from the completed run tools/client-perf/results/results-2026-09-05.json (12 Argon reps per mode). Every other row is byte-for-byte the original legacy recording at the old fixture envelope (64 KiB Argon, fixture SHA default), which is not release-required evidence. The physical-device procedure in tools/client-perf/README.md remains the release boundary; qualification status is lab until physical-device data is recorded.';
 payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline.json (legacy pre-matrix recording; real-ladder lab rows merged 2026-09-04, argon family re-recorded at target 4 on 2026-09-05)';
+
+// The identity block: the current canonical release asset set with
+// full per-asset sha256, computed by the shared module (the guard
+// above proved every merged run recorded these exact bytes).
+payload.clientAssets = currentAssets;
 
 const out = JSON.stringify(payload, null, 2) + '\n';
 if (write) {
