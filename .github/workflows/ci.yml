@@ -1628,7 +1628,7 @@ jobs:
   perf-budget:
     # Deterministic performance budgets. The hard byte limits run first
     # and are gating: the three widget-driver copies (raw, gzip and
-    # brotli) and the decoy-armed and v4 execution-armed
+    # brotli) and the decoy-armed and execution-armed
     # challenge-response JSON must stay under their caps
     # or this job fails. The synthetic-load benchmark steps then measure
     # issuance and verification p50/p95 under fixed workloads — the
