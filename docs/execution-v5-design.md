@@ -5,13 +5,15 @@ ExecutionChallengeV1 execution-program dimension. It specifies the
 next grammar rung end to end: the eight new opcodes, the causal-chain
 design, the deterministic seed rule, the exact DOM state model the
 simulators must implement, the complete file map, and the ladder
-authority invariant. Version 4 is live today (the nested-tree
-DOM_CHILD/DOM_DEPTH rung); this document is written against that
-architecture and is the implementation blueprint for the version-5
-rung. It matches the audit file list: every file that changes when the
-rung lands is enumerated in the file-map section below.
+authority invariant. The design was written when version 4 was the
+live rung (the nested-tree DOM_CHILD/DOM_DEPTH grammar); the
+version-5 causal object-graph rung it specifies has since landed as
+the generator maximum
+(`ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`). It matches
+the audit file list: every file that changes when the rung lands is
+enumerated in the file-map section below.
 
-## The execution-version ladder today
+## The execution-version ladder at design time
 
 The dimension lives in `ExecutionChallengeGenerator` (PHP). A program
 is a self-describing bytecode blob minted from a keyed PRF stream:
@@ -47,10 +49,12 @@ Each version raises the guaranteed-skeleton floor: version 1 floor 8,
 version 2 floor 11 (the causal chain), version 3 floor 15, version 4
 floor 18. The count byte is drawn from the stream before the extra
 probes, and emission is capped at the stamped count, so every minted
-blob lands inside the grammar and ends at EOF. The live maximum is 4
-throughout: the PHP constant, the Rust mirror constant, the protocol
-manifest, the driver's capability header and every test sweep derive
-from the ladder in the way the authority section pins.
+blob lands inside the grammar and ends at EOF. At design time the
+live maximum was 4 throughout: the PHP constant, the Rust mirror
+constant, the protocol manifest, the driver's capability header and
+every test sweep derive from the ladder in the way the authority
+section pins, and the version-5 rung lands by raising that single
+authority.
 
 The execution digest binds the program, the challenge context and the
 canonical op trace: hex HMAC-SHA256 keyed by the program bytes over
