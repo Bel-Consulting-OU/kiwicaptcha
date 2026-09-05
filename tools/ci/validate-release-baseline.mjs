@@ -1254,7 +1254,7 @@ function main() {
     process.exit(1);
   }
   if (releaseMode) console.log(statusLine);
-  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length} release-required cells, ${ceilingCounts ? `${ceilingCounts.interactiveCells} interactive + ${ceilingCounts.nonInteractiveCells} non-interactive budgeted cell(s) under the absolute ceilings, ` : ''}budgets ${budgetsPath}${physicalClaim ? ', physical claim: per-device evidence on release tiers ' + (releaseTiers.join('+') || '(none)') : ''}${releaseMode ? ', release mode' : ''})`);
+  console.log(`validate-release-baseline: PASS ${baselinePath} (schema ${JSON.stringify(payload.schema) || 'none'}, generated ${payload.generated_at}, ${requiredCells.length} release-required cells, ${ceilingCounts ? `${ceilingCounts.interactiveCells} interactive cell(s) under the absolute ceilings + ${ceilingCounts.nonInteractiveCells} non-interactive budgeted cell(s), ` : ''}budgets ${budgetsPath}${physicalClaim ? ', physical claim: per-device evidence on release tiers ' + (releaseTiers.join('+') || '(none)') : ''}${releaseMode ? ', release mode' : ''})`);
   for (const n of notes) console.log(`  note: ${n}`);
   process.exit(0);
 }
