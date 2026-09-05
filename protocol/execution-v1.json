@@ -1,8 +1,8 @@
 {
   "$schema": "kiwicaptcha.execution-v1/1",
   "format_version": 1,
-  "max_execution_version": 4,
-  "opcode_count": 37,
+  "max_execution_version": 5,
+  "opcode_count": 45,
   "opcodes": {
     "ADD": 0,
     "SUB": 1,
@@ -40,7 +40,15 @@
     "DOM_OBSERVE": 33,
     "DOM_SIBLING_INDEX": 34,
     "DOM_CHILD": 35,
-    "DOM_DEPTH": 36
+    "DOM_DEPTH": 36,
+    "DOM_FRAGMENT_APPEND": 37,
+    "DOM_CLONE": 38,
+    "DOM_REPARENT": 39,
+    "DOM_ATTR_REFLECT": 40,
+    "DOM_EVENT_PHASE": 41,
+    "DOM_URL_CANON": 42,
+    "DOM_TEXT_MUTATE": 43,
+    "DOM_SELECT_DEP": 44
   },
   "trace_names": [
     "add",
@@ -79,6 +87,14 @@
     "obs",
     "dsib",
     "dchild",
-    "ddepth"
+    "ddepth",
+    "dfrag",
+    "dclone",
+    "drepar",
+    "dreflec",
+    "dphase",
+    "durlc",
+    "dmutate",
+    "dsdep"
   ]
 }

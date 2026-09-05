@@ -46,7 +46,11 @@ namespace KiwiCaptcha;
  * parent, dispatch and serialize. The browser-observed probes close
  * the table: query real, geometry, point, event real, serialize real
  * and observe. Version 2 adds observe, version 3 the sibling-index
- * probe, and version 4 the child and depth probes of the nested tree.
+ * probe, version 4 the child and depth probes of the nested tree, and
+ * version 5 the causal object-graph ops (fragment append, clone,
+ * reparent, attribute reflection, event phase, URL canonicalization,
+ * text mutation and select-depth descent), whose integer entries flow
+ * through the u8 cells of the causal array.
  *
  * String literals are printable ASCII (0x20..0x7E); ids and class
  * names come from fixed 64-char alphabets; u32 literals are raw
@@ -117,9 +121,14 @@ final class ExecutionChallengeGenerator
      * (dsib). Version 4 builds a real nested tree (a child node created
      * under a constructed parent) and probes its depth with an actual
      * ancestor walk whose exact value the server derives from the
-     * construction order.
+     * construction order. Version 5 adds the causal object-graph
+     * grammar: the clone and reparent spine over the nested tree, the
+     * observed URL-canon digest and the text-mutation serialization
+     * readback, with the integer entries flowing through the u8 cells
+     * (see the version-5 arms of simulateOp and the design record
+     * docs/execution-v5-design.md).
      */
-    public const MAX_EXECUTION_VERSION = 4;
+    public const MAX_EXECUTION_VERSION = 5;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -185,7 +194,23 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SIBLING_INDEX = 34;
     public const OP_DOM_CHILD = 35;
     public const OP_DOM_DEPTH = 36;
-    public const OP_COUNT = 37;
+    /** Version-5 ops: moves the current node (with its subtree) into a detached fragment slot; terminal only. */
+    public const OP_DOM_FRAGMENT_APPEND = 37;
+    /** Version-5 ops: deep-copies the current node's subtree, reassigns the copy's reflected id, inserts it after the original. */
+    public const OP_DOM_CLONE = 38;
+    /** Version-5 ops: moves the current node's subtree under the constructed target node. */
+    public const OP_DOM_REPARENT = 39;
+    /** Version-5 ops: reads the current node's reflected property value for the indexed attribute name. */
+    public const OP_DOM_ATTR_REFLECT = 40;
+    /** Version-5 ops: dispatches a real bubbling event over the current node's constructed ancestor path. */
+    public const OP_DOM_EVENT_PHASE = 41;
+    /** Version-5 ops: canonicalizes and hashes the sandboxed document URL (the one browser-observed entry). */
+    public const OP_DOM_URL_CANON = 42;
+    /** Version-5 ops: sets the current node's textContent to the value operand. */
+    public const OP_DOM_TEXT_MUTATE = 43;
+    /** Version-5 ops: descends by the three child-index bytes; the entry is the number of descents completed. */
+    public const OP_DOM_SELECT_DEP = 44;
+    public const OP_COUNT = 45;
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -198,6 +223,7 @@ final class ExecutionChallengeGenerator
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
         'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
+        'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
     ];
 
     private function __construct()
@@ -229,7 +255,8 @@ final class ExecutionChallengeGenerator
         }
         if ($version < 1 || $version > self::MAX_EXECUTION_VERSION) {
             throw new \InvalidArgumentException(
-                'execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)'
+                'execution version must be 1..'.self::MAX_EXECUTION_VERSION
+                .' (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe; 5 the causal object-graph grammar)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -258,12 +285,19 @@ final class ExecutionChallengeGenerator
         // plus the drawn 1..3 extra probes needs floor 15. Version 4
         // adds the nested tree (two child ops) and the depth probe;
         // its fixed 15-op skeleton plus the drawn 1..3 extra probes
-        // needs floor 18. Every stamped count always fits its emitted
-        // records and the grammar bounds 8..24 stay unchanged.
+        // needs floor 18. Version 5 adds the six-op causal spine over
+        // the version-4 skeleton (clone, reparent, u8 read of the
+        // reparent cell, URL canon, text mutate, serialize real): its
+        // fixed 21-op skeleton plus up to three drawn extra probes
+        // would reach 24, the grammar cap, so the count byte only
+        // adds 0..3 slots (21 + byte % 4). Every stamped count always
+        // fits its emitted records and the grammar bounds 8..24 stay
+        // unchanged.
         $opCount = match ($version) {
             2 => 11 + (self::nextByte($stream) % 14),
             3 => 15 + (self::nextByte($stream) % 10),
             4 => 18 + (self::nextByte($stream) % 7),
+            5 => 21 + (self::nextByte($stream) % 4),
             default => 8 + (self::nextByte($stream) % 17),
         };
         $program .= \chr($opCount);
@@ -314,10 +348,12 @@ final class ExecutionChallengeGenerator
             // current node in sequence (the second under the first), so
             // the program builds a real ancestor chain whose depth the
             // browser walks for the ddepth probe.
+            $childOperands = [];
             for ($n = 0; $n < 2; $n++) {
                 $tagC = self::drawBytes($stream, 1);
                 $childOperand = self::drawIdOperand($stream);
                 $ops[] = [self::OP_DOM_CHILD, $tagC.$childOperand];
+                $childOperands[] = $childOperand;
                 $depthOperand = $childOperand;
             }
         }
@@ -350,7 +386,47 @@ final class ExecutionChallengeGenerator
             // derives from the construction order.
             $ops[] = [self::OP_DOM_DEPTH, $depthOperand];
         }
+        if ($version >= 5) {
+            // The version-5 causal spine, emitted in the fixed order:
+            // DOM_CLONE, DOM_REPARENT, U8_READ of the reparent cell,
+            // DOM_URL_CANON, DOM_TEXT_MUTATE, DOM_SERIALIZE_REAL. The
+            // current node at this point is the deepest nested child
+            // (a leaf), so the clone deep-copies that leaf, the
+            // reparent moves the copy under one of the constructed
+            // nodes (the first node, the second node or one of the two
+            // children, drawn by two bits over the reused operand
+            // bytes), and the text mutation marks the copy. The
+            // reparent cell write binds the U8_READ that follows (the
+            // derived child count read back like the version-2
+            // observed byte), the URL-canon entry is browser-observed
+            // and the closing serialize-real digests the canonical
+            // serialization of the record after the clone, the
+            // reparent and the text mutation. The cell bytes are drawn
+            // modulo the live u8 length so every write lands in range;
+            // the u8-array length itself is the skeleton draw of the
+            // version-2 causal chain above.
+            $cloneOperand = self::drawIdOperand($stream);
+            $cloneCell = self::nextByte($stream) % $u8Len;
+            $ops[] = [self::OP_DOM_CLONE, $cloneOperand.\chr($cloneCell)];
+            $parentCandidates = [$idOperand, $siblingOperand, $childOperands[0], $childOperands[1]];
+            $reparentOperand = $parentCandidates[self::nextByte($stream) % 4];
+            $reparentCell = self::nextByte($stream) % $u8Len;
+            $ops[] = [self::OP_DOM_REPARENT, $reparentOperand.\chr($reparentCell)];
+            $ops[] = [self::OP_U8_READ, \chr($reparentCell)];
+            $ops[] = [self::OP_DOM_URL_CANON, ''];
+            $ops[] = [
+                self::OP_DOM_TEXT_MUTATE,
+                self::drawPrintableOperand($stream, 32).\chr(self::nextByte($stream) % $u8Len),
+            ];
+            $ops[] = [self::OP_DOM_SERIALIZE_REAL, ''];
+        }
         $extraProbes = 1 + (self::nextByte($stream) % 3);
+        if ($version >= 5) {
+            // The version-5 emission cap: the stamped count is 21..24,
+            // so at most opCount - 21 extra probes fit (a stamped
+            // count of 21 carries the fixed skeleton only).
+            $extraProbes = min($extraProbes, $opCount - 21);
+        }
         $probePool = match ($version) {
             2 => 5,
             3 => 7,
@@ -358,7 +434,24 @@ final class ExecutionChallengeGenerator
             default => 5,
         };
         for ($i = 0; $i < $extraProbes; $i++) {
-            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
+            if ($version >= 5) {
+                // The version-5 extra-slot pool extends to the read-only
+                // real probes of the rung: geometry, point, event real,
+                // serialize real, observe, sibling, depth, reflect,
+                // phase, URL canon and select depth (opcodes 29..44
+                // with the topology mutators excluded). Query real and
+                // the mutators stay out of the extra slots exactly as
+                // the child op maps away in version 4.
+                $v5Pool = [
+                    self::OP_DOM_GEOMETRY, self::OP_DOM_POINT, self::OP_DOM_EVENT_REAL,
+                    self::OP_DOM_SERIALIZE_REAL, self::OP_DOM_OBSERVE, self::OP_DOM_SIBLING_INDEX,
+                    self::OP_DOM_DEPTH, self::OP_DOM_ATTR_REFLECT, self::OP_DOM_EVENT_PHASE,
+                    self::OP_DOM_URL_CANON, self::OP_DOM_SELECT_DEP,
+                ];
+                $probe = $v5Pool[self::nextByte($stream) % 11];
+            } else {
+                $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
+            }
             if ($version >= 4 && $probe === self::OP_DOM_CHILD) {
                 // The nested-tree opcode never appears in extra slots
                 // (it would mutate the tree mid-run); the draw maps to
@@ -371,6 +464,15 @@ final class ExecutionChallengeGenerator
                 self::OP_DOM_POINT => self::drawBytes($stream, 2),
                 self::OP_DOM_OBSERVE => $idOperand.self::drawBytes($stream, 1),
                 self::OP_DOM_DEPTH => $depthOperand,
+                // The version-5 current-node probes: the attribute-name
+                // byte of the reflect probe, the phase cell byte (drawn
+                // modulo the live u8 length so its write lands in
+                // range), no operands for the URL-canon probe and the
+                // three raw descendant-index bytes of the select-depth
+                // probe.
+                self::OP_DOM_ATTR_REFLECT => self::drawBytes($stream, 1),
+                self::OP_DOM_EVENT_PHASE => \chr(self::nextByte($stream) % $u8Len),
+                self::OP_DOM_SELECT_DEP => self::drawBytes($stream, 3),
                 default => '',
             };
             $ops[] = [$probe, $probeOperand];
@@ -475,13 +577,14 @@ final class ExecutionChallengeGenerator
             // Older-version programs never carry newer opcodes (the
             // version-2 observe opcode 33, the version-3 sibling-index
             // opcode 34, the version-4 child and depth opcodes 35 and
-            // 36): the interpreter of a mixed fleet must be able to
-            // reject a newer grammar by the declared version byte
-            // alone.
+            // 36, the version-5 object-graph opcodes 37-44): the
+            // interpreter of a mixed fleet must be able to reject a
+            // newer grammar by the declared version byte alone.
             $maxOpcode = match (\ord($opVersion)) {
                 1 => 33,
                 2 => 34,
                 3 => 35,
+                4 => 37,
                 default => self::OP_COUNT,
             };
             if ($opcode >= $maxOpcode) {
@@ -959,6 +1062,13 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_SIBLING_INDEX => $readIdKeyed(),
             self::OP_DOM_DEPTH => $readIdKeyed(),
             self::OP_DOM_CHILD => self::readChild($read, $readByte, $readIdKeyed),
+            self::OP_DOM_CLONE, self::OP_DOM_REPARENT => self::readIdCell($read, $readByte, $readIdKeyed),
+            self::OP_DOM_FRAGMENT_APPEND => self::readFragAppend($readByte),
+            self::OP_DOM_ATTR_REFLECT => ['name' => ($readByte() ?? 0) % 5],
+            self::OP_DOM_EVENT_PHASE => ['cell' => ($readByte() ?? 0) % 64],
+            self::OP_DOM_URL_CANON => [],
+            self::OP_DOM_TEXT_MUTATE => self::readTextMutate($read, $readByte, $readValue),
+            self::OP_DOM_SELECT_DEP => ['b0' => $readByte() ?? 0, 'b1' => $readByte() ?? 0, 'b2' => $readByte() ?? 0],
             default => null,
         };
     }
@@ -996,6 +1106,66 @@ final class ExecutionChallengeGenerator
         }
 
         return ['id' => $id['id'], 'idx' => $idx % 64];
+    }
+
+    /**
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, cell: int}|null
+     */
+    private static function readIdCell(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'cell' => $cell % 64];
+    }
+
+    /**
+     * @param callable(): ?int $readByte
+     *
+     * @return array{s: int, cell: int}|null
+     */
+    private static function readFragAppend(callable $readByte): ?array
+    {
+        $slot = $readByte();
+        if ($slot === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['s' => $slot % 4, 'cell' => $cell % 64];
+    }
+
+    /**
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array{len: int, s: string} $readValue
+     *
+     * @return array{val: string, cell: int}|null
+     */
+    private static function readTextMutate(callable $read, callable $readByte, callable $readValue): ?array
+    {
+        $value = $readValue();
+        if ($value === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['val' => $value['s'], 'cell' => $cell % 64];
     }
 
     /**

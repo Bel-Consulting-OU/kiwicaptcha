@@ -56,14 +56,14 @@ final class ExecutionVersionPolicyTest extends TestCase
 
     public function testBinaryMaxDefaultsToTheGeneratorMaximum(): void
     {
-        $policy = new ExecutionVersionPolicy(4, 4);
+        $policy = new ExecutionVersionPolicy(5, 5);
 
         self::assertSame(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, $policy->effectiveAvailableTier(), 'the generator maximum is the ceiling of the effective tier');
     }
 
     public function testAnExplicitBinaryMaxBelowTheCapAndFloorBindsTheTier(): void
     {
-        $policy = new ExecutionVersionPolicy(4, 4, 3);
+        $policy = new ExecutionVersionPolicy(5, 5, 3);
 
         self::assertSame(3, $policy->effectiveAvailableTier(), 'the binary max binds when it is below the cap and the floor');
         self::assertTrue($policy->requirementSatisfiable(3));

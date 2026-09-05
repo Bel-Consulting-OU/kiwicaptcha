@@ -168,7 +168,7 @@ final class ExecutionDifferentialCorpusTest extends TestCase
     {
         $manifest = $this->manifest();
         $maxVersion = $manifest['max_execution_version'];
-        self::assertSame(4, $maxVersion, 'the manifest register ceiling at HEAD');
+        self::assertSame(5, $maxVersion, 'the manifest register ceiling at HEAD');
 
         $cases = self::CORPUS;
         self::assertCount(16, $cases, 'the embedded corpus is pinned to 16 cases');
