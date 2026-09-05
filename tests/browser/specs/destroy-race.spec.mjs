@@ -13,10 +13,10 @@ import { test, expect } from '@playwright/test';
 // setProgress() for every chunk after the destroy. The audit found a P2
 // race on CI where those queued progress writes landed on a destroyed —
 // but still in-DOM — widget. The fix: setProgress() no-ops when the
-// widget is destroyed (the same dataset flag destroy() sets first), so a
+// widget is destroyed, the same dataset flag destroy sets first, so a
 // stale solve can never paint progress into a dead widget.
 //
-// This spec pins that fix with a DETERMINISTIC reproduction of the race,
+// This spec pins that fix with a deterministic reproduction of the race,
 // not a broad lifecycle sweep. The deterministic core is an event-loop
 // ordering argument, not a timing bet:
 //
@@ -26,15 +26,15 @@ import { test, expect } from '@playwright/test';
 //      one progress callback with a distinct non-100 value — measured
 //      across all three engines as 45-55 ticks over roughly half a
 //      second. A plain bits=8 challenge solves inside the first chunk,
-//      so the ceiling is what makes progress writes observable at all.
+//      so the ceiling makes progress writes observable at all.
 //   2. A MutationObserver on the fill bar destroys the widget (via
 //      window.KiwiCaptcha.destroy) synchronously from the observer
-//      callback the moment the FIRST mid-solve tick (a value other than
+//      callback the moment the first mid-solve tick (a value other than
 //      100, while data-state="solving") is observed. Because the
 //      observer callback runs in the microtask checkpoint right after
 //      the chunk that produced the tick, and the next chunk only runs as
 //      a later macrotask, the destroy is guaranteed to land while the
-//      solve is still in flight and BEFORE any further progress write:
+//      solve is still in flight and before any further progress write:
 //      a data-progress tick exists only when the chunk that emitted it
 //      did NOT find the proof, so at least one more chunk is queued
 //      behind the destroy. If the widget instead reached done before the
@@ -46,7 +46,7 @@ import { test, expect } from '@playwright/test';
 //      stale writes. The test then lets the background solve run to
 //      completion (≥2 s settle; the expected residual after the first
 //      tick is well under a second and the run is capped by the 5M-hash
-//      ceiling) and asserts that NOTHING mutated the widget since the
+//      ceiling) and asserts that nothing mutated the widget since the
 //      destroy: no data-progress write, no state/lang/label change, no
 //      childList activity, no token, no kiwi:* event, no error.
 //
@@ -92,7 +92,7 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
 
     // ── Page-side harness ──────────────────────────────────────────
     // Template: a scrubbed deep clone of the fixture's own rendered
-    // container, so the cycle always runs the CURRENT tree's markup.
+    // container, so the cycle always runs the current tree's markup.
     // The fixture's original widget is destroyed and removed right away
     // so its own auto-solve never pollutes the page. Error/event
     // collectors are global (installed before any iteration exists);
@@ -199,7 +199,7 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
             destroyed: widget.dataset.kiwiDestroyed === undefined ? null : widget.dataset.kiwiDestroyed,
           });
           snapshot = read();
-          // Post-destroy baseline: attached in the SAME microtask, after
+          // Post-destroy baseline: attached in the same microtask, after
           // destroy() returned — every record from here on is a stale
           // write of the cancelled generation.
           const records = [];
@@ -343,7 +343,7 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
       rejections: window.__kiwiRace.rejections,
     }));
     expect(pageErrors, 'the destroy race must raise no page error').toEqual([]);
-    // The ONLY tolerated console noise is the browser's automatic
+    // The only tolerated console noise is the browser's automatic
     // "Failed to load resource" line for a challenge POST refused by the
     // fixture server itself (net::ERR_CONNECTION_REFUSED). The fixture
     // port is shared with other lanes on this machine, and a foreign
