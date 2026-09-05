@@ -1305,7 +1305,7 @@ final class ConfigurationTest extends TestCase
 
         self::assertSame('sha256', $processed['algorithm']);
         self::assertSame(18, $processed['difficulty_bits']);
-        self::assertSame(8, $processed['argon2_difficulty_bits']);
+        self::assertSame(4, $processed['argon2_difficulty_bits']);
         self::assertSame(0, $processed['argon_m_kib']);
         self::assertSame(3, $processed['argon_t']);
         self::assertSame(1, $processed['argon_p']);

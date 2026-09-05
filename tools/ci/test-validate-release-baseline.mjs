@@ -86,6 +86,7 @@ const SCHEMA = harnessConst(HARNESS_SOURCE, 'schema string', /const SCHEMA = '([
 const COMPLETION_MARKER = harnessConst(HARNESS_SOURCE, 'completion marker', /const COMPLETION_MARKER = '([^']+)';/);
 const SHA_REPS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'SHA rep default', /reps: (\d+), \/\/ SHA-256 solve repetitions/), 10);
 const ARGON_REPS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'Argon rep default', /argonReps: (\d+), \/\/ Argon2id solve repetitions/), 10);
+const ARGON_BITS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'argon bits default', /argonBits: (\d+), \/\/ the real adaptive-risk ladder/), 10);
 const { tiers: TIERS, difficulties: DIFFICULTIES } = harnessFacts(HARNESS_SOURCE);
 const CACHE_STATES = ['cold', 'warm'];
 const RELEASE_TIER = 'mainstream-desktop';
@@ -93,7 +94,9 @@ const RELEASE_TIER = 'mainstream-desktop';
 // ── Fixture helpers. ────────────────────────────────────────────────
 
 const DAY_MS = 86400000;
+const MIN_MS = 60000;
 const nowIso = (offsetDays = 0) => new Date(Date.now() + offsetDays * DAY_MS).toISOString();
+const isoAt = (ms) => new Date(ms).toISOString();
 
 function clone(src) {
   return JSON.parse(JSON.stringify(src));
@@ -194,7 +197,7 @@ function schema3Payload(results = fullMatrix()) {
     reps: SHA_REPS_DEFAULT,
     argonReps: ARGON_REPS_DEFAULT,
     cache: 'both',
-    argonBits: 8,
+    argonBits: ARGON_BITS_DEFAULT,
     argonMKib: 16384,
     multiWidget: false,
     assets: 'both',
@@ -566,6 +569,156 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   });
   const res = runValidator(physicalPayload({ 'lab-rig': deviceIndex('lab-rig') }), budgets, false);
   reject('physical_results indexed under a registered lab device', res, ['not a registered kind:"physical" device']);
+}
+
+// ── Absolute UX ceiling cases (audit finding 2, round 5). ───────────
+// The committed release-budgets.json declares absoluteP95Ceilings
+// (5000 ms for mainstream-desktop) and the interactive/non-interactive
+// classification (execchain budgeted but never an ordinary interactive
+// release cell). The argon2id cells are interactive: their budget rows
+// must sit under the absolute ceiling even when measurements are below
+// the budget, and a budget above the ceiling is a hard rejection.
+
+// 24. Interactive budget under the absolute ceiling with measurements
+//     under the budget: the ceiling-complete state passes in CI mode.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  pass('absolute ceiling present + argon measurement under budget: CI mode accepts the clean run', runValidator(payload, budgets, false));
+}
+
+// 25. Interactive cell measurement above its budget row.
+{
+  const payload = clone(schema3Payload());
+  for (const cache of CACHE_STATES) {
+    for (const mode of DIFFICULTIES.argon2id.assetModes) {
+      payload.results[`${RELEASE_TIER}:argon2id:${cache}:${mode}`] = modeRow(
+        null, RELEASE_TIER, 'argon2id', cache, mode,
+        Array.from({ length: ARGON_REPS_DEFAULT }, () => slowSample(20000))
+      );
+    }
+  }
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('argon2id measurement above the budget row: reject naming the measured p95', res, ['exceeds the budget'], ['absolute interactive ceiling']);
+}
+
+// 26. Interactive budget row above the absolute ceiling (measurements
+//     healthy): the ceiling binds the budget, never only the
+//     measurements.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  budgets.budgets[RELEASE_TIER].argon2id.warm.solveMsP95 = 6000;
+  budgets.budgets[RELEASE_TIER].argon2id.warm.pageToVerifiedMsP95 = 6000;
+  const res = runValidator(payload, budgets, false);
+  reject('argon2id warm budget 6000 ms above the absolute 5000 ms ceiling: reject', res, ['exceeds the absolute interactive ceiling'], ['exceeds the budget']);
+}
+
+// 27. Measurement below an inflated 20-second budget: still rejected —
+//     an inflated budget can never buy the ceiling out.
+{
+  const payload = schema3Payload();
+  const budgets = baseBudgets();
+  budgets.budgets[RELEASE_TIER].argon2id.warm.solveMsP95 = 20000;
+  budgets.budgets[RELEASE_TIER].argon2id.warm.pageToVerifiedMsP95 = 20000;
+  const res = runValidator(payload, budgets, false);
+  reject('argon2id warm budget inflated to 20 s with 5 ms measurements: still rejected on the absolute ceiling', res, ['exceeds the absolute interactive ceiling'], ['exceeds the budget']);
+}
+
+// 28. A certified tier without an absoluteP95Ceilings entry is
+//     rejected in release mode (and for a committed physical claim in
+//     CI): the release ladder cannot declare a tier with no absolute
+//     UX ceiling.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  delete budgets.absoluteP95Ceilings;
+  const res = runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, true);
+  reject('release mode: physical claim whose budget file lacks absoluteP95Ceilings', res, ['has no absoluteP95Ceilings entry']);
+}
+
+// ── Evidence time validation cases (audit finding 3, round 5). ──────
+// Evidence timestamps (payload generated_at, qualification
+// qualified_at, device tested_at) must be canonical UTC RFC3339
+// (zero offset, T separator) and may not lie beyond now + 5 minutes
+// (MAX_EVIDENCE_CLOCK_SKEW_MS); qualified_at may not postdate
+// generated_at beyond the same skew allowance.
+
+// 29. generated_at a year in the future.
+{
+  const payload = legacySchema1Payload();
+  payload.generated_at = nowIso(365);
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('generated_at now+365d: reject as beyond the clock-skew allowance', res, ['is in the future beyond the 5-minute clock-skew allowance']);
+}
+
+// 30. All three evidence timestamps a year in the future in a valid
+//     chronological order: every field is rejected individually.
+{
+  const budgets = physicalBudgets({
+    devices: [physicalDevice('dev-a', RELEASE_TIER, { tested_at: nowIso(365) })],
+    qualifiedAt: nowIso(365),
+  });
+  const payload = physicalPayload({ 'dev-a': deviceIndex('dev-a') });
+  payload.generated_at = nowIso(365);
+  const res = runValidator(payload, budgets, false);
+  reject('generated_at + qualified_at + tested_at all at now+365d in valid order', res, ['is in the future beyond the 5-minute clock-skew allowance']);
+}
+
+// 31. qualified_at postdating generated_at by a day (both in the
+//     past): rejected by the qualified-vs-generated skew rule.
+{
+  const past = Date.now() - 30 * DAY_MS;
+  const budgets = physicalBudgets({
+    devices: [physicalDevice('dev-a', RELEASE_TIER, { tested_at: isoAt(past) })],
+    qualifiedAt: isoAt(past + DAY_MS),
+  });
+  const payload = physicalPayload({ 'dev-a': deviceIndex('dev-a') });
+  payload.generated_at = isoAt(past);
+  const res = runValidator(payload, budgets, false);
+  reject('qualified_at = generated_at + 1 day: reject beyond the clock-skew allowance', res, ['postdates payload.generated_at']);
+}
+
+// 32. tested_at two minutes in the future stays within the 5-minute
+//     skew allowance: accepted (chronology valid: tested_at <=
+//     qualified_at <= generated_at, all within skew).
+{
+  const t = Date.now();
+  const budgets = physicalBudgets({
+    devices: [physicalDevice('dev-a', RELEASE_TIER, { tested_at: isoAt(t + 2 * MIN_MS) })],
+    qualifiedAt: isoAt(t + 3 * MIN_MS),
+  });
+  const payload = physicalPayload({ 'dev-a': deviceIndex('dev-a') });
+  payload.generated_at = isoAt(t + 4 * MIN_MS);
+  pass('tested_at now+2min (within the 5-minute skew allowance): accepted', runValidator(payload, budgets, false));
+}
+
+// 33. tested_at six minutes in the future: rejected.
+{
+  const t = Date.now();
+  const budgets = physicalBudgets({
+    devices: [physicalDevice('dev-a', RELEASE_TIER, { tested_at: isoAt(t + 6 * MIN_MS) })],
+    qualifiedAt: isoAt(t + 6 * MIN_MS + 1000),
+  });
+  const payload = physicalPayload({ 'dev-a': deviceIndex('dev-a') });
+  payload.generated_at = isoAt(t + 6 * MIN_MS + 2000);
+  const res = runValidator(payload, budgets, false);
+  reject('tested_at now+6min: reject as beyond the clock-skew allowance', res, ['is in the future beyond the 5-minute clock-skew allowance']);
+}
+
+// 34. A space-separated local timestamp is not canonical RFC3339.
+{
+  const payload = legacySchema1Payload();
+  payload.generated_at = '2026-09-05 02:00:00';
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('generated_at "2026-09-05 02:00:00" (space separator, no offset): reject as non-canonical', res, ['not a canonical UTC RFC3339']);
+}
+
+// 35. A timestamp with a non-UTC offset is not canonical RFC3339.
+{
+  const payload = legacySchema1Payload();
+  payload.generated_at = '2026-09-04T12:00:00.000+01:00';
+  const res = runValidator(payload, baseBudgets(), false);
+  reject('generated_at with +01:00 offset: reject as non-canonical (UTC designator required)', res, ['not a canonical UTC RFC3339']);
 }
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);

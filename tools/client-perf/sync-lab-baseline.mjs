@@ -7,16 +7,21 @@
  * The committed baseline is the schema-1 pre-matrix recording: legacy
  * rows measured at the old fixture envelope (64 KiB Argon, fixture
  * SHA default). The client-performance release gate now budgets the
- * REAL ladder (Argon m=16384 KiB target 8) on the lab rig (the
- * unthrottled mainstream-desktop tier = the actual recording Mac), so
- * the desktop rows must describe the real-ladder measurements:
+ * REAL ladder (Argon m=16384 KiB target 4 since the round-5 retune)
+ * on the lab rig (the unthrottled mainstream-desktop tier = the
+ * actual recording Mac), so the desktop rows must describe the
+ * real-ladder measurements:
  *
- *   - the sha16/sha18/sha20/argon2id and the four files-tier execution
- *     rows come from results/run-2026-09-03.json (the completed
- *     real-ladder desktop run; 12 SHA / 6 Argon reps per mode),
+ *   - the sha16/sha18/sha20/argon2id and the four files-tier
+ *     execution rows came from results/run-2026-09-03.json (the
+ *     completed real-ladder desktop run; 12 SHA / 6 Argon reps per
+ *     mode),
  *   - the rsw75k/rsw150k/rsw300k and the two inline execution rows
- *     come from the focused 2026-09-04 run at 50 SHA reps per mode,
- *     produced by this branch's client-perf.mjs,
+ *     came from the focused 2026-09-04 run at 50 SHA reps per mode,
+ *   - the argon family (argon2id, execargon, execchain) was
+ *     re-recorded at the retuned ladder rung (target 4) on
+ *     2026-09-05 (results-2026-09-05.json, 12 Argon reps per mode),
+ *     replacing the target-8 rows of the earlier runs.
  *
  * merged per (tier, difficulty, cache) exactly like the legacy row
  * shape (asset modes folded; every summary statistic recomputed over
@@ -25,6 +30,11 @@
  * legacy-labelled) is preserved byte-for-byte: the script asserts the
  * untouched rows round-trip JSON.stringify identically.
  *
+ * --difficulties restricts the surgery to the named difficulties (the
+ * rows of those difficulties found in the runs replace the committed
+ * rows; difficulties absent from the runs keep their committed rows).
+ * The default set is the historical sha16/18/20 + argon2id surgery.
+ *
  * The payload header is updated honestly: generated_at is the surgery
  * date, legacy_note describes the hybrid construction, and the
  * options/difficulties fields document the merged evidence.
@@ -32,6 +42,8 @@
  * Usage:
  *   node tools/client-perf/sync-lab-baseline.mjs --run results/run-2026-09-03.json \
  *     --run tools/client-perf/results/results-2026-09-04.json [--write]
+ *   node tools/client-perf/sync-lab-baseline.mjs --run tools/client-perf/results/results-2026-09-05.json \
+ *     --difficulties argon2id,execargon,execchain --argon-reps 12 --write
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -63,9 +75,15 @@ function summarize(samples) {
 const args = process.argv.slice(2);
 const runs = [];
 let write = false;
+let difficultyFilter = null;
+let shaReps = 12;
+let argonReps = 6;
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--run') runs.push(args[++i]);
   else if (args[i] === '--write') write = true;
+  else if (args[i] === '--difficulties') difficultyFilter = args[++i].split(',');
+  else if (args[i] === '--reps') shaReps = parseInt(args[++i], 10);
+  else if (args[i] === '--argon-reps') argonReps = parseInt(args[++i], 10);
   else {
     console.error(`unknown option: ${args[i]}`);
     process.exit(2);
@@ -77,7 +95,7 @@ if (runs.length === 0) {
 }
 
 const TIER = 'mainstream-desktop';
-const REPLACE_DIFFICULTIES = new Set(['sha16', 'sha18', 'sha20', 'argon2id']);
+const REPLACE_DIFFICULTIES = new Set(difficultyFilter || ['sha16', 'sha18', 'sha20', 'argon2id']);
 const LEGACY_SUMMARY_FIELDS = [
   'solveMs', 'pureSolveMs', 'pageToVerifiedMs', 'bootstrapToConnectingMs',
   'jsParseCompileMs', 'inlineScriptEvalMs', 'wasmCompileMs', 'wasmInstantiateMs',
@@ -195,19 +213,19 @@ payload.difficulties = {
 };
 payload.options = {
   ...(payload.options || {}),
-  reps: 12,
-  argonReps: 6,
+  reps: shaReps,
+  argonReps: argonReps,
   cache: 'both',
   assets: 'both',
-  argonBits: 8,
+  argonBits: 4,
   argonMKib: 16384,
   mergedRuns: runDates,
-  note: 'the mainstream-desktop rows were re-recorded at the real adaptive-risk ladder (m=16384 KiB, target 8) on 2026-09-03 and 2026-09-04 and merged per cache across asset modes; the emulation-tier rows remain the legacy pre-matrix recording and are not release-required',
+  note: 'the mainstream-desktop rows were recorded at the real adaptive-risk ladder (m=16384 KiB, t=3, p=1) and merged per cache across asset modes; the argon family (argon2id/execargon/execchain) was re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from results-2026-09-05.json; the emulation-tier rows remain the legacy pre-matrix recording and are not release-required',
 };
 payload.generated_at = new Date().toISOString();
 payload.legacy_note =
-  'LEGACY PRE-ROUND-105 RECORDING for the emulation tiers, surgically extended on 2026-09-04: the mainstream-desktop rows (sha16/18/20, argon2id, execvm, execsha18, execargon, execchain, execvminline, execsha18inline, rsw75k, rsw150k, rsw300k) now carry real-ladder measurements (Argon m=16384 KiB target 8, rsw T=75,000/150,000/300,000) merged per cache across the inline and files asset modes from the completed runs results/run-2026-09-03.json and tools/client-perf/results/results-2026-09-04.json. Every other row is byte-for-byte the original legacy recording at the old fixture envelope (64 KiB Argon, fixture SHA default), which is not release-required evidence. The physical-device procedure in tools/client-perf/README.md remains the release boundary; qualification status is lab until physical-device data is recorded.';
-payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline.json (legacy pre-matrix recording; real-ladder lab rows merged 2026-09-04)';
+  'LEGACY PRE-ROUND-105 RECORDING for the emulation tiers, surgically extended on 2026-09-04 and 2026-09-05: the mainstream-desktop rows (sha16/18/20, argon2id, execvm, execsha18, execargon, execchain, execvminline, execsha18inline, rsw75k, rsw150k, rsw300k) carry real-ladder measurements (Argon m=16384 KiB, rsw T=75,000/150,000/300,000) merged per cache across the inline and files asset modes: sha16/18/20 and the execution/rsw rows from the completed runs results/run-2026-09-03.json and tools/client-perf/results/results-2026-09-04.json (measured at the pre-retune Argon target 8 for the argon cells), and the argon family (argon2id/execargon/execchain) re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from the completed run tools/client-perf/results/results-2026-09-05.json (12 Argon reps per mode). Every other row is byte-for-byte the original legacy recording at the old fixture envelope (64 KiB Argon, fixture SHA default), which is not release-required evidence. The physical-device procedure in tools/client-perf/README.md remains the release boundary; qualification status is lab until physical-device data is recorded.';
+payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline.json (legacy pre-matrix recording; real-ladder lab rows merged 2026-09-04, argon family re-recorded at target 4 on 2026-09-05)';
 
 const out = JSON.stringify(payload, null, 2) + '\n';
 if (write) {
