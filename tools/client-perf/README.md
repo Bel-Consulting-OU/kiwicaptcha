@@ -271,9 +271,85 @@ warm across each cell's asset
 tiers: the files execution cells files-only and the inline execution
 cells inline-only by design). It also refuses runs recorded
 below the default sample sizes (50 SHA and 20 Argon repetitions) or
-with a non-real argon ladder (m=16384 KiB, target 4). Only a clean
+with a non-real argon ladder (m=16384 KiB, target 4), and runs whose
+recorded `clientAssets` do not match the current release asset bytes
+(see the identity contract below: the promotion is a hard fail, never
+a warning). Only a clean
 full run can replace `results/baseline.json`, so the committed
 baseline is never overwritten by an interrupted or partial run.
+
+## The client-asset identity contract (audit finding 2, asset bind)
+
+Performance rows are only meaningful bound to the exact client bytes
+they were measured against: a number recorded against one driver
+cannot certify a release that ships another. Every payload therefore
+carries a `clientAssets` block, and one module computes it for every
+consumer of the client-performance authority:
+`tools/client-perf/client-assets.mjs`. The fingerprint policy lives
+there and nowhere else:
+
+- **Canonical asset set.** The canonical client asset set is the
+  release asset manifest
+  (`packages/kiwicaptcha-wasm/release-assets.txt`, the set the
+  `tools/ci/release-asset-contract.sh` carrier checks guard across the
+  release workflow): `widget-driver.js`, `widget-risk.js`,
+  `widget-telemetry.js`, `widget-locales.js`, `widget-compat.js`,
+  `execution-interpreter.js`, `kiwicaptcha-wasm.js`, `kiwi-worker.js`
+  and `widget.css`. All nine are read from
+  `packages/kiwicaptcha-wasm/assets/`, the repo paths the harness
+  serves.
+- **Full SHA-256.** Every asset is hashed with FULL SHA-256 — 64
+  lowercase hex — recorded next to its exact byte count as
+  `{ "<name>": { "bytes": N, "sha256": "<64 hex>" } }`. The historical
+  16-hex prefixes bound only 64 bits (two different files of the same
+  length collide 1 in 2^64) and were dropped; a truncated fingerprint
+  is an invalid record today.
+- **Recorded at run time.** `client-perf.mjs` fingerprints the
+  working tree at measurement time into every results payload;
+  `sync-lab-baseline.mjs` writes the same block into the maintenance
+  baseline; `merge-cells.mjs` and the release validator compare
+  against it.
+
+The identity rules bind in CI mode and in release mode alike:
+
+- **Validator** (`tools/ci/validate-release-baseline.mjs`): a
+  schema-3 payload MUST carry `clientAssets`, and whenever a payload
+  carries the block it must name exactly the current canonical set
+  with per-asset bytes and full sha256 equal to the current tree.
+  Each difference is a hard reason — `client asset set differs from
+  current release asset set` (extra or missing asset) or `client
+  asset <name> does not match current bytes` (byte count or sha256).
+  A committed baseline therefore fails CI the moment any client asset
+  changes, until the evidence is re-bound by a fresh run recorded
+  against the new bytes.
+- **Baseline promotion** (`--promote-baseline`): a run recorded
+  against any other bytes is REFUSED with the same reasons. The old
+  warning-only behavior is gone — a promotion is a re-bind, and
+  re-binding requires measuring the bytes it certifies.
+- **sync-lab-baseline.mjs**: refuses to rebuild the baseline from any
+  `--run` file whose recorded `clientAssets` do not match the current
+  canonical set (a stale run would launder old rows under a fresh
+  identity), then records the canonical block.
+- **merge-cells.mjs**: before any repetition is concatenated, every
+  `--run` file must have been measured against the same measurement
+  context: the canonical client asset set (each run equal to the
+  current release bytes), the harness schema, the Argon parameters
+  (`options.argonBits`/`argonMKib`), the execution maximum
+  (`options.executionMaxVersion` when payloads carry it), the
+  difficulty definitions and the asset mode. Any difference throws
+  `cannot merge performance runs measured against different client
+  assets` with the naming detail — merging repetitions recorded
+  against different bytes, ladders or grammar versions would fabricate
+  a percentile over incomparable measurements.
+
+The committed maintenance baseline was re-bound on 2026-09-05: its
+identity block was regenerated from the current release asset bytes
+(full sha256) with the performance rows untouched. The pre-fix state
+the audit cited — the target-4 recording (2026-09-05T03:07) carried
+driver 92,053 / risk 47,649 / interpreter 33,402 with 16-hex
+prefixes while the current tree ships driver 99,146 / risk 31,644 /
+interpreter 35,728 — is why the truncated prefixes are invalid
+records and why identity is now asserted, never warned.
 
 ## Running
 
@@ -494,7 +570,10 @@ non-empty, it does not enumerate the vocabulary.
   `results/baseline.json` on every push. It fails unless every
   release-required cell has a measured p95 under budget: coverage gaps
   and uncovered cells are hard failures, there is no notes escape for
-  any release-required cell. It prints the current qualification
+  any release-required cell, and the payload's recorded `clientAssets`
+  match the current release asset bytes (the identity contract above —
+  a baseline whose assets drifted from the tree is a rejection, never
+  a note). It prints the current qualification
   status line (e.g. `performance qualification status=lab —
   physical-device data required before release certification`) and
   does not fail solely on the status. Once the committed file claims
@@ -509,8 +588,11 @@ non-empty, it does not enumerate the vocabulary.
   recorded devices) and the physical-authority contract below holds; a
   current-harness (schema 3) payload must additionally satisfy the
   completed-run guards (completion marker, full default matrix,
-  default sample sizes, real argon ladder), and the per-device sha20
-  evidence must meet `minSha20SamplesPhysical`. Release mode widens the
+  default sample sizes, real argon ladder), the client-asset
+  identity rule binds exactly as in CI mode — release certification
+  never skips the proof that the rows certify the bytes they claim to
+  describe — and the per-device sha20 evidence must meet
+  `minSha20SamplesPhysical`. Release mode widens the
   release-required cells to the union of the budget `tiers` and
   `qualification.release_tiers`. In the committed state (status
   `lab`), release mode fails with the qualification reason and no
@@ -692,7 +774,15 @@ time-validation cases (generated_at/qualified_at/tested_at a year in
 the future reject; qualified_at postdating generated_at by a day
 rejects; tested_at two minutes in the future passes within the skew
 allowance and six minutes rejects; a space-separated timestamp and a
-non-UTC offset timestamp reject as non-canonical RFC3339). The job is
+non-UTC offset timestamp reject as non-canonical RFC3339). Round 6
+added the client-asset identity cases (the asset bind): a schema-3
+payload without a `clientAssets` block rejects, an extra recorded
+asset rejects on the set difference, a recorded asset missing from
+the current release set rejects, a byte-count mismatch and a sha256
+mismatch each reject on the per-asset reason (in CI and in
+`--release` mode alike), a schema-3 payload bound to the current set
+passes, and a legacy payload with a tampered identity block rejects.
+The job is
 wired into CI as the self-contained "Release-validator mutation
 suite" job.
 
@@ -702,9 +792,11 @@ suite" job.
   schema `kiwicaptcha.client-perf/3`, environment + methodology +
   completion marker + tiers + options + per-cell aggregates and
   per-repetition samples). The payload records the served client
-  assets (driver, glue, worker, execution interpreter) with their
-  sizes and sha256 prefixes, so a run is attributable to the exact
-  bytes measured. A physical-device recording (or the maintenance
+  assets as the `clientAssets` identity block (full sha256 + byte
+  counts over the canonical release asset set, see the identity
+  contract), so a run is attributable to the exact bytes measured and
+  the validator can prove that a payload certifies the bytes the tree
+  ships. A physical-device recording (or the maintenance
   payload built from one) additionally carries the top-level
   `physical_results` per-device evidence index of the physical-
   authority contract.
@@ -744,6 +836,15 @@ scope. The physical-device procedure remains the release boundary:
 emulation numbers, with or without a fresh full run, are calibration
 signals, never mobile claims, and the qualification status stays
 `lab` until physical-device data is recorded.
+
+On 2026-09-05 the file was re-bound to the client-asset identity
+contract (round 6): it now carries the `clientAssets` block computed
+from the current release asset bytes — full sha256 over the canonical
+nine-asset set (driver 99,146 / risk 31,644 / interpreter 35,728
+bytes at re-bind, where the earlier target-4 recording had measured
+driver 92,053 / risk 47,649 / interpreter 33,402) — with the
+performance rows untouched, and every push validates that the tree
+still ships those exact bytes.
 
 ## Server-side latency baselines and hosted-Redis anomalies (finding-9 note)
 
