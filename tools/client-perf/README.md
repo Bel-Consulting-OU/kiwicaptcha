@@ -492,6 +492,9 @@ the physical sha20 sample floor, the absolute UX ceiling and the normal
 engineering target per certified tier, and a top-level `qualification`
 block:
 
+Pre-qualification example (the lab state, shown only as the
+shape of an un-certified file):
+
 ```json
 {
   "status": "lab",
@@ -502,15 +505,18 @@ block:
 }
 ```
 
-`status` is one of `lab` or `physical`. `lab` means the budgets are
+`status` is one of `lab` or `physical`. `lab` means the budgets rest on
 desktop-lab evidence recorded by the harness on the rigs listed in
-`devices` (the current file names the recording Mac). `physical` means
-the budgets come from the physical-device procedure below, with
+`devices`; a lab claim cannot certify a release. `physical` means the
+budgets come from the physical-device procedure below, with
 `qualified_at` and the device rows recorded, and the validator proves
-the claim (see the physical-authority contract section). Budget-file
-prose describes what the current evidence means (the harness
-percentile semantics, the real challenge configurations, the split
-between the absolute wall and the engineering target); history
+the claim (see the physical-authority contract section). The committed
+release authority is currently physically qualified for
+`mainstream-desktop`, with device-indexed physical evidence in
+`results/baseline.json`; release mode must pass before certification.
+Budget-file prose describes what the current evidence means (the
+harness percentile semantics, the real challenge configurations, the
+split between the absolute wall and the engineering target); history
 (re-records, retunes, earlier audit rounds) belongs in the changelog,
 not in the budgets prose or in this README's narrative.
 
