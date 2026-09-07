@@ -1306,7 +1306,9 @@ jobs:
           # upstream product). Changelogs and release notes are the
           # designated home for history; an informational step surfaces
           # drift there without failing.
-          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
+          # round labels must be whole-word (an unanchored 'round[- ]?[0-9]+'
+          # also matches CSS transitions like 'background 0.2s ease').
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
           if rg -n -i \
             --glob '!CHANGELOG*' \
             --glob '!**/CHANGELOG*' \
