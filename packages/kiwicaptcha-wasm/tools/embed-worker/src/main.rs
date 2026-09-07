@@ -15,7 +15,7 @@
 //!      asset the driver preflight-verifies), and the legacy explicit
 //!      data-kiwi-worker-src path.
 //!
-//! The worker SOLVER SOURCE — the canonical, hand-edited part of
+//! The worker solver source — the canonical, hand-edited part of
 //! `assets/kiwi-worker.js` — is the file's tail after the
 //! KIWI_WORKER_GLUE_END marker line. It is never rewritten by this tool,
 //! and it is byte-identical to the glue's embedded `workerSource` copy
@@ -79,7 +79,7 @@ fn json_escape(s: &str) -> String {
 /// The `workerSource` section appended to the glue: the whole span between
 /// (and including) the KIWI_WORKER_SRC_BEGIN and KIWI_WORKER_SRC_END
 /// marker lines, ending with the trailing "from the KIWI_WORKER_SRC_BEGIN
-/// marker" comment line. NOTE: the prose names the markers WITHOUT the
+/// marker" comment line. Note: the prose names the markers without the
 /// `// ` line prefix (the tool locates the markers by exact
 /// "// KIWI_WORKER_SRC_..." matches, so a prefixed mid-line mention would
 /// break the sentinel scan).
@@ -98,12 +98,12 @@ fn worker_source_section(worker_src: &str) -> String {
 /// The machine-written span at the head of the release worker asset
 /// `assets/kiwi-worker.js`: the `var window = self;` prelude followed by
 /// the complete glue text (`assets/kiwicaptcha-wasm.js`, verbatim), with
-/// the KIWI_WORKER_GLUE_END marker line as the span's LAST line — the
+/// the KIWI_WORKER_GLUE_END marker line as the span's final line — the
 /// canonical solver source follows it immediately, so the tool's
 /// extraction (everything after that marker line) is exact. A worker
 /// executing this span runs the glue before the solver source, so
 /// `window.__kiwiCaptchaWasm` (and its wasm) is in scope from boot.
-/// NOTE: the generated prose never repeats the marker tokens verbatim —
+/// Note: the generated prose never repeats the marker tokens verbatim —
 /// the tool locates the markers by exact line-anchored matches, so a
 /// mid-line mention would break extraction.
 fn worker_glue_span(glue_full: &str) -> String {
