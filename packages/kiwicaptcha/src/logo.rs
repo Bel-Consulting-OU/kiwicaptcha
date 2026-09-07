@@ -2,10 +2,9 @@
 //! Released by Bel Consulting OÜ under MIT License.
 
 /// The KiwiCaptcha mark: the Spiral Lock (the proof-of-work spiral
-/// seated inside the padlock shackle — design round 2026-09-05, no. 8
+/// seated inside the padlock shackle — design no. 8
 /// of twelve proposals; see design/logo-proposals.html). Two strokes,
 /// 64x64 grid, currentColor, no gradients, animate-free.
-
 pub fn kiwi_mark_svg() -> &'static str {
     r##"<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
   <g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none">

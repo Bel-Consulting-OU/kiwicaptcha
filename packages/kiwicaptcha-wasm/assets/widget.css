@@ -278,6 +278,10 @@
     font-weight: 600;
     cursor: pointer;
   }
+  /* The retry control's boundary must clear WCAG 1.4.11 (>=3:1 against
+     the widget background) in the light theme; the decorative hairline
+     border stays quiet elsewhere. */
+  .kiwi-widget .kiwi-retry { border-color: #737373; }
   .kiwi-retry:hover { border-color: var(--kiwi-primary); color: var(--kiwi-primary); }
   .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
