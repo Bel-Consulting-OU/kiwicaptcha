@@ -233,11 +233,11 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-89,162 bytes raw, 26,788 bytes gzip and 22,684 bytes brotli, against
+92,299 bytes raw, 27,633 bytes gzip and 23,370 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 31,644 bytes raw, 9,073 bytes gzip and 7,772 bytes
+module) is 32,765 bytes raw, 9,432 bytes gzip and 8,095 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
@@ -298,7 +298,11 @@ the audit-4/5 headroom passes of the same day (the deliberate
 code-level size pass took execution-interpreter.js to 32,378 raw /
 9,738 gzip / 8,466 brotli and the comment-prose compaction took
 widget-driver.js to 89,162 raw / 26,788 gzip / 22,684 brotli, caps
-unchanged throughout), and the
+unchanged throughout), and again after the files-tier SHA worker
+dispatch (the glue-less page's SHA-256 solve routes through the worker:
+widget-driver.js at 92,299 raw / 27,633 gzip / 23,370 brotli and
+widget-risk.js at 32,765 raw / 9,432 gzip / 8,095 brotli, caps
+unchanged), and the
 challenge-response execution row was re-recorded the same day with
 the audit-3 deterministic largest-wire probe; perf-budget.sh
 verifies the recorded
@@ -316,12 +320,12 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 89,162 bytes
-raw, 26,788 gzip and 22,684 brotli (the record's
+any memory-hard challenge — is the eager core alone: 92,299 bytes
+raw, 27,633 gzip and 23,370 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 numbers are inside the **sub-30 KB compressed** target: the
 audit-5 comment-prose compaction restored the compressed headroom,
-and the gzip figure now sits at 87% of its 30,720-byte cap (the
+and the gzip figure now sits at 90% of its 30,720-byte cap (the
 compaction removed shipped prose only — code bytes are untouched,
 and the audit-1 acquisition rework's semantic view model and eager
 coarse client-context descriptor stay in the core); the raw 160,000
@@ -331,14 +335,17 @@ The driver surface is now five files with one eager core (the
 record's budget rows, equality-gated):
 
 - `widget-driver.js`, the eager core: bootstrap, challenge request,
-  the SHA-256 solve, the state/token lifecycle, retry/reset, the
+  the SHA-256 solve (the page-wasm path and the files-tier worker
+  dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (89,162 raw / 26,788 gzip / 22,684 brotli);
-- `widget-risk.js`, the lazy adaptive-risk module: the argon2id/rsw
-  worker solve tier (construction plus the files-mode versioned
+  lazy-module loader (92,299 raw / 27,633 gzip / 23,370 brotli);
+- `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
+  worker solves and the glue-less SHA-256 worker dispatch
+  (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge or an armed response (31,644 raw / 9,073 gzip / 7,772
+  challenge, an armed response or a glue-less SHA-256 solve (32,765
+  raw / 9,432 gzip / 8,095
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
@@ -482,8 +489,8 @@ fact, not a statistic. The caps are
 defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
-authority that could drift. The recorded sizes (89,162 / 26,788 /
-22,684 bytes for the eager driver core and 32,378 / 9,738 / 8,466
+authority that could drift. The recorded sizes (92,299 / 27,633 /
+23,370 bytes for the eager driver core and 32,378 / 9,738 / 8,466
 bytes for the execution interpreter) gate against the widget caps
 with the recorded-gzip/brotli equality checks, and the
 challenge-response budgets (1,014-1,046 bytes decoy armed against the

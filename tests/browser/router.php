@@ -1740,7 +1740,9 @@ if ($path === '/' || $path === '/index.html') {
     // once (the page-level dedup registry), the runtime and the worker
     // stay lazy (data-kiwi-runtime-src + data-kiwi-worker-src with their
     // SRI digests on each container; the driver fetches them only when a
-    // memory-hard challenge arrives), and the inline style/script blocks
+    // challenge needs the worker tier: a memory-hard challenge — or, on
+    // this glue-less page, a SHA-256 solve, which dispatches to the
+    // worker at the solve phase), and the inline style/script blocks
     // are omitted.
     $filesMode = ($_GET['assets'] ?? '') === 'files';
     $assetTags = '';
@@ -1812,16 +1814,19 @@ if ($path === '/' || $path === '/index.html') {
     // specs depend on that). The files tier carries the documented
     // production profile: same-origin assets only (script-src,
     // style-src, connect-src and worker-src 'self'), the fixture's
-    // inline stylesheet hash-pinned, no wasm-unsafe-eval (a SHA-256 page
-    // solves in pure JS), no inline allowance (the tier emits no inline
+    // inline stylesheet hash-pinned, no wasm-unsafe-eval (the profile
+    // never requires a wasm compilation allowance on the page: a
+    // SHA-256 solve runs through the page's own JS or the same-origin
+    // worker), no inline allowance (the tier emits no inline
     // script). frame-src 'none' stays: about:srcdoc iframes are not
     // governed by frame-src in any engine, so the execution iframe still
     // loads and its interpreter <script src> rides the inherited
     // script-src. The strict files-tier 'self' sources are the
     // restrictive-but-allowing profile for the lazy same-origin
-    // SRI-pinned module loads (the widget-locales.js packs): the
-    // injected script src and its fetch are same-origin, so the locale
-    // module runs under this header while the hash-only
+    // SRI-pinned module loads (the widget-risk.js worker tier and the
+    // widget-locales.js packs): the
+    // injected script src and its fetch are same-origin, so the module
+    // runs under this header while the hash-only
     // execution-blocked variant would refuse it. The locale-csp spec
     // asserts that contract end to end.
     $cspHeader = null;

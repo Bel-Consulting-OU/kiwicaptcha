@@ -85,8 +85,11 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     // The coarse client-context descriptor moved into the eager core:
     // with data-kiwi-risk-context="coarse" the files-tier widget must
     // send the challenge request immediately — no data-kiwi-risk-src
-    // module fetch of its own before (or after) the issuance — while
-    // the request body still carries the coarse descriptor.
+    // module fetch of its own before the issuance — while
+    // the request body still carries the coarse descriptor. The module
+    // is fetched exactly once after issuance: a glue-less files page
+    // dispatches its SHA-256 solve to the worker at the solve phase
+    // (audit finding 1 keeps every required module load post-issuance).
     const riskRequests = [];
     page.on('request', (req) => {
       if (req.url().includes('/assets/risk.')) riskRequests.push(req.url());
@@ -102,13 +105,16 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(riskRequests, 'no risk-module fetch may precede the challenge request').toEqual([]);
 
     await solve(page);
-    expect(riskRequests, 'the unarmed lifecycle must never need the risk module').toEqual([]);
+    // The worker dispatch of the glue-less SHA-256 solve loads the risk
+    // module exactly once, strictly after the issuance (never before).
+    expect(riskRequests, 'the glue-less SHA-256 solve must load the risk module exactly once, after issuance').toHaveLength(1);
     const body = JSON.parse(await readCapture(page, 'ccfiles'));
     expect(body, 'the challenge request must be captured').toBeTruthy();
     expect(typeof body.client_context).toBe('string');
     expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
     expect(body.client_context).toMatch(/v[123]/);
     expect(body.client_context).toMatch(/t[01]/);
+    expect(body.client_context).toMatch(/l[a-z]{2,3}/);
     expect(body.client_context).toMatch(/z[0-4]/);
     expect(body.decoy_field).toBeUndefined();
     expect(body.honeypot).toBeUndefined();

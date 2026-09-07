@@ -625,25 +625,33 @@ The runtime and the worker are the lazy heavy modules: the page never
 downloads them eagerly. The widget container carries
 `data-kiwi-runtime-src` + `data-kiwi-runtime-integrity` and
 `data-kiwi-worker-src` + `data-kiwi-worker-integrity`, and the driver
-fetches the WASM runtime and the Argon worker asset only when a
-memory-hard challenge actually arrives. A page that only ever receives
-SHA-256 challenges pays no request for the Argon machinery. The driver
+fetches the WASM runtime and the worker asset only when a challenge
+needs the worker tier: a memory-hard (argon2id) or rsw challenge, or a
+SHA-256 solve. This tier never embeds the glue on the page, so the
+SHA-256 solve dispatches to the same worker at the solve phase, and
+the lazy load never delays the challenge request because it happens
+strictly after issuance. The driver
 hashes the fetched bytes and compares them against the page-issued
 digests (a cryptographic preflight). Then the content-addressed
 same-origin URLs are loaded by the browser APIs: the Worker constructor
 for the worker asset, and the worker's importScripts for its WASM glue.
 No Blob URL is created, so the worker download is deduplicated across
-widgets like the runtime.
+widgets like the runtime. A SHA-256 solve whose worker tier cannot load
+degrades to the driver's in-page pure-JS solver (SHA-256 is
+main-thread-safe), never a hard unavailable state. The inline tier
+keeps its page-wasm solve with zero asset requests.
 
 The driver itself is split the same way: the
 always-loaded eager core (`widget-driver.js`) carries the bootstrap,
 the challenge request, the SHA-256 solve, the state machine and the
-lazy-module loader. The adaptive-risk solve tier and the armed-evidence
-machinery (the Argon2id/rsw worker solve, the ExecutionChallengeV1
+lazy-module loader. The worker solve tier and the armed-evidence
+machinery (the argon2id/rsw worker solve, the glue-less SHA-256 worker
+dispatch, the ExecutionChallengeV1
 runner, the decoy rendering and the coarse client-context descriptor)
 live in `widget-risk.js`. The core loads that module lazily when a
 memory-hard challenge, an armed response or the risk-context opt-in
-needs it. The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
+needs it, and at the solve phase for a glue-less SHA-256 challenge.
+The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
 in `widget-locales.js`, loaded only when the core resolves a
 non-default language (English pages pay zero bytes; a failed load
 degrades to the English fallback with a console warning). The
