@@ -8,11 +8,5 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.45.0"
-  },
-  "allowScripts": {
-    "playwright@1.62.1": true,
-    "@playwright/test@1.62.1": true,
-    "playwright-core@1.62.1": true,
-    "fsevents@2.3.2": true
   }
 }
