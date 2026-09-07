@@ -4,9 +4,12 @@ import { createHash } from 'node:crypto';
 // The files-mode asset delivery tier (kiwi_captcha.asset_mode "files"):
 // versioned immutable first-party asset URLs with exact content hashes,
 // long cache lifetimes, SRI, once-per-page dedup, and the lazy heavy
-// modules: the driver fetches the WASM runtime AND the Argon worker asset
-// only when a memory-hard challenge arrives, so a plain SHA-256 page pays
-// nothing for the Argon machinery.
+// modules: the driver fetches the WASM runtime AND the worker asset
+// only when a challenge needs the worker tier — a memory-hard Argon
+// challenge, or a SHA-256 challenge on a page without the wasm glue
+// (the glue-less solve dispatches to the worker at the solve phase, so
+// a plain SHA-256 page still never pays for the Argon machinery up
+// front).
 // The worker runs as a same-origin Worker whose source the driver
 // cryptographically preflights: the fetched bytes are hashed and
 // compared against the page-issued digest, then the content-addressed
@@ -70,10 +73,15 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await page.goto('/?assets=files');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
 
-    // The page references exactly two assets: the stylesheet and the driver.
+    // The page EMITS exactly two asset tags: the stylesheet and the
+    // driver. The lazy risk-module script the glue-less SHA-256 solve
+    // injects at the solve phase (data-kiwi-module="risk") is a
+    // driver-injected lazy tag, not an emitted page reference, and is
+    // excluded here (its own headers/SRI are asserted by the
+    // fetch-accounting cases below).
     const hrefs = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((l) => l.getAttribute('href'));
-      const scripts = Array.from(document.querySelectorAll('script[src]')).map((s) => s.getAttribute('src'));
+      const scripts = Array.from(document.querySelectorAll('script[src]:not([data-kiwi-module])')).map((s) => s.getAttribute('src'));
       return links.concat(scripts);
     });
     const assetUrls = hrefs.filter((h) => h.includes('/kiwi-captcha/assets/'));
@@ -163,18 +171,33 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await expect(page.locator('[data-kiwi-widget]').nth(1)).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
   });
 
-  test('a SHA challenge triggers no runtime or worker asset fetch (lazy)', async ({ page }) => {
+  test('a glue-less files-tier SHA challenge solves through the worker: exactly one runtime fetch and one worker fetch, and the token verifies', async ({ page }) => {
+    // A SHA-256 challenge on a page without the wasm glue (files tier)
+    // dispatches its solve to the same-origin worker exactly like a
+    // memory-hard challenge: the lazy risk module is ensured at the
+    // solve phase (strictly after issuance) and the driver performs
+    // exactly one runtime fetch and one worker fetch (the shared
+    // per-URL dedup). The search never runs the long pure-JS loop on
+    // the main thread. The inline tier keeps its page-wasm SHA solve
+    // (zero asset requests; pinned in the inline block below).
     const driverFetches = await trackDriverFetches(page);
     await page.goto('/?assets=files');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
 
+    const fetches = await driverFetches();
+    expect(runtimeCount(fetches), 'the glue-less SHA-256 solve must fetch the runtime exactly once (the worker handshake)').toBe(1);
+    expect(workerCount(fetches), 'the glue-less SHA-256 solve must fetch the worker asset exactly once').toBe(1);
+    const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
+    expect(workerUsed, 'the glue-less SHA-256 solve must run in the same-origin worker').toBe(true);
+    const riskModule = await page.evaluate(() => {
+      const s = document.querySelector('script[data-kiwi-module="risk"]');
+      return s ? s.getAttribute('src') : null;
+    });
+    expect(riskModule, 'the files-tier SHA-256 solve must load the lazy risk module at the solve phase').toContain('/assets/risk.');
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
     const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
     expect((await resp.json()).ok).toBe(true);
-    const fetches = await driverFetches();
-    expect(runtimeCount(fetches), 'a SHA-256 solve must never download the Argon runtime').toBe(0);
-    expect(workerCount(fetches), 'a SHA-256 solve must never download the Argon worker').toBe(0);
   });
 
   test('an Argon challenge triggers exactly one driver runtime fetch and one driver worker fetch and verifies', async ({ page }) => {
@@ -316,6 +339,50 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     // untouched); only the worker asset is refused.
     expect(workerHits).toBe(3);
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+  });
+
+  test('a SHA challenge whose worker asset cannot load degrades to the in-page pure-JS solver, never worker-unavailable', async ({ page }) => {
+    // The SHA-256 degrade contract: unlike argon2id, a glue-less SHA
+    // challenge whose worker tier fails must STILL solve — the driver
+    // falls back to the in-page pure-JS solver (SHA-256 is
+    // main-thread-safe) and mints a verifying token. No worker is ever
+    // constructed from the refused bytes (the bounded retry exhausts
+    // first), so __kiwiWorkerUsed stays false.
+    let workerHits = 0;
+    await page.route('**/assets/worker*.js', async (route) => {
+      workerHits++;
+      await route.fulfill({ status: 500, contentType: 'application/javascript', body: 'boom' });
+    });
+    await page.goto('/?assets=files');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+
+    expect(workerHits).toBe(3);
+    const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
+    expect(workerUsed, 'the refused worker asset must never be constructed').toBe(false);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the in-page fallback solve must verify').toBe(true);
+  });
+
+  test('a SHA challenge whose risk module cannot load still solves in-page (the worker tier is never a SHA gate)', async ({ page }) => {
+    // The lazy widget-risk.js module is required for the argon2id solve
+    // tier, but a SHA-256 challenge must never hard-fail on it: the
+    // module's bounded retries exhaust, the worker dispatch degrades,
+    // and the in-page pure-JS solver completes the challenge.
+    let riskHits = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      riskHits++;
+      await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+    });
+    await page.goto('/?assets=files');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await expect.poll(() => riskHits, 'the missing module must repeat through the bounded retries').toBe(3);
+
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the SHA challenge must solve without the risk module').toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the module-less fallback solve must verify').toBe(true);
   });
 
   test('integrity verification fails closed: a page that cannot compute the digest never accepts the runtime or the worker', async ({ page }) => {
