@@ -249,10 +249,17 @@ raw, 8,357 bytes gzip and 7,150 bytes brotli against caps of
 (execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
 32,378 bytes raw, 9,738 bytes gzip and 8,466 bytes brotli, against
 caps of 36,000 / 11,200 / 9,500 bytes; the same budgets section also
-records the measured raw bytes of the worker at 24,819 bytes, the
-wasm glue runtime at 97,815 bytes and the widget stylesheet at 13,863
-bytes, each byte-identical across the three copies, with the optional
-rsw sequential solver living inside the worker asset; the
+records the measured raw bytes of the worker at 126,104 bytes, the
+wasm glue runtime at 99,325 bytes and the widget stylesheet at 13,863
+bytes, each byte-identical across the three copies. Since the r8
+glue-embedding change the worker row describes the assembled release
+asset (tools/embed-worker: the `var window = self;` prelude plus the
+full wasm glue text plus the worker solver source — 126,104 raw /
+40,068 gzip / 33,711 brotli), so the files-mode worker boots with wasm
+in scope and the optional rsw sequential solver still lives inside the
+worker's solver source; the runtime row quotes the glue asset alone,
+whose embedded workerSource copy is regenerated from that same solver
+source; the
 decoy-armed challenge-response JSON (the wire shape of the bundle's
 /challenge response) is 1,014-1,045 bytes for sha256 and 1,025-1,046
 bytes for argon2id (the grammar-composed name length varies the size
@@ -358,10 +365,15 @@ bloat:
   bytes for the interpreter; the files-tier page performs exactly one
   fetch of it when an armed challenge arrives, and the browser's
   cache dedups it across the page;
-- the runtime (the wasm glue, 97,815 raw) and the
-  worker (24,819 raw, the Argon2id and rsw solver asset)
-  are already lazy in the files tier: a memory-hard or sequential
-  challenge fetches the runtime once, a SHA page never does.
+- the runtime (the wasm glue, 99,325 raw) is lazy in the files tier,
+  and the worker asset (126,104 raw, the glue-embedded Argon2id and
+  rsw solver asset: tools/embed-worker prepends the full glue text to
+  the worker solver source, so the files-mode worker boots with wasm
+  in scope) is lazy too: a memory-hard or sequential challenge fetches
+  the worker asset once and the worker solves without any runtime
+  fetch of its own (the driver's runtime fetch remains, for the compat
+  tier that still hands the glue to pure-source workers); a SHA page
+  fetches neither.
 
 ## Hot paths per lifecycle
 

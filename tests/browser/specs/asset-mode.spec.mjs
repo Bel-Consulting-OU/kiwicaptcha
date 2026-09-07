@@ -434,7 +434,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(interpreterRequests, 'the interpreter must never be fetched when its runner cannot load').toEqual([]);
   });
 
-  test('a cross-origin lookalike runtime URL is refused by the worker origin guard (parsed origin equality, never a prefix check)', async ({ page }) => {
+  test('a cross-origin lookalike runtime URL is refused by the worker origin guard, and the glue-embedded worker asset solves on its own (parsed origin equality, never a prefix check)', async ({ page }) => {
     // Serve the files-mode widget page from the http://localhost origin
     // (route-fulfilled; the same-origin assets and the challenge are
     // forwarded to the real fixture) with data-kiwi-runtime-src rewritten
@@ -443,13 +443,18 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     // would accept it) but parses to a different origin, and it resolves
     // to the real fixture, which serves the real glue. The driver's lazy
     // preflight fetch of the lookalike is fulfilled with the real glue
-    // bytes (CORS-open), so the page-issued digest verifies; the worker's
-    // own importScripts of the same URL reaches the real fixture. Only
-    // the worker's origin guard stands between the lookalike and that
-    // importScripts. The guard must refuse it: the worker never loads
-    // the foreign-origin runtime, the solve fails closed, and no token
-    // is minted. (A prefix-based check would accept the lookalike, import
-    // the real glue, and mint a token.)
+    // bytes (CORS-open), so the page-issued digest verifies. The worker's
+    // origin guard must refuse the lookalike handshake: the foreign
+    // runtime URL is never importScripted (the lookalike request stream
+    // holds exactly the driver's single preflight fetch). Since the r8
+    // glue-embedding change the worker asset itself carries the wasm glue
+    // (its bytes are SRI-preflight-verified by the driver before the
+    // Worker is constructed from the content-addressed URL), so the
+    // worker solves the challenge with the authentic embedded runtime and
+    // the widget mints a token — the refused lookalike can neither race
+    // nor replace the verified runtime. (A prefix-based check would
+    // accept the lookalike, import it, and mint a token from
+    // unverified-directed bytes.)
     const real = 'http://127.0.0.1:8085';
     const lookalikeRequests = [];
     page.on('request', (req) => {
@@ -476,9 +481,10 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     });
     await page.route(/\/kiwi-captcha\/assets\/runtime/, async (route) => {
       // The driver's preflight fetch of the lookalike: real glue bytes,
-      // CORS-open so the cross-origin read succeeds. The worker's
-      // importScripts of the same URL bypasses the page routes and is
-      // served the same bytes by the real fixture.
+      // CORS-open so the cross-origin read succeeds. The worker's own
+      // importScripts of the same URL (which would only happen if the
+      // origin guard failed) bypasses the page routes and is served the
+      // same bytes by the real fixture.
       const res = await route.fetch();
       const body = await res.body();
       await route.fulfill({
@@ -503,9 +509,15 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
       await route.fulfill({ response: res });
     });
     await page.goto('http://localhost/?assets=files&algorithm=argon2id');
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
-    expect(await page.locator('[data-kiwi-token]').inputValue(), 'the refused lookalike runtime must never mint a token').toBe('');
-    expect(lookalikeRequests.length, 'the driver preflight fetch of the lookalike must have happened').toBeGreaterThanOrEqual(1);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the SRI-verified glue-embedded worker asset must solve the challenge').toBeGreaterThan(0);
+    const resp = await page.request.post(real + '/verify', { data: { token } });
+    expect((await resp.json()).ok, 'the worker-solved token must verify at the real fixture').toBe(true);
+    expect(
+      lookalikeRequests.length,
+      'exactly the driver preflight fetch may reach the lookalike — the worker origin guard must refuse the foreign runtime handshake (no importScripts)',
+    ).toBe(1);
   });
 });
 
