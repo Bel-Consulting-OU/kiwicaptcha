@@ -165,7 +165,7 @@ dedicated latency runner are tracked in the release checklist.
 
 The nine browser assets in `packages/kiwicaptcha-wasm/assets/` are **version-locked as a set** — the widget driver core, its lazy widget modules, the worker, and the WASM glue/solver must come from the **same build**:
 
-- `widget-driver.js`, the always-loaded eager core, declares `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-09-r1`). The memory-hard worker machinery and the build-id handshake live in the lazy `widget-risk.js` module (loaded when a memory-hard or armed challenge arrives), which declares the same constant. The other lazy modules are `widget-telemetry.js` (the opt-in session), `widget-locales.js` (the non-default language packs, loaded only when a non-default language is resolved) and `widget-compat.js` (the /api.js compat loader). The worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
+- `widget-driver.js`, the always-loaded eager core, declares `KIWI_SOLVER_PROTOCOL_ID` (currently `2026-09-r1`). The worker machinery and the build-id handshake live in the lazy `widget-risk.js` module, which declares the same constant. The module loads when a memory-hard or armed challenge arrives, and at the solve phase for a SHA-256 challenge on a glue-less files page (it carries the worker solve tier the SHA dispatch uses). The other lazy modules are `widget-telemetry.js` (the opt-in session), `widget-locales.js` (the non-default language packs, loaded only when a non-default language is resolved) and `widget-compat.js` (the /api.js compat loader). The worker verifies the wasm glue's exported `solver_protocol_version()` before `ready`.
 - The worker declares the same constant and reports it in its handshake (`ready` / `done` messages).
   The driver's worker machinery validates it; a mismatch enters the controlled `kiwi:solver-mismatch` state and the driver **never** accepts a solution from a mismatched worker.
 - The wasm glue (`kiwicaptcha-wasm.js`) is built by the release pipeline (`.github/workflows/release.yml` on every `v*` tag): strict deterministic build, SHA-256 + SRI manifests, SLSA provenance attestation, and asset upload to the GitHub release.
@@ -196,7 +196,11 @@ worker directive depends on the asset delivery tier:
   and immutable (an unknown hash is a 404). This is not literal
   executed-byte SRI, which `new Worker(url)` cannot express. No Blob
   URL is ever created. This tier needs `worker-src 'self'` and never
-  allows `blob:`.
+  allows `blob:`. A glue-less SHA-256 solve dispatches to this worker
+  tier (the page never embeds the glue in this mode). A missing or
+  failed worker on such a solve degrades to the driver's in-page
+  chunked JS solver, never a hard unavailable state — see the
+  no-synchronous-Argon note below.
 - Inline compatibility tier (`asset_mode: inline`): the driver builds the
   worker from a Blob URL of locally embedded code (`URL.createObjectURL`).
   A CSP with `worker-src 'self'` and no `blob:` allowance blocks it; this

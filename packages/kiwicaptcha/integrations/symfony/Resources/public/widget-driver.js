@@ -1155,25 +1155,24 @@
           if (result && result.deadline) throw new Error("Expired");
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
-          // SHA-256. The page-level wasm path (the inline tier, where the
-          // glue runs on the page) is unchanged: solve() is wasm-first
-          // with the pure-JS chunked loop as its in-page fallback. On a
-          // page WITHOUT the glue (files mode: the runtime is a lazy
-          // same-origin asset, never executed on the page), the SHA-256
-          // solve dispatches to the same-origin worker exactly like the
-          // argon2id/rsw solve tier below — the risk module is ensured
-          // HERE, at the solve phase, strictly after the challenge
-          // request went out (audit finding 1) — so the search never
-          // blocks the main thread with the long JS loop. Unlike a
+          // SHA-256. The page-level wasm path (the inline tier, where
+          // the glue runs on the page) is unchanged: solve() is
+          // wasm-first with the pure-JS chunked loop as its in-page
+          // fallback. On a page WITHOUT the glue (files mode: the
+          // runtime is a lazy same-origin asset, never executed on the
+          // page), the SHA-256 solve dispatches to the same-origin
+          // worker exactly like the argon2id/rsw solve tier below — the
+          // risk module is ensured HERE, at the solve phase, strictly
+          // after the challenge request went out (audit finding 1) — so
+          // the search never blocks the main thread. Unlike a
           // memory-hard challenge, a SHA-256 solve whose worker is
           // missing, refused or failed DEGRADES to the in-page pure-JS
           // solver instead of the controlled kiwi:worker-unavailable
           // state: SHA-256 is main-thread-safe, so a broken worker tier
-          // must never hard-fail a SHA challenge. The deadline semantics
-          // are shared: a worker attempt that reaches the challenge
-          // deadline falls through to the in-page solver, which
-          // re-checks the same deadline and abandons (re-acquire) when
-          // it has passed.
+          // must never hard-fail a SHA challenge. A worker attempt that
+          // reaches the challenge deadline falls through to the in-page
+          // solver, which re-checks the same deadline and abandons
+          // (re-acquire) when it has passed.
           if (!wasmLoader) {
             if (!riskApi || !riskApi.solveWorker) {
               riskApi = await kiwiEnsureModule("risk", container, W);

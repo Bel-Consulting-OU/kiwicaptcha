@@ -105,7 +105,9 @@ fetched `worker.<hash>.js` asset, so `worker-src 'self'` applies and
 `blob:` is never required. The inline compatibility tier builds its
 worker from a Blob URL, so it needs `worker-src blob:`. With
 `asset_mode: files` the same directives cover the widget: the asset
-URLs are same-origin and the lazy runtime and worker fetches use
+URLs are same-origin and the lazy runtime and worker fetches (the
+memory-hard solve tier and the glue-less SHA-256 solve, which
+dispatches through the same worker) use
 `connect-src 'self'`. The recommended profile is in
 [getting-started.md](getting-started.md#content-security-policy).
 

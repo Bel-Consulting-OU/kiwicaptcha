@@ -87,7 +87,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     // send the challenge request immediately — no data-kiwi-risk-src
     // module fetch of its own before the issuance — while
     // the request body still carries the coarse descriptor. The module
-    // is fetched exactly once AFTER issuance: a glue-less files page
+    // is fetched exactly once after issuance: a glue-less files page
     // dispatches its SHA-256 solve to the worker at the solve phase
     // (audit finding 1 keeps every required module load post-issuance).
     const riskRequests = [];

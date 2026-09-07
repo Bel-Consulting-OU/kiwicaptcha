@@ -73,7 +73,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await page.goto('/?assets=files');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
 
-    // The page EMITS exactly two asset tags: the stylesheet and the
+    // The page emits exactly two asset tags: the stylesheet and the
     // driver. The lazy risk-module script the glue-less SHA-256 solve
     // injects at the solve phase (data-kiwi-module="risk") is a
     // driver-injected lazy tag, not an emitted page reference, and is
@@ -343,7 +343,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
 
   test('a SHA challenge whose worker asset cannot load degrades to the in-page pure-JS solver, never worker-unavailable', async ({ page }) => {
     // The SHA-256 degrade contract: unlike argon2id, a glue-less SHA
-    // challenge whose worker tier fails must STILL solve — the driver
+    // challenge whose worker tier fails must still solve — the driver
     // falls back to the in-page pure-JS solver (SHA-256 is
     // main-thread-safe) and mints a verifying token. No worker is ever
     // constructed from the refused bytes (the bounded retry exhausts

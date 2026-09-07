@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated": "2026-09-05",
+  "generated": "2026-09-07",
   "environment": {
     "machine": "Apple silicon Mac, quiet local machine",
     "php": "8.5.4 (bench recording; the core and bundle suites also pass on 8.2.33)",
@@ -9,15 +9,15 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 89162,
-      "brotli_bytes": 22684,
+      "raw_bytes": 92299,
+      "brotli_bytes": 23370,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 26788,
-      "gzip_bytes_zlib13": 26788
+      "gzip_bytes_zlib12": 27633,
+      "gzip_bytes_zlib13": 27633
     },
     "widget_worker": {
       "raw_bytes": 24819,
@@ -67,15 +67,15 @@
       "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
     },
     "widget_risk": {
-      "raw_bytes": 31644,
-      "brotli_bytes": 7772,
+      "raw_bytes": 32765,
+      "brotli_bytes": 8095,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner and the decoy/honeypot machinery. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 9073,
-      "gzip_bytes_zlib13": 9073
+      "gzip_bytes_zlib12": 9432,
+      "gzip_bytes_zlib13": 9432
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
