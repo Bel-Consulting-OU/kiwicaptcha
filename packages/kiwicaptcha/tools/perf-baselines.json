@@ -20,14 +20,14 @@
       "gzip_bytes_zlib13": 26788
     },
     "widget_worker": {
-      "raw_bytes": 24819,
+      "raw_bytes": 126104,
       "copies_identical": true,
-      "note": "The worker asset (kiwi-worker.js), three byte-identical copies; the rsw sequential time-lock solver lives inside it (pure JS BigInt, exactly the Argon worker's loading and message pattern); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+      "note": "The worker asset (kiwi-worker.js), three byte-identical copies; since the r8 glue-embedding change the asset is assembled by tools/embed-worker as the `var window = self;` prelude plus the full wasm glue (kiwicaptcha-wasm.js) plus the worker solver source, so a files-mode worker boots with wasm in scope (SHA solves in the worker use solve_sha256_chunk; the rsw sequential time-lock solver stays pure JS BigInt, exactly the Argon worker's loading and message pattern). The lazy runtime fetch of the driver stays for the compat tier. The row carries no cap fields by design, like the widget_runtime and widget_css rows: the asset is lazy in the files tier (a SHA-only page never fetches it) and perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_runtime": {
-      "raw_bytes": 97815,
+      "raw_bytes": 99325,
       "copies_identical": true,
-      "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from assets/kiwi-worker.js by the embed-worker tool, so the rsw solver rides the glue copy too; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+      "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from the worker solver source (the tail of assets/kiwi-worker.js) by the embed-worker tool, so the rsw solver rides the glue copy too; the release worker asset embeds this same glue text, so the files-mode worker needs no runtime fetch to solve. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_css": {
       "raw_bytes": 13863,
