@@ -18,15 +18,20 @@
   // ── The lazy risk tier ──────────────────────────────────────────────
   // Loaded ONLY when an armed response or configuration needs it: an
   // argon2id/rsw widget (adaptive solve tier), a server decoy field /
-  // strategy hint, or an execution_program. Files mode injects this
+  // strategy hint, an execution_program, or a SHA-256 solve on a page
+  // without the wasm glue (the files-tier worker dispatch). Files mode
+  // injects this
   // module as a same-origin SRI-pinned script (native SRI fails closed);
   // inline mode embeds it. The module registers on the internal core
   // bridge and stays stateless: widget state is passed in per call.
   // Failure semantics: decoy/honeypot evidence is probabilistic, never a
   // gate (an unloadable module degrades to the absent default with a
-  // console.warn); solve tiers fail closed into the controlled
+  // console.warn); the argon2id/rsw/execution solve tiers fail closed
+  // into the controlled
   // kiwi:worker-unavailable / kiwi:execution-unavailable states — never
-  // a silent success, never a weaker-profile fallback. The coarse
+  // a silent success, never a weaker-profile fallback; a SHA-256 solve
+  // whose worker tier is missing degrades to the driver's in-page
+  // pure-JS solver (the driver owns that fallback decision). The coarse
   // client-context descriptor moved into the eager core; this module
   // still reads it and bridge.core.boundBytes for decoy evidence.
   var kiwiExecutionRunCounter = 0;
@@ -127,11 +132,16 @@
     });
   }
 
-  // ── The same-origin Argon2id/rsw solve tier ─────────────────────────
+  // ── The same-origin worker solve tier ──────────────────────────────
   // The memory-hard and sequential time-lock solvers ALWAYS run off the
   // main thread; a missing/failed worker enters the controlled
   // kiwi:worker-unavailable state — no main-thread Argon2 hash and no
-  // weaker-profile retry, ever. All postMessage traffic here is
+  // weaker-profile retry, ever. A SHA-256 solve also routes through
+  // this tier when the page carries no wasm glue (files mode): the
+  // worker solves it off the main thread, and the driver degrades a
+  // missing/failed worker to the in-page pure-JS solver there (SHA-256
+  // is main-thread-safe; the argon2id/rsw states stay fail-closed).
+  // All postMessage traffic here is
   // worker-internal; forged page traffic is ignored (the spec asserts
   // forged payloads never mint a token). Inline mode builds the Blob
   // worker from the glue's embedded workerSource (zero requests);
@@ -147,7 +157,9 @@
   }
   // ── Files-mode lazy asset loading (runtime + worker) ────────────────
   // In files mode the runtime glue and worker assets are fetched ONLY
-  // when a memory-hard challenge arrives; both fetches are bounded (two
+  // when a challenge needs the worker tier (argon2id/rsw — or a
+  // SHA-256 solve on a page without the wasm glue); both fetches are
+  // bounded (two
   // retries), deduplicated per URL across the page, and preflight-
   // verified against the page-issued sha256 digests BEFORE the bytes are
   // used. The verification FAILS CLOSED: when a digest is demanded but
@@ -230,6 +242,13 @@
   }
   function solveWithWorker(data, onProgress, container, deadline) {
     var terminateHandle = function () {};
+    // The normalized algorithm of the solve message: argon2id/rsw pass
+    // through, and a SHA-256 challenge (the default when the field is
+    // absent) rides as "sha256" so the worker dispatches its wasm-first
+    // solveSha rather than the memory-hard solver. The message shape is
+    // unchanged: every solve carries the full field set, and only an
+    // rsw solve adds the nonce and modulus.
+    var algorithm = data.algorithm === "argon2id" ? "argon2id" : (data.algorithm === "rsw" ? "rsw" : "sha256");
     var workerSrc = container.getAttribute("data-kiwi-worker-src");
     var workerIntegrity = container.getAttribute("data-kiwi-worker-integrity");
     var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
@@ -319,7 +338,7 @@
         var workerStart = performance.now();
         // The progress denominator: an rsw solve reports squarings done,
         // every other solve reports hashes against 2^target_bits.
-        var expectedUnits = (data.algorithm || "sha256") === "rsw"
+        var expectedUnits = algorithm === "rsw"
           ? (data.t || 1)
           : Math.pow(2, data.targetBits);
         var settled = false;
@@ -374,7 +393,7 @@
               if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
               return;
             }
-            var isRsw = (data.algorithm || "sha256") === "rsw";
+            var isRsw = algorithm === "rsw";
             // An rsw solve reports the final proof value, never a counter.
             if (isRsw) {
               if (typeof msg.proof !== "string" || !/^[0-9a-f]{512}$/.test(msg.proof)) {
@@ -422,7 +441,7 @@
         };
         var prefixBytes = encoder.encode(data.prefix);
         var saltBytes = b64decode(data.salt);
-        var isRsw = (data.algorithm || "sha256") === "rsw";
+        var isRsw = algorithm === "rsw";
         try {
           // Hand the runtime URL to the worker BEFORE the solve: it
           // importScripts the URL, verifies the wasm protocol version and
@@ -437,7 +456,7 @@
           var solveMsg = {
             v: 1,
             type: "solve",
-            algorithm: isRsw ? "rsw" : "argon2id",
+            algorithm: algorithm,
             prefix: data.prefix,
             prefixLen: prefixBytes.length,
             salt: data.salt,

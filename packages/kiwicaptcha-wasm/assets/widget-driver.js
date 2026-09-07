@@ -27,9 +27,10 @@
   // nonce plus this window, so a retry loop never spams the endpoint.
   var KIWI_CANCEL_COOLDOWN_MS = 5000;
 
-  // ── Argon2id / rsw worker source (carried by the wasm glue) ──
-  // The worker runs off the main thread (each 64 MiB hash blocks the UI).
-  // Its source is NOT embedded here: the glue carries the identical
+  // ── Worker source (argon2id / rsw / glue-less SHA-256) ──
+  // The worker runs off the main thread (each 64 MiB hash blocks the UI;
+  // a glue-less SHA-256 search would block it for seconds). Its source
+  // is NOT embedded here: the glue carries the identical
   // bytes as window.__kiwiCaptchaWasm.workerSource, GENERATED from
   // assets/kiwi-worker.js by the kiwicaptcha-embed-worker tool (CI
   // --check fails on drift). Inline mode reads the copy off the glue;
@@ -259,13 +260,17 @@
     });
   }
 
-  // ── Same-origin Argon2id/rsw Web Worker ──
+  // ── Same-origin worker solve tier ──
   // Memory-hard (argon2id) and time-lock (rsw) solves run ONLY in the
   // same-origin worker, never on the main thread; a missing or failed
   // worker enters the controlled kiwi:worker-unavailable state with no
-  // weaker-profile retry. The worker machinery lives in the lazy
-  // widget-risk.js module (loaded when a memory-hard challenge arrives);
-  // the core keeps only the glue/worker-source extraction helpers below.
+  // weaker-profile retry. A SHA-256 solve dispatches to the same worker
+  // tier when the page has no wasm glue (files mode), and a missing or
+  // failed worker there degrades to the in-page pure-JS solver instead
+  // (SHA-256 is main-thread-safe). The worker machinery lives in the
+  // lazy widget-risk.js module (loaded when a challenge needs the
+  // worker tier); the core keeps only the glue/worker-source extraction
+  // helpers below.
   // postMessage BOUNDARY: the driver never posts to the parent page; all
   // postMessage is worker-internal (solve traffic, the MessageChannel
   // yield, the sandboxed execution iframe run by widget-risk.js). The
@@ -994,8 +999,10 @@
       // refuses a late session), the locale pack settles by repainting,
       // the coarse client context is built in the eager core. The risk
       // module is read from the registry and loaded at its REQUIRED
-      // trigger points below (an armed response's worker/execution paths
-      // fail closed on a missing module).
+      // trigger points below, all AFTER issuance (the argon2id/rsw
+      // worker solve, the files-mode SHA-256 worker solve on a glue-less
+      // page, and the armed response's worker/execution paths fail
+      // closed on a missing module).
       var riskApi = kiwiModuleApi("risk");        var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection: the client may only choose among the
         // server-offered profiles (sha256 / argon2id / rsw); anything
@@ -1148,7 +1155,51 @@
           if (result && result.deadline) throw new Error("Expired");
           if (!result || result.unavailable) { workerUnavailable(result ? result.reason : "solve-failed"); return; }
         } else {
-          result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline);
+          // SHA-256. The page-level wasm path (the inline tier, where the
+          // glue runs on the page) is unchanged: solve() is wasm-first
+          // with the pure-JS chunked loop as its in-page fallback. On a
+          // page WITHOUT the glue (files mode: the runtime is a lazy
+          // same-origin asset, never executed on the page), the SHA-256
+          // solve dispatches to the same-origin worker exactly like the
+          // argon2id/rsw solve tier below — the risk module is ensured
+          // HERE, at the solve phase, strictly after the challenge
+          // request went out (audit finding 1) — so the search never
+          // blocks the main thread with the long JS loop. Unlike a
+          // memory-hard challenge, a SHA-256 solve whose worker is
+          // missing, refused or failed DEGRADES to the in-page pure-JS
+          // solver instead of the controlled kiwi:worker-unavailable
+          // state: SHA-256 is main-thread-safe, so a broken worker tier
+          // must never hard-fail a SHA challenge. The deadline semantics
+          // are shared: a worker attempt that reaches the challenge
+          // deadline falls through to the in-page solver, which
+          // re-checks the same deadline and abandons (re-acquire) when
+          // it has passed.
+          if (!wasmLoader) {
+            if (!riskApi || !riskApi.solveWorker) {
+              riskApi = await kiwiEnsureModule("risk", container, W);
+              if (!kiwiGenerationCurrent(widgetId, gen)) return;
+            }
+            if (riskApi && riskApi.solveWorker) {
+              var shaWorkerHandle = riskApi.solveWorker(data, setProgress, container, deadline);
+              var shr = kiwiWidgets[widgetId];
+              if (shr) shr.worker = shaWorkerHandle.terminate;
+              var shaWorkerResult = await shaWorkerHandle.promise;
+              var shr2 = kiwiWidgets[widgetId];
+              if (shr2 && shr2.worker === shaWorkerHandle.terminate) shr2.worker = null;
+              if (!kiwiGenerationCurrent(widgetId, gen)) return;
+              // Only a genuine worker solution counts here; every failure
+              // mode (missing module, asset/integrity refusal, worker
+              // error, protocol mismatch, deadline) falls through to the
+              // in-page solver below.
+              if (shaWorkerResult && !shaWorkerResult.unavailable && !shaWorkerResult.mismatch
+                && !shaWorkerResult.deadline && typeof shaWorkerResult.counter === "number") {
+                result = shaWorkerResult;
+              }
+            }
+          }
+          if (!result) {
+            result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline);
+          }
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         if (result && result.deadline) throw new Error("Expired");
@@ -1512,8 +1563,10 @@
     return kiwiModuleApis[kind] || null;
   }
   // The armed-response trigger predicate: a valid authenticated decoy
-  // name or an execution program. Mirrors widget-risk.js, so a
-  // decoy-less SHA-256 page never loads the module.
+  // name or an execution program. Mirrors widget-risk.js; the decoy and
+  // the execution runner are the only response-driven reasons the
+  // module is needed before the solve dispatch (a glue-less page's
+  // SHA-256 solve dispatches it separately, at the solve phase).
   function kiwiRiskResponseNeeds(data) {
     return !!(data && typeof data === "object" && !Array.isArray(data)
       && ((typeof data.decoy_field === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(data.decoy_field))
