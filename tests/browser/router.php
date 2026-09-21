@@ -998,7 +998,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $algorithm = $requestedRsw
         ? PoWAlgorithm::Rsw
         : ($escalated || $requestedArgon ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256);
-    $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
+    $ttlParam = (string) ($_GET['ttl'] ?? '');
+    // ?ttl=none strips ttlSecs from the issuance response (the
+    // missing-expiry fixture: the driver must bound the solve with its
+    // wall-clock ceiling instead of an expiry estimate); the record
+    // itself keeps the default lifetime so verification stays valid.
+    $ttlNone = $ttlParam === 'none';
+    $ttlOverride = $ttlParam !== '' && !$ttlNone ? max(1, (int) $ttlParam) : null;
     // The bundle maps incumbent sitekeys -> policy scopes server-side
     // (sitekey_allowlist); the fixture mirrors that mapping so compat
     // challenges are issued under the intended scope.
@@ -1174,6 +1180,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         if ($strategy >= 0 && $strategy <= 5) {
             $out['strategy'] = $strategy;
         }
+    }
+    if ($ttlNone) {
+        unset($out['ttlSecs']);
     }
     echo json_encode($out);
 

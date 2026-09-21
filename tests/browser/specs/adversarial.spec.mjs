@@ -703,7 +703,9 @@ test.describe('KiwiCaptcha adversarial runtime lifecycle', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          nonce: 'exhaust-adv-' + calls,
+          // The canonical server nonce shape (44 chars, one padding =)
+          // keeps the forged challenge inside the validation contract.
+          nonce: ('exhaustadv' + calls).padEnd(43, 'a') + '=',
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
           algorithm: 'argon2id',

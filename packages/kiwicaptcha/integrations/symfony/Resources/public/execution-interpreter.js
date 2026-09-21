@@ -902,6 +902,18 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
    } catch (e) {}
   }
   window.addEventListener("message", function (event) {
+   // Only the embedding parent may start a run: a sibling frame (or any
+   // other window holding this iframe's reference) posting forged run
+   // traffic is ignored — the mirror of the parent-side
+   // event.source === iframe.contentWindow gate. The about:srcdoc
+   // document serializes its own location.origin as "null", so the
+   // origin comparison reads the parent's; an unreadable parent origin
+   // is a foreign origin and fails closed.
+   var parentOrigin = null;
+   try { parentOrigin = window.parent.location.origin; } catch (e) {}
+   if (event.source !== parent || parentOrigin === null || event.origin !== parentOrigin) {
+    return;
+   }
    var data = event.data;
    if (!data || data.type !== KIWI_EXECUTION_RUN || data.protocol !== KIWI_EXECUTION_PROTOCOL) {
     return;

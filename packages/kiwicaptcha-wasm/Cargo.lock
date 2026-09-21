@@ -151,6 +151,10 @@ dependencies = [
 [[package]]
 name = "kiwicaptcha-embed-worker"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "sha2",
+]
 
 [[package]]
 name = "kiwicaptcha-wasm"

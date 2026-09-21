@@ -354,7 +354,11 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
     expect(pageErrors, 'the destroy race must raise no page error').toEqual([]);
     // The only tolerated console noise is the browser's automatic
     // "Failed to load resource" line for a challenge POST refused by the
-    // fixture server itself (net::ERR_CONNECTION_REFUSED). The fixture
+    // fixture server itself (net::ERR_CONNECTION_REFUSED), and the same
+    // automatic line for a challenge POST the driver aborts on destroy
+    // (net::ERR_ABORTED): cancelling an in-flight acquisition is the
+    // designed destroy semantics, so the aborted request is expected.
+    // The fixture
     // port is shared with other lanes on this machine, and a foreign
     // teardown can briefly take the server down mid-run; the driver's
     // designed bounded retry absorbs exactly that, the iteration still
@@ -362,9 +366,20 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
     // above stays strict. Anything else — a driver console.error(), an
     // uncaught rejection, any other failed resource — fails the test.
     const refusedNoise = 'Failed to load resource: net::ERR_CONNECTION_REFUSED';
-    const unexpectedConsole = consoleErrors.filter((e) => e.text !== refusedNoise);
+    const abortedNoise = 'Failed to load resource: net::ERR_ABORTED';
+    const unexpectedConsole = consoleErrors.filter((e) => e.text !== refusedNoise && e.text !== abortedNoise);
     expect(unexpectedConsole, `the destroy race must raise no console error other than the fixture-refusal noise (unexpected: ${JSON.stringify(unexpectedConsole)}; failed requests: ${JSON.stringify(failedRequests)})`).toEqual([]);
     const unexpectedFailures = failedRequests.filter((f) => {
+      if (f.failure === 'net::ERR_ABORTED') {
+        // A challenge POST aborted client-side is the driver's own
+        // destroy-time cancellation of an in-flight acquisition.
+        try {
+          const p = new URL(f.url).pathname;
+          return !(f.method === 'POST' && p === '/challenge');
+        } catch (e) {
+          return true;
+        }
+      }
       if (f.failure !== 'net::ERR_CONNECTION_REFUSED') return true;
       try {
         const p = new URL(f.url).pathname;
@@ -373,7 +388,7 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
         return true;
       }
     });
-    expect(unexpectedFailures, 'the only tolerated failed request is a fixture /challenge POST refused by the server').toEqual([]);
+    expect(unexpectedFailures, 'the only tolerated failed requests are a fixture /challenge POST refused by the server and a /challenge POST aborted by the destroy-time cancellation').toEqual([]);
     expect(consoleErrors.length, `transient fixture refusals must stay bounded (${consoleErrors.length} refused POSTs; a longer outage would have voided iterations instead)`).toBeLessThanOrEqual(30);
     expect(pageSide.errors, 'the destroy race must raise no window error').toEqual([]);
     expect(pageSide.rejections, 'the destroy race must raise no unhandled rejection').toEqual([]);
@@ -729,7 +744,11 @@ test.describe('closure case 2: the bulk destroy over a page of two solving widge
     expect(pageErrors, 'the bulk destroy must raise no page error').toEqual([]);
     // The only tolerated console noise is the browser's automatic
     // "Failed to load resource" line for a challenge POST refused by the
-    // fixture server itself (net::ERR_CONNECTION_REFUSED). The fixture
+    // fixture server itself (net::ERR_CONNECTION_REFUSED), and the same
+    // automatic line for a challenge POST the driver aborts on destroy
+    // (net::ERR_ABORTED): cancelling an in-flight acquisition is the
+    // designed destroy semantics, so the aborted request is expected.
+    // The fixture
     // port is shared with other lanes on this machine, and a foreign
     // teardown can briefly take the server down mid-run; the driver's
     // designed bounded retry absorbs exactly that, the iteration still
@@ -738,9 +757,20 @@ test.describe('closure case 2: the bulk destroy over a page of two solving widge
     // console.error(), an uncaught rejection, any other failed
     // resource — fails the test.
     const refusedNoise = 'Failed to load resource: net::ERR_CONNECTION_REFUSED';
-    const unexpectedConsole = consoleErrors.filter((e) => e.text !== refusedNoise);
+    const abortedNoise = 'Failed to load resource: net::ERR_ABORTED';
+    const unexpectedConsole = consoleErrors.filter((e) => e.text !== refusedNoise && e.text !== abortedNoise);
     expect(unexpectedConsole, `the bulk destroy must raise no console error other than the fixture-refusal noise (unexpected: ${JSON.stringify(unexpectedConsole)}; failed requests: ${JSON.stringify(failedRequests)})`).toEqual([]);
     const unexpectedFailures = failedRequests.filter((f) => {
+      if (f.failure === 'net::ERR_ABORTED') {
+        // A challenge POST aborted client-side is the driver's own
+        // destroy-time cancellation of an in-flight acquisition.
+        try {
+          const p = new URL(f.url).pathname;
+          return !(f.method === 'POST' && p === '/challenge');
+        } catch (e) {
+          return true;
+        }
+      }
       if (f.failure !== 'net::ERR_CONNECTION_REFUSED') return true;
       try {
         const p = new URL(f.url).pathname;
@@ -749,7 +779,7 @@ test.describe('closure case 2: the bulk destroy over a page of two solving widge
         return true;
       }
     });
-    expect(unexpectedFailures, 'the only tolerated failed request is a fixture /challenge POST refused by the server').toEqual([]);
+    expect(unexpectedFailures, 'the only tolerated failed requests are a fixture /challenge POST refused by the server and a /challenge POST aborted by the destroy-time cancellation').toEqual([]);
     expect(consoleErrors.length, `transient fixture refusals must stay bounded (${consoleErrors.length} refused POSTs; a longer outage would have voided iterations instead)`).toBeLessThanOrEqual(30);
     expect(pageSide.errors, 'the bulk destroy must raise no window error').toEqual([]);
     expect(pageSide.rejections, 'the bulk destroy must raise no unhandled rejection').toEqual([]);

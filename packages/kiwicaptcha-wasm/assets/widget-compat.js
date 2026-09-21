@@ -73,30 +73,41 @@
   // to the FIRST CREATED widget when the id is omitted. Track the first
   // successful compat render.
   var kiwiCompatFirstId = null;
-  // The loader's own glue part (the /api.js response is glue + driver +
-  // this module, split by the /*KIWI_COMPAT_SPLIT*/ marker): the worker
-  // cannot find the glue in an inline script element, so the module
-  // fetches the loader's own source once and keeps the glue part for
-  // the Blob-worker prelude — Argon2id stays worker-only and WORKING
-  // through the external loader. The glue is handed to the core bridge
-  // (K.compatGlue), where the worker path reads it.
+  // The loader's worker glue (the /api.js response is glue + driver +
+  // this module): the worker cannot find the glue in an inline script
+  // element, so the module rebuilds the worker prelude from the glue's
+  // OWN executed constants — the base64 wasm bytes the glue assembly
+  // exposes together with the glue-body string constant it embeds — and
+  // hands the rebuilt text to the core bridge (K.compatGlue), where the
+  // worker path reads it. The bytes come from the SAME api.js response
+  // that executed here; no second network fetch exists for an extension
+  // or proxy to rewrite, and the page never re-downloads the loader.
+  // The b64 constant carries its assembly-stamped digest, verified once
+  // at boot; a mismatch drops the glue so the worker tier fails closed
+  // for want of a verified runtime.
   var kiwiCompatGlue = null;
   var kiwiCompatGlueReady = null;
-  // Revalidate — force-cache would let the browser reuse a stale
-  // /api.js representation, defeating the server's ETag policy and
-  // potentially pairing the current driver with an out-of-date glue
-  // of the same protocol generation.
-  kiwiCompatGlueReady = fetch(compatScriptUrl.split("?")[0], { cache: "no-cache", credentials: "same-origin" })
-    .then(function (r) { return r.ok ? r.text() : null; })
-    .then(function (src) {
-      if (!src) return;
-      var idx = src.indexOf("/*KIWI_COMPAT_SPLIT*/");
-      if (idx !== -1) {
-        kiwiCompatGlue = src.slice(0, idx);
-        if (K) K.compatGlue = kiwiCompatGlue;
+  kiwiCompatGlueReady = Promise.resolve().then(function () {
+    var W = typeof window !== "undefined" ? window.__kiwiCaptchaWasm : null;
+    if (!W || typeof W.wasmB64 !== "string" || typeof W.glueBoot !== "string") return;
+    // The prelude ("var window = self;") comes from the worker
+    // constructor; this text is the glue body it prepends.
+    kiwiCompatGlue = "var KIWI_WASM_B64=" + JSON.stringify(W.wasmB64) + ";\n" + W.glueBoot + "\n";
+    if (K) K.compatGlue = kiwiCompatGlue;
+    var stamp = typeof W.wasmB64Sha256 === "string" && W.wasmB64Sha256.indexOf("sha256-") === 0
+      ? W.wasmB64Sha256.slice(7) : null;
+    if (!stamp || !window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) return;
+    return crypto.subtle.digest("SHA-256", new TextEncoder().encode(W.wasmB64)).then(function (buf) {
+      var bytes = new Uint8Array(buf);
+      var bin = "";
+      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      if (btoa(bin) !== stamp) {
+        console.error("KiwiCaptcha: compat worker glue digest mismatch; dropping the worker runtime");
+        kiwiCompatGlue = null;
+        if (K) K.compatGlue = null;
       }
-    })
-    .catch(function () {});
+    }).catch(function () {});
+  });
 
   var COMPAT_FIELD = { recaptcha: "g-recaptcha-response", hcaptcha: "h-captcha-response", turnstile: "cf-turnstile-response" }[compat];
   var COMPAT_SELECTOR = { recaptcha: ".g-recaptcha", hcaptcha: ".h-captcha", turnstile: ".cf-turnstile" }[compat];
@@ -122,7 +133,12 @@
   var compatLocales = (typeof window !== "undefined" && window.__kiwiCaptchaCompatLocales) || null;
   var compatLocalesAttrs = "";
   var compatLocalesSrc = "";
-  if (compatLocales && compatScriptUrl) {
+  // Both marker values are interpolated into markup, so only the bare
+  // hash/digest alphabet passes — anything else falls back to the
+  // no-locale attributes instead of reaching the innerHTML sink.
+  if (compatLocales && compatScriptUrl
+    && /^[A-Za-z0-9+/=_-]+$/.test(String(compatLocales.hash))
+    && /^[A-Za-z0-9+/=_-]+$/.test(String(compatLocales.sri))) {
     var compatBase = compatScriptUrl.split("?")[0];
     compatBase = compatBase.substring(0, compatBase.lastIndexOf("/") + 1);
     compatLocalesSrc = compatBase + 'assets/locales.' + compatLocales.hash + '.js';
@@ -367,19 +383,19 @@
     var p = core.execute(id2);
     // A long-lived SPA repeatedly calling execute() must not accumulate
     // hidden DOM, registry entries or reset hooks — the holder is
-    // removed and the widget destroyed on BOTH paths.
-    if (p && typeof p.then === "function") {
-      return p.then(function (tok) {
-        if (id2 && core.record(id2)) core.remove(id2);
-        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
-        return tok;
-      }, function (err) {
-        if (id2 && core.record(id2)) core.remove(id2);
-        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
-        throw err;
-      });
-    }
-    return p;
+    // removed and the widget destroyed on BOTH settlement arms,
+    // including a cancellation rejection.
+    var holderDone = function () {
+      if (id2 && core.record(id2)) core.remove(id2);
+      if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+    };
+    return Promise.resolve(p).then(function (tok) {
+      holderDone();
+      return tok;
+    }, function (err) {
+      holderDone();
+      throw err;
+    });
     });
   }
   function compatResolveId(idOrEl) {
@@ -426,9 +442,9 @@
   };
   if (compat === "recaptcha") {
     window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
-      // ready() queues until the compat loader's glue self-fetch
+      // ready() queues until the compat loader's glue bootstrap
       // resolves — an explicit render() inside ready() that immediately
-      // starts an Argon challenge must not race the glue bootstrap
+      // starts an Argon challenge must not race the glue handshake
       // (implicit rendering already waits).
       ready: function (fn) {
         if (typeof fn !== "function") return;
@@ -469,7 +485,7 @@
     }
     if (compatRenderMode === "explicit") return;
     // Implicit render: every incumbent container on the page. The initial
-    // render waits for the loader-glue fetch so Argon2id solves work on
+    // render waits for the loader-glue bootstrap so Argon2id solves work on
     // first paint through the external /api.js path.
     var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
     for (var ci = 0; ci < compatContainers.length; ci++) {

@@ -323,7 +323,9 @@ test.describe('KiwiCaptcha migration compatibility', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          nonce: 'cancel-nonce-' + calls, salt: btoa(String(calls).padStart(16, '0')), prefix: 'x',
+          // The canonical server nonce shape (44 chars, one padding =)
+          // keeps the forged challenge inside the validation contract.
+          nonce: ('cancelnonce' + calls).padEnd(43, 'a') + '=', salt: btoa(String(calls).padStart(16, '0')), prefix: 'x',
           targetBits: 6, algorithm: 'sha256', mKib: 0, t: 1, p: 1, ttlSecs: 120, minDurationMs: 0,
         }),
       });
@@ -378,7 +380,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   });
 
   test('reCAPTCHA v2 Argon: grecaptcha.ready() queues behind glue readiness for explicit render', async ({ page }) => {
-    // ready() must not race the loader-glue self-fetch — an
+    // ready() must not race the loader-glue bootstrap — an
     // explicit render() inside ready() immediately starts an Argon worker
     // that needs the glue (no inline script exists on the external-loader
     // page). The api.js response is deliberately delayed so the race is
@@ -510,8 +512,10 @@ test.describe('KiwiCaptcha migration compatibility', () => {
 
   test('Argon2id solves through the external compatibility loader (worker glue path)', async ({ page }) => {
     // With the driver loaded as the external /api.js, the
-    // Blob worker has no inline glue element to copy — the loader's own
-    // fetched source supplies it. Argon2id must therefore solve
+    // Blob worker has no inline glue element to copy — the loader's
+    // embedded glue constants supply it (rebuilt from the SAME api.js
+    // response, digest-verified at boot; no second loader request
+    // exists). Argon2id must therefore solve
     // end-to-end through the one-script migration path (SHA-256-only
     // fixtures would mask a broken glue handoff).
     await page.goto('/migration/recaptcha-v2-argon.html');

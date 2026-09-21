@@ -233,21 +233,21 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-92,299 bytes raw, 27,633 bytes gzip and 23,370 bytes brotli, against
+97,316 bytes raw, 29,138 bytes gzip and 24,571 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 32,765 bytes raw, 9,432 bytes gzip and 8,095 bytes
+module) is 34,305 bytes raw, 9,983 bytes gzip and 8,587 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
 widget-locales.js copy (the lazy non-default locale packs) is 13,395
 bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
-16,384 / 6,000 / 5,000; every widget-compat.js copy is 26,943 bytes
+16,384 / 6,000 / 5,000; every widget-compat.js copy is 28,103 bytes
 raw, 8,478 bytes gzip and 7,275 bytes brotli against caps of
 32,768 / 12,000 / 10,000; every execution-interpreter copy
 (execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
-32,378 bytes raw, 9,738 bytes gzip and 8,466 bytes brotli, against
+33,039 bytes raw, 9,998 bytes gzip and 8,675 bytes brotli, against
 caps of 36,000 / 11,200 / 9,500 bytes; the same budgets section also
 records the measured raw bytes of the worker at 126,104 bytes, the
 wasm glue runtime at 99,325 bytes and the widget stylesheet at 13,863
@@ -300,8 +300,8 @@ code-level size pass took execution-interpreter.js to 32,378 raw /
 widget-driver.js to 89,162 raw / 26,788 gzip / 22,684 brotli, caps
 unchanged throughout), and again after the files-tier SHA worker
 dispatch (the glue-less page's SHA-256 solve routes through the worker:
-widget-driver.js at 92,299 raw / 27,633 gzip / 23,370 brotli and
-widget-risk.js at 32,765 raw / 9,432 gzip / 8,095 brotli, caps
+widget-driver.js at 97,316 raw / 29,138 gzip / 24,571 brotli and
+widget-risk.js at 34,305 raw / 9,983 gzip / 8,587 brotli, caps
 unchanged), and the
 challenge-response execution row was re-recorded the same day with
 the audit-3 deterministic largest-wire probe; perf-budget.sh
@@ -320,8 +320,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 92,299 bytes
-raw, 27,633 gzip and 23,370 brotli (the record's
+any memory-hard challenge — is the eager core alone: 97,316 bytes
+raw, 29,138 gzip and 24,571 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 numbers are inside the **sub-30 KB compressed** target: the
 audit-5 comment-prose compaction restored the compressed headroom,
@@ -338,13 +338,13 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (92,299 raw / 27,633 gzip / 23,370 brotli);
+  lazy-module loader (97,316 raw / 29,138 gzip / 24,571 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge, an armed response or a glue-less SHA-256 solve (32,765
+  challenge, an armed response or a glue-less SHA-256 solve (34,305
   raw / 9,432 gzip / 8,095
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
@@ -364,7 +364,7 @@ The execution-orchestration delivery is a deliberate split, not eager
 bloat:
 
 - the execution interpreter itself is a separate lazy asset
-  (`execution.<sha256>.js`, 32,378 raw / 9,738 gzip / 8,466 brotli,
+  (`execution.<sha256>.js`, 33,039 raw / 9,998 gzip / 8,675 brotli,
   the `budgets.widget_execution` section): the driver's orchestration
   is the minimal seam that creates a sandboxed ephemeral iframe per
   armed challenge, loads the SRI-pinned interpreter inside it and
@@ -489,8 +489,8 @@ fact, not a statistic. The caps are
 defined once, in the `budgets` section of
 packages/kiwicaptcha/tools/perf-baselines.json, and the shell script
 reads them from that record at run time, so there is no second
-authority that could drift. The recorded sizes (92,299 / 27,633 /
-23,370 bytes for the eager driver core and 32,378 / 9,738 / 8,466
+authority that could drift. The recorded sizes (97,316 / 29,138 /
+24,571 bytes for the eager driver core and 33,039 / 9,998 / 8,675
 bytes for the execution interpreter) gate against the widget caps
 with the recorded-gzip/brotli equality checks, and the
 challenge-response budgets (1,014-1,046 bytes decoy armed against the

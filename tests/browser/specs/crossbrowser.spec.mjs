@@ -69,7 +69,9 @@ test.describe('KiwiCaptcha cross-browser critical paths', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          nonce: 'x-r-' + calls, salt: btoa(String(calls).padStart(16, '0')), prefix: 'x',
+          // The canonical server nonce shape (44 chars, one padding =)
+          // keeps the forged challenge inside the validation contract.
+          nonce: ('xr' + calls).padEnd(43, 'a') + '=', salt: btoa(String(calls).padStart(16, '0')), prefix: 'x',
           targetBits: 6, algorithm: 'sha256', mKib: 0, t: 1, p: 1, ttlSecs: 120, minDurationMs: 0,
         }),
       });

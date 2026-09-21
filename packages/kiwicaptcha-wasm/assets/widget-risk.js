@@ -168,14 +168,46 @@
   // runs, and a mismatch never reaches the browser APIs.
   var kiwiRuntimeGlueCache = {};
   var kiwiWorkerAssetCache = {};
+  // The supported SRI digest algorithms: the crypto.subtle digest name
+  // and the exact base64 length of each algorithm's output. A multi-hash
+  // integrity attribute verifies against the first supported token.
+  var KIWI_SRI_ALGOS = {
+    "sha256-": { algo: "SHA-256", len: 44 },
+    "sha384-": { algo: "SHA-384", len: 64 },
+    "sha512-": { algo: "SHA-512", len: 88 },
+  };
+  var kiwiIntegrityWarned = false;
+  function kiwiWarnIntegrityOff() {
+    if (kiwiIntegrityWarned) return;
+    kiwiIntegrityWarned = true;
+    console.warn("KiwiCaptcha: asset URL carries no integrity digest; loading it unverified");
+  }
   function kiwiVerifyIntegrity(src, integrity) {
-    if (!integrity) return Promise.resolve({ ok: true });
-    var expected = integrity.indexOf("sha256-") === 0 ? integrity.slice(7) : null;
-    if (!expected) return Promise.resolve({ ok: false, reason: "integrity-malformed" });
+    if (!integrity) {
+      // An asset URL without an integrity attribute keeps the legacy
+      // unverified contract, but the state is surfaced once per page
+      // instead of passing silently.
+      kiwiWarnIntegrityOff();
+      return Promise.resolve({ ok: true });
+    }
+    var algo = null, expected = null;
+    var tokens = String(integrity).split(/\s+/);
+    for (var i = 0; i < tokens.length && !algo; i++) {
+      for (var prefix in KIWI_SRI_ALGOS) {
+        if (tokens[i].indexOf(prefix) === 0) {
+          algo = KIWI_SRI_ALGOS[prefix];
+          expected = tokens[i].slice(prefix.length);
+          break;
+        }
+      }
+    }
+    if (!algo || expected.length !== algo.len || !/^[A-Za-z0-9+/]+={0,2}$/.test(expected)) {
+      return Promise.resolve({ ok: false, reason: "integrity-malformed" });
+    }
     if (!window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
       return Promise.resolve({ ok: false, reason: "integrity-unverifiable" });
     }
-    return crypto.subtle.digest("SHA-256", encoder.encode(src)).then(function (buf) {
+    return crypto.subtle.digest(algo.algo, encoder.encode(src)).then(function (buf) {
       var bytes = new Uint8Array(buf);
       var bin = "";
       for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -241,7 +273,28 @@
     return promise;
   }
   function solveWithWorker(data, onProgress, container, deadline) {
-    var terminateHandle = function () {};
+    var worker = null;
+    var blobUrl = null;
+    // Blob-URL cleanup: the URL is revoked exactly once on every terminal
+    // path (done, failed, mismatch, worker error, deadline, termination);
+    // terminate() kills the worker, revoking only releases the URL.
+    function teardown() {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
+        blobUrl = null;
+      }
+    }
+    // A cancelled generation terminates the worker outright — revoking
+    // the blob URL alone would not stop it. The handle is ONE stable
+    // closure over the mutable `worker` slot: the caller holds it from
+    // the first synchronous tick, so a call before the async
+    // construction settles is a safe no-op and a later one terminates
+    // whichever worker currently occupies the slot.
+    var terminateHandle = function () {
+      if (worker) { try { worker.terminate(); } catch (e) {} }
+      teardown();
+    };
     // The normalized algorithm of the solve message: argon2id/rsw pass
     // through, and a SHA-256 challenge (the default when the field is
     // absent) rides as "sha256" so the worker dispatches its wasm-first
@@ -256,8 +309,10 @@
     // Files-mode worker asset: a versioned worker URL WITH its integrity
     // digest is the theme-emitted lazy worker asset (fetched and
     // preflight-verified below). A worker URL WITHOUT the integrity
-    // attribute keeps the legacy explicit static-worker path.
+    // attribute keeps the legacy explicit static-worker path — surfaced
+    // once per page as the unverified state it is.
     var lazyWorkerAsset = !!(workerSrc && workerIntegrity);
+    if (workerSrc && !workerIntegrity) kiwiWarnIntegrityOff();
     // The glue source: the inline script element (inline mode), the
     // compat loader's fetched glue (/api.js), or the lazy runtime fetch
     // of files mode.
@@ -303,8 +358,6 @@
       var resolvedGlue = glueResult ? glueResult.src : null;
       return new Promise(function(resolve) {
         if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
-        var worker = null;
-        var blobUrl = null;
         try {
           if (workerSrc) {
             // Files mode: a SAME-ORIGIN Worker constructed from the
@@ -328,12 +381,6 @@
         if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
         kiwiRevokeActiveBlobUrl();
         kiwiActiveBlobUrl = blobUrl;
-        // A cancelled generation terminates the worker outright — revoking
-        // the blob URL alone would not stop it.
-        terminateHandle = function () {
-          try { worker.terminate(); } catch (e) {}
-          teardown();
-        };
         window.__kiwiWorkerUsed = true;
         var workerStart = performance.now();
         // The progress denominator: an rsw solve reports squarings done,
@@ -342,16 +389,6 @@
           ? (data.t || 1)
           : Math.pow(2, data.targetBits);
         var settled = false;
-        // Blob-URL cleanup: the URL is revoked exactly once on every
-        // terminal path (done, failed, mismatch, worker error, deadline);
-        // terminate() kills the worker, revoking only releases the URL.
-        function teardown() {
-          if (blobUrl) {
-            URL.revokeObjectURL(blobUrl);
-            if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
-            blobUrl = null;
-          }
-        }
         // The solve deadline (challenge expiry − margin): a solve that
         // would outlive the challenge is wasted work, so the worker is
         // terminated at the deadline; the driver then re-acquires.

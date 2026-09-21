@@ -15,6 +15,16 @@
 //!      asset the driver preflight-verifies), and the legacy explicit
 //!      data-kiwi-worker-src path.
 //!
+//! The tool also stamps the glue's compat constants, the two values the
+//! incumbent-compatibility loader (/api.js) rebuilds its worker prelude
+//! from so it never re-fetches the loader over the network: the exposure
+//! line gains `wasmB64` (the exact base64 wasm bytes the glue executes)
+//! and `wasmB64Sha256` (the digest of that string, stamped here), and a
+//! generated `glueBoot` section embeds the glue's own body — everything
+//! between the b64 var line and the IIFE close — as a string constant.
+//! The compat module verifies the stamped digest once at boot and hands
+//! the reconstructed prelude to the worker path through the core bridge.
+//!
 //! The worker solver source — the canonical, hand-edited part of
 //! `assets/kiwi-worker.js` — is the file's tail after the
 //! KIWI_WORKER_GLUE_END marker line. It is never rewritten by this tool,
@@ -31,8 +41,9 @@
 //! cargo run --locked --manifest-path tools/embed-worker/Cargo.toml -- --check    # exit 1 on drift (CI)
 //! ```
 //!
-//! Both generated sections are delimited by explicit sentinel comments
+//! Every generated section is delimited by explicit sentinel comments
 //! (KIWI_WORKER_SRC_BEGIN … KIWI_WORKER_SRC_END in the glue;
+//! KIWI_GLUE_BOOT_BEGIN … KIWI_GLUE_BOOT_END in the glue;
 //! KIWI_WORKER_GLUE_BEGIN … KIWI_WORKER_GLUE_END in the worker asset) —
 //! each whole span is replaced wholesale, so no JavaScript token parsing
 //! can ever misfire. The embedded values are JSON string literals (quotes
@@ -44,11 +55,32 @@
 
 use std::{env, fs, path::PathBuf, process};
 
+use base64::Engine;
+use sha2::{Digest, Sha256};
+
 /// Sentinel comments delimiting the machine-written section in
 /// `kiwicaptcha-wasm.js` (the `workerSource` literal). Both are unique in
 /// the glue.
 const BEGIN: &str = "// KIWI_WORKER_SRC_BEGIN";
 const END: &str = "// KIWI_WORKER_SRC_END";
+
+/// Sentinel comments delimiting the machine-written `glueBoot` section in
+/// `kiwicaptcha-wasm.js`: the glue's own body (everything between the b64
+/// var line and the IIFE close) embedded as a string constant for the
+/// compat tier's worker prelude.
+const GLUE_BOOT_BEGIN: &str = "// KIWI_GLUE_BOOT_BEGIN";
+const GLUE_BOOT_END: &str = "// KIWI_GLUE_BOOT_END";
+
+/// The head of the glue's exposure assignment (inside the IIFE). The tool
+/// rewrites this line so the executed object also carries the b64 wasm
+/// bytes and their stamped digest — the constants the compat loader
+/// rebuilds its worker prelude from.
+const EXPOSURE_HEAD: &str = "window.__kiwiCaptchaWasm = { load: load, initSync: initSync";
+
+/// The b64 wasm literal's assignment opening inside the IIFE. The base64
+/// alphabet contains no quotes or backslashes, so the literal spans to the
+/// first closing `";`.
+const B64_VAR: &str = "var KIWI_WASM_B64 = \"";
 
 /// Sentinel comments delimiting the machine-written span in
 /// `assets/kiwi-worker.js`: from the KIWI_WORKER_GLUE_BEGIN marker through
@@ -129,6 +161,119 @@ fn find_line_anchored(haystack: &str, marker: &str) -> Option<usize> {
     }
     let needle = format!("\n{marker}");
     haystack.find(&needle).map(|i| i + 1)
+}
+
+/// Extract the b64 wasm literal (the bytes between the quotes of the
+/// `var KIWI_WASM_B64 = "...";` line). The base64 alphabet contains no
+/// escape sequences, so the first closing `";` terminates the literal.
+fn extract_b64(glue: &str) -> Result<&str, String> {
+    let pos = glue
+        .find(B64_VAR)
+        .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_WASM_B64 assignment not found".to_string())?;
+    let start = pos + B64_VAR.len();
+    let end_rel = glue[start..]
+        .find("\";")
+        .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_WASM_B64 literal is unterminated".to_string())?;
+    Ok(&glue[start..start + end_rel])
+}
+
+/// Rewrite the glue's exposure assignment so the executed object also
+/// carries `wasmB64` (the exact bytes the glue executes) and
+/// `wasmB64Sha256` (the digest of that string, stamped at assembly).
+/// Idempotent: the canonical line rewrites to itself because the digest
+/// of the same b64 string is deterministic.
+fn rewrite_exposure(glue: &str, sri: &str) -> Result<String, String> {
+    let pos = glue
+        .find(EXPOSURE_HEAD)
+        .ok_or_else(|| "kiwicaptcha-wasm.js: exposure assignment not found".to_string())?;
+    let end_rel = glue[pos..]
+        .find("};")
+        .ok_or_else(|| "kiwicaptcha-wasm.js: exposure assignment is unterminated".to_string())?;
+    let canonical = format!("{EXPOSURE_HEAD}, wasmB64: KIWI_WASM_B64, wasmB64Sha256: \"{sri}\" }};");
+    let mut out = String::with_capacity(glue.len());
+    out.push_str(&glue[..pos]);
+    out.push_str(&canonical);
+    out.push_str(&glue[pos + end_rel + 2..]);
+    Ok(out)
+}
+
+/// The glue body the compat worker executes between the b64 var line and
+/// the IIFE close: the wasm-bindgen boilerplate, the `load()` function
+/// and the (rewritten) exposure. Prefixed with the b64 var and the
+/// `var window = self;` prelude by the compat loader, it is the glue the
+/// worker runs — reconstructed from the SAME response the page executed,
+/// never a second network fetch.
+fn extract_glue_boot(glue: &str) -> Result<String, String> {
+    let b64_pos = glue
+        .find(B64_VAR)
+        .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_WASM_B64 assignment not found".to_string())?;
+    let body_start = b64_pos
+        + glue[b64_pos..]
+            .find('\n')
+            .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_WASM_B64 line is unterminated".to_string())?
+        + 1;
+    let exp_pos = glue
+        .find(EXPOSURE_HEAD)
+        .ok_or_else(|| "kiwicaptcha-wasm.js: exposure assignment not found".to_string())?;
+    let close_rel = glue[exp_pos..]
+        .find("\n})();")
+        .ok_or_else(|| "kiwicaptcha-wasm.js: IIFE close not found after the exposure".to_string())?;
+    let body_end = exp_pos + close_rel + 1;
+    if body_end <= body_start {
+        return Err("kiwicaptcha-wasm.js: glue body bounds are inverted".to_string());
+    }
+    Ok(glue[body_start..body_end].to_string())
+}
+
+/// The generated `glueBoot` section appended to the glue.
+fn glue_boot_section(boot: &str) -> String {
+    format!(
+        "{GLUE_BOOT_BEGIN} — generated section (tools/embed-worker): the whole span\n\
+         // from this marker to the KIWI_GLUE_BOOT_END marker is machine-written.\n\
+         window.__kiwiCaptchaWasm = window.__kiwiCaptchaWasm || {{}};\n\
+         window.__kiwiCaptchaWasm.glueBoot = \"{escaped}\";\n\
+         {GLUE_BOOT_END} — generated section (tools/embed-worker): the whole span\n\
+         // from the KIWI_GLUE_BOOT_BEGIN marker to this marker is machine-written.\n",
+        escaped = json_escape(boot)
+    )
+}
+
+/// Replace the span between the glue's glueBoot sentinels (from the
+/// BEGIN-marker line start through the END marker line AND its trailing
+/// continuation line) with a fresh section; when the sentinels are absent
+/// the section is appended at the end.
+fn regenerate_glue_boot(glue: &str, section: &str) -> Result<String, String> {
+    let err = |m: &str| Err(m.to_string());
+    match find_line_anchored(glue, GLUE_BOOT_BEGIN) {
+        Some(begin_idx) => {
+            let end_idx = find_line_anchored(glue, GLUE_BOOT_END)
+                .ok_or_else(|| "kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END sentinel not found".to_string())?;
+            if begin_idx >= end_idx {
+                return err("kiwicaptcha-wasm.js: glueBoot sentinels out of order (BEGIN must precede END)");
+            }
+            let between = &glue[begin_idx..end_idx];
+            if !between.contains("window.__kiwiCaptchaWasm.glueBoot = \"")
+                || !between.trim_end().ends_with(';')
+            {
+                return err("kiwicaptcha-wasm.js: generated section between the glueBoot sentinels does not match the glueBoot assignment");
+            }
+            let begin_line_start = glue[..begin_idx].rfind('\n').map_or(0, |i| i + 1);
+            let end_line_end = end_idx + glue[end_idx..].find('\n').expect("newline after END");
+            let mut tail_start = end_line_end + 1;
+            if glue[tail_start..].starts_with("// from the KIWI_GLUE_BOOT_BEGIN marker") {
+                tail_start += glue[tail_start..].find('\n').map_or(0, |i| i + 1);
+            }
+            let head = &glue[..begin_line_start];
+            let tail = &glue[tail_start..];
+            Ok(format!("{head}{section}{tail}"))
+        }
+        None => {
+            if glue.contains(GLUE_BOOT_END) {
+                return err("kiwicaptcha-wasm.js: KIWI_GLUE_BOOT_END present without KIWI_GLUE_BOOT_BEGIN");
+            }
+            Ok(format!("{glue}{section}"))
+        }
+    }
 }
 
 /// Replace the span between the glue's workerSource sentinels (from the
@@ -228,7 +373,24 @@ fn main() {
         die("kiwi-worker.js must not contain a closing-script-tag sequence (the glue is inlined into pages)");
     }
 
-    let regenerated_glue = regenerate_glue(&glue, &worker_src).unwrap_or_else(|e| die(&e));
+    // The compat constants: the exposure is stamped with the b64 wasm
+    // bytes and their digest, and the glue body is embedded as the
+    // glueBoot constant. Both derive from the glue text itself, so
+    // regeneration is idempotent (the digest of the same b64 string is
+    // deterministic).
+    let b64 = extract_b64(&glue).unwrap_or_else(|e| die(&e));
+    let mut hasher = Sha256::new();
+    hasher.update(b64.as_bytes());
+    let sri = format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+    );
+    let stamped = rewrite_exposure(&glue, &sri).unwrap_or_else(|e| die(&e));
+    let boot = extract_glue_boot(&stamped).unwrap_or_else(|e| die(&e));
+
+    let regenerated_glue = regenerate_glue(&stamped, &worker_src).unwrap_or_else(|e| die(&e));
+    let regenerated_glue =
+        regenerate_glue_boot(&regenerated_glue, &glue_boot_section(&boot)).unwrap_or_else(|e| die(&e));
     let regenerated_worker = {
         let span = worker_glue_span(&regenerated_glue);
         if let Some(begin_idx) = find_line_anchored(&worker_asset, WORKER_GLUE_BEGIN) {

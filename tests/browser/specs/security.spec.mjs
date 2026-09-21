@@ -540,9 +540,10 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // cancel); the widget-risk.js module owns the two files-mode lazy
     // fetches (the WASM runtime glue and the Argon worker asset,
     // worker.<hash>.js), downloaded only when a memory-hard challenge
-    // arrives; the widget-compat.js module owns the loader-glue fetch
-    // (the external /api.js path fetches its own source to hand the wasm
-    // glue to the Blob worker). A SHA-256 solve pays no runtime or
+    // arrives; the widget-compat.js module issues NO network request at
+    // all (the external /api.js path rebuilds its worker prelude from
+    // the glue constants embedded in the same loader response). A
+    // SHA-256 solve pays no runtime or
     // worker request at all. Both lazy fetches are SRI-verified (fail
     // closed when the digest cannot be computed), deduplicated per URL
     // across the page and bounded to two retries; their failure enters

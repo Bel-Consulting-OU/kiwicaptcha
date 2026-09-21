@@ -13,20 +13,20 @@
   },
   "clientAssets": {
     "kiwicaptcha-wasm.js": {
-      "bytes": 99325,
-      "sha256": "8159cf121a91a5003f39fbe9a416f787ea1570a820db2285a9f8e13a495a54c9"
+      "bytes": 114111,
+      "sha256": "e4912b64643a7515e60baa7a3deb9860410a145c8f35a90c2e8339db073b9221"
     },
     "kiwi-worker.js": {
-      "bytes": 126104,
-      "sha256": "b82fa2b0d587ae9af46bd9fb8aa47928562479ffc63bcbc5473ee772a19f06aa"
+      "bytes": 141542,
+      "sha256": "396fb13051286836ebf7b1d6be25a2da5aeecb143af7c0c7ad12ac81f97200f1"
     },
     "widget-driver.js": {
-      "bytes": 92299,
-      "sha256": "f9e2763f8ffcec40513adaef49a574e79c2303feef9a83270d5684b9074dc71f"
+      "bytes": 97316,
+      "sha256": "dc954537987cec5cac2c7e959169d6b8cf82e0704eab786e0f4a2c00cb5b693a"
     },
     "widget-risk.js": {
-      "bytes": 32765,
-      "sha256": "192a3dd3c5731aaa24d43ef63004a50cbd49379e9c0f0d0925b5d6f0a92f0023"
+      "bytes": 34305,
+      "sha256": "752523996e9d4ea840993d94315a40604fe6ef81121bb3b4b5b0f1551b173cd0"
     },
     "widget-telemetry.js": {
       "bytes": 2922,
@@ -37,16 +37,16 @@
       "sha256": "aade1c8561c3180ad5a2c9e919454b326de86e6f3535449b641cac9c11e7037d"
     },
     "widget-compat.js": {
-      "bytes": 26943,
-      "sha256": "793bdada9a6c7fc943e6552a5a0263c1b998d3d8e967e02f83cca918c64eb721"
+      "bytes": 28103,
+      "sha256": "07f2fd6ae1c84b89b61992857a59f6e50201a05d4b9362bfceeef86acf3b33df"
     },
     "widget.css": {
       "bytes": 10907,
       "sha256": "e25c17d024455c5089809efff76bb9585c6280bf1ee4e4a59ecd3b7e9adba055"
     },
     "execution-interpreter.js": {
-      "bytes": 32378,
-      "sha256": "97b3de3767c5ecc352fefc45f004de66c550fae4d4db81a0f7d7a86cf6ff0e29"
+      "bytes": 33039,
+      "sha256": "a374fe9ecf1945b79a3a76e17279fe075f1c8295f9331169e66066cace18597f"
     }
   },
   "fixture": {
@@ -171,7 +171,7 @@
     "mergedRuns": [
       "2026-09-07T20:29:06.625Z"
     ],
-    "note": "the mainstream-desktop rows were recorded at the real adaptive-risk ladder (m=16384 KiB, t=3, p=1) and merged per cache across asset modes; the argon family (argon2id/execargon/execchain) was re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from results-2026-09-05.json; the execution cells were re-recorded at the LIVE execution grammar on 2026-09-05 from results-2026-09-05-exec-v5.json (audit finding 1: every armed query carries ?exec_cap=5, the protocol/execution-v1.json manifest maximum, and each execution rep and merged row records the issued executionVersion 5 decoded from the /challenge responses \u2014 the earlier execution rows measured the fixture's historical v3 default); the emulation-tier rows remain the legacy pre-matrix recording and are not release-required"
+    "note": "the mainstream-desktop rows were recorded at the real adaptive-risk ladder (m=16384 KiB, t=3, p=1) and merged per cache across asset modes; the argon family (argon2id/execargon/execchain) was re-recorded at the round-5 retuned rung (target 4) on 2026-09-05 from results-2026-09-05.json; the execution cells were re-recorded at the LIVE execution grammar on 2026-09-05 from results-2026-09-05-exec-v5.json (audit finding 1: every armed query carries ?exec_cap=5, the protocol/execution-v1.json manifest maximum, and each execution rep and merged row records the issued executionVersion 5 decoded from the /challenge responses — the earlier execution rows measured the fixture's historical v3 default); the emulation-tier rows remain the legacy pre-matrix recording and are not release-required"
   },
   "results": {
     "low-android:sha16:cold": {
