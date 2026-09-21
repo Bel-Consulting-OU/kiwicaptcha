@@ -227,14 +227,22 @@ final class ExecutionChallengeDimensionTest extends TestCase
 
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
+        // The receipt instant is pinned sixty seconds past issuance:
+        // comfortably above any minimum-duration floor the escalated
+        // difficulty mints, comfortably inside the TTL, and identical
+        // on every host speed (a real-clock receipt races the floor on
+        // a fast runner, where the whole round trip lands inside the
+        // server-measured minimum).
+        $receiptNs = $record->issuedAtNs + 60_000_000;
+
         $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
-        self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1')->isOk());
+        self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->isOk());
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
-        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1')->error);
+        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->error);
 
         $missing = SolutionToken::create($payload['nonce'], $counter, 5000, [])->encode();
-        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1')->error);
+        self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->error);
     }
 
     /**
