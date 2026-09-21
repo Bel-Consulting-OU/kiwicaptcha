@@ -935,7 +935,7 @@ struct StoredEnvelope {
     // The claim fields are accepted and dropped (the canonical record
     // parse must never see them); the underscore names mark them
     // intentionally unread.
-    #[serde(default)]
+    #[serde(rename = "resume_owner", default)]
     _resume_owner: Option<serde_json::Value>,
     #[serde(rename = "resume_until", default)]
     _resume_until: Option<serde_json::Value>,
