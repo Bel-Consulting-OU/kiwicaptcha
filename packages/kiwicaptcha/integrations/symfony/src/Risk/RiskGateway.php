@@ -152,6 +152,31 @@ final class RiskGateway
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
         }
+        // One policy authority for every mode: the optional
+        // gateway-level policy is only the degraded-decision surface,
+        // so a divergent object would answer degraded lookups from a
+        // table the engine never consults — weakening a configured
+        // degraded floor in any mode, not only minimum.
+        if ($policy !== null && $policy !== $engine->policy()) {
+            throw new \InvalidArgumentException('the gateway policy must be the engine policy: two divergent policy objects would decide from different tables');
+        }
+        // The application-scope id map is validated in full: every id
+        // is a u32, no two scopes share one id (they would silently
+        // couple their risk state and policy row), and every id names
+        // a row in exactly the policy the engine consults.
+        $seenIds = [];
+        foreach ($this->scopeIds as $scopeName => $scopeId) {
+            if (!\is_int($scopeId) || $scopeId < 1 || $scopeId > 0xFFFFFFFF) {
+                throw new \InvalidArgumentException(sprintf('scope id for "%s" must be an integer u32 (got %s)', $scopeName, var_export($scopeId, true)));
+            }
+            if (isset($seenIds[$scopeId])) {
+                throw new \InvalidArgumentException(sprintf('scope ids must be unique: "%s" and "%s" both map to %d', $seenIds[$scopeId], $scopeName, $scopeId));
+            }
+            $seenIds[$scopeId] = $scopeName;
+            if (!isset($engine->policy()->scopes[$scopeId])) {
+                throw new \InvalidArgumentException(sprintf('scope id %d for "%s" names no policy scope row: the engine policy must carry a row for every mapped scope', $scopeId, $scopeName));
+            }
+        }
         if ($unknownScopeMode === 'minimum') {
             // The synthetic policy and its id are one configuration
             // unit: 'minimum' mode promises every unknown scope the
@@ -188,13 +213,6 @@ final class RiskGateway
             }
             if (($row['base_risk'] ?? 0) < 100) {
                 throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a base_risk below 100: the synthetic row must be assessed, not whitelisted', $unknownScopeId));
-            }
-            // The optional gateway-level policy (the degraded-decision
-            // surface) must be the very object the engine consults: a
-            // divergent second policy would answer degraded lookups
-            // from a table the engine never uses.
-            if ($policy !== null && $policy !== $enginePolicy) {
-                throw new \InvalidArgumentException('the gateway policy must be the engine policy: two divergent policy objects would decide from different tables');
             }
         }
     }
@@ -1013,16 +1031,14 @@ final class RiskGateway
      * misconfigured proxy), so the configured degraded floor always
      * applies and issuance can never silently drop below it.
      *
-     * @throws \LogicException when the policy is not wired (the extension
-     *                         wires it automatically).
+     * The decision always comes from the engine's own policy.
      */
     public function degradedDecisionForScope(int $scope): RiskDecision
     {
-        if ($this->policy === null) {
-            throw new \LogicException('degradedDecisionForScope requires the RiskPolicy to be wired into the RiskGateway');
-        }
-
-        return $this->policy->degradedDecision($scope, 0);
+        // The engine's policy is the one authority: the decision can
+        // never come from a table the engine itself never consults,
+        // and no separate wiring is required.
+        return $this->engine->policy()->degradedDecision($scope, 0);
     }
 
     /**
