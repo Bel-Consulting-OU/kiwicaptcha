@@ -991,6 +991,45 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     ) {
         return None;
     }
+    // The full structural contract, not only the grammar matrix: the
+    // record a storage read surfaces can never carry a shape
+    // verification would reject as malformed (partial execution
+    // triplets, broken identifiers, impossible lifetimes) — the same
+    // one-call authority the verifier itself consults.
+    {
+        let probe = ChallengeRecord {
+            nonce: envelope.nonce.clone(),
+            scope: envelope.scope.clone(),
+            binding_tag: envelope.binding_tag.clone(),
+            issued_at: envelope.issued_at,
+            expires_at: envelope.expires_at,
+            algorithm: envelope.algorithm,
+            m_kib: envelope.m_kib,
+            t: envelope.t,
+            p: envelope.p,
+            target_bits: envelope.target_bits,
+            salt: envelope.salt.clone(),
+            prefix: envelope.prefix.clone(),
+            challenge: envelope.challenge.clone(),
+            min_duration_ms: envelope.min_duration_ms,
+            issued_at_ns: envelope.issued_at_ns,
+            attempts_used: envelope.attempts_used,
+            protocol_version: envelope.protocol_version,
+            region: envelope.region.clone(),
+            policy_version: envelope.policy_version,
+            request_binding: envelope.request_binding.clone(),
+            issuer: envelope.issuer.clone(),
+            hostname: envelope.hostname.clone(),
+            decoy_field: envelope.decoy_field.clone(),
+            execution_program: envelope.execution_program.clone(),
+            execution_version: envelope.execution_version,
+            execution_commitment: envelope.execution_commitment.clone(),
+            kid: envelope.kid,
+        };
+        if !crate::challenge::record_is_structurally_valid(&probe) {
+            return None;
+        }
+    }
     let record = ChallengeRecord {
         nonce: envelope.nonce,
         scope: envelope.scope,

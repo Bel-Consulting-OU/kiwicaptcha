@@ -797,6 +797,18 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// either would hold unauthenticated semantics — v3 requires the decoy
 /// and carries no execution, and v4 requires the execution triplet and
 /// may also carry the decoy (the canonical appends both segments).
+/// The one structural record contract at every deserialization
+/// boundary: the shared grammar matrix, the exact armed/unarmed
+/// execution-triplet equivalence (with the commitment hash compare),
+/// the identifier alphabets, the canonical nonce/salt shapes and the
+/// record lifetime bounds. [`crate::verify::validate_record`] is this
+/// check mapped onto the verifier's error vocabulary; the storage
+/// decoder applies it directly so a typed record can never surface
+/// from storage in a shape verification would reject as malformed.
+pub fn record_is_structurally_valid(record: &ChallengeRecord) -> bool {
+    crate::verify::validate_record(record).is_ok()
+}
+
 pub fn protocol_extension_grammar_ok(
     protocol_version: u8,
     decoy_present: bool,
