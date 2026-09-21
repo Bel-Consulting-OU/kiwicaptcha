@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
@@ -1072,7 +1073,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // runs the runtime guard on the actual client.
             $riskRedisRaw = $this->resolveRiskRedisClient($riskConfig, $rawRedisRef, $container);
             $riskRedis = $this->checkedRedisClientRef($riskRedisRaw, 'risk', $container);
-            $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
+            $namespace = RedisNamespace::deriveOr((string) $riskConfig['namespace'], 'kiwi');
 
             $riskMaster = $riskConfig['master_secret'] ?? $config['secret_key'];
             $container->setDefinition('kiwi_captcha.risk.keys', (new Definition(RiskKeys::class))
@@ -1476,11 +1477,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // bump revokes outstanding challenges within one cache window.
         // Without a Redis client the monitor serves the configured
         // risk.policy_version (no central state to read).
-        $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
+        $namespace = RedisNamespace::deriveOr((string) $riskConfig['namespace'], 'kiwi');
         $container->setDefinition(SecurityEpochMonitor::class, (new Definition(SecurityEpochMonitor::class, [
             new Reference('kiwi_captcha.verifier'),
             $redisRef,
-            $namespace,
+            // The raw configured namespace: the monitor derives its key
+            // segment through the one shared derivation internally.
+            (string) $riskConfig['namespace'],
             $config['risk']['policy_version'],
             $riskConfig['security_epoch_cache_secs'],
         ]))
@@ -1853,7 +1856,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             );
         }
 
-        $healthNamespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
+        $healthNamespace = (string) $riskConfig['namespace'];
         $container->setDefinition(KiwiHealthController::class, (new Definition(KiwiHealthController::class, [
             $config['secret_key'],
             $redisRef,
@@ -2302,7 +2305,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'kiwi_captcha.ha_authority is "pinned_primary", but no storage/limiter Redis client is wired — the pinned-primary guard pins the serving authority of the security Redis, and without a client there is no authority to pin and nothing to enforce. Configure redis_dsn / redis_service / a RedisStorage storage (a direct single-node Predis client), or set ha_authority: none (see docs/ha-authority.md).'
             );
         }
-        $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) ($config['risk']['namespace'] ?? 'kiwicaptcha')) ?: 'kiwi';
+        $namespace = RedisNamespace::deriveOr((string) ($config['risk']['namespace'] ?? 'kiwicaptcha'), 'kiwi');
         $expectedConfig = $config['ha_authority_expected'] ?? null;
         if (\is_string($expectedConfig) && $expectedConfig !== '') {
             // The scalar shorthand: ONE expected identity applies to

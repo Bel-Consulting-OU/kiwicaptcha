@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
@@ -84,7 +86,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame(AggregateCalibrator::class, $definition->getClass());
         $args = $definition->getArguments();
         self::assertInstanceOf(Reference::class, $args[0], 'arg 0 = the risk Predis client');
-        self::assertSame('wiring-test', $args[1], 'arg 1 = the risk namespace');
+        self::assertSame(RedisNamespace::derive('wiring-test'), $args[1], 'arg 1 = the risk namespace (derived)');
         self::assertSame(500, $args[2], 'arg 2 = min_samples');
         self::assertSame(77, $args[3], 'arg 3 = max_adjustment');
         self::assertSame(5, $args[4], 'arg 4 = max_change_per_minute');
@@ -157,7 +159,7 @@ final class RiskWiringTest extends TestCase
         $args = $definition->getArguments();
         self::assertNull($args[0], 'no argon semaphore wired (sha256) -> null');
         self::assertInstanceOf(Reference::class, $args[1], 'arg 1 = the risk Redis client for the counter reads');
-        self::assertSame('{kiwi:wiring-test}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged)');
+        self::assertSame('{kiwi:'.RedisNamespace::derive('wiring-test').'}:issuance:', $args[2], 'arg 2 = the issuance counter key prefix (hash-tagged with the derived namespace)');
         self::assertSame(500, $args[3], 'arg 3 = resource_capacity.issuance_per_second (the DEPLOYMENT-WIDE denominator, default 500, aligned with the hard global limiter)');
 
         // The deployment denominator is a separate knob from the per-process
@@ -182,7 +184,7 @@ final class RiskWiringTest extends TestCase
         $gateway = $container->getDefinition(RiskGateway::class);
         self::assertSame('request_stack', (string) $gateway->getArgument('$requestStack'), 'the gateway resolves the request principal via the request stack');
         self::assertSame('kiwi_captcha.redis.checked.risk', (string) $gateway->getArgument('$decisionRedis'), 'the nonce->decision handles live in the checked risk Redis');
-        self::assertSame('{kiwi:wiring-test}:decision:', $gateway->getArgument('$decisionKeyPrefix'), 'the handle key prefix is hash-tagged with the risk namespace');
+        self::assertSame('{kiwi:'.RedisNamespace::derive('wiring-test').'}:decision:', $gateway->getArgument('$decisionKeyPrefix'), 'the handle key prefix is hash-tagged with the derived risk namespace');
         self::assertSame(300, $gateway->getArgument('$decisionTtlSecs'), 'the handle TTL follows risk.nonce_to_decision_ttl_secs (default 300)');
         self::assertArrayNotHasKey('$principalResolver', $gateway->getArguments(), 'no principal resolver wired by default');
         self::assertSame('kiwi_captcha.risk.policy', (string) $gateway->getArgument('$policy'), 'the gateway receives the policy for the degraded fallback');
@@ -231,7 +233,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame(IssuanceCounter::class, $counter->getClass());
         $args = $counter->getArguments();
         self::assertInstanceOf(Reference::class, $args[0]);
-        self::assertSame('{kiwi:wiring-test}:issuance:', $args[1]);
+        self::assertSame('{kiwi:'.RedisNamespace::derive('wiring-test').'}:issuance:', $args[1]);
 
         $controllerArgs = $container->getDefinition(ChallengeController::class)->getArguments();
         self::assertSame('kiwi_captcha.risk.issuance_counter', (string) $controllerArgs[5], 'the controller receives the issuance counter');
@@ -314,7 +316,7 @@ final class RiskWiringTest extends TestCase
         self::assertSame(OutstandingChallenges::class, $definition->getClass());
         $args = $definition->getArguments();
         self::assertInstanceOf(Reference::class, $args[0], 'arg 0 = the risk Predis client (shared with the state store)');
-        self::assertSame('{kiwi:wiring-test}:outstanding:', $args[1], 'arg 1 = the hash-tagged outstanding key prefix');
+        self::assertSame('{kiwi:'.RedisNamespace::derive('wiring-test').'}:outstanding:', $args[1], 'arg 1 = the hash-tagged outstanding key prefix');
         self::assertSame('kiwi_captcha.risk.keys', (string) $args[2], 'arg 2 = the risk identity keys (the event key HMACs the canonical IP)');
         self::assertSame(7, $args[3], 'arg 3 = risk.max_outstanding_challenges');
         self::assertSame(12345, $args[4], 'arg 4 = risk.max_outstanding_challenges_global');
@@ -520,7 +522,7 @@ final class RiskWiringTest extends TestCase
         $container = $this->load($risk);
         $cap = $container->getDefinition('kiwi_captcha.risk.scope_issuance_cap');
         self::assertSame('kiwi_captcha.redis.checked.risk', (string) $cap->getArgument(0), 'the cap uses the checked risk Redis client');
-        self::assertSame('{kiwi:wiring-test}:issuance:', $cap->getArgument(1), 'the cap keys live in the risk hash-tag family');
+        self::assertSame('{kiwi:'.RedisNamespace::derive('wiring-test').'}:issuance:', $cap->getArgument(1), 'the cap keys live in the risk hash-tag family');
         self::assertSame(50, $cap->getArgument(2), 'the cap reaches the service');
         $controllerArgs = $container->getDefinition(ChallengeController::class)->getArguments();
         self::assertSame('kiwi_captcha.risk.scope_issuance_cap', (string) $controllerArgs['$scopeIssuanceCap'], 'the controller receives the scope cap');

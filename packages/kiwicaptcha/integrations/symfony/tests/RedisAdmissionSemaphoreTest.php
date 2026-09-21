@@ -34,7 +34,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     private function leases(FakePredisClient $client, string $namespace = 'default'): int
     {
-        return $client->zcard('{kiwicaptcha:argon2:leases:'.$namespace.'}:global');
+        return $client->zcard('{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:global');
     }
 
     private function requirePredis(): FakePredisClient
@@ -120,7 +120,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         // never remove B's live lease.
         $semaphore->release($tokenA);
         self::assertSame(1, $this->leases($client), 'stale release must not remove the new lease (B)');
-        self::assertContains($tokenB, $client->zmembers('{kiwicaptcha:argon2:leases:default}:global'));
+        self::assertContains($tokenB, $client->zmembers('{kiwicaptcha:argon2:leases:n_37a8eec1ce19687d132fe29051dca629}:global'));
     }
 
     public function testWrongTokenReleaseIsANoOp(): void
@@ -165,10 +165,11 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertIsString($second->acquire(), 'independent namespaces must not compete');
         self::assertSame(1, $this->leases($client, 'deployment-b'));
 
-        // Sanitization: hostile namespace characters collapse to underscores.
+        // Hostile namespace characters are digested, never sanitized:
+        // the raw bytes are the deployment identity.
         $hostile = new RedisAdmissionSemaphore($client, 1, 'my/ns:weird');
         self::assertIsString($hostile->acquire());
-        self::assertSame(1, $this->leases($client, 'my_ns_weird'));
+        self::assertSame(1, $this->leases($client, 'my/ns:weird'));
     }
 
     public function testDisabledCapReturnsSentinelTokenAndReleaseNoOps(): void
@@ -325,7 +326,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The waiters counter key of a namespace (mirrors the semaphore's own derivation). */
     private function waitersKey(string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:sem:waiters';
+        return '{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:sem:waiters';
     }
 
     public function testSaturatedAcquiresAreCountedAsWaitersWithTheLeaseTtl(): void
@@ -462,7 +463,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
     private function scopeKey(string $scope, string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:scope:'.hash('sha256', $scope);
+        return '{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:scope:'.hash('sha256', $scope);
     }
 
     public function testOneScopeFillsItsBudgetAndAnotherScopeStillAcquires(): void

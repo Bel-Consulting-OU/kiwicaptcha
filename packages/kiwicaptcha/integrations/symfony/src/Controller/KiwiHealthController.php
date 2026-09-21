@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use KiwiCaptcha\ChallengeProfile;
 use KiwiCaptcha\ExecutionChallengeGenerator;
@@ -450,7 +452,7 @@ final class KiwiHealthController
         $reason = null;
         $parsed = [];
         try {
-            $policy = $this->redis->hgetall('{kiwi:'.$this->namespace.'}:security-policy');
+            $policy = $this->redis->hgetall('{kiwi:'.RedisNamespace::deriveOr($this->namespace, 'kiwi').'}:security-policy');
             if (\is_array($policy) && $policy !== []) {
                 // Corrupt present policy state must fail closed: a
                 // malformed min_protocol_version / min_policy_epoch /

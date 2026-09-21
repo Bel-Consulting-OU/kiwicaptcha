@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use Psr\Cache\CacheItemPoolInterface;
 
@@ -155,9 +157,23 @@ final class IssuanceRateLimiter
      * bound the spec guarantees: 'kr_' + 24 segment hex + '_' + 36
      * identity hex.
      */
+    /**
+     * The Redis key-family tag: the digest of the raw namespace, or
+     * the legacy literal when no namespace is configured (the shared
+     * no-namespace family an operator opts into by leaving the
+     * discriminator empty).
+     */
+    private function rlTag(): string
+    {
+        return $this->namespace !== '' ? RedisNamespace::derive($this->namespace) : '';
+    }
+
     private static function namespaceKeySegment(string $namespace): string
     {
-        return substr(hash('sha256', $namespace), 0, 24);
+        // The PSR-6 segment mirrors the Redis tag derivation (the
+        // digest of the raw namespace) so the two families agree on
+        // the deployment identity.
+        return substr(RedisNamespace::derive($namespace), 2, 24);
     }
 
     /**
@@ -337,10 +353,15 @@ LUA;
                 'a rotation shorter than the window would drop live hits from older epochs'
             );
         }
-        $this->namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: '';
+        // The namespace stays RAW: it is an identity discriminator,
+        // and both key families derive their Redis-safe segment from
+        // the complete original bytes (a digest), never from a
+        // replacement-sanitized value that would fold distinct
+        // namespaces onto one key family.
+        $this->namespace = $namespace;
     }
 
-    /** @var string sanitized deployment namespace for Redis keys */
+    /** @var string raw deployment namespace (digested per key family, never sanitized) */
     private readonly string $namespace;
 
     /**
@@ -463,9 +484,10 @@ LUA;
         // no client identity and is shared by every client — rotating it
         // would silently turn the deployment-wide budget into per-client
         // budgets.
-        $clientPrev = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityPrev;
-        $clientCur = '{kiwi:rl:'.$this->namespace.'}:client:'.$identityCur;
-        $global = '{kiwi:rl:'.$this->namespace.'}:global';
+        $tag = $this->rlTag();
+        $clientPrev = '{kiwi:rl:'.$tag.'}:client:'.$identityPrev;
+        $clientCur = '{kiwi:rl:'.$tag.'}:client:'.$identityCur;
+        $global = '{kiwi:rl:'.$tag.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
@@ -508,7 +530,7 @@ LUA;
 
     private function checkRedisGlobalOnly(): int
     {
-        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
+        $globalKey = '{kiwi:rl:'.$this->rlTag().'}:global';
         $windowMs = $this->windowSecs * 1000;
         $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
         $requestId = bin2hex(random_bytes(16));
@@ -730,8 +752,9 @@ LUA;
 
     private function checkRedis(string $identity): int
     {
-        $clientKey = '{kiwi:rl:'.$this->namespace.'}:client:'.$identity;
-        $globalKey = '{kiwi:rl:'.$this->namespace.'}:global';
+        $tag = $this->rlTag();
+        $clientKey = '{kiwi:rl:'.$tag.'}:client:'.$identity;
+        $globalKey = '{kiwi:rl:'.$tag.'}:global';
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;

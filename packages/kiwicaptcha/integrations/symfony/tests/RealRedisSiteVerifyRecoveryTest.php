@@ -264,7 +264,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // monitor; the static configured epoch stays 0, so any claim
         // under the static key would prove the monitor is NOT wired.
         $policyRedis = new FakePredisClient();
-        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $policyRedis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
 
         try {
             $ownerVerifier = new Verifier($lost);
@@ -486,11 +486,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         // finalize: the successful finalize WAITs; a refused finalize
         // (the wrong owner) returns false and never WAITs.
-        $refused = $store->finalize($backendId, $key2, 'hash-b', 'wrong-owner', ['success' => true]);
+        $refused = $store->finalize($backendId, $key2, 'hash-b', 'wrong-owner', ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertFalse($refused, 'a refused finalize returns false');
         self::assertSame($waitsBefore + 2, \count($counting->waits()), 'a refused finalize never WAITs');
         try {
-            $store->finalize($backendId, $key2, 'hash-b', (string) $owner2, ['success' => true]);
+            $store->finalize($backendId, $key2, 'hash-b', (string) $owner2, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::fail('the successful finalize WAIT must fail closed');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
         }

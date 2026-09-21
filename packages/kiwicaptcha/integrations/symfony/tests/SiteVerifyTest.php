@@ -673,7 +673,7 @@ final class SiteVerifyTest extends TestCase
         $args = $last[1];
         $numKeys = (int) $args[1];
         $keys = array_slice($args, 2, $numKeys);
-        self::assertSame('{kiwicaptcha:argon2:leases:siteverify-argon}:scope:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
+        self::assertSame('{kiwicaptcha:argon2:leases:n_b3f6b1af419fe8f0b2fb82fda6346715}:scope:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
         self::assertNull($request->attributes->get(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE), 'the scope attribute is restored after the verification');
     }
 
@@ -1270,12 +1270,12 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(IdempotencyClaim::TookOver, $takeover);
 
         // The displaced owner's finalize must be a no-op after the takeover.
-        $store->finalize($backendId, $uuid, $hash, $oldOwner, ['success' => true]);
+        $store->finalize($backendId, $uuid, $hash, $oldOwner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertNull($store->stored($backendId, $uuid), 'a displaced owner cannot finalize after the takeover');
 
         // The takeover winner finalizes with ITS token.
-        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
-        self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
     }
 
     public function testMalformedTokenFinalizesTheClaimDeterministically(): void
@@ -1646,7 +1646,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertNotNull($newOwner);
 
         // A complete entry can no longer be renewed.
-        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true]);
+        $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertFalse($store->renew($backendId, $uuid, $newOwner), 'a completed entry cannot be renewed');
     }
 
@@ -1736,11 +1736,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(IdempotencyClaim::Claimed, $claim);
         self::assertNotNull($owner);
 
-        $store->finalize($backendId, $uuid, 'wrong-hash', $owner, ['success' => true]);
+        $store->finalize($backendId, $uuid, 'wrong-hash', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
 
-        $store->finalize($backendId, $uuid, $hash, $owner, ['success' => true]);
-        self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+        $store->finalize($backendId, $uuid, $hash, $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
     }
 
     public function testTakeoverWithWrongRemoteipFingerprintIsRefused(): void
@@ -2901,7 +2901,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
         self::assertSame($expectedCanonical, (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
         self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
-        self::assertSame(['success' => true], array_intersect_key($store->stored($backendId, $uuid) ?? [], ['success' => true]), 'the resumed outcome is finalized as COMPLETE_SAME');
+        $stored = $store->stored($backendId, $uuid);
+        self::assertTrue($stored['success'] === true, 'the resumed outcome is finalized as COMPLETE_SAME');
+        self::assertNotNull($stored['challenge_ts'], 'the stored canonical success carries the server-bound challenge timestamp');
+        self::assertArrayHasKey('hostname', $stored, 'the stored canonical success carries the hostname field');
     }
 
     /**
@@ -3827,7 +3830,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     private function monitorFixture(Verifier $verifier, int $configuredEpoch, int $centralEpoch, \Closure $clockMs): array
     {
         $redis = new FakePredisClient();
-        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, (string) $centralEpoch);
+        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, (string) $centralEpoch);
 
         return [$redis, new SecurityEpochMonitor($verifier, $redis, 'test-ns', $configuredEpoch, 1, $clockMs, 60)];
     }

@@ -24,6 +24,12 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class RateLimiterTest extends TestCase
 {
+    /** The derived Redis tag of a raw namespace (mirrors RedisNamespace::derive). */
+    private static function tag(string $ns): string
+    {
+        return 'n_'.substr(hash('sha256', $ns), 0, 32);
+    }
+
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     private function controller(?IssuanceRateLimiter $limiter = null): ChallengeController
@@ -1330,8 +1336,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // (inet_pton with IPv4-mapped normalization) — the same
         // canonicalization used for challenge binding.
         $identity = hash_hmac('sha256', \KiwiCaptcha\Issuer::canonicalIpFamily('198.51.100.7'), $pepper);
-        self::assertArrayHasKey('{kiwi:rl:deployment-x}:client:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced canonical-HMAC key');
-        self::assertArrayHasKey('{kiwi:rl:deployment-x}:global', $client->zsets);
+        self::assertArrayHasKey('{kiwi:rl:'.self::tag('deployment-x').'}:client:'.$identity, $client->zsets, 'the per-client ZSET must live under the namespaced canonical-HMAC key');
+        self::assertArrayHasKey('{kiwi:rl:'.self::tag('deployment-x').'}:global', $client->zsets);
 
         foreach (array_keys($client->zsets) as $key) {
             self::assertStringNotContainsString('198.51.100.7', (string) $key, 'raw IPs must never appear in Redis keys');
@@ -1378,7 +1384,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             }
         }
 
-        $globalKey = '{kiwi:rl:bounded-global}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('bounded-global').'}:global';
         self::assertArrayHasKey($globalKey, $client->zsets, 'the global key must exist');
         self::assertSame(1000, $allowed, 'exactly the cap\'s worth of admissions are allowed');
         self::assertSame(1000, $client->zcard($globalKey), 'the global ZSET never exceeds the cap — one exact-time member per admission');
@@ -1411,7 +1417,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             now: static fn (): float => $t0Ms / 1000,
         );
         self::assertSame(1, $limiter->check('198.51.100.7'), 'the first admission fills the global cap');
-        $globalKey = '{kiwi:rl:exact-boundary-global}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('exact-boundary-global').'}:global';
         self::assertCount(1, $client->zsets[$globalKey], 'exactly one member exists after the first admission');
         $member = array_key_first($client->zsets[$globalKey]);
         self::assertSame($t0Ms, $client->zsets[$globalKey][$member], 'the member is scored at its exact admission ms');
@@ -1421,7 +1427,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // itself never disturbs the state under test: it only observes
         // whether the T request still counts toward the cap.
         $probe = static function (float $atMs, string $namespace, int $expected, string $why) use ($client, $member, $t0Ms): void {
-            $key = '{kiwi:rl:'.$namespace.'}:global';
+            $key = '{kiwi:rl:'.self::tag($namespace).'}:global';
             $client->zsets[$key] = [$member => $t0Ms];
             $client->setTimeMs($atMs);
             $probeLimiter = new IssuanceRateLimiter(
@@ -1471,7 +1477,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             pepper: 'pepper',
             now: static fn (): float => $clock,
         );
-        $globalKey = '{kiwi:rl:exact-burst}:global';
+        $globalKey = '{kiwi:rl:'.self::tag('exact-burst').'}:global';
         self::assertSame(1, $limiter->check('198.51.100.1'));
         self::assertSame(1, $limiter->check('198.51.100.2'));
         self::assertSame(2, $client->zcard($globalKey), 'two admissions = two exact-time members');

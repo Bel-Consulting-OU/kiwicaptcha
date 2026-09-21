@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
@@ -95,9 +97,9 @@ final class PinnedPrimaryWiringTest extends TestCase
             'the guard binds to the checked client\'s raw inner instance, so its INFO/pin commands never recurse through a guarded wrapper',
         );
         self::assertSame(
-            'prod-eu',
+            RedisNamespace::derive('prod-eu'),
             $guardArgs[1],
-            'the pin key namespace is the sanitized deployment namespace, like every other bundle key',
+            'the pin key namespace is the derived deployment namespace, like every other bundle key',
         );
         self::assertSame(5, $guardArgs[2], 'the default reverify window is 5 seconds');
         self::assertSame('storage', $guardArgs[3], 'the storage authority pins its own key suffix');

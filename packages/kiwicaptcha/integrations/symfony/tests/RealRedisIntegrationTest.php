@@ -117,7 +117,7 @@ final class RealRedisIntegrationTest extends TestCase
         $sem1 = new RedisAdmissionSemaphore($this->client, 1, 'ci-stale');
         $oldToken = $sem1->acquire();
         self::assertNotNull($oldToken);
-        $this->client->del('{kiwicaptcha:argon2:leases:ci-stale}:global');
+        $this->client->del('{kiwicaptcha:argon2:leases:n_0ff7a46408d2bb67a53bf5ca68c8a326}:global');
         $newToken = $sem1->acquire();
         self::assertNotNull($newToken);
         $sem1->release((string) $oldToken); // stale release — must be a no-op
@@ -441,7 +441,7 @@ final class RealRedisIntegrationTest extends TestCase
     public function testSemaphoreWaitersGuardAgainstRealRedis(): void
     {
         $sem = new RedisAdmissionSemaphore($this->client, 1, 'ci-waiters', 45_000, 2);
-        $waitersKey = '{kiwicaptcha:argon2:leases:ci-waiters}:sem:waiters';
+        $waitersKey = '{kiwicaptcha:argon2:leases:n_4254a47ffc03ff08905e332c23109d43}:sem:waiters';
 
         $token = $sem->acquire();
         self::assertNotNull($token, 'the only lease is granted');
@@ -465,7 +465,7 @@ final class RealRedisIntegrationTest extends TestCase
     public function testPerScopeBudgetAndGlobalCapAgainstRealRedis(): void
     {
         $sem = new RedisAdmissionSemaphore($this->client, 100, 'ci-scope', 45_000, 64, 2);
-        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:scope:'.hash('sha256', 'login');
+        $scopeKey = '{kiwicaptcha:argon2:leases:n_8a5f009fb728cefed7fa45d1b2721c92}:scope:'.hash('sha256', 'login');
 
         // Scope 'login' fills its own budget of 2 while the global cap is
         // nowhere near full; a second scope still acquires (fairness).
@@ -486,11 +486,11 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertNull($sem->acquire('admin'));
         $sem->release($tokens[0]);
         $sem->release($tokens[1]);
-        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:scope:admin'), 'scoped release must free the scope set');
+        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:n_8a5f009fb728cefed7fa45d1b2721c92}:scope:admin'), 'scoped release must free the scope set');
         self::assertNotNull($sem->acquire('admin'), 'the freed scope budget admits again immediately');
 
         // Global cap still binds on top of the per-scope budgets.
-        $globalKey = '{kiwicaptcha:argon2:leases:ci-scope-global}:global';
+        $globalKey = '{kiwicaptcha:argon2:leases:n_d36917bc95e58110ee4df924dc882935}:global';
         $global = new RedisAdmissionSemaphore($this->client, 2, 'ci-scope-global', 45_000, 64, 10);
         self::assertNotNull($global->acquire('a'));
         self::assertNotNull($global->acquire('b'));
@@ -510,29 +510,29 @@ final class RealRedisIntegrationTest extends TestCase
         );
 
         // No central policy key: the binary's own config is authoritative.
-        $this->client->del('{kiwi:ci-health}:security-policy');
+        $this->client->del('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready without a central policy key');
 
         // Compatible central policy (protocol 4, epoch 1): the
         // execution-capable v4 canonical is this binary's max protocol.
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
+        $this->client->hset('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '1');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'ready with a compatible central policy');
 
         // A newer protocol or epoch takes the binary out of the pool.
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '4', 'min_policy_epoch', '1');
+        $this->client->hset('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy', 'min_protocol_version', '4', 'min_policy_epoch', '1');
         self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_protocol_version 4 <= the binary max (4) — the v4-capable binary stays ready');
 
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '5', 'min_policy_epoch', '1');
+        $this->client->hset('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy', 'min_protocol_version', '5', 'min_policy_epoch', '1');
         self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 5 > the binary max (4)');
 
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '2');
+        $this->client->hset('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '2');
         self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1');
 
         // Live stays 200 while ready fails.
         self::assertSame(200, $controller()->live()->getStatusCode(), 'live must stay 200 while ready fails');
 
         // Cleanup for the next test run.
-        $this->client->del('{kiwi:ci-health}:security-policy');
+        $this->client->del('{kiwi:n_978b2eaa9f818704a0ac51e19a15283c}:security-policy');
     }
 
     public function testConsumeIndeterminateResolvesToTheStoredOutcomeThroughTheValidator(): void

@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyCorruptException;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataCorruptException;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyResult;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -41,6 +45,8 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
             'chainDepth three' => ['chainDepth', ['v' => 1, 'chainDepth' => 3]],
             'depth without an id' => ['pair', ['v' => 1, 'chainDepth' => 2]],
             'id without depth two' => ['pair', ['v' => 1, 'chainId' => 'chain-1', 'chainDepth' => 0]],
+            'chainId with identifier-only characters' => ['chainId', ['v' => 1, 'chainId' => 'abc:def', 'chainDepth' => 2]],
+            'over-long chainId' => ['chainId', ['v' => 1, 'chainId' => str_repeat('x', 100), 'chainDepth' => 2]],
         ];
     }
 
@@ -76,6 +82,84 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         $chained = SiteVerifyMetadata::fromArray(['v' => 1, 'chainId' => 'chain-1', 'chainDepth' => 2]);
         self::assertSame('chain-1', $chained->chainId);
         self::assertSame(2, $chained->chainDepth);
+    }
+
+    public function testACachedCompletedResultIsStrictlyValidated(): void
+    {
+        // A completed idempotency result is authorization-bearing
+        // cached state: shapes no conforming finalize could write
+        // (bare success objects, unknown keys, impossible combinations,
+        // unknown error codes) fail closed at read, and finalize
+        // refuses them at write.
+        $corrupt = [
+            ['success' => true],
+            ['success' => 'true'],
+            ['success' => 1],
+            ['success' => true, 'hostname' => 'h', 'unknown' => 'x'],
+            ['success' => true, 'challenge_ts' => 'ts', 'hostname' => 5],
+            ['success' => false, 'challenge_ts' => 'ts', 'hostname' => null, 'error-codes' => ['internal-error']],
+            ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => []],
+            ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['not-a-code']],
+            ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error', 'bad-request']],
+            [],
+        ];
+        foreach ($corrupt as $shape) {
+            try {
+                SiteVerifyResult::validate($shape);
+                self::fail('the corrupt cached shape must fail closed: '.json_encode($shape));
+            } catch (SiteVerifyIdempotencyCorruptException) {
+            }
+        }
+        // The canonical shapes pass: the full success form, the minimal
+        // success form, and the canonical failure form.
+        SiteVerifyResult::validate(['success' => true, 'challenge_ts' => null, 'hostname' => null, 'action' => null, 'cdata' => null, 'error-codes' => []]);
+        SiteVerifyResult::validate(['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+        SiteVerifyResult::validate(['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['invalid-input-response']]);
+        $this->addToAssertionCount(3);
+    }
+
+    public function testARealRedisCompletedRecordWithACorruptResultFailsClosed(): void
+    {
+        $url = getenv('KC_REDIS_URL');
+        if (!\is_string($url) || $url === '') {
+            $flag = getenv('KIWI_REQUIRE_REAL_REDIS_TESTS');
+            if (\is_string($flag) && $flag !== '' && $flag !== '0') {
+                self::fail('KIWI_REQUIRE_REAL_REDIS_TESTS is set but KC_REDIS_URL is absent');
+            }
+            self::markTestSkipped('KC_REDIS_URL is not set');
+        }
+        $client = new \Predis\Client(['host' => parse_url($url, PHP_URL_HOST) ?: '127.0.0.1', 'port' => parse_url($url, PHP_URL_PORT) ?: 6379]);
+        $store = new RedisSiteVerifyIdempotencyStore($client, 'kiwitest:result-corrupt:'.getmypid());
+        $backendId = hash('sha256', 'secret|login|0|');
+        $uuid = 'eeeeeeee-cach-4b2c-8c3d-000000000c05';
+        $hash = hash('sha256', 'response');
+        // Seed a legitimate completed record directly (the exact
+        // envelope a conforming finalize writes) so the read-side
+        // validation runs against genuine stored bytes.
+        $key = '{kiwitest:result-corrupt:'.getmypid().'}:siteverify-idem:'.$backendId.':'.$uuid;
+        $client->set($key, json_encode([
+            'state' => 'complete',
+            'response_hash' => $hash,
+            'remoteip_fingerprint' => 'ip-fingerprint',
+            'result' => ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error']],
+        ], JSON_THROW_ON_ERROR), 'EX', 300);
+        self::assertSame(['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error']], $store->stored($backendId, $uuid), 'the legitimate completed record reads back');
+
+        // Corrupt the persisted completed result in place: the cached
+        // read must fail closed as the typed corrupt exception.
+        foreach ([
+            ['state' => 'complete', 'result' => ['success' => true]],
+            ['state' => 'complete', 'result' => ['success' => true, 'evil' => 'extra']],
+            ['state' => 'complete', 'result' => ['success' => 'true']],
+        ] as $corrupt) {
+            $client->set($key, json_encode($corrupt, JSON_THROW_ON_ERROR));
+            try {
+                $store->stored($backendId, $uuid);
+                self::fail('the corrupt completed result must fail closed');
+            } catch (SiteVerifyIdempotencyCorruptException) {
+            }
+        }
+        $client->del([$key]);
     }
 
     public function testTheRedisRoundTripThrowsTheSameVerdictsOnRealRedis(): void

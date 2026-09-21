@@ -321,7 +321,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         // parent: every forked worker inherits the copy and its monitor
         // observes the same effective epoch.
         $policyRedis = new FakePredisClient();
-        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $policyRedis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-');
         $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-start-');
@@ -927,12 +927,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
             // The correct owner with a wrong response hash: atomic no-op,
             // the entry stays pending.
-            $store->finalize($backendId, $uuid, 'hash-b', $owner, ['success' => true]);
+            $store->finalize($backendId, $uuid, 'hash-b', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
 
             // The correct owner with the correct hash completes the entry.
-            $store->finalize($backendId, $uuid, 'hash-a', $owner, ['success' => true]);
-            self::assertSame(['success' => true], $store->stored($backendId, $uuid));
+            $store->finalize($backendId, $uuid, 'hash-a', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
         } finally {
             $probe->del($key);
         }

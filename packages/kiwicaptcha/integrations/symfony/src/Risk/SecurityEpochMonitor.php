@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
 use KiwiCaptcha\Verifier;
 
 /**
@@ -286,7 +288,10 @@ final class SecurityEpochMonitor
     /** The central policy hash key (shared with the readiness probe). */
     public function policyKey(): string
     {
-        return sprintf(self::POLICY_KEY, $this->namespace);
+        // The raw configured namespace digested through the one shared
+        // derivation, so two deployments whose namespaces differ only
+        // in separator bytes never share a policy key.
+        return sprintf(self::POLICY_KEY, RedisNamespace::deriveOr($this->namespace, 'kiwi'));
     }
 
     /**

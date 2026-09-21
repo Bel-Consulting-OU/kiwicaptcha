@@ -272,7 +272,7 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         self::assertSame('pending', $before['state'], 'the claim is pending before the finalize attempt');
 
         try {
-            $store->finalize('backend', 'idem-1', 'response-hash', $owner, ['valid' => true]);
+            $store->finalize('backend', 'idem-1', 'response-hash', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::fail('the siteverify finalize must refuse inside the window after the authority changed');
         } catch (PinnedAuthorityRefusalException $e) {
             self::assertStringContainsString('pinned master|'.$pinnedRunId, $e->getMessage());
@@ -305,7 +305,7 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         [$claim, $owner] = $store->claim('backend', 'idem-ok', 'response-hash', 300, 'fp', null, 'binding');
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
-        self::assertTrue($store->finalize('backend', 'idem-ok', 'response-hash', $owner, ['valid' => true]));
+        self::assertTrue($store->finalize('backend', 'idem-ok', 'response-hash', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
         $record = json_decode((string) $this->client($port)->get('{'.self::NS.'}:siteverify-idem:backend:idem-ok'), true, 8, JSON_THROW_ON_ERROR);
         self::assertSame('complete', $record['state'], 'a legitimate finalize still succeeds on the pinned authority');
     }

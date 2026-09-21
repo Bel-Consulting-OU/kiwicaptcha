@@ -89,7 +89,7 @@ final class KiwiHealthControllerTest extends TestCase
         if ($minExecutionVersion !== null) {
             $policy['min_execution_version'] = (string) $minExecutionVersion;
         }
-        $client->hashes['{kiwi:health-test}:security-policy'] = $policy;
+        $client->hashes['{kiwi:n_526d8e2815323187d9c6bdb52c374dd1}:security-policy'] = $policy;
     }
 
     /**
@@ -99,7 +99,7 @@ final class KiwiHealthControllerTest extends TestCase
      */
     private function setRawExecutionFloor(FakePredisClient $client, string $raw): void
     {
-        $client->hashes['{kiwi:health-test}:security-policy'] = [
+        $client->hashes['{kiwi:n_526d8e2815323187d9c6bdb52c374dd1}:security-policy'] = [
             'min_protocol_version' => '1',
             'min_policy_epoch' => '1',
             'min_execution_version' => $raw,
@@ -272,7 +272,7 @@ final class KiwiHealthControllerTest extends TestCase
             if ($floor !== null) {
                 $policy['min_execution_version'] = (string) $floor;
             }
-            $client->hashes['{kiwi:health-test}:security-policy'] = $policy;
+            $client->hashes['{kiwi:n_526d8e2815323187d9c6bdb52c374dd1}:security-policy'] = $policy;
             $controller = $this->controller($client, executionGate: $gate, executionVersionCap: $cap, executionRequiredVersion: $required);
 
             $response = $controller->ready();

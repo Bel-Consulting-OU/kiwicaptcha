@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
@@ -293,7 +295,7 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
 
     private function pinKey(string $suffix): string
     {
-        return '{kiwi:'.self::NS.'}:authority:pin:'.$suffix;
+        return '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:'.$suffix;
     }
 
     private function identityOf(\Predis\Client $client): array

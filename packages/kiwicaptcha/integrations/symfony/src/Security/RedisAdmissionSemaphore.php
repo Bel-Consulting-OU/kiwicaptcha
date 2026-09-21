@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
+
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\VerificationAdmissionGate;
 
@@ -27,7 +29,8 @@ use KiwiCaptcha\VerificationAdmissionGate;
  * the next acquire, with no watchdog counter to drift and no DECR race.
  *
  * Keys: the one hash-tagged family root
- * `{kiwicaptcha:argon2:leases:<namespace>}` names every script key.
+ * `{kiwicaptcha:argon2:leases:n_<digest>}` (the digest of the raw
+ * namespace) names every script key.
  * The members are `:global` (the lease set), `:sem:waiters` (the
  * saturation gauge) and `:scope:<sha256(scope)>` (each per-scope set).
  * All of them occupy one Redis Cluster slot, so the multi-key scripts
@@ -234,15 +237,20 @@ LUA;
         if ($maxPerScope < 1) {
             throw new \InvalidArgumentException('maxPerScope must be >= 1');
         }
-        $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
+        // The tag content is a digest of the complete raw namespace:
+        // replacement-sanitizing first would fold distinct namespaces
+        // (tenant/a and tenant:a, two project directories differing in
+        // a separator byte) onto one lease family. An unset namespace
+        // shares the named default's deployment scope by choice.
+        $tag = RedisNamespace::deriveOr($namespace, 'default');
         // One hash-tagged root names the whole key family: every key any
         // script touches (the global lease set, the saturation counter,
         // each per-scope set) is derived from it with a plain suffix, so
         // the family is structurally confined to one Cluster slot — a
         // derived key cannot forget its tag. Lease sets live at most one
-        // lease lifetime, so the prior untagged key shape simply expires
-        // away rather than needing a migration.
-        $this->root = '{kiwicaptcha:argon2:leases:'.$suffix.'}';
+        // lease lifetime, so the prior key shape simply expires away
+        // rather than needing a migration.
+        $this->root = '{kiwicaptcha:argon2:leases:'.$tag.'}';
         $this->key = $this->root.':global';
         $this->waitersKey = $this->root.':sem:waiters';
     }

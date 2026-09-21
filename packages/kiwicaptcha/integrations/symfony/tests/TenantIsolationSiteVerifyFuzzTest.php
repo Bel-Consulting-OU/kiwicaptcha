@@ -229,7 +229,7 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         self::assertIsString($ownerB);
 
         self::assertTrue(
-            $this->store->finalize($idA, $uuid, hash('sha256', 'response-A'), $ownerA, ['success' => true]),
+            $this->store->finalize($idA, $uuid, hash('sha256', 'response-A'), $ownerA, ['success' => true, 'challenge_ts' => null, 'hostname' => null]),
             'the A owner must finalize its own namespace',
         );
         self::assertIsArray($this->store->stored($idA, $uuid), 'the A namespace must hold the finalized record');
@@ -280,7 +280,7 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
 
         [$claim0, $owner0] = $this->store->claim($idEpoch0, $uuid, hash('sha256', 'epoch-0'), 300, 'fp');
         self::assertSame(IdempotencyClaim::Claimed, $claim0);
-        self::assertTrue($this->store->finalize($idEpoch0, $uuid, hash('sha256', 'epoch-0'), $owner0, ['success' => true]));
+        self::assertTrue($this->store->finalize($idEpoch0, $uuid, hash('sha256', 'epoch-0'), $owner0, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
 
         [$claim2, $owner2] = $this->store->claim($idEpoch2, $uuid, hash('sha256', 'epoch-2'), 300, 'fp');
         self::assertSame(

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\Authority;
 
 use KiwiCaptcha\AuthoritySafety;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use KiwiCaptcha\AuthoritySafetyClassifier;
 
 /**
@@ -114,8 +116,8 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
      *        passed client of {@see assertServeEligible()}. A guarded
      *        wrapper would otherwise recurse into its own check.
      * @param string                $namespace       the deployment
-     *        namespace, sanitized to [A-Za-z0-9_.-] before it is
-     *        embedded in the pin key. Matches every other bundle key.
+     *        namespace, digested into the pin key (the same derivation
+     *        every bundle key family uses).
      * @param int                   $reverifySecs    the verification cache
      *        window in seconds. 0 disables the cache, so every check
      *        re-verifies (the test-mode and doctor-mode behavior).
@@ -142,8 +144,8 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
         if ($reverifySecs < 0) {
             throw new \InvalidArgumentException(sprintf('reverifySecs must be >= 0, got %d', $reverifySecs));
         }
-        $sanitized = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'kiwi';
-        $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $sanitized, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
+        $tag = RedisNamespace::deriveOr($namespace, 'kiwi');
+        $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $tag, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
         if ($expectedIdentity !== null && preg_match('/^[^|]+\|[^|]+$/D', $expectedIdentity) !== 1) {
             throw new \InvalidArgumentException(sprintf('ha_authority_expected must be the identity shape "role|run_id" (got "%s")', $expectedIdentity));
         }

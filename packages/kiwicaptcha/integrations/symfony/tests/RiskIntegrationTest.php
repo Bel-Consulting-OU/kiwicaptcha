@@ -952,13 +952,64 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame([], $store->observations, 'the degraded decision must never observe the store');
         self::assertSame(RiskReason::CapacityPressure, $decision->reasons[0]);
 
-        // Without a wired policy the helper must fail loudly, never guess.
+        // The engine's policy is the one authority: a gateway without
+        // the optional policy argument answers from the engine's own
+        // table, identically to the wired one.
         $bare = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1]);
+        $bareDecision = $bare->degradedDecisionForScope(1);
+        self::assertSame(RiskAction::Sha20, $bareDecision->action, 'the unwired gateway answers from the engine policy');
+
+        // A divergent gateway-level policy object refuses construction
+        // in every mode (not only minimum): the degraded surface must
+        // never decide from a table the engine never consults.
+        $divergent = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
         try {
-            $bare->degradedDecisionForScope(1);
-            self::fail('degradedDecisionForScope without a wired policy must throw LogicException');
-        } catch (\LogicException) {
-            self::assertTrue(true);
+            new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $divergent);
+            self::fail('a divergent gateway policy must refuse construction in every mode');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be the engine policy', $e->getMessage());
+        }
+    }
+
+    public function testScopeIdMapDeviationsRefuseConstruction(): void
+    {
+        // The scope id map is validated in full: u32 ids, no duplicate
+        // mapping (two scopes sharing one id would silently couple
+        // their risk state), and every id names a row in the engine
+        // policy.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1, 'signup' => 1]);
+            self::fail('two scopes sharing one id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be unique', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 7]);
+            self::fail('an id naming no policy row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('names no policy scope row', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 0]);
+            self::fail('a non-u32 id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('u32', $e->getMessage());
         }
     }
 
@@ -2601,7 +2652,10 @@ final class RiskIntegrationTest extends TestCase
             'version' => RiskPolicy::CONTRACT_VERSION,
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
-            'scopes' => [42 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
         ]);
         $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $weak, $keys);
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
@@ -2616,7 +2670,10 @@ final class RiskIntegrationTest extends TestCase
             'version' => RiskPolicy::CONTRACT_VERSION,
             'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
-            'scopes' => [42 => ['base_risk' => 0, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 0, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
         ]);
         $engine2 = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $whitelisted, $keys);
         try {

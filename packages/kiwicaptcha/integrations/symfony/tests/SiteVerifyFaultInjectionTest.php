@@ -912,9 +912,9 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $backendId1 = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
 
         $redisA = new FakePredisClient();
-        $redisA->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '0');
+        $redisA->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '0');
         $redisB = new FakePredisClient();
-        $redisB->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $redisB->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
 
         $verifier = new Verifier($storage);
         $monitorA = new SecurityEpochMonitor($verifier, $redisA, 'test-ns', 0, 1, static fn (): float => 0.0, 60);

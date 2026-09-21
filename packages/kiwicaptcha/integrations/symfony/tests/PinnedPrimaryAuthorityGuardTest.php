@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
+
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
@@ -48,7 +50,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
 
     private function pinKey(string $suffix = ''): string
     {
-        return '{kiwi:'.self::NS.'}:authority:pin'.($suffix !== '' ? ':'.$suffix : '');
+        return '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin'.($suffix !== '' ? ':'.$suffix : '');
     }
 
     private function infoCalls(FakePredisClient $fake): int
@@ -136,14 +138,14 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         $fake = $this->fake();
         $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'storage');
         self::assertSame(
-            '{kiwi:'.self::NS.'}:authority:pin:storage',
+            '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage',
             $guard->pinKey(),
             'one pin per distinct Redis authority: the storage authority pins its own key',
         );
 
         $riskGuard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, 'risk');
         self::assertSame(
-            '{kiwi:'.self::NS.'}:authority:pin:risk',
+            '{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:risk',
             $riskGuard->pinKey(),
             'a distinct risk authority pins its own key',
         );
@@ -179,7 +181,7 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         self::assertSame('master|'.self::RUN_ID_A, $guard->initializePin());
         self::assertSame(
             'master|'.self::RUN_ID_A,
-            $fake->strings['{kiwi:'.self::NS.'}:authority:pin:storage'] ?? null,
+            $fake->strings['{kiwi:'.RedisNamespace::deriveOr(self::NS, 'kiwi').'}:authority:pin:storage'] ?? null,
             'the initialize command records the operator-provisioned identity as the pin',
         );
     }

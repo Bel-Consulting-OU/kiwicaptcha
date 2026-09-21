@@ -1304,7 +1304,7 @@ final class ValidatorTest extends TestCase
 
         // The central epoch bumps to 2 and the monitor's cache window
         // (1 s) elapses: the next validation's refresh observes the bump.
-        $redis->hset('{kiwi:test-ns}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
         $nowMs += 2000.0;
 
         self::assertSame([KiwiCaptcha::INVALID_OR_EXPIRED_ERROR], $validate(), 'the same operation after the epoch bump never replays the stored success');
@@ -1378,7 +1378,7 @@ final class ValidatorTest extends TestCase
 
         // The epoch bumps; the token expires (an exempt failure, which
         // would otherwise route to the identity-gated replay branch).
-        $redis->hset('{kiwi:test-ns}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
         $nowMs += 2000.0;
         $now = 1_800_000_130;
 
