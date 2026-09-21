@@ -696,7 +696,7 @@ final class ConfigurationTest extends TestCase
     public function testSiteverifyIntegerCoercedSecretKeyIsRejectedWithAnActionableMessage(): void
     {
         // A canonical-decimal numeric secret within int range becomes an
-        // INTEGER array key at array-construction time (PHP semantics no
+        // integer array key at array-construction time (PHP semantics no
         // config tree can undo); the validation rejects it with the
         // actionable remedy instead of letting an integer secret key
         // reach hash_equals() and fail every /siteverify request.

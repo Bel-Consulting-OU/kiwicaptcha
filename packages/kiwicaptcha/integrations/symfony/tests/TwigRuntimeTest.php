@@ -358,7 +358,7 @@ final class TwigRuntimeTest extends TestCase
 
         $html = $runtime->renderWidget($env, ['nonce' => 'abc"def\'onload=alert(1)>&lt;']);
 
-        // The emitted driver tag carries the ESCAPED nonce (quotes and
+        // The emitted driver tag carries the escaped nonce (quotes and
         // angle brackets encoded), never the raw value.
         self::assertStringContainsString('nonce="abc&quot;def&#039;onload=alert(1)&gt;&amp;lt;"', $html, 'the CSP nonce is HTML-escaped inside the raw attribute');
         self::assertStringNotContainsString('nonce="abc"def', $html, 'a raw double quote must never break out of the nonce attribute');

@@ -128,6 +128,7 @@ final class ChainedChallengeTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policyConfig = [
             'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
             'scopes' => [],
         ];
@@ -428,11 +429,11 @@ final class ChainedChallengeTest extends TestCase
 
     public function testATicketlessFloodPerformsNoObligationReadsBeforeTheRateLimiterDenies(): void
     {
-        // The admission ordering of the chain gate: a presented SIGNED
+        // The admission ordering of the chain gate: a presented signed
         // ticket is validated before the limiter (cheap, local crypto,
         // and its one chain-record read is gated by possession of a
-        // server-signed one-shot ticket), but the TICKETLESS obligation
-        // lookup runs only AFTER the per-IP rate limiter admits the
+        // server-signed one-shot ticket), but the ticketless obligation
+        // lookup runs only after the per-IP rate limiter admits the
         // request — an unthrottled flood performs zero obligation reads
         // before the limiter denies it.
         $storage = new ArrayStorage();
@@ -442,7 +443,7 @@ final class ChainedChallengeTest extends TestCase
         $service = $this->chainService($chainStore);
         $limiter = new IssuanceRateLimiter(2, 60, pepper: 'chain-flood-test');
 
-        // An OPEN obligation exists for the transaction (scope login,
+        // An open obligation exists for the transaction (scope login,
         // unbound transaction, policy epoch 1): every ticketless request
         // of this transaction auto-resumes at stage 2 when admitted.
         $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
@@ -471,7 +472,7 @@ final class ChainedChallengeTest extends TestCase
         $denied = \count(array_filter($statuses, static fn (int $s): bool => $s === 429));
         self::assertSame(3, $denied, 'the per-IP limiter denies the requests beyond the 2-per-window cap: '.implode(',', $statuses));
 
-        // Only the ADMITTED requests read the obligation: the denied
+        // Only the admitted requests read the obligation: the denied
         // requests performed zero obligation reads before the limiter
         // refused them.
         self::assertSame(2, $chainStore->obligationChainIdReads, 'exactly the admitted requests perform the ticketless obligation lookup (never the denied ones)');

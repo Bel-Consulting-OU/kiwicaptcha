@@ -16,8 +16,8 @@ use Symfony\Component\HttpFoundation\Request;
  * The bounded-read fallback contract of the challenge and cancellation
  * endpoints: when Symfony hands back no stream resource from
  * getContent(true), the reader returns the empty string instead of the
- * unbounded buffered content, so the strict decoders refuse the request
- * and an oversized buffered body is never materialized.
+ * unbounded buffered content. The strict decoders therefore refuse the
+ * request and an oversized buffered body is never materialized.
  */
 final class BoundedBodyReadFallbackTest extends TestCase
 {

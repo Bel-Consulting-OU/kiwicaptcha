@@ -280,7 +280,7 @@ final class RealRedisIntegrationTest extends TestCase
     {
         // The per-challenge mutation components (rate limiter, Argon
         // semaphore, outstanding accounting, scope cap, issuance
-        // counter) ride the typed seam's ORDINARY mutation lane, so
+        // counter) ride the typed seam's ordinary mutation lane, so
         // under ha_authority pinned_primary their EVALs serve within
         // the guard's verification window: the INFO + pin reads of the
         // authority revalidation do NOT multiply per EVAL. Before the
@@ -621,6 +621,7 @@ final class RealRedisIntegrationTest extends TestCase
         $classifier = new \KiwiCaptcha\Risk\Network\CidrNetworkClassifier([]);
         $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
             'version' => \KiwiCaptcha\Risk\RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'weights' => [],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],

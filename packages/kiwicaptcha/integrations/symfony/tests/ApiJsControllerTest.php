@@ -10,9 +10,9 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The compat loader ({prefix}/api.js): the lazy locales module's
- * content-addressed descriptor is derived from the REAL asset bytes, and
- * a missing locales asset fails loudly at loader construction with the
- * actionable remedy — it never silently hashes the empty string (which
+ * content-addressed descriptor is derived from the real asset bytes.
+ * A missing locales asset fails loudly at loader construction with the
+ * actionable remedy. It never silently hashes the empty string (which
  * would pin an SRI digest of bytes that exist nowhere, so every lazy
  * locale fetch would fail the browser's integrity check with no
  * server-side signal).

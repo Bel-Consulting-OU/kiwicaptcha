@@ -6,8 +6,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 
 /**
  * The warned combination: a custom (non-__Host-) cookie name with a
- * scheme-derived Secure flag (secure: null) behind trusted proxies —
- * behind a TLS-terminating proxy the PHP-side scheme is the proxy's
+ * scheme-derived Secure flag (secure: null) behind trusted proxies.
+ * Behind a TLS-terminating proxy the PHP-side scheme is the proxy's
  * plain-http hop, so the cookie can be minted without Secure and
  * dropped by the browser.
  */

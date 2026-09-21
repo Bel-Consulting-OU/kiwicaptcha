@@ -11,10 +11,10 @@ use Symfony\Component\HttpFoundation\Request;
 /**
  * The continuity cookie's Secure-flag contract: a `__Host-` prefixed
  * name forces Secure regardless of the request scheme (the prefix's
- * browser contract), so a TLS-terminating proxy — where the PHP-side
- * request scheme is the proxy's plain-http hop — can never cause the
- * browser to silently drop the session cookie. A custom name without
- * the prefix keeps the configured/derived flag.
+ * browser contract). A TLS-terminating proxy — where the PHP-side
+ * request scheme is the proxy's plain-http hop — can therefore never
+ * cause the browser to silently drop the session cookie. A custom name
+ * without the prefix keeps the configured/derived flag.
  */
 final class ContinuityCookieTest extends TestCase
 {
