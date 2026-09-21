@@ -199,6 +199,77 @@ final class RedisStorageEvalShaTest extends TestCase
         self::assertSame([], $this->commands($client, 'EVAL'), 'the NOSCRIPT repair never ships the body through plain EVAL');
     }
 
+    /**
+     * The canned phpredis transport of the false/NOSCRIPT
+     * disambiguation tests: the polyfill \Redis declared by the
+     * EvalShaPhpRedisStub fixture. Skipped where the real extension is
+     * loaded (the stub cannot safely override the real class; the real
+     * transport's NOSCRIPT repair is covered by the predis-lane tests
+     * above).
+     */
+    private function phpRedisStubOrSkip(): ?\KiwiCaptcha\Tests\Fixtures\EvalShaPhpRedisStub
+    {
+        if (!\class_exists(\KiwiCaptcha\Tests\Fixtures\EvalShaPhpRedisStub::class)) {
+            self::markTestSkipped('the redis extension is loaded; the canned phpredis transport stub needs the polyfill base');
+        }
+
+        return new \KiwiCaptcha\Tests\Fixtures\EvalShaPhpRedisStub();
+    }
+
+    public function testACleanFalseEvalShaReplyIsTheNilNeverReEvaled(): void
+    {
+        // phpredis maps a Lua nil reply to a clean false. Only evidenced
+        // NOSCRIPT re-runs the script through plain EVAL, so the clean
+        // false is returned to the caller as the nil it is: exactly one
+        // EVALSHA, zero EVALs, and the missing record resolves as
+        // missing without a second script execution.
+        $client = $this->phpRedisStubOrSkip();
+        self::assertNotNull($client);
+        $storage = new RedisStorage($client, 'kiwi:');
+
+        $consumed = $storage->consume('absent-nonce');
+
+        self::assertNull($consumed, 'the nil reply resolves as the missing record');
+        self::assertSame(1, $client->evalShaCalls, 'exactly one EVALSHA ran');
+        self::assertSame(0, $client->evalCalls, 'a clean false must never be re-executed through plain EVAL');
+        self::assertSame([], $client->evalBodies, 'no script body was ever shipped');
+    }
+
+    public function testANoScriptExceptionOnPhpRedisIsRepairedThroughPlainEval(): void
+    {
+        // The evidenced NOSCRIPT: the server raised the error as a
+        // \RedisException, and the storage repairs by shipping the body
+        // through one plain EVAL.
+        $client = $this->phpRedisStubOrSkip();
+        self::assertNotNull($client);
+        $client->evalShaBehavior = 'noscript-exception';
+        $storage = new RedisStorage($client, 'kiwi:');
+
+        $result = $storage->consume('absent-nonce');
+
+        self::assertNull($result, 'the canned repaired reply degrades to the missing semantics');
+        self::assertSame(1, $client->evalShaCalls, 'the failing EVALSHA ran once');
+        self::assertSame(1, $client->evalCalls, 'the NOSCRIPT repair re-runs the script through plain EVAL');
+        self::assertStringContainsString('-- kiwicaptcha consume transition', (string) $client->evalBodies[0], 'the repair ships the consume script body');
+    }
+
+    public function testANoScriptLastErrorBufferOnPhpRedisIsRepairedThroughPlainEval(): void
+    {
+        // The build family that surfaces a missing script through the
+        // client's last-error buffer instead of an exception: the clean
+        // false plus a NOSCRIPT buffer entry is evidenced NOSCRIPT, and
+        // the storage repairs through plain EVAL.
+        $client = $this->phpRedisStubOrSkip();
+        self::assertNotNull($client);
+        $client->evalShaBehavior = 'noscript-last-error';
+        $storage = new RedisStorage($client, 'kiwi:');
+
+        $storage->consume('absent-nonce');
+
+        self::assertSame(1, $client->evalShaCalls, 'the buffered-NOSCRIPT EVALSHA ran once');
+        self::assertSame(1, $client->evalCalls, 'the buffered NOSCRIPT is repaired through plain EVAL');
+    }
+
     public function testStoreNeverRunsAnyLua(): void
     {
         // Only the transitions use Lua: an issuance is a single fused

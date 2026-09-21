@@ -12,9 +12,10 @@ use PHPUnit\Framework\TestCase;
  * Differential malicious-record parsing: the same deterministic fuzz
  * corpus (protocol/risk-v1/fuzz-corpus.json, 1000 mutations of a valid
  * record, seed 0x5EED0001) must be accepted and rejected identically by
- * the PHP and Rust parsers. The Rust side pins 659 accepted records;
- * fromArray is the strict serde mirror, so it must land on the same
- * 659.
+ * the PHP and Rust parsers. The Rust side pins 576 accepted records
+ * under the shared serde boundary (protocol_version 1..4, kid >= 1,
+ * policy_version >= 1); fromArray is the strict serde mirror, so it
+ * must land on the same 576.
  */
 final class FuzzCorpusParityTest extends TestCase
 {
@@ -57,7 +58,7 @@ final class FuzzCorpusParityTest extends TestCase
             }
         }
 
-        self::assertSame(659, $accepted, 'PHP fromArray must accept the SAME 659 records the Rust serde parser accepts');
-        self::assertSame(1000 - 659, $rejected);
+        self::assertSame(576, $accepted, 'PHP fromArray must accept the SAME 576 records the Rust serde parser accepts under the shared protocol/kid/policy boundary');
+        self::assertSame(1000 - 576, $rejected);
     }
 }

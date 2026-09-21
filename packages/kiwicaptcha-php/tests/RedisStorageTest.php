@@ -946,8 +946,9 @@ final class RedisStorageTest extends TestCase
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
         $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim owner is embedded in the record envelope');
-        self::assertGreaterThan(time(), $data['resume_until'] ?? 0, 'the claim must carry a future expiry');
-        self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertGreaterThan($nowUs, $data['resume_until'] ?? 0, 'the claim must carry a future expiry (epoch microseconds)');
+        self::assertLessThanOrEqual($nowUs + 60_000_000, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease (epoch microseconds)');
         self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a second claim while the first is held must be refused');
 
         self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', str_repeat('b', 32)), 'a stale owner can never release the claim');
@@ -1501,6 +1502,66 @@ final class RedisStorageTest extends TestCase
 
         $client->waitAck = 1;
         self::assertSame('missing', $storage->deleteIfPending('redis-nonce-1')->state, 'the failed-barrier delete still removed the record on the primary');
+    }
+
+    public function testDeleteRunsTheVerifiedWaitBarrierWhenItRemovedAKey(): void
+    {
+        // The plain delete is durability-critical the same way the
+        // delete-if-pending transition's is: a burned challenge that only
+        // vanished from the primary could reappear as pending from a
+        // promoted stale replica. A DEL that removed a key issues the
+        // fence + verified WAIT barrier; a DEL of an absent key performs
+        // no mutation and issues none.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 2, waitTimeoutMs: 100);
+        $client->waitAck = 2;
+        $waits = fn (): array => array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT'));
+
+        $storage->delete('absent-nonce');
+        self::assertSame([], $waits(), 'a DEL of an absent key must not issue the WAIT barrier');
+
+        $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
+        $storage->delete('pending-nonce');
+        $waitCalls = $waits();
+        self::assertCount(2, $waitCalls, 'the issuance and the removal DEL each issue the WAIT barrier');
+        self::assertSame([2, 100], $waitCalls[1][1], 'the deletion WAIT carries the configured numreplicas and timeout');
+
+        // A violated barrier on the deletion surfaces the same
+        // fail-closed ReplicaWaitException as the other transitions.
+        $storage->store($this->makeRecord('pending-nonce')); // +1 WAIT (issuance)
+        $client->waitAck = 0;
+        try {
+            $storage->delete('pending-nonce');
+            self::fail('delete must fail closed when the deletion is not durably replicated');
+        } catch (\KiwiCaptcha\Storage\ReplicaWaitException $e) {
+            self::assertStringContainsString('0 of 2', $e->getMessage());
+            self::assertStringContainsString('record deletion', $e->getMessage());
+        }
+        self::assertNull($client->store['kiwicaptcha:pending-nonce'] ?? null, 'the failed-barrier DEL still removed the record on the primary');
+    }
+
+    public function testAPersistentKeyIsRefusedByTheMutatingTransitionsAndLeftByteIntact(): void
+    {
+        // A key with no expiry (a raw SET, the real PTTL -1) is a
+        // persistent foreign key: the consume, cancel and commit
+        // transitions refuse it without touching the bytes — rewriting
+        // it with a synthesized TTL would silently attach a lifetime to
+        // data its owner never gave one.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, 'kiwi:');
+        $envelope = json_encode(
+            $this->makeRecord('persistent-nonce')->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
+            JSON_UNESCAPED_SLASHES,
+        );
+        $client->set('kiwi:persistent-nonce', $envelope);
+
+        self::assertNull($storage->consume('persistent-nonce'), 'the consume transition refuses a persistent key');
+        self::assertNull($storage->consumeWithOperationIdentity('persistent-nonce', 'order-42'), 'the identity consume refuses a persistent key');
+        self::assertNull($storage->cancel('persistent-nonce'), 'the cancel transition refuses a persistent key');
+        self::assertFalse($storage->commitResult('persistent-nonce', true, null), 'the result commit refuses a persistent key');
+        self::assertNull($storage->claimResumeDerivation('persistent-nonce'), 'the resume claim refuses a persistent key');
+
+        self::assertSame($envelope, $client->store['kiwi:persistent-nonce'], 'the refused transitions leave the persistent key byte-intact');
     }
 
     public function testRuntimeStateConsumedDecodesFromTheSingleSnapshot(): void

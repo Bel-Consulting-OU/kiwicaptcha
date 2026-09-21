@@ -144,4 +144,48 @@ final class OperationIdentityTest extends TestCase
             self::assertNull($storage->consumedState($nonce)?->operationIdentity);
         }
     }
+
+    public function testAnEnvelopeWithoutTheIdentityMarkerRefusesTheIdentityConsume(): void
+    {
+        // The identity API's envelope contract: a non-empty identity must
+        // land in the same write as the state flip, and an envelope that
+        // carries no `"operation_identity":null` marker is not one the
+        // API may write to. The consume transition reports the missing
+        // splice and the storage refuses the result — the identity is
+        // never silently dropped, and the flipped record never claims an
+        // identity it does not carry.
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $client = new FakePredisClient();
+        $storage = new RedisStorage($client, 'kiwi:');
+        $envelope = json_encode(
+            $this->makeRecord('markerless-nonce')->toArray() + ['state' => 'pending', 'consumed_result' => null],
+            JSON_UNESCAPED_SLASHES,
+        );
+        $client->set('kiwi:markerless-nonce', $envelope, 'EX', 120);
+
+        try {
+            $storage->consumeWithOperationIdentity('markerless-nonce', self::VALID_HEX);
+            self::fail('a non-empty identity on a markerless envelope must be refused');
+        } catch (\KiwiCaptcha\Storage\StorageWriteException $e) {
+            self::assertStringContainsString('operation_identity', $e->getMessage());
+        }
+
+        $after = json_decode((string) $client->store['kiwi:markerless-nonce'], true);
+        self::assertIsArray($after);
+        self::assertArrayNotHasKey('operation_identity', $after, 'the refused consume must not leave the record claiming an identity');
+        self::assertNull($storage->consumedState('markerless-nonce')?->operationIdentity, 'the retained state exposes no identity');
+
+        // The plain consume on a markerless envelope stays legal: no
+        // identity argument, nothing to splice.
+        $secondEnvelope = json_encode(
+            $this->makeRecord('markerless-nonce-2')->toArray() + ['state' => 'pending', 'consumed_result' => null],
+            JSON_UNESCAPED_SLASHES,
+        );
+        $client->set('kiwi:markerless-nonce-2', $secondEnvelope, 'EX', 120);
+        $consumed = $storage->consume('markerless-nonce-2');
+        self::assertTrue($consumed?->consumedNow ?? false, 'the plain consume of a markerless envelope is unchanged');
+        self::assertNull($consumed?->operationIdentity);
+    }
 }

@@ -162,4 +162,174 @@ final class ConsumedOutcomeRecoveryTest extends TestCase
         self::assertFalse($outcome->isOk());
         self::assertSame(VerifyError::InsufficientWork, $outcome->error);
     }
+
+    public function testStoredResultRecoveryConfirmsTheReplicationBarrier(): void
+    {
+        // The failed-barrier replay hole on the recovery API: the
+        // consume/commit that produced the stored success may have landed
+        // on the primary with its WAIT failing. A recovery that accepts
+        // the stored success must establish the replication fence first:
+        // a shortfall fails closed (no unproven success), and a satisfied
+        // fence returns the stored Valid — the same guard as the verify
+        // and resume paths.
+        [$inner, $token] = $this->consumedWithStoredValid(self::IDENTITY_A);
+        $barrier = new RecoveryBarrierStorage($inner);
+        $recovery = new ConsumedOutcomeRecovery($barrier);
+
+        $barrier->confirmResult = false;
+        $outcome = $recovery->recover($token, self::IDENTITY_A);
+        self::assertNotNull($outcome);
+        self::assertFalse($outcome->isOk(), 'a barrier shortfall must fail closed, never return an unproven success');
+        self::assertSame(VerifyError::StorageUnavailable, $outcome->error, 'the failed-barrier recovery answers the retryable StorageUnavailable, never an escaped storage exception');
+
+        $barrier->confirmResult = true;
+        $outcome = $recovery->recover($token, self::IDENTITY_A);
+        self::assertNotNull($outcome);
+        self::assertTrue($outcome->isOk(), 'the satisfied fence releases the stored success');
+        self::assertTrue($outcome->fromStoredResult, 'the recovery is the stored committed result, never a fresh derivation');
+    }
+
+    public function testAWrongNonceEnvelopeIsMalformedNeverTheStoredResult(): void
+    {
+        // The retained envelope was loaded by the token's nonce (the
+        // storage key); a stored nonce field that differs is an
+        // impossible key-value pair and answers the deterministic
+        // MalformedRecord, never the retained result — mirroring the
+        // verifier's consumed-envelope resolution.
+        [$inner, $token] = $this->consumedWithStoredValid(self::IDENTITY_A);
+        $consumed = $inner->consumedState(SolutionToken::decode($token)->nonce);
+        self::assertNotNull($consumed);
+        $mismatched = new MismatchedNonceStorage($consumed, 'foreign-nonce-not-the-tokens');
+        $recovery = new ConsumedOutcomeRecovery($mismatched);
+
+        $outcome = $recovery->recover($token, self::IDENTITY_A);
+        self::assertNotNull($outcome);
+        self::assertFalse($outcome->isOk(), 'an impossible key-value pair never replays the stored success');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error);
+    }
+}
+
+/**
+ * The barrier storage of the recovery tests: a
+ * {@see \KiwiCaptcha\ReplicationBarrierInterface} wrapper whose
+ * establishReplicationFence is configurable, mirroring the verify-path
+ * barrier tests.
+ */
+final class RecoveryBarrierStorage implements \KiwiCaptcha\StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface
+{
+    public bool $confirmResult = true;
+
+    public function __construct(private readonly ArrayStorage $inner)
+    {
+    }
+
+    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+    {
+        $this->inner->store($record);
+    }
+
+    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+    {
+        return $this->inner->find($nonce);
+    }
+
+    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consume($nonce);
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        return $this->inner->commitResult($nonce, $valid, $binding);
+    }
+
+    public function delete(string $nonce): void
+    {
+        $this->inner->delete($nonce);
+    }
+
+    public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return $this->inner->consumedState($nonce);
+    }
+
+    public function establishReplicationFence(string $what): void
+    {
+        if (!$this->confirmResult) {
+            throw new \RuntimeException('replication barrier shortfall');
+        }
+    }
+}
+
+/**
+ * A consumed-state storage whose retained envelope always reports a
+ * nonce different from the lookup key: the impossible key-value pair
+ * the nonce guard refuses.
+ */
+final class MismatchedNonceStorage implements \KiwiCaptcha\StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface
+{
+    public function __construct(
+        private readonly \KiwiCaptcha\ConsumedRecord $envelope,
+        private readonly string $storedNonce,
+    )
+    {
+    }
+
+    public function store(\KiwiCaptcha\ChallengeRecord $record): void
+    {
+    }
+
+    public function find(string $nonce): ?\KiwiCaptcha\ChallengeRecord
+    {
+        return null;
+    }
+
+    public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return null;
+    }
+
+    public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+    {
+        return false;
+    }
+
+    public function delete(string $nonce): void
+    {
+    }
+
+    public function consumedState(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+    {
+        return new \KiwiCaptcha\ConsumedRecord(
+            new \KiwiCaptcha\ChallengeRecord(
+                nonce: $this->storedNonce,
+                scope: $this->envelope->record->scope,
+                bindingTag: $this->envelope->record->bindingTag,
+                issuedAt: $this->envelope->record->issuedAt,
+                expiresAt: $this->envelope->record->expiresAt,
+                algorithm: $this->envelope->record->algorithm,
+                mKib: $this->envelope->record->mKib,
+                t: $this->envelope->record->t,
+                p: $this->envelope->record->p,
+                targetBits: $this->envelope->record->targetBits,
+                salt: $this->envelope->record->salt,
+                prefix: $this->envelope->record->prefix,
+                challenge: $this->envelope->record->challenge,
+                minDurationMs: $this->envelope->record->minDurationMs,
+                issuedAtNs: $this->envelope->record->issuedAtNs,
+                protocolVersion: $this->envelope->record->protocolVersion,
+                region: $this->envelope->record->region,
+                policyVersion: $this->envelope->record->policyVersion,
+                requestBinding: $this->envelope->record->requestBinding,
+                issuer: $this->envelope->record->issuer,
+                kid: $this->envelope->record->kid,
+                hostname: $this->envelope->record->hostname,
+                decoyField: $this->envelope->record->decoyField,
+            ),
+            $this->envelope->consumedNow,
+            $this->envelope->consumedBefore,
+            $this->envelope->consumedResult,
+            $this->envelope->operationIdentity,
+        );
+    }
 }

@@ -193,6 +193,10 @@ final class StrictParserTest extends TestCase
 
         yield 'algorithm alias argon2' => [self::mutate('algorithm', 'argon2'), 'must be exactly'];
 
+        // The rejection vocabulary names every accepted algorithm, rsw
+        // included.
+        yield 'unknown algorithm names all three accepted values' => [self::mutate('algorithm', 'scrypt'), '"sha256", "argon2id" or "rsw"'];
+
         // Unknown algorithm strings must be rejected identically to the
         // Rust parser (PoWAlgorithm enum: exact lowercase names only, no
         // aliases, no spelling variants).
@@ -514,13 +518,36 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->decoyField);
     }
 
-    public function testProtocolVersionWithinU8RangeIsAccepted(): void
+    public function testProtocolVersionsOutsideTheCanonicalRangeAreRejected(): void
     {
-        // serde accepts any u8 — 99 is within range and deserializes (the
-        // verifier's validateRecord rejects it later, exactly like Rust).
-        $record = ChallengeRecord::fromArray(self::mutate('protocol_version', 99));
+        // The canonical protocol bounds are enforced at the parse
+        // boundary, mirroring the Rust serde boundary: 0 is not a
+        // protocol version, and everything above MAX_PROTOCOL_VERSION is
+        // a corrupt or foreign value no conforming issuer writes.
+        foreach ([0, 5, 99, 255] as $version) {
+            try {
+                ChallengeRecord::fromArray(self::mutate('protocol_version', $version));
+                self::fail("protocol_version $version must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString('protocol_version', $e->getMessage());
+            }
+        }
+    }
 
-        self::assertSame(99, $record->protocolVersion);
+    public function testZeroKidAndZeroPolicyVersionAreRejected(): void
+    {
+        // The key id and the security-policy epoch are 1-based sequences:
+        // a stored 0 is a corrupt or foreign value rejected at the parse
+        // boundary, mirroring the Rust serde boundary.
+        foreach (['kid', 'policy_version'] as $field) {
+            try {
+                ChallengeRecord::fromArray(self::mutate($field, 0));
+                self::fail("$field 0 must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString($field, $e->getMessage());
+                self::assertStringContainsString('within 1..', $e->getMessage());
+            }
+        }
     }
 
     public function testBase64IsNotValidatedAtParseTime(): void

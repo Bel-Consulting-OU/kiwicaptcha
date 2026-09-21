@@ -7,7 +7,6 @@
     "require": {
         "php": ">=8.1",
         "ext-json": "*",
-        "ext-openssl": "*",
         "ext-sodium": "*"
     },
     "require-dev": {
@@ -18,6 +17,7 @@
     },
     "suggest": {
         "ext-gmp": "Required only for the optional RSW time-lock algorithm",
+        "ext-openssl": "Optional: the core hashes and HMACs use ext-sodium/ext-hash primitives; install only if other parts of your stack need it",
         "psr/cache": "Required for the PSR-6 challenge storage adapter (Psr6Storage)",
         "psr/log": "Optional structured logging of verify outcomes",
         "bel-consulting/kiwicaptcha-symfony": "Symfony bundle integration (form type, validator constraint, Twig widget, challenge endpoint)"

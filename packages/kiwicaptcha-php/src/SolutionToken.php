@@ -14,7 +14,10 @@ namespace KiwiCaptcha;
  * independently. The rsw final value is peeled first, exactly when the
  * last segment is 512 lowercase hex. The execution-evidence segment
  * that precedes it (digest or digest:trace) is peeled next. The
- * unarmed token keeps the exact four-segment shape.
+ * unarmed token keeps the exact four-segment shape. The numeric
+ * segments (counter, duration_ms) are canonical decimal: digits only,
+ * a leading zero rejected unless the whole segment is exactly "0", so
+ * each value has exactly one wire spelling in both implementations.
  *
  * An rsw token carries the client's final value as an optional final
  * segment: exactly 512 lowercase hex characters (the 256-byte
@@ -216,9 +219,15 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        // Rust's `u64::from_str` accepts leading zeros ("007" -> 7) and
-        // rejects empty/"+1"/"1.5". ctype_digit mirrors that exactly.
+        // The numeric segments are canonical decimal: digits only, with a
+        // leading zero rejected unless the whole segment is exactly "0"
+        // ("0042" is not a number the solver or the widget ever emits).
+        // Both implementations enforce the identical rule, so the token
+        // language accepts exactly one spelling per value.
         if ($counterStr === '' || !ctype_digit($counterStr)) {
+            throw DecodeError::invalidCounter();
+        }
+        if (\strlen($counterStr) > 1 && $counterStr[0] === '0') {
             throw DecodeError::invalidCounter();
         }
         // Counter bound: the JS solver searches counter < 5,000,000
@@ -231,6 +240,9 @@ final class SolutionToken
         $counter = (int) $counterStr;
 
         if ($durationStr === '' || !ctype_digit($durationStr)) {
+            throw DecodeError::invalidDuration();
+        }
+        if (\strlen($durationStr) > 1 && $durationStr[0] === '0') {
             throw DecodeError::invalidDuration();
         }
         // Duration is client telemetry only, but the wire protocol still

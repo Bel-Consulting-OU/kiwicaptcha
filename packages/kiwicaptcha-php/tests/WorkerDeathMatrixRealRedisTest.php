@@ -582,8 +582,9 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
             self::assertIsString($owner, 'the dead recovery left its owner token inside the envelope');
             self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $owner, 'the owner token follows the 32-hex contract');
             $until = (int) ($data['resume_until'] ?? 0);
-            self::assertGreaterThan(time() + 1, $until, 'the claim must still be live for the loser probe');
-            self::assertLessThanOrEqual(time() + $claimTtlSecs + 2, $until, 'the claim is the short configured lease');
+            $nowUs = (int) (microtime(true) * 1_000_000);
+            self::assertGreaterThan($nowUs + 1_000_000, $until, 'the claim must still be live for the loser probe');
+            self::assertLessThanOrEqual($nowUs + ($claimTtlSecs + 2) * 1_000_000, $until, 'the claim is the short configured lease');
             self::assertNull($data['consumed_result'] ?? null, 'the claiming worker committed nothing');
 
             $loser = $verifier->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
@@ -598,13 +599,15 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
 
         // Wait out the remaining lease with a bounded poll, so the
         // stale claim is dead regardless of how long the probe took.
+        // The lease expiry is epoch microseconds, compared on the same
+        // microsecond clock the claim wrote.
         $deadline = microtime(true) + $claimTtlSecs + 3.0;
-        while ((int) ($this->envelope($client, $prefix, $nonce)['resume_until'] ?? 0) > time()) {
+        while ((int) ($this->envelope($client, $prefix, $nonce)['resume_until'] ?? 0) > (int) (microtime(true) * 1_000_000)) {
             self::assertLessThan($deadline, microtime(true), 'the claim lease must expire within its TTL');
             usleep(250000);
         }
         $data = $this->envelope($client, $prefix, $nonce);
-        self::assertLessThanOrEqual(time(), (int) ($data['resume_until'] ?? 0), 'the lease expired while the owner process was gone');
+        self::assertLessThanOrEqual((int) (microtime(true) * 1_000_000), (int) ($data['resume_until'] ?? 0), 'the lease expired while the owner process was gone');
         self::assertNull($data['consumed_result'] ?? null, 'no result was committed while the claim was dead');
 
         $outcome = $verifier->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');

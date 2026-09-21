@@ -185,6 +185,24 @@ final class Config
      *                                      when algorithm is rsw). The client performs T
      *                                      sequential modular squarings; the server
      *                                      verifies instantly through lambda.
+     * @param string|null $tenantId         The tenant scope of the derived
+     *                                      purpose keys (mirrors the Rust
+     *                                      ChallengeConfig.tenant_id). When
+     *                                      non-null, the challenge-signing
+     *                                      and IP-binding keys of every
+     *                                      issued record are derived under
+     *                                      the per-tenant root
+     *                                      ("kiwi/v2/tenant/" + tenant id,
+     *                                      see {@see DerivedKeys::fromMaster()}),
+     *                                      so tenants of a shared master
+     *                                      secret cannot forge each other's
+     *                                      challenges or binding tags. Must
+     *                                      match the narrow identifier
+     *                                      alphabet, at most 64 bytes of
+     *                                      [A-Za-z0-9._:-]. Null (the
+     *                                      default) derives the global
+     *                                      purpose keys, byte-identical to
+     *                                      the tenantless issuance.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -205,6 +223,7 @@ final class Config
         public readonly ?string $rswModulusN = null,
         public readonly ?string $rswLambda = null,
         public readonly int $rswT = 75_000,
+        public readonly ?string $tenantId = null,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
@@ -220,6 +239,11 @@ final class Config
         if ($issuer !== null && !self::isValidIdentifier($issuer, 128)) {
             throw new \InvalidArgumentException(
                 'issuer must be 1-128 characters of [A-Za-z0-9._:-] when set'
+            );
+        }
+        if ($tenantId !== null && !self::isValidIdentifier($tenantId, 64)) {
+            throw new \InvalidArgumentException(
+                'tenantId must be 1-64 characters of [A-Za-z0-9._:-] when set'
             );
         }
         if ($t < 1) {
@@ -351,6 +375,7 @@ final class Config
             'rswModulusN' => $this->rswModulusN,
             'rswLambda' => $this->rswLambda !== null ? '<redacted>' : null,
             'rswT' => $this->rswT,
+            'tenantId' => $this->tenantId,
         ];
     }
 

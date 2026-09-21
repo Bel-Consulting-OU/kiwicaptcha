@@ -56,9 +56,10 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * atomically with the pending→consumed transition via
  * {@see OperationIdentityAwareStorageInterface}). Two more optional
  * runtime fields exist only while a resume re-derivation claim is held:
- * `resume_owner` (hex owner token) and `resume_until` (epoch seconds);
- * they are absent otherwise and cleared atomically with the release and
- * the claim-bearing commit. The `cancelled` state
+ * `resume_owner` (hex owner token) and `resume_until` (epoch
+ * microseconds on the server clock); they are absent otherwise and
+ * cleared atomically with the release and the claim-bearing commit.
+ * The `cancelled` state
  * is the terminal marker of
  * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}. A pending
  * record flipped to cancelled is dead. The consume transition refuses
@@ -92,31 +93,36 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * InvalidArgumentException at the storage boundary otherwise) and the
  * claim lease TTL is >= 1 second.
  *
- * The claim's runtime envelope fields: `resume_owner` (the hex owner
- * token) and `resume_until` (epoch seconds on the server clock) exist
- * only while a claim is held; they are absent otherwise and cleared
- * atomically by the release and by the claim-bearing commit. Every
- * envelope reader strips them with the other runtime fields before the
- * strict record parse.
+     * The claim's runtime envelope fields: `resume_owner` (the hex owner
+     * token) and `resume_until` (epoch microseconds on the server clock)
+     * exist only while a claim is held; they are absent otherwise and
+     * cleared atomically by the release and by the claim-bearing commit.
+     * Every envelope reader strips them with the other runtime fields
+     * before the strict record parse.
  */
 final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface, ResumeDerivationClaimInterface
 {
     /**
      * Atomic consume transition: GET the record; if present and not yet
-     * consumed, flip `state` to "consumed" (preserving the key TTL). When
-     * ARGV[1] is a non-empty JSON-escaped identity, the
-     * `"operation_identity":null` marker is spliced to the identity in
-     * the same script, so the identity lands atomically with the state
-     * flip and the stored identity is provably the actual atomic consume
-     * winner's. The identity has already passed
-     * {@see OperationIdentity::validate()} before it reaches the script.
-     * The 1..128-byte `[A-Za-z0-9_-]` alphabet excludes `%` and every
-     * other Lua `string.gsub` replacement-template escape by
+     * consumed, flip `state` to "consumed" (preserving the key's
+     * remaining lifetime in milliseconds). When ARGV[1] is a non-empty
+     * JSON-escaped identity, the `"operation_identity":null` marker is
+     * spliced to the identity in the same script, so the identity lands
+     * atomically with the state flip and the stored identity is provably
+     * the actual atomic consume winner's. The identity has already
+     * passed {@see OperationIdentity::validate()} before it reaches the
+     * script. The 1..128-byte `[A-Za-z0-9_-]` alphabet excludes `%` and
+     * every other Lua `string.gsub` replacement-template escape by
      * construction, so the raw replacement-string splice below can never
      * be interpreted as a template; a replacement function is
-     * unnecessary. Returns nil for a missing record, else {json,
-     * consumed_now, consumed_before, consumed_result_json}, where the
-     * result is the committed JSON ("" when absent).
+     * unnecessary. The splice count rides the reply as its fifth
+     * element, so a non-empty identity that finds no marker is reported
+     * to the caller and never silently dropped. Returns nil for a
+     * missing record, false for a key without an expiry (a persistent
+     * foreign key the transition refuses to rewrite), else {json,
+     * consumed_now, consumed_before, consumed_result_json,
+     * identity_spliced}, where the result is the committed JSON (""
+     * when absent).
      */
     private const CONSUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha consume transition
@@ -127,20 +133,24 @@ final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 -- RAW stored JSON string (store() always writes the exact
 -- `"state":"pending"` marker), and the logical-operation identity is
 -- spliced into the `"operation_identity":null` marker in the SAME
--- script when a non-empty identity argument is given (an old record
--- without the marker — or a null identity — leaves it untouched). The
--- identity has passed the shared OperationIdentity::validate() gate
--- BEFORE the eval: 1..128 bytes of [A-Za-z0-9_-]. That alphabet is what
--- makes the gsub REPLACEMENT splice safe — `%` is the Lua replacement-
--- template escape and is excluded by construction, so ARGV[1] is never
--- interpreted as a template. The transition winner receives the UPDATED
--- bytes, so the recorded identity rides back on its own ConsumedRecord.
+-- script when a non-empty identity argument is given. The splice count
+-- is reported back (reply element 5): a non-empty identity that finds
+-- no marker leaves the flip in place but tells the caller, which
+-- refuses the transition result instead of silently dropping the
+-- identity. The identity has passed the shared
+-- OperationIdentity::validate() gate BEFORE the eval: 1..128 bytes of
+-- [A-Za-z0-9_-]. That alphabet is what makes the gsub REPLACEMENT
+-- splice safe — `%` is the Lua replacement-template escape and is
+-- excluded by construction, so ARGV[1] is never interpreted as a
+-- template. The transition winner receives the UPDATED bytes, so the
+-- recorded identity rides back on its own ConsumedRecord.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
 end
 local consumedNow = 0
 local consumedBefore = 0
+local identitySpliced = 0
 if string.find(v, '"state":"consumed"', 1, true) then
   consumedBefore = 1
 else
@@ -162,8 +172,17 @@ else
     or string.find(v, '"resume_until":', 1, true) then
     return nil
   end
-  local ttl = redis.call("TTL", KEYS[1])
-  if ttl < 1 then ttl = 1 end
+  -- Lease preservation in milliseconds. PTTL < 0 means the key carries
+  -- NO expiry (a persistent foreign key): the transition refuses
+  -- without touching the bytes — rewriting it with a synthesized TTL
+  -- would silently attach a lifetime to data its owner never gave one.
+  -- A sub-second remainder is floored at 1000 ms so the flip can never
+  -- mint an already-expired key.
+  local pttl = redis.call("PTTL", KEYS[1])
+  if pttl < 0 then
+    return false
+  end
+  if pttl < 1000 then pttl = 1000 end
   local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
   if n ~= 1 then
     -- A cancelled record (or any other non-pending state) is never
@@ -176,9 +195,10 @@ else
     local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
     if m == 1 then
       updated = withIdentity
+      identitySpliced = 1
     end
   end
-  redis.call("SET", KEYS[1], updated, "EX", ttl)
+  redis.call("SET", KEYS[1], updated, "PX", pttl)
   consumedNow = 1
   v = updated
 end
@@ -192,9 +212,9 @@ if s and e then
     elseif c == '}' then depth = depth - 1 end
     i = i + 1
   end
-  return {v, consumedNow, consumedBefore, string.sub(v, e, i - 1)}
+  return {v, consumedNow, consumedBefore, string.sub(v, e, i - 1), identitySpliced}
 end
-return {v, consumedNow, consumedBefore, 'null'}
+return {v, consumedNow, consumedBefore, 'null', identitySpliced}
 LUA;
 
     /**
@@ -252,14 +272,17 @@ LUA;
 
     /**
      * Atomic cancellation transition: GET the record and decide. A
-     * missing record returns nil. A consumed record is finalized and is
-     * never cancelled ({'consumed'}). An already-cancelled record is
-     * idempotent ({'cancelled'}). A pending record is flipped to
-     * `"state":"cancelled"` in place, preserving the key TTL, and
-     * returns {'cancelled-now'}. The same raw-splice rule as the consume
-     * script applies: the stored JSON is never re-encoded through cjson.
-     * The record is kept until its TTL. The cancelled marker is the
-     * replay and redemption protection, not absence.
+     * missing record returns nil. A key without an expiry (a persistent
+     * foreign key) returns false, refused without touching the bytes. A
+     * consumed record is finalized and is never cancelled
+     * ({'consumed'}). An already-cancelled record is idempotent
+     * ({'cancelled'}). A pending record is flipped to
+     * `"state":"cancelled"` in place, preserving the key's remaining
+     * lifetime in milliseconds, and returns {'cancelled-now'}. The same
+     * raw-splice rule as the consume script applies: the stored JSON is
+     * never re-encoded through cjson. The record is kept until its TTL.
+     * The cancelled marker is the replay and redemption protection, not
+     * absence.
      */
     private const CANCEL_SCRIPT = <<<'LUA'
 -- kiwicaptcha cancel transition
@@ -270,7 +293,9 @@ LUA;
 -- RAW stored JSON string (store() always writes the exact
 -- `"state":"pending"` marker), mirroring the consume transition. A
 -- consumed record is terminal and never cancellable; a cancelled record
--- is idempotent. The flip preserves the key TTL.
+-- is idempotent. The flip preserves the key's remaining lifetime in
+-- milliseconds; a key without an expiry (PTTL < 0) is refused untouched,
+-- never rewritten with a synthesized lifetime.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
@@ -281,13 +306,16 @@ end
 if string.find(v, '"state":"cancelled"', 1, true) then
   return {'cancelled'}
 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return false
+end
+if pttl < 1000 then pttl = 1000 end
 local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
 if n ~= 1 then
   return nil
 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return {'cancelled-now'}
 LUA;
 
@@ -307,7 +335,12 @@ LUA;
      * the record's runtime envelope (`resume_owner` / `resume_until`),
      * so the transition is a single-key splice that a Redis Cluster
      * deployment routes to one slot, never `CROSSSLOT`. ARGV[1] = the
-     * random owner token, ARGV[2] = the claim TTL in seconds.
+     * random owner token, ARGV[2] = the claim TTL in seconds. The lease
+     * expiry `resume_until` is epoch MICROSECONDS on the server clock
+     * (the same unit both languages' readers parse as a JSON integer;
+     * ~1.79e15 stays exact in PHP ints and 2^53 doubles), so a claim
+     * TTL of N seconds is a true N-second lease rather than a
+     * second-granularity rounding.
      */
     private const CLAIM_RESUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha resume-derivation claim
@@ -317,15 +350,20 @@ LUA;
 -- commit; the losers re-read and resolve the winner's committed outcome.
 -- KEYS[1] = the record key only. ARGV[1] = the random owner token,
 -- ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the record
--- envelope: `"resume_owner":"<hex token>","resume_until":<epoch secs>`
--- is spliced before the envelope's closing brace (the record key TTL is
--- preserved), so this script touches exactly one key and is single-slot
--- on a Redis Cluster. A crash leaves only the short lease: once
--- resume_until passes, a later retry may claim again. The record checks
--- use the RAW markers (the same strategy as the rest of this storage
--- layer, which never re-encodes the record's JSON bytes): the envelope
--- stores `"consumed_result":null`, and a cjson decode would map a JSON
--- null to cjson.null, never Lua nil, refusing every resultless record.
+-- envelope: `"resume_owner":"<hex token>","resume_until":<epoch us>`
+-- is spliced before the envelope's closing brace (the record key's
+-- remaining lifetime in milliseconds is preserved), so this script
+-- touches exactly one key and is single-slot on a Redis Cluster. A
+-- crash leaves only the short lease: once resume_until (microseconds)
+-- passes, a later retry may claim again. The record checks use the RAW
+-- markers (the same strategy as the rest of this storage layer, which
+-- never re-encodes the record's JSON bytes): the envelope stores
+-- `"consumed_result":null`, and a cjson decode would map a JSON null to
+-- cjson.null, never Lua nil, refusing every resultless record. The
+-- microsecond now is built from TIME and written with %.0f: Lua's
+-- default number-to-string conversion uses %.14g and would render a
+-- 16-digit microsecond value in scientific notation, breaking the
+-- strict integer readers.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
@@ -336,14 +374,14 @@ end
 if not string.find(v, '"consumed_result":null', 1, true) then
   return nil
 end
+local t = redis.call("TIME")
+local nowUs = tonumber(t[1]) * 1000000 + tonumber(t[2])
 -- Live-claim check: refuse while a live claim is held. An owner marker
 -- without a parseable expiry is treated as live (fail safe: never a
 -- second unsynchronized derivation).
 local untilStr = string.match(v, '"resume_until":(%d+)')
 if string.find(v, '"resume_owner":"', 1, true) then
-  local time = redis.call("TIME")
-  local now = tonumber(time[1])
-  if untilStr == nil or tonumber(untilStr) > now then
+  if untilStr == nil or tonumber(untilStr) > nowUs then
     return nil
   end
   -- Expired claim: strip the stale fields before appending the fresh
@@ -356,12 +394,14 @@ if string.find(v, '"resume_owner":"', 1, true) then
   end
   v = stripped
 end
-local time = redis.call("TIME")
-local untilVal = tonumber(time[1]) + tonumber(ARGV[2])
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return nil
+end
+if pttl < 1000 then pttl = 1000 end
+local untilVal = nowUs + tonumber(ARGV[2]) * 1000000
+local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. string.format("%.0f", untilVal) .. '}'
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return ARGV[1]
 LUA;
 
@@ -372,8 +412,10 @@ LUA;
 -- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
 -- owner token. The claim fields are cleared from the envelope only when
 -- they still hold exactly this owner: a stale owner after a crash and
--- TTL expiry can never delete a newer recovery's claim. The record key
--- TTL is preserved.
+-- TTL expiry can never delete a newer recovery's claim. The record
+-- key's remaining lifetime in milliseconds is preserved; a key without
+-- an expiry (PTTL < 0) is refused untouched, never rewritten with a
+-- synthesized lifetime.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
@@ -382,9 +424,12 @@ local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_u
 if n ~= 1 then
   return 0
 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return 1
 LUA;
 
@@ -404,10 +449,16 @@ LUA;
 -- Ownership lost (missing, expired, or owned by a different token)
 -- returns 2 with no write, so a stale owner whose claim expired
 -- mid-derivation can never commit, and the successful write clears the
--- claim fields in the same atomic transition. The claim is embedded in
--- the record envelope, so this script touches exactly one key
--- (single-slot on a Redis Cluster, never CROSSSLOT). Callers without a
--- claim pass ARGV[4] = '': byte-identical legacy behavior.
+-- claim fields in the same atomic transition. The lease expiry
+-- `resume_until` is epoch MICROSECONDS; the liveness comparison runs
+-- on the same microsecond clock (TIME with the microsecond part), so a
+-- claim TTL of N seconds fences for exactly N seconds. The claim is
+-- embedded in the record envelope, so this script touches exactly one
+-- key (single-slot on a Redis Cluster, never CROSSSLOT). Callers
+-- without a claim pass ARGV[4] = '': byte-identical legacy behavior.
+-- A key without an expiry (PTTL < 0) is refused with 0 untouched,
+-- never rewritten with a synthesized lifetime; the result write
+-- preserves the key's remaining lifetime in milliseconds.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
@@ -425,12 +476,17 @@ if claim then
   -- must be LIVE: an expired claim no longer fences (the stale owner
   -- may not commit, exactly the Rust GET-on-an-expired-key behavior).
   local untilStr = string.match(v, '"resume_owner":"' .. ARGV[4] .. '","resume_until":(%d+)')
-  local time = redis.call("TIME")
-  local now = tonumber(time[1])
-  if untilStr == nil or tonumber(untilStr) <= now then
+  local t = redis.call("TIME")
+  local nowUs = tonumber(t[1]) * 1000000 + tonumber(t[2])
+  if untilStr == nil or tonumber(untilStr) <= nowUs then
     return 2
   end
 end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
 local encoded = cjson.encode({
   valid = (ARGV[1] == '1'),
   binding = (ARGV[3] == "0") and cjson.null or ARGV[2]
@@ -446,9 +502,7 @@ if claim then
   end
   updated = cleared
 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return 1
 LUA;
 
@@ -677,6 +731,19 @@ LUA;
      * {@see self::decodeEnvelope()}: the ChallengeRecord, the committed
      * result and the recorded operation identity are all derived from
      * a single json_decode of the same bytes.
+     *
+     * The identity contract: when a non-empty identity argument is given
+     * and the fresh pending→consumed flip happened, the Lua reports
+     * whether the `"operation_identity":null` marker was actually
+     * spliced (reply element 5). An envelope that carries no marker is
+     * not one the identity API may write to, so the flip's result is
+     * refused with {@see StorageWriteException} — the identity is never
+     * silently dropped, per the
+     * {@see OperationIdentityAwareStorageInterface} contract.
+     *
+     * @throws StorageWriteException when a non-empty identity argument
+     *                               found no marker to splice on a
+     *                               fresh consume
      */
     private function doConsume(string $nonce, string $identityArg): ?ConsumedRecord
     {
@@ -692,6 +759,7 @@ LUA;
             return null;
         }
         [$json, $consumedNow, $consumedBefore, $resultBinding] = $parts;
+        $identitySpliced = (int) ($parts[4] ?? 0);
 
         // Durability barrier: the verified WAIT runs only when the
         // pending→consumed transition actually happened (consumedNow) —
@@ -706,6 +774,19 @@ LUA;
         // promotion gating.
         if ($this->waitReplicas > 0 && (bool) $consumedNow) {
             $this->waitAndVerify('the pending→consumed transition');
+        }
+
+        // The identity-splice contract: a fresh flip with a non-empty
+        // identity argument must have spliced the marker (the only
+        // writer of `"operation_identity":null` markers is store(), and
+        // a record without one is not an envelope the identity API may
+        // write to). The flip itself stays durable; the caller learns
+        // the identity was not recorded instead of proceeding on a
+        // silently identity-less consumed record.
+        if ($identityArg !== '' && (bool) $consumedNow && $identitySpliced !== 1) {
+            throw new StorageWriteException(
+                'the consume transition could not record the operation identity: the stored envelope carries no "operation_identity" marker'
+            );
         }
 
         $envelope = $this->decodeEnvelope((string) $json);
@@ -964,8 +1045,8 @@ LUA;
      * and resolve the winner's committed outcome. ONE Lua script over
      * the record key fuses the claimability check with the envelope
      * splice of the fresh random owner token and its expiry
-     * (`resume_owner` / `resume_until`, epoch seconds on the server
-     * clock). The claim lives in the record envelope, never in a second
+     * (`resume_owner` / `resume_until`, epoch microseconds on the
+     * server clock). The claim lives in the record envelope, never in a second
      * key: every claim transition is single-slot and safe on a Redis
      * Cluster deployment, where a second unhash-tagged key would raise
      * `CROSSSLOT`. The claimability check requires the record to exist,
@@ -1092,9 +1173,24 @@ LUA;
         }
     }
 
+    /**
+     * Delete the record key. The deletion is durability-critical the
+     * same way the delete-if-pending transition's is: a burned challenge
+     * that only vanished from the primary could reappear as pending from
+     * a stale replica after promotion and be redeemed. A DEL that
+     * removed a key is therefore followed by the same verified WAIT
+     * barrier {@see self::deleteIfPending()} runs (when waitReplicas >
+     * 0); a DEL of an absent key performs no mutation and issues no
+     * barrier. A violated barrier raises
+     * {@see ReplicaWaitException} fail closed, exactly like every other
+     * durability-critical transition.
+     */
     public function delete(string $nonce): void
     {
-        $this->client->del($this->prefix.$nonce);
+        $removed = $this->client->del($this->prefix.$nonce);
+        if ($removed > 0 && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the record deletion');
+        }
     }
 
     /**
@@ -1133,20 +1229,29 @@ LUA;
     {
         if ($this->client instanceof \Redis) {
             $sha = $this->shaOf($script);
+            // The last-error buffer is cleared before the evalSha so a
+            // stale NOSCRIPT from an earlier command cannot masquerade
+            // as the evidence for this reply.
+            if (\method_exists($this->client, 'clearLastError')) {
+                $this->client->clearLastError();
+            }
             try {
                 $result = $this->client->evalSha($sha, $args, $numKeys);
                 if ($result !== false) {
                     return $result;
                 }
-                // phpredis builds exist that report a missing script as
-                // a plain false instead of raising the server's
-                // `NOSCRIPT` error, and false is also phpredis's mapping
-                // of a Lua nil reply. Every script of this class
-                // replies nil only on a no-mutation path (a missing,
-                // refused or terminal record), so treating false as a
-                // suspected `NOSCRIPT` and re-running through plain EVAL
-                // is safe: the re-run is idempotent and returns the
-                // same answer, while a genuine `NOSCRIPT` is repaired.
+                // A clean false is phpredis's mapping of a Lua nil
+                // reply, and every script of this class replies nil only
+                // on a no-mutation path (a missing, refused or terminal
+                // record). The re-EVAL repair runs only when the
+                // server's `NOSCRIPT` error is actually evidenced —
+                // some builds surface it through the client's last-error
+                // buffer instead of an exception — so a genuine nil
+                // reply is returned as-is and the script is never
+                // re-executed for a nil.
+                if (!self::lastErrorMentionsNoScript($this->client)) {
+                    return false;
+                }
             } catch (\RedisException $e) {
                 if (!self::isNoScriptError($e)) {
                     throw $e;
@@ -1180,6 +1285,23 @@ LUA;
     private static function isNoScriptError(\RedisException $e): bool
     {
         return stripos($e->getMessage(), 'NOSCRIPT') !== false;
+    }
+
+    /**
+     * Whether the phpredis client's last-error buffer carries the
+     * server's `NOSCRIPT` error: the build-family evidence for a plain
+     * `false` evalSha reply being a missing script rather than a Lua
+     * nil. The buffer is cleared immediately before every evalSha, so a
+     * match here describes this invocation's reply only.
+     */
+    private static function lastErrorMentionsNoScript(\Redis $client): bool
+    {
+        if (!\method_exists($client, 'getLastError')) {
+            return false;
+        }
+        $error = $client->getLastError();
+
+        return \is_string($error) && stripos($error, 'NOSCRIPT') !== false;
     }
 
     /** Cached sha of a script, `SCRIPT` LOADing it exactly once. */

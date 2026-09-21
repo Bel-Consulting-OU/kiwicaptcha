@@ -346,6 +346,20 @@ final class Verifier
          * client.
          */
         private readonly ?string $rswLambda = null,
+        /**
+         * The tenant scope of the derived purpose keys. When non-null,
+         * the challenge-signing and IP-binding keys are derived under
+         * the per-tenant root ("kiwi/v2/tenant/" + tenant id, see
+         * {@see DerivedKeys::fromMaster()}), so tenants of a shared
+         * master secret cannot forge each other's challenges or
+         * binding tags: a tenant-scoped record fails the signature
+         * check under any other tenant or under the global keys.
+         * Null (the default) derives the global purpose keys —
+         * byte-identical behavior to the tenantless construction. Must
+         * match the narrow identifier alphabet, at most 64 bytes of
+         * [A-Za-z0-9._:-].
+         */
+        private readonly ?string $tenantId = null,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -383,6 +397,11 @@ final class Verifier
         if (($rswModulusN === null) !== ($rswLambda === null)) {
             throw new \InvalidArgumentException(
                 'rswModulusN and rswLambda must be configured together (the rsw trapdoor pair)'
+            );
+        }
+        if ($tenantId !== null && !Config::isValidIdentifier($tenantId, 64)) {
+            throw new \InvalidArgumentException(
+                'tenantId must be 1-64 characters of [A-Za-z0-9._:-] when set'
             );
         }
         $this->rsw = $rswModulusN !== null && $rswLambda !== null
@@ -527,6 +546,12 @@ final class Verifier
         // reads of one verification.
         $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
 
+        // The execution evidence of this token, built once and shared by
+        // the cheap phase, the compositional replay gate and every other
+        // execution-binding consumer below (the immutable value is the
+        // same at each site; only one instance is needed).
+        $evidence = ExecutionEvidence::fromToken($token);
+
         // The record source is a single snapshot for storages with the
         // {@see ChallengeRuntimeStateReadableInterface} capability:
         // runtimeState() decodes the full
@@ -623,7 +648,7 @@ final class Verifier
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
         //
-        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, ExecutionEvidence::fromToken($token));
+        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $evidence);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -660,7 +685,7 @@ final class Verifier
                 // the evidence stays preserved by the fused transition,
                 // and only a clean pass falls through to the consumed
                 // branch.
-                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
+                $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs);
                 if ($hard !== null) {
                     return VerifyOutcome::invalid($hard);
                 }
@@ -701,8 +726,8 @@ final class Verifier
                     // the exempt circumstance may not mask a hard verdict
                     // that also applies to this request. Any hard failure
                     // wins with the evidence preserved; only a clean pass
-                    // falls through to the consume branch below.
-                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token));
+                    // falls through to the consumed branch below.
+                    $hard = $this->replaySecurityCheck($peek, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs);
                     if ($hard !== null) {
                         return VerifyOutcome::invalid($hard);
                     }
@@ -727,8 +752,17 @@ final class Verifier
         //    record with failing telemetry falls through to the consumed
         //    branch with its retained state preserved, and an unreadable
         //    retained state is the fail-closed StorageUnavailable with the
-        //    record kept.
-        if ($enforceTelemetry && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))) {
+        //    record kept. A runtime-state snapshot that already resolved
+        //    the Consumed kind short-circuits the cleanup entirely:
+        //    consumed is terminal, so the fused delete-if-pending eval
+        //    could never observe anything else, and the held snapshot
+        //    answers the terminal-state resolution below without the
+        //    extra eval.
+        if (
+            $enforceTelemetry
+            && (empty($token->telemetry) || Telemetry::score($token->telemetry, $token->durationMs))
+            && !($runtime !== null && $runtime->kind === ChallengeRuntimeStateKind::Consumed)
+        ) {
             if ($this->storage instanceof AtomicDeleteIfPendingInterface) {
                 try {
                     $cleanup = $this->storage->deleteIfPending($token->nonce);
@@ -1284,8 +1318,15 @@ final class Verifier
 
         // The server receipt clock for the resume's exposed solve
         // duration, see {@see self::measurableSolveDurationMs()}, the
-        // same receipt instant that feeds every valid-returning path below.
+        // same receipt instant that feeds every valid-returning path
+        // below and the replay gate's receipt-timing floor.
         $receiptNs = (int) (microtime(true) * 1_000_000);
+
+        // The execution evidence of this token, built once and shared by
+        // the committed-result replay gate and the cheap-phase
+        // revalidation below (the immutable value is the same at each
+        // site; only one instance is needed).
+        $evidence = ExecutionEvidence::fromToken($token);
 
         // The retained consumed state must be readable (the bundle enforces
         // the ConsumedStateReadableInterface contract at configuration time;
@@ -1348,7 +1389,7 @@ final class Verifier
         // expiry, and a same-operation recovery may legitimately come from
         // another backend network path.
         if ($consumed->consumedResult !== null) {
-            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null) {
+            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs)) !== null) {
                 return VerifyOutcome::invalid($failure);
             }
             // Failed-barrier replay guard: the committed result's writes
@@ -1410,10 +1451,10 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, ExecutionEvidence::fromToken($token));
+        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $evidence);
         if ($failure !== null) {
             if ($failure->isReplayExempt()
-                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, ExecutionEvidence::fromToken($token))) !== null
+                && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs)) !== null
             ) {
                 return VerifyOutcome::invalid($hard);
             }
@@ -2065,6 +2106,14 @@ final class Verifier
      * Returns the failing hard error, or null when every hard replay
      * invariant passes. The fresh-challenge path never calls this: the
      * public first-error precedence for pending records is unchanged.
+     *
+     * The receipt-timing floor evaluates on the SAME receipt instant the
+     * caller's original check used ($receiptNs), never a separately
+     * timed fresh clock read: the single-receipt-instant contract of
+     * {@see self::verify()}. A replay gate that took its own clock
+     * could answer differently than the check that produced the exempt
+     * failure it re-evaluates, for a receipt that lands on the floor's
+     * boundary.
      */
     private function replaySecurityCheck(
         ChallengeRecord $record,
@@ -2072,6 +2121,7 @@ final class Verifier
         ?string $expectedScope,
         RequestBindingExpectation $expectation,
         ExecutionEvidence $executionEvidence,
+        ?int $receiptNs,
     ): ?VerifyError {
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {
             return $e;
@@ -2085,7 +2135,7 @@ final class Verifier
         if (($e = $this->checkExecutionBinding($record, $executionEvidence)) !== null) {
             return $e;
         }
-        if (($e = $this->checkMinDuration($record, null)) !== null) {
+        if (($e = $this->checkMinDuration($record, $receiptNs)) !== null) {
             return $e;
         }
 
@@ -2260,7 +2310,12 @@ final class Verifier
      * binding tag (recomputed here); v1 records carry the legacy
      * stable IP hash. Both are keyed by the kid-selected secret
      * (K_ip_bind is derived from the same master secret
-     * that signed the challenge). The exempt network circumstances —
+     * that signed the challenge, under the verifier's tenant scope
+     * when one is configured). A client IP that cannot be canonicalized
+     * at all — a non-address string, a zoned IPv6 like `fe80::1%eth0`,
+     * an empty string — can never equal the tag an issuer derived from
+     * a canonical address, and resolves to the typed IpMismatch instead
+     * of an escaped exception. The exempt network circumstances —
      * deliberately excluded from the compositional replay gate.
      */
     private function checkIpBinding(ChallengeRecord $record, ?string $clientIp, string $signingSecret): ?VerifyError
@@ -2269,9 +2324,13 @@ final class Verifier
             if ($clientIp === null) {
                 return VerifyError::MissingClientIp;
             }
-            $expectedTag = $record->protocolVersion === 1
-                ? Issuer::hashIp($clientIp, $signingSecret)
-                : Issuer::bindingTag($record->nonce, $clientIp, $signingSecret);
+            try {
+                $expectedTag = $record->protocolVersion === 1
+                    ? Issuer::hashIp($clientIp, $signingSecret)
+                    : Issuer::bindingTag($record->nonce, $clientIp, $signingSecret, $this->tenantId);
+            } catch (\InvalidArgumentException) {
+                return VerifyError::IpMismatch;
+            }
             if (!hash_equals($expectedTag, $record->bindingTag)) {
                 return VerifyError::IpMismatch;
             }
@@ -2624,7 +2683,7 @@ final class Verifier
                 $record->decoyField,
                 $record->executionVersion,
                 $record->executionCommitment,
-            ), $secretKey);
+            ), $secretKey, $this->tenantId);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));
     }

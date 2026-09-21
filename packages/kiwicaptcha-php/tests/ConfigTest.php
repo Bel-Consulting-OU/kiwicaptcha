@@ -17,7 +17,7 @@ final class ConfigTest extends TestCase
         'secretKey', 'algorithm', 'mKib', 't', 'p', 'targetBits',
         'argon2TargetBits', 'ttlSecs', 'minDurationMs', 'solverMaxHashes',
         'bindingMode', 'policyVersion', 'issuer', 'kid', 'executionKey',
-        'rswModulusN', 'rswLambda', 'rswT',
+        'rswModulusN', 'rswLambda', 'rswT', 'tenantId',
     ];
 
     private static function captureVarDump(object $value): string

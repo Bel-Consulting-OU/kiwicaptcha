@@ -210,6 +210,16 @@ final class ChallengeRecord
      */
     public const MAX_PROTOCOL_VERSION = 4;
 
+    /**
+     * The wire-key whitelist as a flipped isset() hash, built once per
+     * process from {@see self::WIRE_KEYS}: the deny-unknown-fields gate
+     * answers every key of a parsed record with one hash lookup instead
+     * of a linear scan over the constant list.
+     *
+     * @var array<string, true>
+     */
+    private static array $wireKeyLookup = [];
+
     public function __construct(
         public readonly string $nonce,
         public readonly string $scope,
@@ -421,11 +431,15 @@ final class ChallengeRecord
      *   The capability is fully inferable from the authenticated
      *   canonical shape; see the class docblock for the
      *   wire-compatibility statement.
-     * - Integers must be real JSON integers within the Rust type ranges
-     *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
-     *   attempts_used/policy_version/kid, u64 for the timestamps).
-     *   Negatives, floats, booleans, numeric strings, and overflow are
-     *   rejected.
+     * - Integers must be real JSON integers within the accepted ranges:
+     *   u32 for m_kib/t/p/target_bits/attempts_used, u64 for the
+     *   timestamps, and for the three sequence fields the canonical
+     *   protocol bounds rather than the bare integer widths —
+     *   protocol_version 1..MAX_PROTOCOL_VERSION, policy_version >= 1,
+     *   kid >= 1 (both u32-capped). Negatives, floats, booleans, numeric
+     *   strings, overflow, protocol_version 0 and above the maximum,
+     *   and a zero policy epoch or key id are rejected at the parse
+     *   boundary, mirroring the Rust serde boundary.
      * - Strings must be JSON strings of at most 4096 bytes.
      * - `algorithm` must be exactly `sha256`, `argon2id` or `rsw` (no
      *   aliases). An rsw record carries its sequential-squaring cost T
@@ -461,8 +475,13 @@ final class ChallengeRecord
         // serde deny_unknown_fields: every key must be a whitelisted string
         // (the legacy `ip_hash` alias is remapped below, before validation).
         // A JSON array (integer keys) can never map to the record struct.
+        // The whitelist answers through the flipped isset() hash, never a
+        // linear scan per key.
+        if (!self::$wireKeyLookup) {
+            self::$wireKeyLookup = array_fill_keys(self::WIRE_KEYS, true);
+        }
         foreach ($data as $key => $value) {
-            if (!\is_string($key) || ($key !== 'ip_hash' && !\in_array($key, self::WIRE_KEYS, true))) {
+            if (!\is_string($key) || ($key !== 'ip_hash' && !isset(self::$wireKeyLookup[$key]))) {
                 throw MalformedRecordException::unknownKey((string) $key);
             }
         }
@@ -498,7 +517,7 @@ final class ChallengeRecord
             0,
             PHP_INT_MAX,
         );
-        // m_kib/t/p/target_bits/attempts_used/policy_version/kid: u32.
+        // m_kib/t/p/target_bits/attempts_used: u32.
         foreach (['m_kib', 't', 'p', 'target_bits', 'attempts_used'] as $field) {
             self::requireInt(
                 \array_key_exists($field, $data) ? $data[$field] : 0,
@@ -507,20 +526,29 @@ final class ChallengeRecord
                 4_294_967_295,
             );
         }
+        // policy_version/kid: u32 with the serde defaults 1, and the
+        // epoch/key-id floors 1: the security-policy epoch and the
+        // signing key id are 1-based sequences in both languages, so a
+        // stored 0 is a corrupt or foreign value rejected at the parse
+        // boundary (mirroring the Rust serde boundary).
         foreach (['policy_version', 'kid'] as $field) {
             self::requireInt(
                 \array_key_exists($field, $data) ? $data[$field] : 1,
                 $field,
-                0,
+                1,
                 4_294_967_295,
             );
         }
-        // protocol_version: u8 (default 1, serde's default_protocol_version).
+        // protocol_version: the canonical protocol range 1..
+        // MAX_PROTOCOL_VERSION (default 1, serde's
+        // default_protocol_version). Versions 0 and everything above the
+        // current maximum are corrupt or foreign values rejected at the
+        // parse boundary, mirroring the Rust serde boundary.
         self::requireInt(
             \array_key_exists('protocol_version', $data) ? $data['protocol_version'] : 1,
             'protocol_version',
-            0,
-            255,
+            1,
+            self::MAX_PROTOCOL_VERSION,
         );
 
         $algorithm = $data['algorithm'];

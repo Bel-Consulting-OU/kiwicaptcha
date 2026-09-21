@@ -74,7 +74,7 @@ final class MalformedRecordException extends \RuntimeException
     {
         $shown = \is_string($value) ? $value : get_debug_type($value);
 
-        return new self(sprintf('record algorithm must be exactly "sha256" or "argon2id", got "%s"', $shown));
+        return new self(sprintf('record algorithm must be exactly "sha256", "argon2id" or "rsw", got "%s"', $shown));
     }
 
     /**

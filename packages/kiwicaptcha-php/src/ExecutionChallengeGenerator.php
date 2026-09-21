@@ -501,12 +501,49 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * Parse a program blob into its canonical structure, or null when the
-     * blob is malformed.
+     * Per-process memo of parsed programs, keyed by the program's base64
+     * wire string (decode is a pure function of that string, so a memoized
+     * entry can never go stale). One verification parses the same program
+     * several times — the structural validation, the trace walk of
+     * {@see self::verifyExecutedTrace()} and the digest derivation of
+     * {@see self::digestOverTrace()} decode independently, and the
+     * execution-binding check runs in both the cheap phase and the replay
+     * gate. The memo is bounded: a caller presenting many distinct
+     * programs resets it instead of growing unboundedly, degrading to a
+     * fresh parse per call.
      *
-     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>}|null
+     * @var array<string, array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}>|null>
+     */
+    private static array $decodeMemo = [];
+
+    private const DECODE_MEMO_LIMIT = 8;
+
+    /**
+     * Parse a program blob into its canonical structure, or null when the
+     * blob is malformed. Memoized per program string.
+     *
+     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}}|null
      */
     public static function decode(string $programB64): ?array
+    {
+        if (\array_key_exists($programB64, self::$decodeMemo)) {
+            return self::$decodeMemo[$programB64];
+        }
+        $decoded = self::decodeProgram($programB64);
+        if (\count(self::$decodeMemo) >= self::DECODE_MEMO_LIMIT) {
+            self::$decodeMemo = [];
+        }
+        self::$decodeMemo[$programB64] = $decoded;
+
+        return $decoded;
+    }
+
+    /**
+     * The un-memoized parse behind {@see self::decode()}.
+     *
+     * @return array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}}}|null
+     */
+    private static function decodeProgram(string $programB64): ?array
     {
         if (\strlen($programB64) > self::MAX_PROGRAM_BASE64) {
             return null;

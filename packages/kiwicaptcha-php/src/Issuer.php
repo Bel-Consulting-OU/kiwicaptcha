@@ -196,6 +196,7 @@ final class Issuer
             rswModulusN: $c->rswModulusN,
             rswLambda: $c->rswLambda,
             rswT: $c->rswT,
+            tenantId: $c->tenantId,
         );
 
         return new self($clone, $this->storage, $this->now, $this->region);
@@ -524,7 +525,7 @@ final class Issuer
         // verifier skips the binding check for empty tags.
         $bindingTag = $this->config->bindingMode === \KiwiCaptcha\BindingMode::None
             ? ''
-            : self::bindingTag($nonce, $clientIp, $this->config->secretKey);
+            : self::bindingTag($nonce, $clientIp, $this->config->secretKey, $this->config->tenantId);
         $algorithm = $this->config->algorithm;
         $targetBits = $this->effectiveTargetBits();
 
@@ -606,7 +607,7 @@ final class Issuer
             $executionProgram !== null ? $executionVersion : null,
             $executionCommitment,
         );
-        $signature = self::signPayloadV2($payload, $this->config->secretKey);
+        $signature = self::signPayloadV2($payload, $this->config->secretKey, $this->config->tenantId);
 
         $challenge = base64_encode($payload).'.'.$signature;
         $prefix = $challenge.'|'.$salt.'|';
@@ -767,6 +768,7 @@ final class Issuer
             rswModulusN: $this->config->rswModulusN,
             rswLambda: $this->config->rswLambda,
             rswT: $this->config->rswT,
+            tenantId: $this->config->tenantId,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
@@ -786,7 +788,10 @@ final class Issuer
      * never a stable identifier that follows the client across requests.
      * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are normalized to
      * their 4-byte IPv4 form so both spellings of the same address
-     * produce the same tag.
+     * produce the same tag. A non-null $tenantId derives K_ip_bind under
+     * the per-tenant root, so tenants of a shared master secret cannot
+     * forge each other's binding tags; null (the default) keeps the
+     * global key, byte-identical to the tenantless tag.
      *
      * Message layout:
      *   "kiwicaptcha/ip-bind/v2\0" . nonce . "\0" . family . canonical_bytes
@@ -796,12 +801,12 @@ final class Issuer
      * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
      *                                   IPv6 address
      */
-    public static function bindingTag(string $nonce, string $ip, string $secret): string
+    public static function bindingTag(string $nonce, string $ip, string $secret, ?string $tenantId = null): string
     {
         $family = self::canonicalIpFamily($ip);
         $message = "kiwicaptcha/ip-bind/v2\0".$nonce."\0".$family;
 
-        return hash_hmac('sha256', $message, DerivedKeys::fromMaster($secret)->ipBindKey());
+        return hash_hmac('sha256', $message, DerivedKeys::fromMaster($secret, $tenantId)->ipBindKey());
     }
 
     /**
@@ -1036,12 +1041,16 @@ final class Issuer
      * Protocol v2 signature: hex HMAC-SHA256 of the canonical v2 payload
      * keyed by the `HKDF`-derived challenge-signing purpose key
      * (K_challenge). See {@see DerivedKeys}. The master secret is never
-     * used directly as the signing key. Byte-identical to the Rust
-     * crate's `sign_canonical_v2`.
+     * used directly as the signing key. A non-null $tenantId derives
+     * K_challenge under the per-tenant root ("kiwi/v2/tenant/" + tenant
+     * id), so tenants of a shared master secret cannot sign each other's
+     * challenges; null (the default) keeps the global key, byte-identical
+     * to the tenantless signature and to the Rust crate's
+     * `sign_canonical_v2`.
      */
-    public static function signPayloadV2(string $canonicalPayload, string $secretKey): string
+    public static function signPayloadV2(string $canonicalPayload, string $secretKey, ?string $tenantId = null): string
     {
-        return hash_hmac('sha256', $canonicalPayload, DerivedKeys::fromMaster($secretKey)->challengeKey());
+        return hash_hmac('sha256', $canonicalPayload, DerivedKeys::fromMaster($secretKey, $tenantId)->challengeKey());
     }
 
     private function effectiveTargetBits(): int

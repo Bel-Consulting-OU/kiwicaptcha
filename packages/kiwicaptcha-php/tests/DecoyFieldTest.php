@@ -810,22 +810,21 @@ final class DecoyFieldTest extends TestCase
         $outcome3 = $verifier3->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
         self::assertSame(VerifyError::MalformedRecord, $outcome3->error, 'a decoyless v3 record fails closed as MalformedRecord');
 
-        // The serde-mirror parser accepts any u8 for protocol_version
-        // except the grammar-locked shape: v4 requires the execution
-        // triplet, so a bare version flip to 4 is rejected at parse time
-        // (the same total grammar as the v2/v3 decoy split). Unknown
-        // versions (0, 5..255) still parse and fail closed at the
-        // verifier.
+        // The serde-mirror parser enforces the canonical protocol bounds
+        // at the parse boundary, mirroring the Rust serde boundary:
+        // versions 0 and 5..255 are corrupt or foreign values no
+        // conforming issuer writes, rejected before any storage or
+        // verification work (the verifier's stored-record path can never
+        // observe them).
         foreach ([0, 5, 255] as $version) {
             $data = $issued->toArray();
             $data['protocol_version'] = $version;
-            self::assertSame($version, ChallengeRecord::fromArray($data)->protocolVersion, 'the serde-mirror parser accepts any u8');
-
-            $fresh = new ArrayStorage();
-            $fresh->store(ChallengeRecord::fromArray($data));
-            $verifier = new Verifier($fresh, now: static fn (): int => Vectors::NOW);
-            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', Vectors::CLIENT_IP, nowNs: $issued->issuedAtNs + 1_000_000);
-            self::assertSame(VerifyError::MalformedRecord, $outcome->error, "protocol version {$version} must fail closed as MalformedRecord");
+            try {
+                ChallengeRecord::fromArray($data);
+                self::fail("protocol version {$version} must be rejected at parse");
+            } catch (MalformedRecordException $e) {
+                self::assertStringContainsString('protocol_version', $e->getMessage());
+            }
         }
         // A bare flip to 4 (no execution triplet on a decoy-armed
         // record) is refused by the parser: the v4 canonical requires

@@ -60,11 +60,14 @@ final class SolutionTokenTest extends TestCase
         SolutionToken::decode(base64_encode(self::NONCE.'..100.{}'));
     }
 
-    public function testAcceptsLeadingZeroCounter(): void
+    public function testRejectsLeadingZeroCounter(): void
     {
-        // Rust's u64 parse accepts "007" => 7.
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.007.100.{}'));
-        self::assertSame(7, $token->counter);
+        // The counter segment is canonical decimal: a leading zero is
+        // rejected unless the whole segment is exactly "0", so each value
+        // has exactly one wire spelling in both implementations.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_counter');
+        SolutionToken::decode(base64_encode(self::NONCE.'.007.100.{}'));
     }
 
     public function testRejectsCounterAboveSolverMaximum(): void
@@ -94,18 +97,38 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsCounterLongerThanSevenDigits(): void
     {
-        // 8 digits but numerically below the maximum — still rejected by
-        // the digit-length bound (an absurdly long string would otherwise
-        // silently clamp in the integer cast).
+        // 8 canonical digits — rejected by the digit-length bound before
+        // the value could clamp in the integer cast (the canonical rule
+        // leaves no 8-digit spelling below the maximum).
         $this->expectException(DecodeError::class);
         $this->expectExceptionMessage('counter exceeds solver maximum');
-        SolutionToken::decode(base64_encode(self::NONCE.'.00000000.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.99999999.100.{}'));
     }
 
-    public function testAcceptsSevenDigitCounterWithLeadingZeros(): void
+    public function testRejectsAllZeroCounterThatIsNotExactlyZero(): void
     {
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.0000007.100.{}'));
-        self::assertSame(7, $token->counter);
+        // "00" is not the canonical spelling of 0; only the exact string
+        // "0" carries the value zero.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_counter');
+        SolutionToken::decode(base64_encode(self::NONCE.'.00.100.{}'));
+    }
+
+    public function testAcceptsExactlyZeroCounterAndDuration(): void
+    {
+        // "0" is the canonical spelling of zero for both numeric segments.
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.0.0.{}'));
+        self::assertSame(0, $token->counter);
+        self::assertSame(0, $token->durationMs);
+    }
+
+    public function testRejectsLeadingZeroDuration(): void
+    {
+        // The duration segment carries the same canonical-decimal rule:
+        // "0042" is not a spelling the widget ever emits.
+        $this->expectException(DecodeError::class);
+        $this->expectExceptionMessage('invalid_duration');
+        SolutionToken::decode(base64_encode(self::NONCE.'.0.0042.{}'));
     }
 
     public function testRejectsInvalidTelemetryJson(): void

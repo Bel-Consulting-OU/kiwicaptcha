@@ -326,6 +326,42 @@ final class VerifierHardeningTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('empty telemetry must pass when enforcement is off, got %s', $outcome->code()));
     }
 
+    public function testTheTelemetryGateSkipsTheFusedCleanupEvalOnAConsumedSnapshot(): void
+    {
+        // The runtime-state snapshot already resolved the terminal
+        // Consumed kind: consumed is terminal, so the fused
+        // delete-if-pending eval could never observe anything else. The
+        // strict-telemetry replay of a consumed record resolves the
+        // retained outcome from the held snapshot without issuing the
+        // cleanup eval (the gate is replay-exempt client-side solve
+        // evidence; the identity-proven stored success replays).
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed; cannot test RedisStorage');
+        }
+        $client = new \KiwiCaptcha\Tests\Fixtures\FakePredisClient();
+        $storage = new \KiwiCaptcha\Storage\RedisStorage($client);
+        $issuer = new Issuer($this->makeConfig(0), $storage);
+        $challenge = $issuer->issue('login', '198.51.100.77');
+        $counter = $this->solveSha256($challenge->prefix, $challenge->salt, $challenge->targetBits);
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        $identity = 'op-'.hash('sha256', 'telemetry-skip');
+
+        // The first redemption with enforcement off: fresh valid
+        // derivation, consumed with the identity, committed valid result.
+        $verifier = new Verifier($storage);
+        $first = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity);
+        self::assertTrue($first->isOk(), sprintf('the setup redemption must verify fresh, got %s', $first->code()));
+
+        // The strict-telemetry replay: the empty payload fails the gate,
+        // and no Lua transition runs — the snapshot answers.
+        $evalsBefore = \count($client->evals);
+        $replay = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.77', operationIdentity: $identity, enforceTelemetry: true);
+        self::assertTrue($replay->isOk(), sprintf('the exempt telemetry failure replays the stored success for the proven operation, got %s', $replay->code()));
+        self::assertTrue($replay->fromStoredResult, 'the replay is the stored result, never a fresh derivation');
+        self::assertSame($evalsBefore, \count($client->evals), 'the consumed snapshot must not issue the fused delete-if-pending eval');
+        self::assertNotNull($client->store['kiwicaptcha:'.$challenge->nonce] ?? null, 'the consumed evidence is retained');
+    }
+
     public function testScopeLongerThan128BytesThrows(): void
     {
         $storage = new ArrayStorage();

@@ -129,11 +129,13 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
 
         // The claim is embedded in the record envelope with a bounded
-        // expiry (epoch seconds, server clock).
+        // expiry (epoch microseconds, server clock): a true 60-second
+        // lease, not a second-granularity rounding of one.
         $data = $this->envelope($client, $storage, $challenge->nonce);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim owner is embedded in the record envelope');
-        self::assertGreaterThan(time(), $data['resume_until'] ?? 0, 'the claim must carry a live expiry');
-        self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertGreaterThan($nowUs, $data['resume_until'] ?? 0, 'the claim must carry a live expiry');
+        self::assertLessThanOrEqual($nowUs + 60_000_000, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
 
         self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'a second claim while the first is held must be refused');
         self::assertFalse($storage->releaseResumeDerivation($challenge->nonce, str_repeat('b', 32)), 'a stale owner can never release');
@@ -167,9 +169,11 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
     {
         // The bounded lease: a claim whose resume_until has passed is
         // dead and re-claimable — a crashed recovery leaves only the
-        // short lease, never a poison marker. The 1-second lease is
-        // claimed, the clock moves past it, and the same nonce is
-        // claimable again without any release.
+        // short lease, never a poison marker. The lease expiry is epoch
+        // MICROseconds, so a claim TTL of 1 is a true 1-second lease:
+        // the immediate re-claim is deterministically inside the live
+        // window (refused), and after sleeping 2 full seconds the lease
+        // is deterministically dead (re-claimable) without any release.
         $client = $this->redisOrSkip();
         self::assertNotNull($client);
         [$storage, $prefix] = $this->makeStorage($client);
@@ -181,7 +185,9 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         self::assertIsString($first, 'the 1-second lease is claimable');
         self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'the live lease is refused');
         $data = $this->envelope($client, $storage, $challenge->nonce);
-        self::assertLessThanOrEqual(time() + 1, $data['resume_until'] ?? 0, 'the lease expiry must be now + 1s');
+        $nowUs = (int) (microtime(true) * 1_000_000);
+        self::assertGreaterThan($nowUs, $data['resume_until'] ?? 0, 'the lease expiry must be in the future');
+        self::assertLessThanOrEqual($nowUs + 1_000_000, $data['resume_until'] ?? 0, 'the lease expiry must be now + 1s (epoch microseconds)');
 
         // No release (the crashed-recovery path); the lease expires.
         sleep(2);

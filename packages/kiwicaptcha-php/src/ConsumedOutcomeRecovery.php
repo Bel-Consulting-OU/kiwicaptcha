@@ -31,6 +31,16 @@ namespace KiwiCaptcha;
  * {@see Verifier::verify()}, which maps a consumed token to the
  * duplicate vocabulary.
  *
+ * The identity-proven acceptance of a stored success holds the same
+ * failed-barrier replay guard as the verify and resume paths: when the
+ * storage implements {@see \KiwiCaptcha\ReplicationBarrierInterface},
+ * the replication fence is re-established before the stored outcome is
+ * returned, and a barrier or shortfall failure answers the retryable
+ * {@see VerifyError::StorageUnavailable} instead of an unproven
+ * success. A retained envelope whose stored nonce does not match the
+ * token's nonce is an impossible key-value pair and answers the
+ * deterministic MalformedRecord, never the stored result.
+ *
  * The retained evidence is readable even after the signed challenge has
  * expired (the storage's retention horizon covers the recovery window),
  * so a late-lifetime crash can still reproduce the original outcome.
@@ -74,6 +84,14 @@ final class ConsumedOutcomeRecovery
         if ($consumed === null) {
             return null;
         }
+        if ($consumed->record->nonce !== $decoded->nonce) {
+            // The retained envelope was loaded by the token's nonce (the
+            // storage key); a stored nonce field that differs is an
+            // impossible key-value pair and never replays the retained
+            // result — the deterministic MalformedRecord, mirroring the
+            // verifier's consumed-envelope resolution.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         if ($consumed->consumedResult === null) {
             // Crash between consume and commit: intrinsically ambiguous.
             return null;
@@ -94,6 +112,22 @@ final class ConsumedOutcomeRecovery
             || !hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
             return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
+        }
+
+        // Failed-barrier replay guard, the same fence the verify and
+        // resume paths hold before accepting a stored success: the
+        // consume/commit mutations that produced it may have landed on
+        // the primary with their WAIT failing, and accepting the stored
+        // result read-only would return a success a promotion could
+        // lose. The barrier is re-established before the acceptance, and
+        // a barrier or shortfall failure maps to the retryable
+        // StorageUnavailable.
+        try {
+            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                $this->storage->establishReplicationFence('the recovered stored-result acceptance');
+            }
+        } catch (\Throwable) {
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
         }
 
         // The stored valid outcome is an authorization grant, released

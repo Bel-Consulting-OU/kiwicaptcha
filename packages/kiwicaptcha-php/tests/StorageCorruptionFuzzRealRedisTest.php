@@ -234,10 +234,12 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
                 $d['resume_owner'] = 'not-hex!';
             },
             'resume_until in the past' => static function (array &$d): void {
+                // The lease expiry is epoch microseconds: a seconds-scale
+                // value is deep in the past on that clock.
                 $d['resume_until'] = $d['issued_at'] - 100;
             },
             'resume_until far future' => static function (array &$d): void {
-                $d['resume_until'] = $d['issued_at'] + 100_000;
+                $d['resume_until'] = $d['issued_at'] * 1_000_000 + 100_000 * 1_000_000;
             },
         ];
     }
