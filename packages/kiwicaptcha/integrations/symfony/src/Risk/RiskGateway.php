@@ -152,6 +152,25 @@ final class RiskGateway
         if (!\in_array($unknownScopeMode, ['reject', 'baseline', 'minimum'], true)) {
             throw new \InvalidArgumentException(sprintf('unknownScopeMode must be "reject", "baseline" or "minimum" (got "%s")', $unknownScopeMode));
         }
+        if ($unknownScopeMode === 'minimum') {
+            // The synthetic policy and its id are one configuration
+            // unit: 'minimum' mode promises every unknown scope the
+            // shared sha20-floored policy, and that promise is only
+            // real when the id names the policy row that carries the
+            // floor. A derived id (a checksum of the scope string)
+            // would name no policy row at all, silently degrading the
+            // promised floor to the engine's fallback (allow), and
+            // could collide with an unrelated configured scope id.
+            if ($unknownScopeId === null) {
+                throw new \InvalidArgumentException('unknownScopeId is required when unknownScopeMode=minimum: it names the synthetic policy row whose sha20 floor the mode promises');
+            }
+            if ($unknownScopeId < 1 || $unknownScopeId > 0xFFFFFFFF) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId must be a u32 (got %d)', $unknownScopeId));
+            }
+            if (\in_array($unknownScopeId, $this->scopeIds, true)) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d collides with a configured risk scope id', $unknownScopeId));
+            }
+        }
     }
 
     /** The configured unknown-scope mode ('reject' | 'baseline' | 'minimum'). */
@@ -191,8 +210,9 @@ final class RiskGateway
         if ($this->unknownScopeMode === 'minimum') {
             // 'minimum' mode: every unknown scope is assessed under the
             // shared synthetic policy (base_risk 100, minimum/degraded
-            // sha20).
-            return $this->unknownScopeId ?? (crc32($scope) & 0x7fffffff);
+            // sha20). The id is constructor-mandatory here, so the
+            // shared row is always the one the mode promised.
+            return $this->unknownScopeId;
         }
 
         // 'reject' and 'baseline' modes: the adaptive engine declines to

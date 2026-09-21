@@ -2541,4 +2541,42 @@ final class RiskIntegrationTest extends TestCase
 
         return \KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
     }
+
+
+    public function testMinimumModeWithoutASyntheticScopeIdIsAConstructionError(): void
+    {
+        // 'minimum' mode promises every unknown scope the shared
+        // sha20-floored synthetic policy; the promise is only real when
+        // the id names that policy row, so the gateway refuses to be
+        // built without one (a derived id would name no row at all and
+        // could collide with a configured scope).
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', null);
+            self::fail('minimum mode without unknownScopeId must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('unknownScopeId is required', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 1);
+            self::fail('an unknownScopeId colliding with a configured scope id must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('collides', $e->getMessage());
+        }
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 0);
+            self::fail('a non-u32 unknownScopeId must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('u32', $e->getMessage());
+        }
+    }
 }
