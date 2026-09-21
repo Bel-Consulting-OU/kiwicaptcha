@@ -16,8 +16,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * A bound record presented with a client IP that cannot be canonicalized
  * at all — a non-address string, a zoned IPv6 like `fe80::1%eth0`, an
- * empty string — resolves to the typed IpMismatch on every path that
- * re-derives the binding tag, never to an escaped exception. The
+ * empty string — resolves to the typed IpMismatch. This holds on every
+ * path that re-derives the binding tag, never an escaped exception. The
  * binding-tag derivation throws {@see \InvalidArgumentException} on such
  * inputs; the verifier maps that to the mismatch vocabulary because a
  * non-canonicalizable IP can never equal the tag an issuer derived from

@@ -1465,7 +1465,7 @@ impl ChallengeCache {
     pub fn get(&mut self, ip_hash: &str, scope: &str) -> Option<&Issued> {
         // One entry lookup decides freshness: a fresh hit refreshes the
         // entry's timestamp so the eviction below evicts by
-        // least-recently-USED, and a stale entry is removed so the map
+        // least-recently-used, and a stale entry is removed so the map
         // stays self-pruning.
         let ttl = self.ttl;
         let key = Self::cache_key(ip_hash, scope);

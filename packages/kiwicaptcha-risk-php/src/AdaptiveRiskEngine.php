@@ -903,7 +903,7 @@ final class AdaptiveRiskEngine
      * decisionHour anchors the outcome to the hour the decision was made.
      * Failures are silent, so registration never breaks issuance.
      *
-     * The DEGRADED paths never call this: a limiter hard-deny never
+     * The degraded paths never call this: a limiter hard-deny never
      * reached the state backend, and while the breaker is open or right
      * after a store failure the engine skips the state backend entirely —
      * receipt/ledger registration included.

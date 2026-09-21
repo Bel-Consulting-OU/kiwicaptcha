@@ -60,20 +60,20 @@ LUA;
         return sprintf('%s%d', $keyPrefix, $second ?? time());
     }
 
-    /** The typed Lua seam, built lazily on the first record (see {@see record()}). */
+    /** The typed Lua seam, built lazily on the first record; see {@see record()}. */
     private ?RedisSecurityCommandExecutor $luaSeam = null;
 
     /**
      * Record one issued challenge in the current second's counter (one
      * atomic Lua script: INCR + EXPIRE 1). Never throws. The script
-     * rides the typed seam's ordinary mutation lane
-     * ({@see RedisSecurityCommandExecutor::executeMutation()}): the
-     * telemetry counter is a non-final mutation, so under ha_authority
-     * pinned_primary it serves within the guard's verification window
-     * instead of being classified by the plain-EVAL shape as
-     * security-final (which would force an INFO + pin revalidation round
-     * trip per challenge). Without the wrapper the lane declaration is
-     * inert and the packing is byte-identical.
+     * rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: the
+     * telemetry counter is a non-final mutation. Under ha_authority
+     * pinned_primary it therefore serves within the guard's
+     * verification window, instead of being classified by the
+     * plain-EVAL shape as security-final (which would force an INFO +
+     * pin revalidation round trip per challenge). Without the wrapper
+     * the lane declaration is inert and the packing is byte-identical.
      */
     public function record(?int $second = null): void
     {

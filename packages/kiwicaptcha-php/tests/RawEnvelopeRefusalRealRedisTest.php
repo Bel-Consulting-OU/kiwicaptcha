@@ -13,9 +13,9 @@ use PHPUnit\Framework\TestCase;
  * Raw-envelope boundary of the real Redis Lua transitions, against the
  * running real-Redis instance: a key with no expiry (a persistent
  * foreign key) is refused by every mutating transition and left
- * byte-intact, an envelope without the `"operation_identity":null`
+ * byte-intact. An envelope without the `"operation_identity":null`
  * marker refuses the identity consume instead of silently dropping the
- * identity, and the consume flip preserves the key's remaining lifetime
+ * identity. The consume flip preserves the key's remaining lifetime
  * in milliseconds (PTTL/PX, floored at 1000 ms).
  *
  * Runs when `KC_REDIS_URL` or `TEST_REDIS_URL` is set (the shared

@@ -9,7 +9,7 @@ use KiwiCaptcha\Risk\SignalVector;
 /**
  * The full reply of one observation, as a value object (the PHP mirror of
  * the Rust `Observed` struct): the signal vector plus the global pressure
- * level, cooldown deadline and dedupe verdict of THIS call.
+ * level, cooldown deadline and dedupe verdict of this call.
  *
  * Unlike the lastGlobalLevel()/lastCooldownUntilMs()/lastIsDuplicate()
  * side channels, a reply object is immutable and call-scoped — safe under

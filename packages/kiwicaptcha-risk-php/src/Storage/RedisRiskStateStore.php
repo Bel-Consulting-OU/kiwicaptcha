@@ -242,7 +242,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * Applies the observation and returns the full reply as a value
      * object (the PHP mirror of Rust's `Observed`): vector, global level,
-     * cooldown deadline and dedupe verdict of THIS call — no side-channel
+     * cooldown deadline and dedupe verdict of this call — no side-channel
      * reads.
      *
      * @throws RiskStoreException when the underlying state backend fails
@@ -270,8 +270,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * @deprecated use observeWithReply(): the reply object is call-scoped
      *             and immutable, while this method's companion side
-     *             channels (lastGlobalLevel()/lastCooldownUntilMs()/
-     *             lastIsDuplicate()) are shared mutable state — racy when
+     *             channels lastGlobalLevel(), lastCooldownUntilMs() and
+     *             lastIsDuplicate() are shared mutable state — racy when
      *             a coroutine runtime interleaves two observations on one
      *             store instance. Kept as a delegating BC shim.
      */
@@ -318,7 +318,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      * The consolidated risk-v2 assessment as a value object (the PHP
      * mirror of Rust's `AssessV2Reply`): the signal vector, the global
      * level, the cooldown deadline, the dedupe verdict, the recorded tag
-     * values and the registration status of THIS call — no side-channel
+     * values and the registration status of this call. No side-channel
      * reads.
      *
      * $contextTag / $tlsTag are the presented tags of the current request
@@ -386,8 +386,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * @deprecated use assessV2WithReply(): the reply object is call-scoped
      *             and immutable, while this method's companion side
-     *             channels (lastGlobalLevel()/lastCooldownUntilMs()/
-     *             lastIsDuplicate()) are shared mutable state — racy when
+     *             channels lastGlobalLevel(), lastCooldownUntilMs() and
+     *             lastIsDuplicate() are shared mutable state — racy when
      *             a coroutine runtime interleaves two assessments on one
      *             store instance. Kept as a delegating BC shim.
      *

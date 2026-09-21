@@ -513,7 +513,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
   test('Argon2id solves through the external compatibility loader (worker glue path)', async ({ page }) => {
     // With the driver loaded as the external /api.js, the
     // Blob worker has no inline glue element to copy — the loader's
-    // embedded glue constants supply it (rebuilt from the SAME api.js
+    // embedded glue constants supply it (rebuilt from the same api.js
     // response, digest-verified at boot; no second loader request
     // exists). Argon2id must therefore solve
     // end-to-end through the one-script migration path (SHA-256-only

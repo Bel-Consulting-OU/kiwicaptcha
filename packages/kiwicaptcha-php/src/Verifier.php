@@ -352,7 +352,7 @@ final class Verifier
          * the per-tenant root ("kiwi/v2/tenant/" + tenant id, see
          * {@see DerivedKeys::fromMaster()}), so tenants of a shared
          * master secret cannot forge each other's challenges or
-         * binding tags: a tenant-scoped record fails the signature
+         * binding tags. A tenant-scoped record fails the signature
          * check under any other tenant or under the global keys.
          * Null (the default) derives the global purpose keys —
          * byte-identical behavior to the tenantless construction. Must
@@ -2107,7 +2107,7 @@ final class Verifier
      * invariant passes. The fresh-challenge path never calls this: the
      * public first-error precedence for pending records is unchanged.
      *
-     * The receipt-timing floor evaluates on the SAME receipt instant the
+     * The receipt-timing floor evaluates on the same receipt instant the
      * caller's original check used ($receiptNs), never a separately
      * timed fresh clock read: the single-receipt-instant contract of
      * {@see self::verify()}. A replay gate that took its own clock
@@ -2314,9 +2314,10 @@ final class Verifier
      * when one is configured). A client IP that cannot be canonicalized
      * at all — a non-address string, a zoned IPv6 like `fe80::1%eth0`,
      * an empty string — can never equal the tag an issuer derived from
-     * a canonical address, and resolves to the typed IpMismatch instead
-     * of an escaped exception. The exempt network circumstances —
-     * deliberately excluded from the compositional replay gate.
+     * a canonical address. Such an input resolves to the typed
+     * IpMismatch instead of an escaped exception. The exempt network
+     * circumstances, deliberately excluded from the compositional
+     * replay gate.
      */
     private function checkIpBinding(ChallengeRecord $record, ?string $clientIp, string $signingSecret): ?VerifyError
     {

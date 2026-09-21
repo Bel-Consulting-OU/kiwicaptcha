@@ -336,10 +336,10 @@ LUA;
      * so the transition is a single-key splice that a Redis Cluster
      * deployment routes to one slot, never `CROSSSLOT`. ARGV[1] = the
      * random owner token, ARGV[2] = the claim TTL in seconds. The lease
-     * expiry `resume_until` is epoch MICROSECONDS on the server clock
+     * expiry `resume_until` is epoch microseconds on the server clock
      * (the same unit both languages' readers parse as a JSON integer;
-     * ~1.79e15 stays exact in PHP ints and 2^53 doubles), so a claim
-     * TTL of N seconds is a true N-second lease rather than a
+     * ~1.79e15 stays exact in PHP ints and 2^53 doubles). A claim TTL
+     * of N seconds is therefore a true N-second lease rather than a
      * second-granularity rounding.
      */
     private const CLAIM_RESUME_SCRIPT = <<<'LUA'

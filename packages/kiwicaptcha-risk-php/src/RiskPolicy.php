@@ -62,11 +62,11 @@ final class RiskPolicy
     /**
      * Parses and validates a policy config. Rejects: a version that does
      * not match the requested (default: contract) version, base_risk
-     * outside 0..1000, scope ids outside 1..4294967295, and a missing /
-     * short / malformed global_floors (exactly 5 entries required, index
-     * 0 = Allow, entries 1..4 valid actions — fail-closed, identical to
-     * the Rust parser). Enforced in the parser itself, not only in the
-     * Symfony config layer.
+     * outside 0..1000, and scope ids outside 1..4294967295. Also
+     * rejected: a missing / short / malformed global_floors (exactly 5
+     * entries required, index 0 = Allow, entries 1..4 valid actions —
+     * fail-closed, identical to the Rust parser). Enforced in the
+     * parser itself, not only in the Symfony config layer.
      */
     public static function fromConfig(array $config, int $version = self::CONTRACT_VERSION): self
     {
@@ -114,7 +114,7 @@ final class RiskPolicy
             ];
         }
 
-        // global_floors: REQUIRED with exactly 5 entries (levels 0..4) —
+        // global_floors: required with exactly 5 entries (levels 0..4) —
         // the strict fail-closed semantics of the Rust parser (missing,
         // short or malformed floors reject the config instead of silently
         // defaulting). Index 0 must be Allow; entries 1..4 are valid

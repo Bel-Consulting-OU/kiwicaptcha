@@ -32,7 +32,7 @@ namespace KiwiCaptcha\Tests\Fixtures;
      *    (kept) / consumed (kept, verbatim).
      *  - commit-result script: stores {valid, binding} on a consumed record
      *    without a result yet; returns 1/0. With a non-empty ARGV[4] (the
-     *    resume claim owner), the claim is a fencing precondition: the
+     *    resume claim owner), the claim is a fencing precondition. The
      *    envelope must carry a live claim owned by exactly that token
      *    (the `resume_until` lease is epoch microseconds on the
      *    microsecond clock), otherwise 2 without a write. The successful

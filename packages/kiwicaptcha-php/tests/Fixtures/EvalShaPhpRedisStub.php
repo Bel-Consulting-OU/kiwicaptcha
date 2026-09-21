@@ -5,9 +5,10 @@ declare(strict_types=1);
 /*
  * The phpredis transport stub of the EVALSHA disambiguation tests.
  * The redis extension is not loaded on every host, and the storage's
- * phpredis branch is gated on `instanceof \Redis`, so this fixture
- * declares a minimal global \Redis / \RedisException pair carrying the
- * canned EVALSHA transport — only when the extension is absent. The
+ * phpredis branch is gated on `instanceof \Redis`. This fixture
+ * therefore declares a minimal global \Redis / \RedisException pair
+ * carrying the canned EVALSHA transport — only when the extension is
+ * absent. The
  * namespaced marker class {@see EvalShaPhpRedisStub} exists exactly
  * when the polyfill does, so the tests can feature-detect it and skip
  * where the real class cannot be safely overridden.
@@ -16,7 +17,7 @@ declare(strict_types=1);
 namespace {
     if (!\extension_loaded('redis') && !\class_exists(\Redis::class, false)) {
         // The runtime marker the namespaced block below keys on: the
-        // polyfill base was declared by THIS file (a bare class_exists
+        // polyfill base was declared by this file (a bare class_exists
         // there would observe the class this block just declared).
         \define('KIWICAPTCHA_TESTS_REDIS_TRANSPORT_POLYFILL', true);
         class Redis
@@ -35,7 +36,7 @@ namespace {
 
             /**
              * The scripted EVALSHA behavior: 'clean-false' answers a Lua
-             * nil (phpredis false) with an empty last-error buffer;
+             * nil (phpredis false) with an empty last-error buffer.
              * 'noscript-exception' raises the server's NOSCRIPT error as
              * a \RedisException; 'noscript-last-error' answers a clean
              * false while the last-error buffer carries NOSCRIPT (the

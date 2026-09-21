@@ -201,7 +201,7 @@ fn rewrite_exposure(glue: &str, sri: &str) -> Result<String, String> {
 /// the IIFE close: the wasm-bindgen boilerplate, the `load()` function
 /// and the (rewritten) exposure. Prefixed with the b64 var and the
 /// `var window = self;` prelude by the compat loader, it is the glue the
-/// worker runs — reconstructed from the SAME response the page executed,
+/// worker runs — reconstructed from the same response the page executed,
 /// never a second network fetch.
 fn extract_glue_boot(glue: &str) -> Result<String, String> {
     let b64_pos = glue

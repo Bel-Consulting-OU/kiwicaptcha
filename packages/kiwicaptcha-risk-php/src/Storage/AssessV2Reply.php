@@ -8,10 +8,11 @@ use KiwiCaptcha\Risk\SignalVector;
 
 /**
  * The full reply of one consolidated risk-v2 assessment, as a value object
- * (the PHP mirror of the Rust `AssessV2Reply` struct): the signal vector,
- * the global pressure level, the cooldown deadline, the dedupe verdict,
- * the session's first-seen client-context / trusted-edge TLS tag records
- * and the outcome-ledger registration status of THIS call.
+ * (the PHP mirror of the Rust `AssessV2Reply` struct). It carries the
+ * signal vector, the global pressure level, the cooldown deadline, the
+ * dedupe verdict, the session's first-seen client-context / trusted-edge
+ * TLS tag records and the outcome-ledger registration status of this
+ * call.
  *
  * Unlike the lastGlobalLevel()/lastCooldownUntilMs()/lastIsDuplicate()
  * side channels, a reply object is immutable and call-scoped — safe under

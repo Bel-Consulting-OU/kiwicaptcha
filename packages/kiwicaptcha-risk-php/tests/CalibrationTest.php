@@ -1125,10 +1125,10 @@ final class CalibrationTest extends TestCase
         $c = new AggregateCalibrator($this->requireClient(), namespace: 'evict' . bin2hex(random_bytes(4)), samplingMode: 'complete');
         $now = $this->nowMs();
 
-        // Seed a full cache (CACHE_CAP scopes) with strictly increasing
-        // write timestamps via reflection; scope 1 is the FIRST inserted
-        // but artificially expired so the next biasForScope(1) refreshes
-        // it — a refresh re-ages the entry (Rust parity).
+        // Seed a full cache (the cache-cap scope count) with strictly
+        // increasing write timestamps via reflection; scope 1 is the first
+        // inserted but artificially expired so the next biasForScope(1)
+        // refreshes it — a refresh re-ages the entry (Rust parity).
         $entries = [];
         for ($scope = 1; $scope <= AggregateCalibrator::CACHE_CAP; $scope++) {
             $entries[$scope] = [
@@ -1144,13 +1144,13 @@ final class CalibrationTest extends TestCase
         // The refresh: scope 1 is re-written NOW (the newest write by far).
         $c->biasForScope(1, $now);
 
-        // One more scope: the cache is full, so the OLDEST-WRITE entry is
+        // One more scope: the cache is full, so the entry with the earliest write timestamp is
         // evicted — scope 2 (writtenAt 1002), NOT the refreshed scope 1.
         $fresh = AggregateCalibrator::CACHE_CAP + 1;
         $c->biasForScope($fresh, $now);
 
         $cache = $prop->getValue($c);
-        self::assertArrayNotHasKey(2, $cache, 'the oldest-written entry (scope 2) must be evicted');
+        self::assertArrayNotHasKey(2, $cache, 'the earliest-written entry (scope 2) must be evicted');
         self::assertArrayHasKey(1, $cache, 'the refreshed first-inserted scope must survive (its write is the newest)');
         self::assertArrayHasKey($fresh, $cache, 'the newly inserted scope must be cached');
         self::assertArrayHasKey(AggregateCalibrator::CACHE_CAP, $cache, 'a recently written non-refreshed scope must survive');

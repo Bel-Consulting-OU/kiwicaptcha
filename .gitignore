@@ -2,6 +2,10 @@ target/
 pkg/
 vendor/
 composer.lock
+# The deploy lock ships in the reference image (deploy/Dockerfile COPYs
+# it and installs vendor exactly from it), so unlike development
+# checkouts it is a tracked artifact, like the Cargo.lock files.
+!deploy/app/composer.lock
 .phpunit.result.cache
 .phpunit.cache/
 *.rs.bk

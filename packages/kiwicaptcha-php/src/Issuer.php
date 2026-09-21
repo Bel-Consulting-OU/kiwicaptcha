@@ -1044,9 +1044,9 @@ final class Issuer
      * used directly as the signing key. A non-null $tenantId derives
      * K_challenge under the per-tenant root ("kiwi/v2/tenant/" + tenant
      * id), so tenants of a shared master secret cannot sign each other's
-     * challenges; null (the default) keeps the global key, byte-identical
-     * to the tenantless signature and to the Rust crate's
-     * `sign_canonical_v2`.
+     * challenges. Null (the default) keeps the global key,
+     * byte-identical to the tenantless signature and to the Rust
+     * crate's `sign_canonical_v2`.
      */
     public static function signPayloadV2(string $canonicalPayload, string $secretKey, ?string $tenantId = null): string
     {

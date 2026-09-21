@@ -506,7 +506,7 @@ final class ExecutionChallengeGenerator
      * entry can never go stale). One verification parses the same program
      * several times — the structural validation, the trace walk of
      * {@see self::verifyExecutedTrace()} and the digest derivation of
-     * {@see self::digestOverTrace()} decode independently, and the
+     * {@see self::digestOverTrace()} decode independently. The
      * execution-binding check runs in both the cheap phase and the replay
      * gate. The memo is bounded: a caller presenting many distinct
      * programs resets it instead of growing unboundedly, degrading to a

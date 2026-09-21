@@ -232,14 +232,14 @@ LUA;
 
     /**
      * Run the Lua script against whichever client implementation is in use.
-     * The script rides the typed seam's ordinary mutation lane
-     * ({@see RedisSecurityCommandExecutor::executeMutation()}): a quota
-     * window counter is a non-final mutation, so under ha_authority
-     * pinned_primary it serves within the guard's verification window
-     * instead of being classified by the plain-EVAL shape as
-     * security-final (which would force an INFO + pin revalidation round
-     * trip per issuance). Without the wrapper the lane declaration is
-     * inert and the packing is byte-identical.
+     * The script rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: a quota
+     * window counter is a non-final mutation. Under ha_authority
+     * pinned_primary it therefore serves within the guard's
+     * verification window instead of being classified by the
+     * plain-EVAL shape as security-final (which would force an INFO +
+     * pin revalidation round trip per issuance). Without the wrapper
+     * the lane declaration is inert and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args

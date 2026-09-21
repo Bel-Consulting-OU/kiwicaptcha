@@ -300,7 +300,7 @@ final class ChallengeController
          * OutstandingChallenges, so its cancellationAdmission window is
          * unavailable). A dedicated IssuanceRateLimiter instance with its
          * own key namespace mirroring that window's shape (per-source cap
-         * + deployment-global cap over one sliding window); null leaves
+         * + deployment-global cap over one sliding window). Null leaves
          * the endpoint bounded by the body ceiling, the nonce shape and
          * the origin checks only (direct construction / legacy wiring).
          */
@@ -984,15 +984,15 @@ final class ChallengeController
         // obligation id of the policy-epoch/scope/binding triple) were
         // created atomically at the `CHAIN_REQUIRED` stage, so a client cannot
         // restart the transaction at stage 1 by discarding the ticket. The
-        // SIGNED-TICKET validation runs before any admission control touches
+        // signed-ticket validation runs before any admission control touches
         // a counter, so an invalid, forged, foreign or expired ticket never
         // consumes rate-limit budget, risk state, scope-cap quota or an
         // outstanding slot — and its only pre-limiter state read (the direct
         // chain-record read of the obligation match) is gated by possession
         // of a server-signed one-shot ticket, so an unauthenticated flood
-        // can never drive it. The TICKETLESS obligation lookup (the
+        // can never drive it. The ticketless obligation lookup (the
         // auto-resume read, one Redis read per ordinary challenge request
-        // when chaining is on) deliberately runs AFTER the per-IP rate
+        // when chaining is on) deliberately runs after the per-IP rate
         // limiter, so an unthrottled flood performs no obligation reads:
         //   - a presented ticket is validated (signature, expiry, structure)
         //     and matched against its own chain record (scope, policy epoch,
@@ -1953,9 +1953,9 @@ final class ChallengeController
      * {@see OutstandingChallenges::cancellationAdmission()}. When that
      * layer is not wired (risk disabled), the endpoint's own dedicated
      * cancellation limiter ({@see $cancellationLimiter}) applies the same
-     * bounded per-source + deployment-global sliding-window shape, so
-     * the endpoint is never left bounded only by the body ceiling, the
-     * nonce shape and the origin checks.
+     * bounded per-source + deployment-global sliding-window shape. The
+     * endpoint is therefore never left bounded only by the body ceiling,
+     * the nonce shape and the origin checks.
      */
     public function cancel(Request $request): JsonResponse
     {

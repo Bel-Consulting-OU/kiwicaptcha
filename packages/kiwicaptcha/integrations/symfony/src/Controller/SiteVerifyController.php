@@ -1197,11 +1197,11 @@ final class SiteVerifyController
 
     /**
      * Every SiteVerify response shares the private-document headers of
-     * the native endpoints ({@see ChallengeController::privateJson()}):
+     * the native endpoints, {@see ChallengeController::privateJson()}:
      * Cache-Control no-store/private, Pragma no-cache, Referrer-Policy
-     * no-referrer and X-Content-Type-Options nosniff, so verification
+     * no-referrer and X-Content-Type-Options nosniff. Verification
      * outcomes and the error-code vocabulary (which narrows the cause of
-     * a refusal) are never cached, mirrored or sniffed by an
+     * a refusal) are therefore never cached, mirrored or sniffed by an
      * intermediary.
      *
      * @param array<string, mixed> $data

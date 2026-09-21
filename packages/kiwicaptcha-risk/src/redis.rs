@@ -1296,7 +1296,7 @@ mod tests {
     /// instead of wrapping the raw i64 casts.
     #[test]
     fn reply_slots_are_clamped_to_the_contract_bands() {
-        // Serves the fixed RESP payload once per COMPLETE command: the
+        // Serves the fixed RESP payload once per complete command: the
         // client pipelines its connection-setup commands ahead of the
         // script call, so the frame count (not the byte count) decides
         // the reply count. The listener lives inside the spawned thread,

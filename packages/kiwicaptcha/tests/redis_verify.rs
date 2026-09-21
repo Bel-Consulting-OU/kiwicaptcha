@@ -7173,7 +7173,7 @@ fn pending_envelope_json(record: &ChallengeRecord) -> String {
 #[test]
 fn consume_refuses_a_pending_envelope_carrying_a_terminal_result() {
     // A genuinely issued pending record carries only the null markers;
-    // a pending envelope that ALSO carries a committed result is a
+    // a pending envelope that also carries a committed result is a
     // corrupt or forged rewrite, and the transition refuses it with the
     // missing shape, leaving the stored bytes untouched.
     let (url, endpoint) = FakeEndpoint::spawn();
@@ -7282,7 +7282,7 @@ fn with_rsw_trapdoor_with_a_malformed_pair_never_panics() {
         "a malformed trapdoor pair surfaces the typed unsupported verdict"
     );
 
-    // A well-formed but INVALID pair (a weak modulus) behaves the same;
+    // A well-formed but invalid pair (a weak modulus) behaves the same;
     // re-seed first — the malformed-pair verification above consumed
     // the record without committing a result.
     endpoint.seed(&prefix, &issued.record);

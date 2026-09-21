@@ -66,7 +66,7 @@ final class FixturesParityTest extends TestCase
 
     /**
      * Cross-language policy-parse parity: every policy_parse_rejects
-     * vector in fixtures.json is a config BOTH parsers must reject (the
+     * vector in fixtures.json is a config both parsers must reject (the
      * Rust suite runs the identical cases — strict, fail-closed
      * global_floors semantics on both sides).
      */

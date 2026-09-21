@@ -391,7 +391,7 @@ final class CompositionalReplayPrecedenceTest extends TestCase
 
     public function testTheReplayGateEvaluatesTheFloorOnTheSameReceiptInstant(): void
     {
-        // The replay gate's receipt-timing floor runs on the SAME receipt
+        // The replay gate's receipt-timing floor runs on the same receipt
         // instant the caller's original check used, never a separately
         // timed fresh clock read: a replay verdict adjacent to the
         // minimum-duration boundary must be deterministic on the receipt

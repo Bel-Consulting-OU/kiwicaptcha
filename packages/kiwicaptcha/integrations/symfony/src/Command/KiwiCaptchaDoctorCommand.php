@@ -508,14 +508,14 @@ final class KiwiCaptchaDoctorCommand extends Command
      * forces the Secure flag in {@see ContinuityCookie::cookie()}
      * regardless of the request scheme (the prefix's browser contract),
      * so a TLS-terminating proxy can never silently drop it. A custom
-     * name without the prefix keeps the configured/derived Secure flag:
-     * when forwarding headers are trusted (the proxy tier exists) but
+     * name without the prefix keeps the configured/derived Secure flag.
+     * When forwarding headers are trusted (the proxy tier exists) but
      * the flag is still scheme-derived (secure: null), the request
      * scheme at the PHP layer is the proxy's plain-http hop unless
-     * X-Forwarded-Proto is propagated and trusted, so the cookie can be
-     * minted without Secure and dropped by the browser — the warn tells
-     * the operator to set risk.contuity_cookie.secure explicitly (or
-     * keep a `__Host-` name).
+     * X-Forwarded-Proto is propagated and trusted. The cookie can then
+     * be minted without Secure and dropped by the browser — the warn
+     * tells the operator to set risk.contuity_cookie.secure explicitly
+     * (or keep a `__Host-` name).
      *
      * @return array{0: string, 1: string} [status, detail]
      */

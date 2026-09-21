@@ -550,7 +550,7 @@ final class AggregateCalibrator implements CalibrationStore
         );
 
         if (count($this->biasCache) >= self::CACHE_CAP && !isset($this->biasCache[$scope])) {
-            // Evict the OLDEST-WRITE entry (Rust parity: a refresh re-ages
+            // Evict the entry with the earliest write timestamp (Rust parity: a refresh re-ages
             // the entry, so a recently refreshed scope survives eviction
             // over scopes written earlier — not simply the first-inserted
             // one; array_shift would renumber the int keys and corrupt the
@@ -613,7 +613,7 @@ final class AggregateCalibrator implements CalibrationStore
      * evalsha with the cached-sha + SCRIPT LOAD repair pattern of
      * RedisRiskStateStore: the script bytes ship to Redis only on a
      * NOSCRIPT miss (SCRIPT LOAD once per script per process, the sha
-     * cached in memory); every steady-state call is an EVALSHA of the
+     * cached in memory). Every steady-state call is an EVALSHA of the
      * 40-char sha — never a full-body EVAL of the multi-kilobyte script.
      *
      * @param list<string> $keys

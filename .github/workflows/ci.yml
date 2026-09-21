@@ -741,6 +741,18 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose down
+        # The compose file interpolates its required variables with :?
+        # for every command, so a teardown after an early failure (the
+        # docker build step runs before deploy/.env is written) would
+        # abort on the first missing variable and mask the real error.
+        # compose down only removes containers and networks; dummy
+        # values keep it working without any real credential. Both :?
+        # variables are covered: the valkey requirepass (VALKEY_PASSWORD)
+        # and the app secret (KIWI_SECRET_KEY) — either one alone still
+        # fails interpolation when deploy/.env does not exist yet.
+        env:
+          VALKEY_PASSWORD: ci-teardown
+          KIWI_SECRET_KEY: ci-teardown
 
   php-core-real-redis:
     # The real-Redis fault/topology/death coverage of the PHP core

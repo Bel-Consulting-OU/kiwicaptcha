@@ -2606,7 +2606,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * runtime lanes: a redis:// or rediss:// URL with a host. Returns a
      * description of the violation, or null when the DSN shape is
      * acceptable. Any DSN interpolated into the description is
-     * credential-redacted first ({@see self::redactDsn()}): the message
+     * credential-redacted first via {@see self::redactDsn()}: the message
      * crosses into container-build output, exception pages and logs, so
      * the userinfo component (a password) must never travel with it.
      */
@@ -2630,10 +2630,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     /**
      * Redact the userinfo component of a Redis DSN: everything between
      * the scheme separator and the host (a username and/or password) is
-     * replaced with `***`, so a credential-bearing DSN can be quoted in
-     * a violation message without leaking the secret into build output,
-     * exception pages or logs. The scheme, host, port, path and query
-     * survive (they are the actionable part of the message).
+     * replaced with `***`. A credential-bearing DSN can therefore be
+     * quoted in a violation message without leaking the secret into
+     * build output, exception pages or logs. The scheme, host, port,
+     * path and query survive (they are the actionable part of the
+     * message).
      */
     private static function redactDsn(string $dsn): string
     {

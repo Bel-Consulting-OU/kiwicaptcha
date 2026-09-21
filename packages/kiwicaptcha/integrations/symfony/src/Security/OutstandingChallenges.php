@@ -697,16 +697,17 @@ LUA;
 
     /**
      * Run a Lua script against whichever client implementation is in use.
-     * The script rides the typed seam's ordinary mutation lane
-     * ({@see RedisSecurityCommandExecutor::executeMutation()}): the
+     * The script rides the typed seam's ordinary mutation lane,
+     * {@see RedisSecurityCommandExecutor::executeMutation()}: the
      * outstanding-membership accounting (issuance admission, release,
-     * cancellation admission) is non-final mutation bookkeeping — the
-     * terminal security transitions live in the storage and chain stores
-     * — so under ha_authority pinned_primary these serve within the
-     * guard's verification window instead of being classified by the
-     * plain-EVAL shape as security-final (which would force an INFO +
-     * pin revalidation round trip per challenge). Without the wrapper
-     * the lane declaration is inert and the packing is byte-identical.
+     * cancellation admission) is non-final mutation bookkeeping. The
+     * terminal security transitions live in the storage and chain
+     * stores. Under ha_authority pinned_primary these therefore serve
+     * within the guard's verification window instead of being
+     * classified by the plain-EVAL shape as security-final (which
+     * would force an INFO + pin revalidation round trip per
+     * challenge). Without the wrapper the lane declaration is inert
+     * and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args

@@ -131,8 +131,8 @@ test.describe('worker termination on cancelled generations', () => {
         null,
         { timeout: 10_000 }
       );
-      // The killed generation never writes a token (remove() also takes
-      // the markup with it, so the read is optional-chained).
+      // The killed generation never writes a token — remove() also takes
+      // the markup with it, so the read is optional-chained.
       await page.waitForTimeout(300);
       expect(await page.evaluate(() => (document.querySelector('[data-kiwi-token]') || {}).value ?? '')).toBe('');
     });
@@ -387,7 +387,7 @@ test.describe('execution interpreter sender gate', () => {
         '__target.postMessage({ protocol: "kiwi-execution-v1", type: "kiwi-execution-run",',
         '  id: "forged-sibling-run-0001", program: "AAAAAAAAAAA=", nonce: "n" }, "*");',
       ].join(''));
-      // Positive control: the REAL parent channel answers.
+      // Positive control: the real parent channel answers.
       interp.contentWindow.postMessage({ protocol: 'kiwi-execution-v1', type: 'kiwi-execution-run', id: 'parent-probe-run-0001', program: 'AAAAAAAAAAA=', nonce: 'n' }, window.location.origin);
       await new Promise((r) => setTimeout(r, 1500));
       const idOf = (m) => (m.payload && m.payload.id) || m.id || '';

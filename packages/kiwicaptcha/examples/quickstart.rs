@@ -40,7 +40,8 @@ fn config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
-        tenant: None, // None = global purpose keys (Some("t1") for tenant-scoped deployments)
+        tenant: None, // None = global purpose keys; Some("t1") selects tenant-scoped
+                      // deployments
     }
 }
 

@@ -32,7 +32,7 @@ namespace KiwiCaptcha;
  * duplicate vocabulary.
  *
  * The identity-proven acceptance of a stored success holds the same
- * failed-barrier replay guard as the verify and resume paths: when the
+ * failed-barrier replay guard as the verify and resume paths. When the
  * storage implements {@see \KiwiCaptcha\ReplicationBarrierInterface},
  * the replication fence is re-established before the stored outcome is
  * returned, and a barrier or shortfall failure answers the retryable

@@ -54,8 +54,8 @@ final class ScriptBoundPerfTest extends TestCase
     }
 
     /**
-     * The calibrator ships script bytes ONLY on the first use per script
-     * and on a NOSCRIPT repair (SCRIPT LOAD): every steady-state call is
+     * The calibrator ships script bytes only on the first use per script
+     * and on a NOSCRIPT repair (SCRIPT LOAD). Every steady-state call is
      * an EVALSHA of the cached 40-char sha, never a full-body EVAL of the
      * multi-kilobyte script — the same cached-sha pattern the state store
      * applies.

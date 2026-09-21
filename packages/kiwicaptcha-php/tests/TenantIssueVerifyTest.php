@@ -18,7 +18,7 @@ use PHPUnit\Framework\TestCase;
  * Tenant-scoped issuance and verification: a non-null tenant id derives
  * the challenge-signing and IP-binding purpose keys under the per-tenant
  * root ("kiwi/v2/tenant/" + tenant id, the DerivedKeys tenant path whose
- * t1 root is pinned by the DerivedKeysTest reference vector), so tenants
+ * t1 root is pinned by the DerivedKeysTest reference vector). Tenants
  * of a shared master secret cannot forge each other's challenges. A null
  * tenant (the default) keeps the global keys, byte-identical to the
  * tenantless construction.
@@ -72,9 +72,9 @@ final class TenantIssueVerifyTest extends TestCase
     public function testTenantSignaturesUseTheTenantChallengeKey(): void
     {
         // The tenant-scoped signature is the HMAC under the t1 challenge
-        // key exactly as DerivedKeys derives it (the TENANT_T1_ROOT
-        // vector's derivation, exercised through the issuer's public
-        // signing helper).
+        // key exactly as DerivedKeys derives it, pinned to the shared
+        // tenant-root reference vector and exercised through the
+        // issuer's public signing helper.
         $payload = 'v2|payload';
         self::assertSame(
             hash_hmac('sha256', $payload, DerivedKeys::fromMaster(Vectors::SECRET, 't1')->challengeKey()),
