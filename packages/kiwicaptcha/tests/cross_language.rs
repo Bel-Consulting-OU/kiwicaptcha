@@ -861,20 +861,16 @@ echo $ch->nonce;
         ),
         "the v2-plus-decoy envelope is refused at the decode boundary"
     );
-    let timing_record = into_pending(
-        store
-            .runtime_state(nonce)
-            .expect("Rust must read the armed v3 record"),
-    )
-    .expect("the armed v3 record is pending");
-    let v2_counter = solve_for_test(&timing_record).expect("Rust solver for the timing record");
+    // The armed record was consumed by the verification above, so the
+    // timing basis is its already-held pending snapshot.
+    let v2_counter = solve_for_test(&state).expect("Rust solver for the timing record");
     let v2_token = encode_token(&v2_decoy_nonce, v2_counter);
     assert_eq!(
         verifier.verify(
             &v2_token,
             "login",
             "127.0.0.1",
-            timing_record.issued_at_ns + 1_000_000,
+            state.issued_at_ns + 1_000_000,
             None,
             RequestBindingExpectation::Unenforced,
         ),
