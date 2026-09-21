@@ -433,13 +433,13 @@ final class ChallengeRecord
      *   wire-compatibility statement.
      * - Integers must be real JSON integers within the accepted ranges:
      *   u32 for m_kib/t/p/target_bits/attempts_used, u64 for the
-     *   timestamps, and for the three sequence fields the canonical
+     *   timestamps. The three sequence fields take the canonical
      *   protocol bounds rather than the bare integer widths —
-     *   protocol_version 1..MAX_PROTOCOL_VERSION, policy_version >= 1,
-     *   kid >= 1 (both u32-capped). Negatives, floats, booleans, numeric
-     *   strings, overflow, protocol_version 0 and above the maximum,
-     *   and a zero policy epoch or key id are rejected at the parse
-     *   boundary, mirroring the Rust serde boundary.
+     *   protocol_version 1..MAX_PROTOCOL_VERSION (policy_version and
+     *   kid stay bare u32 like the Rust serde boundary: epoch 0 is the
+     *   legitimate pre-epoch rotation state). Negatives, floats,
+     *   booleans, numeric strings, overflow, and protocol_version 0 or
+     *   above the maximum are rejected at the parse boundary.
      * - Strings must be JSON strings of at most 4096 bytes.
      * - `algorithm` must be exactly `sha256`, `argon2id` or `rsw` (no
      *   aliases). An rsw record carries its sequential-squaring cost T
@@ -526,16 +526,16 @@ final class ChallengeRecord
                 4_294_967_295,
             );
         }
-        // policy_version/kid: u32 with the serde defaults 1, and the
-        // epoch/key-id floors 1: the security-policy epoch and the
-        // signing key id are 1-based sequences in both languages, so a
-        // stored 0 is a corrupt or foreign value rejected at the parse
-        // boundary (mirroring the Rust serde boundary).
+        // policy_version/kid: u32 with the serde defaults 1. The
+        // floors stay at the bare u32 width: epoch 0 is a legitimate
+        // stored value (the pre-epoch migration state a rotation walks
+        // forward from), and the Rust serde boundary accepts any u32
+        // for both fields, so the parse must agree cross-language.
         foreach (['policy_version', 'kid'] as $field) {
             self::requireInt(
                 \array_key_exists($field, $data) ? $data[$field] : 1,
                 $field,
-                1,
+                0,
                 4_294_967_295,
             );
         }

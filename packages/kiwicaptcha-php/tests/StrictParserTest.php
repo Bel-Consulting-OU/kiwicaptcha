@@ -534,18 +534,20 @@ final class StrictParserTest extends TestCase
         }
     }
 
-    public function testZeroKidAndZeroPolicyVersionAreRejected(): void
+    public function testZeroKidAndZeroPolicyVersionStayParseable(): void
     {
-        // The key id and the security-policy epoch are 1-based sequences:
-        // a stored 0 is a corrupt or foreign value rejected at the parse
-        // boundary, mirroring the Rust serde boundary.
+        // The u32 widths are the parse boundary (the Rust serde
+        // boundary agrees): epoch 0 is the legitimate pre-epoch state a
+        // policy rotation walks forward from, and a stored 0 for either
+        // field decodes while every out-of-width value still rejects.
         foreach (['kid', 'policy_version'] as $field) {
+            $record = ChallengeRecord::fromArray(self::mutate($field, 0));
+            self::assertSame(0, $field === 'kid' ? $record->kid : $record->policyVersion);
             try {
-                ChallengeRecord::fromArray(self::mutate($field, 0));
-                self::fail("$field 0 must be rejected at parse");
+                ChallengeRecord::fromArray(self::mutate($field, 4_294_967_296));
+                self::fail("$field above the u32 width must be rejected at parse");
             } catch (MalformedRecordException $e) {
                 self::assertStringContainsString($field, $e->getMessage());
-                self::assertStringContainsString('within 1..', $e->getMessage());
             }
         }
     }
