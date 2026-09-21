@@ -673,7 +673,7 @@ final class SiteVerifyTest extends TestCase
         $args = $last[1];
         $numKeys = (int) $args[1];
         $keys = array_slice($args, 2, $numKeys);
-        self::assertSame('{kiwicaptcha:argon2:leases:siteverify-argon}:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
+        self::assertSame('{kiwicaptcha:argon2:leases:siteverify-argon}:scope:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
         self::assertNull($request->attributes->get(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE), 'the scope attribute is restored after the verification');
     }
 

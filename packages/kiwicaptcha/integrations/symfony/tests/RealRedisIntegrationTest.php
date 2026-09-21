@@ -117,7 +117,7 @@ final class RealRedisIntegrationTest extends TestCase
         $sem1 = new RedisAdmissionSemaphore($this->client, 1, 'ci-stale');
         $oldToken = $sem1->acquire();
         self::assertNotNull($oldToken);
-        $this->client->del('kiwicaptcha:argon2:leases:ci-stale');
+        $this->client->del('{kiwicaptcha:argon2:leases:ci-stale}:global');
         $newToken = $sem1->acquire();
         self::assertNotNull($newToken);
         $sem1->release((string) $oldToken); // stale release — must be a no-op
@@ -465,7 +465,7 @@ final class RealRedisIntegrationTest extends TestCase
     public function testPerScopeBudgetAndGlobalCapAgainstRealRedis(): void
     {
         $sem = new RedisAdmissionSemaphore($this->client, 100, 'ci-scope', 45_000, 64, 2);
-        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:'.hash('sha256', 'login');
+        $scopeKey = '{kiwicaptcha:argon2:leases:ci-scope}:scope:'.hash('sha256', 'login');
 
         // Scope 'login' fills its own budget of 2 while the global cap is
         // nowhere near full; a second scope still acquires (fairness).
@@ -486,11 +486,11 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertNull($sem->acquire('admin'));
         $sem->release($tokens[0]);
         $sem->release($tokens[1]);
-        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:admin'), 'scoped release must free the scope set');
+        self::assertSame('0', (string) $this->client->zcard('{kiwicaptcha:argon2:leases:ci-scope}:scope:admin'), 'scoped release must free the scope set');
         self::assertNotNull($sem->acquire('admin'), 'the freed scope budget admits again immediately');
 
         // Global cap still binds on top of the per-scope budgets.
-        $globalKey = 'kiwicaptcha:argon2:leases:ci-scope-global';
+        $globalKey = '{kiwicaptcha:argon2:leases:ci-scope-global}:global';
         $global = new RedisAdmissionSemaphore($this->client, 2, 'ci-scope-global', 45_000, 64, 10);
         self::assertNotNull($global->acquire('a'));
         self::assertNotNull($global->acquire('b'));

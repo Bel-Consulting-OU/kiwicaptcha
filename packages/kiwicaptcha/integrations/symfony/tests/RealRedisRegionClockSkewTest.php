@@ -132,7 +132,7 @@ final class RealRedisRegionClockSkewTest extends TestCase
         // The lease deadline is anchored at the server clock: the
         // sorted-set score equals Redis TIME plus the lease lifetime.
         $time = $this->client->time();
-        $score = (float) $this->client->zscore('kiwicaptcha:argon2:leases:'.$ns, $leaseA);
+        $score = (float) $this->client->zscore('{kiwicaptcha:argon2:leases:'.$ns.'}:global', $leaseA);
         $serverNowMs = (int) $time[0] * 1000 + (int) ((int) $time[1] / 1000);
         self::assertLessThanOrEqual($serverNowMs + 1000 + 1500, $score, 'the score is the server clock plus the lease lifetime');
         self::assertGreaterThanOrEqual($serverNowMs + 1000 - 1500, $score, 'the score is the server clock plus the lease lifetime');

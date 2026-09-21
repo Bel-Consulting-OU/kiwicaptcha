@@ -34,7 +34,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     private function leases(FakePredisClient $client, string $namespace = 'default'): int
     {
-        return $client->zcard('kiwicaptcha:argon2:leases:'.$namespace);
+        return $client->zcard('{kiwicaptcha:argon2:leases:'.$namespace.'}:global');
     }
 
     private function requirePredis(): FakePredisClient
@@ -120,7 +120,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         // never remove B's live lease.
         $semaphore->release($tokenA);
         self::assertSame(1, $this->leases($client), 'stale release must not remove the new lease (B)');
-        self::assertContains($tokenB, $client->zmembers('kiwicaptcha:argon2:leases:default'));
+        self::assertContains($tokenB, $client->zmembers('{kiwicaptcha:argon2:leases:default}:global'));
     }
 
     public function testWrongTokenReleaseIsANoOp(): void
@@ -462,7 +462,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
     private function scopeKey(string $scope, string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:'.hash('sha256', $scope);
+        return '{kiwicaptcha:argon2:leases:'.$namespace.'}:scope:'.hash('sha256', $scope);
     }
 
     public function testOneScopeFillsItsBudgetAndAnotherScopeStillAcquires(): void

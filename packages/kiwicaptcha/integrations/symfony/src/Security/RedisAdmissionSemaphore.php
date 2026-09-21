@@ -26,9 +26,14 @@ use KiwiCaptcha\VerificationAdmissionGate;
  * never releases it, but its lease expires after `LEASE_MS` and is reaped by
  * the next acquire, with no watchdog counter to drift and no DECR race.
  *
- * Key: `kiwicaptcha:argon2:leases:<namespace>`, one lease set per
- * deployment; the namespace is sanitized to [A-Za-z0-9_.-] (defaults to
- * 'default' when empty).
+ * Keys: the one hash-tagged family root
+ * `{kiwicaptcha:argon2:leases:<namespace>}` names every script key.
+ * The members are `:global` (the lease set), `:sem:waiters` (the
+ * saturation gauge) and `:scope:<sha256(scope)>` (each per-scope set).
+ * All of them occupy one Redis Cluster slot, so the multi-key scripts
+ * never hit a cross-slot refusal. One family per deployment, the
+ * namespace sanitized to [A-Za-z0-9_.-] (defaults to 'default' when
+ * empty).
  *
  * A `maxConcurrent` <= 0 disables the cap: acquire() returns the sentinel
  * token 'disabled' and release() no-ops; the verifier's lease lifecycle
@@ -155,6 +160,9 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
 return redis.call('ZCARD', KEYS[1])
 LUA;
 
+    /** The hash-tagged key family root every script key derives from (one Cluster slot). */
+    private readonly string $root;
+
     private readonly string $key;
 
     /** The saturation-pressure counter key — same hash tag as the lease set (Cluster safe). */
@@ -227,11 +235,16 @@ LUA;
             throw new \InvalidArgumentException('maxPerScope must be >= 1');
         }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
-        $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
-        // The saturation counter must live in the same hash slot as the
-        // lease set (one EVAL script touches both keys), so it is
-        // hash-tagged with the lease key's tag family.
-        $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
+        // One hash-tagged root names the whole key family: every key any
+        // script touches (the global lease set, the saturation counter,
+        // each per-scope set) is derived from it with a plain suffix, so
+        // the family is structurally confined to one Cluster slot — a
+        // derived key cannot forget its tag. Lease sets live at most one
+        // lease lifetime, so the older untagged key shape simply expires
+        // away rather than needing a migration.
+        $this->root = '{kiwicaptcha:argon2:leases:'.$suffix.'}';
+        $this->key = $this->root.':global';
+        $this->waitersKey = $this->root.':sem:waiters';
     }
 
     /**
@@ -295,7 +308,7 @@ LUA;
         // into the key. The token carries the hashed scope suffix so
         // release() can remove the lease from both sets.
             $scopeSuffix = hash('sha256', $scope);
-            $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
+            $scopeKey = $this->root.':scope:'.$scopeSuffix;
             $token .= '.'.$scopeSuffix;
             $hasScope = true;
         }
@@ -342,7 +355,7 @@ LUA;
         if ($sep !== false) {
             $scope = substr($lease, $sep + 1);
             if ($scope !== '') {
-                $scopeKey = '{'.$this->key.'}:'.$scope;
+                $scopeKey = $this->root.':scope:'.$scope;
                 $hasScope = true;
             }
         }
