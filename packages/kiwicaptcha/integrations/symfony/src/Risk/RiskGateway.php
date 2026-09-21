@@ -170,6 +170,32 @@ final class RiskGateway
             if (\in_array($unknownScopeId, $this->scopeIds, true)) {
                 throw new \InvalidArgumentException(sprintf('unknownScopeId %d collides with a configured risk scope id', $unknownScopeId));
             }
+            // The row must exist in exactly the policy the engine
+            // consults, with the floors the mode promises: a legal id
+            // pointing at no row (or at a row floored below sha20)
+            // would silently answer unknown scopes with the engine's
+            // allow fallback instead of the documented minimum.
+            $enginePolicy = $engine->policy();
+            if (!isset($enginePolicy->scopes[$unknownScopeId])) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d names no policy scope row: the engine policy must carry the synthetic row (base_risk 100, minimum sha20, degraded sha20) under that id', $unknownScopeId));
+            }
+            if ($enginePolicy->minimum($unknownScopeId)->rank() < RiskAction::Sha20->rank()) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a minimum below sha20: the mode promises at least the sha20 floor', $unknownScopeId));
+            }
+            $row = $enginePolicy->scopes[$unknownScopeId];
+            if ($row['degraded']->rank() < RiskAction::Sha20->rank()) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a degraded action below sha20: the mode promises at least the sha20 floor on the degraded path too', $unknownScopeId));
+            }
+            if (($row['base_risk'] ?? 0) < 100) {
+                throw new \InvalidArgumentException(sprintf('unknownScopeId %d carries a base_risk below 100: the synthetic row must be assessed, not whitelisted', $unknownScopeId));
+            }
+            // The optional gateway-level policy (the degraded-decision
+            // surface) must be the very object the engine consults: a
+            // divergent second policy would answer degraded lookups
+            // from a table the engine never uses.
+            if ($policy !== null && $policy !== $enginePolicy) {
+                throw new \InvalidArgumentException('the gateway policy must be the engine policy: two divergent policy objects would decide from different tables');
+            }
         }
     }
 

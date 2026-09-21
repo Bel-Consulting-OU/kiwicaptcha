@@ -76,6 +76,18 @@ final class AdaptiveRiskEngine
         'principal' => 10000,
     ];
 
+    /**
+     * The immutable policy the engine decides under. Callers that
+     * construct gateways around the engine can verify their synthetic
+     * policy rows against exactly the object the engine will consult,
+     * so the gateway's unknown-scope contract and the engine's policy
+     * can never silently disagree.
+     */
+    public function policy(): RiskPolicy
+    {
+        return $this->policy;
+    }
+
     public function __construct(
         private readonly RiskStateStoreInterface $store,
         private readonly NetworkClassifierInterface $classifier,

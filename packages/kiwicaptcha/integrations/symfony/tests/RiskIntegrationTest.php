@@ -2578,5 +2578,77 @@ final class RiskIntegrationTest extends TestCase
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('u32', $e->getMessage());
         }
+        // A legal id naming no engine policy row refuses construction:
+        // the engine would answer unknown scopes with its allow
+        // fallback, silently dropping the promised sha20 floor.
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('an unknownScopeId naming no engine policy row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('names no policy scope row', $e->getMessage());
+        }
+    }
+
+    public function testMinimumModeRefusesASyntheticRowFlooredBelowThePromise(): void
+    {
+        // The row exists under the supplied id but its floors sit below
+        // the sha20 the mode promises (and the base risk whitelists the
+        // scope): every divergence refuses construction, so the
+        // gateway's contract and the engine's policy cannot disagree.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $weak = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [42 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $engine = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $weak, $keys);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        try {
+            new RiskGateway($engine, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('a synthetic row floored below sha20 must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('below sha20', $e->getMessage());
+        }
+
+        $whitelisted = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [42 => ['base_risk' => 0, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+        ]);
+        $engine2 = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $whitelisted, $keys);
+        try {
+            new RiskGateway($engine2, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42);
+            self::fail('a whitelisted synthetic row must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('base_risk below 100', $e->getMessage());
+        }
+
+        $strong = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                42 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20'],
+            ],
+        ]);
+        $engine3 = new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $strong, $keys);
+        try {
+            new RiskGateway($engine3, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42, principalResolver: null, requestStack: null, decisionRedis: null, decisionKeyPrefix: '{kiwi:kiwi}:decision:', decisionTtlSecs: 300, policy: RiskPolicy::fromConfig([
+                'version' => RiskPolicy::CONTRACT_VERSION,
+                'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+                'weights' => [],
+                'scopes' => [42 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+            ]));
+            self::fail('a gateway policy object diverging from the engine policy must refuse construction');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('must be the engine policy', $e->getMessage());
+        }
+        // The engine's own object is accepted.
+        $gateway = new RiskGateway($engine3, $classifier, $resolver, ['login' => 1], null, null, [], 'minimum', 42, policy: $strong);
+        self::assertSame(42, $gateway->scopeId('anything_unconfigured'));
     }
 }
