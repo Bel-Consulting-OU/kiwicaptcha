@@ -236,7 +236,8 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $receiptNs = $record->issuedAtNs + 60_000_000;
 
         $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
-        self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->isOk());
+        $goodOutcome = $verifier->verify($good, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs);
+        self::assertTrue($goodOutcome->isOk(), 'the armed good verify failed: '.$goodOutcome->error->value.' (bits '.$payload['targetBits'].', program '.$payload['execution_program'].', trace '.base64_encode($trace).')');
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
         self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1', nowNs: $receiptNs)->error);
