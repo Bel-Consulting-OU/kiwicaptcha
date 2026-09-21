@@ -543,7 +543,6 @@ fn escape_json_string(s: &str) -> String {
 }
 
 #[cfg(test)]
-
 mod malformed_vectors {
     use super::*;
 
@@ -615,6 +614,7 @@ mod malformed_vectors {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
