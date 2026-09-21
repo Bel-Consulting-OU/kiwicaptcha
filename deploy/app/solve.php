@@ -19,10 +19,15 @@ declare(strict_types=1);
  *   php solve.php /path/to/challenge.json     (challenge file path)
  *   php solve.php < challenge.json            (challenge on stdin)
  *
- * Only sha256 challenges are solvable here. The helper carries no
- * credentials: the secret never reaches the solver, the challenge
- * document is public by design, and the token is built with the same
- * public core SolutionToken API the browser uses.
+ * Only sha256 challenges are solvable here, and only when the
+ * challenge carries no execution dimension: a document with an
+ * execution_program field is refused, because the token this helper
+ * mints would carry no execution evidence and verification would
+ * reject it as an execution mismatch. The browser produces execution
+ * evidence; a CLI helper cannot. The helper carries no credentials:
+ * the secret never reaches the solver, the challenge document is
+ * public by design, and the token is built with the same public core
+ * SolutionToken API the browser uses.
  */
 
 require __DIR__.'/vendor/autoload.php';
@@ -63,6 +68,9 @@ foreach (['nonce', 'challenge', 'salt', 'prefix', 'targetBits'] as $field) {
     if (!isset($challenge[$field]) || !is_string($challenge[$field]) && !is_int($challenge[$field])) {
         fail("challenge document is missing the $field field");
     }
+}
+if (array_key_exists('execution_program', $challenge)) {
+    fail('this helper cannot solve execution-armed challenges (the document carries an execution_program field; the execution evidence must come from the browser)');
 }
 if (($challenge['algorithm'] ?? 'sha256') !== 'sha256') {
     fail('only the sha256 algorithm is solvable by this helper (got '.($challenge['algorithm'] ?? 'none').')');

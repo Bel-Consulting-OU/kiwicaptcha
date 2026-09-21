@@ -36,10 +36,25 @@ jobs:
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium, intl
           coverage: none
-      - name: install the symfony CLI
+      - name: install the symfony CLI (versioned release, sha256-pinned)
+        # The installer script from get.symfony.com is a pipe-to-bash
+        # download; instead the lane fetches the versioned GitHub
+        # release tarball and verifies its sha256 against the hash
+        # published in the release checksums file before extracting.
+        # Bump `SYMFONY_CLI_VERSION` and `SYMFONY_CLI_SHA256` together
+        # from the symfony-cli releases page (the checksums.txt entry
+        # of the linux amd64 tarball).
+        env:
+          SYMFONY_CLI_VERSION: '5.20.0'
+          SYMFONY_CLI_SHA256: f50bfbbc1825a2f12a125ea4391f6f7c5b3d7e656901aeeeece0dd8bba135f36
         run: |
           set -euo pipefail
-          curl -sS https://get.symfony.com/cli/installer | bash
+          curl -fsSL -o /tmp/symfony-cli.tar.gz \
+            "https://github.com/symfony-cli/symfony-cli/releases/download/v${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz"
+          echo "${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.symfony5/bin"
+          tar -xzf /tmp/symfony-cli.tar.gz -C "$HOME/.symfony5/bin" symfony
+          "$HOME/.symfony5/bin/symfony" --version
           echo "$HOME/.symfony5/bin" >> "$GITHUB_PATH"
       - name: create the empty LTS application (--webapp)
         run: |

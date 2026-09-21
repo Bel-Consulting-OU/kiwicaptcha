@@ -182,6 +182,20 @@ write-once (`SET ... NX`):
   exactly the operation a stale-promotion recovery must not perform
   automatically.
 
+Residual risk the pin does not close: the pinned-primary model DETECTS
+stale promotion (the promoted replica fails the identity comparison
+and every use refuses), but it does not FENCE a partitioned primary.
+A primary that is cut off from its replicas and its clients keeps its
+pinned identity and keeps accepting writes for as long as it is
+reachable, so a split-brain window can serve concurrent authorities
+until the partition heals or the partitioned primary is fenced. The
+recommendation under `ha_safe` is therefore to pair the guard with
+`min-replicas-to-write >= 1` (replication gating on the primary
+itself): a partitioned primary with zero connected replicas refuses
+writes, which converts the detect-only guarantee into a fenced one for
+the common partition shape. The pin remains the identity authority;
+the replication gate is the fencing leg.
+
 Check window and connection generation: the verification result is
 cached in-process per CONNECTION OBJECT for
 `ha_authority_reverify_secs` (default 5). The cache key is

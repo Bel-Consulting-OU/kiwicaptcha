@@ -371,6 +371,24 @@ jobs:
         # tag exists; this step makes the contract part of the release
         # run itself.
         run: bash "$GITHUB_WORKSPACE/tools/ci/release-asset-contract.sh"
+      - name: client-performance release-baseline gate (release mode)
+        # The release boundary is physical-device data: the same
+        # validator the CI-mode step of the Performance budgets job
+        # runs, invoked here with --release on the same committed
+        # baseline path. A lab-status qualification, a missing
+        # release-required cell, a stale or incomplete physical claim
+        # or drifted asset fingerprints refuses the release before
+        # anything is attested.
+        working-directory: ${{ github.workspace }}
+        run: node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
+      - name: autofill qualification matrix gate
+        # The release-touching-decoy gate: the committed autofill
+        # qualification matrix must carry a pass row with a fresh
+        # tested_at for every required surface, or the release is
+        # refused. The validator and the required-surface set are the
+        # ones docs/autofill-qualification-protocol.md defines.
+        working-directory: ${{ github.workspace }}
+        run: node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json
       - name: upload the immutable build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

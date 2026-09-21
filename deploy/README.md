@@ -29,6 +29,7 @@ Or through compose, which builds the image for you:
 
     cp deploy/.env.example deploy/.env
     # fill in KIWI_SECRET_KEY: openssl rand -hex 32
+    # fill in VALKEY_PASSWORD: openssl rand -hex 16
     docker compose -f deploy/docker-compose.yml up -d
 
 Then:
@@ -75,7 +76,47 @@ fresh challenge per row:
 after a real store round trip (write, read, delete-if-pending) and
 503 with `{"ok":false,"code":"storage_probe_failed"}` otherwise (the
 backend detail of a failed probe stays in the server log); the
-container HEALTHCHECK requires the 200.
+container HEALTHCHECK requires the 200. The full probe is a write
+amplification: three store operations per health check. Set
+`KIWI_HEALTHZ_MODE=probe` to answer a PING-only round trip instead
+(one command, no synthetic record); probe mode trades the
+write/read/delete coverage for a cheap high-frequency check, so use
+it for frequent polls and keep full mode for the container health
+check and pre-cutover verification.
+
+## Issuance rate limiting
+
+`POST /challenge` is rate limited per client IP on the same Redis the
+storage uses: a fixed 60-second window with a budget of
+`KIWI_ISSUANCE_PER_MINUTE_PER_IP` challenges (default 30, 0 disables
+the limiter), implemented as one `INCR` under `kiwi:rl:issuance:<ip>`
+with the window armed on the first increment. A request past the
+budget answers 429 with `{"error":{"code":"RATE_LIMITED",...}}` and
+`Cache-Control: no-store`. The client identity is `REMOTE_ADDR`, the
+socket peer: this deployment is single-hop by design and trusts no
+forwarding header, so a proxy in front must be counted at the proxy
+or balanced across several published ports (a fronting proxy would
+otherwise pool all its clients into one window).
+
+Prove the limiter against a running deployment:
+
+    KIWI_PROBE_BASE_URL=http://127.0.0.1:8080 \
+    KIWI_PROBE_LIMIT=5 \
+    bash deploy/probe-rate-limit.sh
+
+`KIWI_PROBE_LIMIT` must equal the deployment's
+`KIWI_ISSUANCE_PER_MINUTE_PER_IP` value. The probe bursts the
+in-budget 200s, asserts the 429 with the `RATE_LIMITED` code and the
+no-store header past the budget, waits out the 60-second window and
+asserts the reset to 200 (the whole run takes about a minute).
+
+The CLI solve helper refuses execution-armed challenge documents (a
+document carrying `execution_program`) with a clear error: the
+execution evidence must come from the browser, and a helper-minted
+token would fail verification as an execution mismatch. The refusal
+smoke proves it against a synthetic execution-armed document:
+
+    php deploy/smoke-solve-refusal.php
 
 ## Environment variables
 
@@ -84,9 +125,16 @@ Required:
 - `KIWI_SECRET_KEY` — the challenge-signing secret; at least 32 bytes
   of random data (`openssl rand -hex 32`). Never commit a real value.
 - `KC_REDIS_URL` — the challenge-store connection. The compose file
-  sets it to the bundled Valkey service
-  (`redis://valkey:6379`); a standalone deployment points it at any
-  Redis-compatible server (e.g. `redis://127.0.0.1:6379`).
+  sets it to the bundled password-protected Valkey service
+  (`redis://:<password>@valkey:6379`, built from `VALKEY_PASSWORD`);
+  a standalone deployment points it at any Redis-compatible server
+  (e.g. `redis://127.0.0.1:6379`, with credentials inline when the
+  server requires them).
+- `VALKEY_PASSWORD` — required by docker compose only: the `requirepass`
+  credential of the bundled Valkey service (`openssl rand -hex 16`).
+  The compose stack runs Valkey on an internal network with no route
+  off the docker network, keeps `appendonly yes` and the named volume,
+  and publishes only the captcha port.
 
 Optional:
 
@@ -97,9 +145,10 @@ Optional:
   trapdoor pair. Both must be configured together; setting exactly one
   refuses startup with
   `KIWI_RSW_MODULUS_N and KIWI_RSW_LAMBDA must be configured
-  together`. When both are set, `KIWI_ALGORITHM=rsw` is the selectable
-  issuance profile; the modulus is public, lambda is the secret
-  trapdoor.
+  together`. The pair arms the deployment for rsw, and
+  `KIWI_ALGORITHM=rsw` is what selects rsw issuance; the request
+  `algorithm` field is validated metadata only. The modulus is public,
+  lambda is the secret trapdoor.
 - `KIWI_ALGORITHM` — selects the issuance profile (`sha256`,
   `argon2id` or `rsw`; default `sha256`). The browser may advertise
   the profile it expects in the challenge request, but request input
@@ -123,6 +172,12 @@ Optional:
   behavior), 0 disables it.
 - `KIWI_RSW_T` — the rsw sequential-squaring cost, 10,000..300,000
   (default 75,000).
+- `KIWI_ISSUANCE_PER_MINUTE_PER_IP` — the per-client-IP challenge
+  budget per 60-second window, 0..1000000 (default 30; 0 disables the
+  limiter). See "Issuance rate limiting" above.
+- `KIWI_HEALTHZ_MODE` — the `/healthz` round trip: `full` (default,
+  write-probe-read-delete) or `probe` (PING only). See the write
+  amplification note above.
 
 ## Security note
 

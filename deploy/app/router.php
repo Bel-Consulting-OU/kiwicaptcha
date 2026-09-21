@@ -25,6 +25,11 @@ declare(strict_types=1);
  *                    server-selected KIWI_ALGORITHM profile: the
  *                    request `algorithm` field is compatibility
  *                    metadata only (validated, never honored).
+ *                    Issuance is rate limited per client IP on the
+ *                    store Redis (KIWI_ISSUANCE_PER_MINUTE_PER_IP,
+ *                    default 30 challenges per 60-second window, 0
+ *                    disables); an over-limit request answers 429 with
+ *                    code RATE_LIMITED.
  *   POST /verify   -> 200 {"ok":true,"code":""} for a fresh valid
  *                    redemption; {"ok":false,"code":"<error>"} for
  *                    every failure. The presented `request_binding` is
@@ -464,6 +469,40 @@ function kiwiClientIp(): string
 }
 
 /**
+ * The per-client-IP fixed-window issuance limiter, on the same Redis
+ * the storage uses: one INCR per challenge request under
+ * kiwi:rl:issuance:<ip>, and the 60-second window is armed exactly
+ * when the counter is new (INCR result 1 -> EXPIRE 60). The key
+ * namespace is deliberately distinct from the challenge-storage
+ * prefix. A limiter budget of 0 disables the limiter. A Redis error
+ * while limiting is logged and treated as allowed: the issuance path
+ * below fails closed on the same store, so the limiter never turns a
+ * reachable store into a client outage.
+ *
+ * @return bool whether the client is within its window budget
+ */
+function kiwiIssuanceAllowed(string $redisUrl, string $ip, int $perMinute): bool
+{
+    if ($perMinute < 1) {
+        return true;
+    }
+    $key = 'kiwi:rl:issuance:'.$ip;
+    try {
+        $client = kiwiRedisClient($redisUrl);
+        $count = (int) $client->incr($key);
+        if ($count === 1) {
+            $client->expire($key, 60);
+        }
+    } catch (\Throwable $e) {
+        error_log(sprintf('kiwicaptcha deploy: issuance limiter unavailable: %s', $e->getMessage()));
+
+        return true;
+    }
+
+    return $count <= $perMinute;
+}
+
+/**
  * POST /challenge: issue a challenge through the real core issuer.
  *
  * Server-owned semantics mirroring the bundle controller: the issued
@@ -519,6 +558,16 @@ function kiwiChallenge(): void
     if (isset($payload['algorithm']) && $payload['algorithm'] !== ''
         && !in_array($payload['algorithm'], KIWI_ALGORITHM_PROFILES, true)) {
         kiwiError('INVALID_ALGORITHM', 'The algorithm must be one of sha256, argon2id, rsw.', 422);
+
+        return;
+    }
+
+    // The unauthenticated issuance surface is rate limited per client
+    // IP before any issuance work runs: the socket peer is the only
+    // identity input (the deployment trusts no forwarding header), so
+    // a burst burns only its own window.
+    if (!kiwiIssuanceAllowed($deployment['redisUrl'], kiwiClientIp(), (int) $deployment['issuancePerMinute'])) {
+        kiwiError('RATE_LIMITED', 'Too many challenge requests from this address. Try again later.', 429);
 
         return;
     }
@@ -652,11 +701,16 @@ try {
     }
 
     kiwiError('NOT_FOUND', 'not found', 404);
-} catch (\LogicException $e) {
+} catch (\RuntimeException $e) {
     // A configuration error (missing/undersized secret, the half-set
     // rsw pair, an out-of-range knob, an invalid trapdoor value) is
-    // operator-facing and answers a structured document; the exception
-    // message names variables and bounds only, never secret values.
+    // operator-facing and answers a structured document; the bootstrap
+    // signals every configuration failure with RuntimeException, and
+    // the exception message names variables and bounds only, never
+    // secret values.
+    error_log(sprintf('kiwicaptcha deploy: configuration error: %s', $e->getMessage()));
+    kiwiError('CONFIGURATION_ERROR', $e->getMessage(), 500);
+} catch (\LogicException $e) {
     error_log(sprintf('kiwicaptcha deploy: configuration error: %s', $e->getMessage()));
     kiwiError('CONFIGURATION_ERROR', $e->getMessage(), 500);
 } catch (\Throwable $e) {

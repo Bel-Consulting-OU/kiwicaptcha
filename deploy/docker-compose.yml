@@ -3,15 +3,22 @@
 # reads EVERY secret and knob from the environment or from deploy/.env
 # (see deploy/.env.example and deploy/README.md); no secret is
 # committed. Valkey keeps its data in the named volume below, so the
-# challenge records survive a captcha container restart.
+# challenge records survive a captcha container restart. Valkey answers
+# only with the requirepass credential, and the store network is
+# internal: Valkey has no route off the docker network, while the
+# captcha port stays published for the widget.
 services:
   valkey:
     image: valkey/valkey:8-alpine
-    command: ["valkey-server", "--appendonly", "yes"]
+    command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set in the environment or deploy/.env (any non-empty random string, e.g. openssl rand -hex 16)}"]
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set in the environment or deploy/.env}
     volumes:
       - valkey-data:/data
+    networks:
+      - kiwi-store
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ["CMD-SHELL", "valkey-cli --no-auth-warning -a \"$$VALKEY_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 2s
       retries: 10
@@ -23,8 +30,9 @@ services:
       dockerfile: deploy/Dockerfile
     environment:
       # KC_REDIS_URL is the challenge-store connection of the core, the
-      # same variable the CI real-Redis lanes publish.
-      KC_REDIS_URL: redis://valkey:6379
+      # same variable the CI real-Redis lanes publish, carrying the
+      # Valkey credential.
+      KC_REDIS_URL: "redis://:${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set in the environment or deploy/.env}@valkey:6379"
       # Required: at least 32 bytes of random data. The :? form fails
       # the compose up when the variable is missing from the
       # environment or deploy/.env.
@@ -41,12 +49,24 @@ services:
       KIWI_TTL_SECS: ${KIWI_TTL_SECS:-}
       KIWI_MIN_DURATION_MS: ${KIWI_MIN_DURATION_MS:-}
       KIWI_RSW_T: ${KIWI_RSW_T:-}
+      KIWI_ISSUANCE_PER_MINUTE_PER_IP: ${KIWI_ISSUANCE_PER_MINUTE_PER_IP:-}
+      KIWI_HEALTHZ_MODE: ${KIWI_HEALTHZ_MODE:-}
     depends_on:
       valkey:
         condition: service_healthy
+    networks:
+      - kiwi-store
+      - default
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+networks:
+  # The store network is internal: Valkey (and the store traffic) has
+  # no route off the docker network. The captcha service joins it plus
+  # the default network, so its published port keeps working.
+  kiwi-store:
+    internal: true
 
 volumes:
   valkey-data:

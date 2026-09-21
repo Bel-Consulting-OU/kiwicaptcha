@@ -18,8 +18,9 @@ declare(strict_types=1);
  * and exactly one of the rsw pair set throws
  * RuntimeException('KIWI_RSW_MODULUS_N and KIWI_RSW_LAMBDA must be
  * configured together'). The remaining knobs that shape the request
- * surface (algorithm profile selection, difficulty, lifetime) are
- * optional and carry documented defaults mirroring the Symfony bundle
+ * surface (algorithm profile selection, difficulty, lifetime, the
+ * issuance rate limit and the healthz probe mode) are optional and
+ * carry documented defaults mirroring the Symfony bundle
  * configuration defaults.
  *
  * php -S re-includes the router once per request, so the configuration
@@ -152,6 +153,8 @@ function optionalInt(string $name, int $default, int $min, int $max): int
  *     ttlSecs: int,
  *     minDurationMs: int|null,
  *     rswT: int,
+ *     issuancePerMinute: int,
+ *     healthzMode: string,
  *     config: Config
  * }
  *
@@ -213,6 +216,20 @@ function kiwiDeployment(): array
         }
     }
 
+    // The per-client-IP issuance rate limit (challenges per 60-second
+    // window); 0 disables the limiter. The healthz mode picks the
+    // round-trip shape of the health probe: full keeps the
+    // write-probe-read-delete store round trip, probe answers a
+    // PING-only round trip.
+    $issuancePerMinute = optionalInt('KIWI_ISSUANCE_PER_MINUTE_PER_IP', 30, 0, 1_000_000);
+    $healthzModeEnv = optionalEnv('KIWI_HEALTHZ_MODE') ?? 'full';
+    $healthzMode = match ($healthzModeEnv) {
+        'full', 'probe' => $healthzModeEnv,
+        default => throw new RuntimeException(
+            'environment variable KIWI_HEALTHZ_MODE must be one of full, probe'
+        ),
+    };
+
     $deployment = [
         'secret' => $secret,
         'redisUrl' => $redisUrl,
@@ -226,6 +243,8 @@ function kiwiDeployment(): array
         'ttlSecs' => $ttlSecs,
         'minDurationMs' => $minDurationMs,
         'rswT' => $rswT,
+        'issuancePerMinute' => $issuancePerMinute,
+        'healthzMode' => $healthzMode,
     ];
     $deployment['config'] = kiwiConfig($deployment, $algorithm);
 
@@ -263,6 +282,20 @@ function kiwiConfig(array $deployment, PoWAlgorithm $algorithm): Config
 }
 
 /**
+ * The Predis client the deployment builds from KC_REDIS_URL: the same
+ * client construction the storage, the issuance limiter and the
+ * healthz probe use, with fail-fast timeouts so a down store surfaces
+ * as an error instead of hanging the request.
+ */
+function kiwiRedisClient(string $redisUrl): \Predis\Client
+{
+    return new \Predis\Client($redisUrl, [
+        'timeout' => 2.0,
+        'read_write_timeout' => 2.0,
+    ]);
+}
+
+/**
  * The real challenge-record store of the core, exactly the backend the
  * Symfony bundle wires from its redis_dsn setting: a Predis client on
  * the configured URL behind KiwiCaptcha\Storage\RedisStorage. The
@@ -273,10 +306,5 @@ function kiwiConfig(array $deployment, PoWAlgorithm $algorithm): Config
  */
 function kiwiStorage(string $redisUrl): RedisStorage
 {
-    $client = new \Predis\Client($redisUrl, [
-        'timeout' => 2.0,
-        'read_write_timeout' => 2.0,
-    ]);
-
-    return new RedisStorage($client);
+    return new RedisStorage(kiwiRedisClient($redisUrl));
 }

@@ -36,7 +36,7 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 ## Release and branch governance
 
 - **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for all changes; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
-  All required security CI checks must pass (strict), currently 26 contexts. The set includes the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job, the two stable matrix aggregators and the release asset contract + governance fixtures job.
+  All required security CI checks must pass (strict), currently 30 contexts. The count is the gating lane set the CI workflow emits per push. The version-matrix lanes gate through the two stable aggregators; the Redis 8 compatibility and PHP 8.6 nightly lanes are deliberately non-gating; the one-runner build-reproducibility lane runs weekly instead of per push. The set includes the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job, the two stable matrix aggregators and the release asset contract + governance fixtures job.
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
   No actor holds a ruleset bypass: both rulesets carry an empty

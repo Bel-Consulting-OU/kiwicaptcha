@@ -1,0 +1,64 @@
+name: Build reproducibility (weekly)
+
+# The one-runner double-build reproducibility proof: two fully clean
+# build-tree/cache runs in ONE controlled runner (same Rust env +
+# registry) with byte-compared asset hashes. The build-repro-a/b pair
+# in ci.yml extends the proof to independent environments on every
+# push, which subsumes this lane for the per-push gate; this workflow
+# keeps the one-runner cache-independence proof on a weekly schedule
+# (plus manual dispatch) to cut per-push cost while the property stays
+# continuously observed.
+on:
+  schedule:
+    # Mondays 03:20 UTC, off the top of the hour.
+    - cron: "20 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-reproducibility:
+    name: Build reproducibility (two clean strict builds, one runner)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The standalone wasm crate (excluded from the root
+          # workspace, its own target directory).
+          workspaces: packages/kiwicaptcha-wasm
+      - name: first clean strict build
+        # Reproducibility is demonstrated, not inferred from version pins:
+        # two fully clean strict builds (fresh target dir, fresh pkg dir,
+        # fresh wasm-opt download) must produce identical asset hashes.
+        env:
+          WASM_OPT_STRICT: "1"
+        run: |
+          bash build.sh
+          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
+                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build1.sha256
+      - name: second clean strict build (fresh cache + target)
+        env:
+          WASM_OPT_STRICT: "1"
+        run: |
+          cargo clean
+          rm -rf pkg
+          rm -rf "$HOME/.cache/kiwicaptcha-wasm"
+          bash build.sh
+          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
+                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build2.sha256
+      - name: byte-compare the two builds
+        run: |
+          diff /tmp/build1.sha256 /tmp/build2.sha256
+          echo "two clean isolated strict builds produce identical asset hashes"

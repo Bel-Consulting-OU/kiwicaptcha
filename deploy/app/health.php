@@ -5,14 +5,18 @@ declare(strict_types=1);
 /**
  * The /healthz handler logic of the reference deployment.
  *
- * The probe is a REAL round trip through the core challenge-record
- * store, never a process-local check: the storage interface exposes no
- * ping, so the probe stores a synthetic pending record with a fresh
- * random nonce, reads it back, and atomically deletes it while pending
- * (the delete-if-pending transition). A record left behind by a failed
- * probe expires on its own short TTL. Success means the same storage
- * API the Symfony bundle uses for challenge records accepted a write,
- * a read and a delete.
+ * The probe is a REAL round trip through the configured store, never a
+ * process-local check. The default full mode runs the storage round
+ * trip: the storage interface exposes no ping, so the probe stores a
+ * synthetic pending record with a fresh random nonce, reads it back,
+ * and atomically deletes it while pending (the delete-if-pending
+ * transition). A record left behind by a failed probe expires on its
+ * own short TTL. Success means the same storage API the Symfony bundle
+ * uses for challenge records accepted a write, a read and a delete.
+ * The full probe is a deliberate write amplification (three store
+ * operations per health check); KIWI_HEALTHZ_MODE=probe switches to a
+ * PING-only round trip for high-frequency checks, trading the
+ * write/read/delete coverage for one cheap command.
  *
  * The unauthenticated response never carries backend detail: on any
  * probe failure the one-line detail goes to the server log and the
@@ -79,10 +83,12 @@ function kiwiHealthProbe(RedisStorage $storage): array
 
 /**
  * The /healthz request handler: answers 200 only when the configured
- * store completed the round trip, 503 otherwise. The detail of a
- * failed probe (or of a configuration/storage failure while probing)
- * is logged server-side and never serialized into the unauthenticated
- * response.
+ * store completed the round trip, 503 otherwise. The mode selects the
+ * round trip: full runs the write-probe-read-delete storage round
+ * trip; probe answers one PING through the same client the storage
+ * uses. The detail of a failed probe (or of a configuration/storage
+ * failure while probing) is logged server-side and never serialized
+ * into the unauthenticated response.
  */
 function kiwiHealthz(): void
 {
@@ -90,8 +96,14 @@ function kiwiHealthz(): void
     $detail = '';
     try {
         $deployment = kiwiDeployment();
-        $storage = kiwiStorage($deployment['redisUrl']);
-        [$ok, $detail] = kiwiHealthProbe($storage);
+        if ($deployment['healthzMode'] === 'probe') {
+            kiwiRedisClient($deployment['redisUrl'])->ping();
+            $ok = true;
+            $detail = 'probe round trip (PING) succeeded';
+        } else {
+            $storage = kiwiStorage($deployment['redisUrl']);
+            [$ok, $detail] = kiwiHealthProbe($storage);
+        }
     } catch (\Throwable $e) {
         $detail = $e->getMessage();
     }

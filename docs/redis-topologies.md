@@ -13,6 +13,15 @@ failover (the Sentinel HA fixture). The suites that run them are
 on the shared real-Redis env (`KC_REDIS_URL` or `TEST_REDIS_URL`), the
 same gate every real-Redis suite uses.
 
+Server-version coverage splits by role: the gating CI lanes pin Redis
+7 (digest-pinned service images), while the reference deployment under
+`deploy/` ships Valkey 8 (the Redis-compatible store). The Redis 8
+compatibility lane in `ci.yml` bridges the gap: it is deliberately
+non-gating, but it runs the risk real-Redis suites, the PHP core
+real-Redis fault/topology/death suites and the Symfony real-Redis
+suites against a digest-pinned Redis 8 service, so the 8.x line
+stays continuously observed.
+
 ## Redis Cluster: routing and atomicity compatibility
 
 This fixture is **Cluster routing/atomicity compatibility**, not

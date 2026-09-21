@@ -8,11 +8,27 @@ updates:
     directory: /packages/kiwicaptcha
     schedule:
       interval: weekly
+  - package-ecosystem: cargo
+    directory: /packages/kiwicaptcha-wasm
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /tools/rsw-keygen
+    schedule:
+      interval: weekly
   - package-ecosystem: composer
     directory: /packages/kiwicaptcha-php
     schedule:
       interval: weekly
   - package-ecosystem: composer
     directory: /packages/kiwicaptcha/integrations/symfony
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /tests/browser
     schedule:
       interval: weekly

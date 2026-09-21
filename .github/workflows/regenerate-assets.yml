@@ -42,12 +42,18 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: canonical-assets
+          # One file per line, full repo-relative paths: a joined list
+          # would collapse to fewer artifact entries than the release
+          # asset set.
           path: |
             packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
             packages/kiwicaptcha-wasm/assets/kiwi-worker.js
             packages/kiwicaptcha-wasm/assets/execution-interpreter.js
             packages/kiwicaptcha-wasm/assets/widget-driver.js
-            packages/kiwicaptcha-wasm/assets/widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js
+            packages/kiwicaptcha-wasm/assets/widget-risk.js
+            packages/kiwicaptcha-wasm/assets/widget-telemetry.js
+            packages/kiwicaptcha-wasm/assets/widget-locales.js
+            packages/kiwicaptcha-wasm/assets/widget-compat.js
             packages/kiwicaptcha-wasm/assets/widget.css
           if-no-files-found: error
           retention-days: 30

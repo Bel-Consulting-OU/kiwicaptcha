@@ -1176,5 +1176,35 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   reject('engineering target: physical release ladder without an engineeringTargetP95 entry rejects', res, ['has no engineeringTargetP95 entry']);
 }
 
+// 54. A corrupted execution manifest (the schema field mutated away
+//     from the kiwicaptcha.execution-v1/1 authority): the validator
+//     must reject with the named manifest reason and exit non-zero,
+//     never crash on an unhandled error. The case runs the validator
+//     against a corrupted manifest copy in the temp directory through
+//     the KIWI_VALIDATOR_EXECUTION_MANIFEST seam, so the committed
+//     protocol file stays untouched. The crash marker is asserted
+//     absent: a validator that dies mid-check instead of reporting
+//     the reason is a broken gate, not a working one.
+{
+  const corrupted = clone(EXECUTION_MANIFEST);
+  corrupted.$schema = 'kiwicaptcha.execution-v9/1';
+  const manifestPath = join(tmpBase, 'execution-manifest-corrupted.json');
+  writeFileSync(manifestPath, JSON.stringify(corrupted));
+  const baselinePath = join(tmpBase, 'baseline-manifest-corrupted.json');
+  const budgetsPath = join(tmpBase, 'budgets-manifest-corrupted.json');
+  writeFileSync(baselinePath, JSON.stringify(schema3Payload()));
+  writeFileSync(budgetsPath, JSON.stringify(baseBudgets()));
+  const res = spawnSync(process.execPath, [VALIDATOR, baselinePath, budgetsPath], {
+    encoding: 'utf8',
+    env: { ...process.env, KIWI_VALIDATOR_EXECUTION_MANIFEST: manifestPath },
+  });
+  reject(
+    'execution manifest corrupted (schema mutated): reject with the named manifest reason, never crash',
+    res,
+    ['execution manifest', 'is not the kiwicaptcha.execution-v1/1 authority'],
+    ['ReferenceError', 'TypeError'],
+  );
+}
+
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
 process.exit(failures === 0 ? 0 : 1);

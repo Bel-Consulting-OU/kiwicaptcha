@@ -295,7 +295,15 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 const HARNESS_FILE = join(REPO_ROOT, 'tools', 'client-perf', 'client-perf.mjs');
 const DEFAULT_BUDGETS = join(REPO_ROOT, 'tools', 'client-perf', 'release-budgets.json');
-const EXECUTION_MANIFEST_FILE = join(REPO_ROOT, 'protocol', 'execution-v1.json');
+// The execution manifest is a repository authority: the validator
+// always reads the committed protocol/execution-v1.json. The
+// KIWI_VALIDATOR_EXECUTION_MANIFEST override exists purely as the
+// mutation-suite seam (tools/ci/test-validate-release-baseline.mjs
+// corrupts a copy in os.tmpdir() and proves the rejection path); the
+// CI and release invocations never set it.
+const EXECUTION_MANIFEST_FILE = process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST
+  ? resolve(process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST)
+  : join(REPO_ROOT, 'protocol', 'execution-v1.json');
 
 const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/2';
 const RELEASE_STATUSES = ['lab', 'physical'];
@@ -522,11 +530,15 @@ function main() {
   const budgets = loadJson(budgetsPath, 'release budgets');
   const payload = loadJson(baselinePath, 'baseline');
 
-  // The live execution-grammar authority (audit finding 1):
-  // protocol/execution-v1.json declares max_execution_version; every
-  // execution result row must record that version (see the
-  // execution-version evidence rule below). A malformed manifest is a
-  // hard reason, never a silent pass.
+  const reasons = [];
+  const notes = [];
+  const isCurrentHarnessPayload = payload.schema === schema;
+
+  // The live execution-grammar authority: protocol/execution-v1.json
+  // declares max_execution_version; every execution result row must
+  // record that version (see the execution-version evidence rule
+  // below). A malformed manifest is a hard reason, never a silent
+  // pass.
   const executionManifest = loadJson(EXECUTION_MANIFEST_FILE, 'execution manifest');
   let executionMaxVersion = null;
   if (
@@ -538,10 +550,6 @@ function main() {
   } else {
     executionMaxVersion = executionManifest.max_execution_version;
   }
-
-  const reasons = [];
-  const notes = [];
-  const isCurrentHarnessPayload = payload.schema === schema;
 
   // ── The budget authority must be complete and honest. ──────────────
   if (budgets.schema !== BUDGETS_SCHEMA) {

@@ -8,6 +8,28 @@ criteria and its current status. Statuses: not started, in progress,
 blocked, done, closed. It also tracks the governance and operations
 milestones that sit outside the publication sequence.
 
+## Wired release gates
+
+The release workflow runs three evidence gates that a release tag must
+pass before anything is built, attested or published. They run
+automatically on every `v*` tag, but the checklist records them because
+each one can block a tag on data that ages:
+
+- Release-mode baseline validation: `node tools/ci/validate-release-baseline.mjs
+  --release tools/client-perf/results/baseline.json`. The qualification
+  must be `physical` with fresh device evidence; a stale or lab-status
+  qualification refuses the release. Re-record the baseline on physical
+  devices when the qualification window or the asset set changes.
+- Protocol manifest check: `bash tools/ci/protocol-manifest-check.sh`
+  (also a required CI lane). The execution-v1 register must agree
+  across the manifest, the PHP core, the Rust core and the interpreter
+  asset before a release is cut.
+- Autofill qualification matrix: `node tools/ci/validate-autofill-qualification.mjs
+  tests/browser/qualification/autofill-matrix.json`. Every required
+  surface must carry a `pass` row with a `tested_at` inside the
+  90-day window; re-run the qualification protocol when a release
+  touches the decoy surface.
+
 ## Step 1. Publish the package chain to Packagist
 
 The chain is four packages: `kiwicaptcha/kiwicaptcha-php` (the

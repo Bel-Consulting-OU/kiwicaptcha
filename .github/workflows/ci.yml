@@ -27,6 +27,14 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # Both build trees: the root workspace and the standalone
+          # wasm crate (excluded from the workspace, its own target
+          # directory).
+          workspaces: |
+            . -> target
+            packages/kiwicaptcha-wasm -> packages/kiwicaptcha-wasm/target
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -68,6 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - name: quick-start end-to-end
         run: cargo test -p kiwicaptcha --example quickstart
 
@@ -107,8 +116,11 @@ jobs:
           coverage: none
       - name: composer validate
         run: composer validate --strict
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          # uses: steps ignore the job's defaults.run.working-directory.
+          working-directory: packages/kiwicaptcha-php
       - name: composer PSR-4 layout check
         run: bash ../kiwicaptcha/tools/check-psr4.sh
 
@@ -158,8 +170,10 @@ jobs:
           coverage: none
       - name: composer validate
         run: composer validate --strict
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
       - name: composer PSR-4 layout check
         run: bash ../kiwicaptcha/tools/check-psr4.sh
       - name: phpunit
@@ -265,8 +279,10 @@ jobs:
           php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
       - name: composer validate
         run: composer validate --strict
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
       - name: composer PSR-4 layout check
         run: bash ../kiwicaptcha/tools/check-psr4.sh
       - name: no-GMP surface proof
@@ -304,8 +320,10 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: gmp, json, openssl, sodium
           coverage: none
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
       - name: composer audit (dependency/security)
         # Retry wrapper: packagist's advisories API is
         # occasionally flaky; fail closed only after 5 attempts.
@@ -400,8 +418,10 @@ jobs:
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium
           coverage: none
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
       - name: real-redis integration tests
         # The lane owns the bundle real-Redis suites AND the protocol-v3
         # upgrade walk (the walk class name does not match the RealRedis
@@ -439,6 +459,10 @@ jobs:
           umask 077
           printf 'KIWI_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" > .env
           printf 'KIWI_SHA_TARGET_BITS=8\n' >> .env
+          # The Valkey requirepass credential of the compose stack: a
+          # fresh random value, generated once here and preserved by
+          # every later .env rewrite in this lane.
+          printf 'VALKEY_PASSWORD=%s\n' "$(openssl rand -hex 16)" >> .env
       - name: docker compose up (valkey + captcha)
         working-directory: deploy
         run: docker compose up -d
@@ -515,11 +539,14 @@ jobs:
         run: |
           set -euo pipefail
           SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
           test -n "$SECRET"
+          test -n "$VALKEY_PASSWORD"
           {
             printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
             printf 'KIWI_SHA_TARGET_BITS=8\n'
             printf 'KIWI_ALGORITHM=argon2id\n'
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
           } > .env
           docker compose up -d --force-recreate captcha
           for attempt in $(seq 1 60); do
@@ -553,12 +580,15 @@ jobs:
             'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
           test -n "$MODULUS_N"
           test -n "$LAMBDA"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+          test -n "$VALKEY_PASSWORD"
           {
             printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
             printf 'KIWI_SHA_TARGET_BITS=8\n'
             printf 'KIWI_ALGORITHM=rsw\n'
             printf 'KIWI_RSW_MODULUS_N=%s\n' "$MODULUS_N"
             printf 'KIWI_RSW_LAMBDA=%s\n' "$LAMBDA"
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
           } > .env
           docker compose up -d --force-recreate captcha
           for attempt in $(seq 1 60); do
@@ -580,9 +610,13 @@ jobs:
         run: |
           set -euo pipefail
           SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+          test -n "$SECRET"
+          test -n "$VALKEY_PASSWORD"
           {
             printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
             printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
           } > .env
           docker compose up -d --force-recreate captcha
           for attempt in $(seq 1 60); do
@@ -738,8 +772,10 @@ jobs:
           php-version: '8.2'
           extensions: pcntl, posix, json, openssl, sodium
           coverage: none
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
       - name: install local redis binaries (topology suites)
         # The cluster and sentinel suites boot their own redis-server
         # processes from the binaries on `PATH`, and the ubuntu-latest
@@ -771,8 +807,10 @@ jobs:
         # of the four real-Redis suites runs — the lane's fail-on-skip
         # contract is that a missing piece fails the lane, never that a
         # test silently no-ops.
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
       - name: real-Redis fault/topology/death suites
         env:
           KC_REDIS_URL: redis://127.0.0.1:6379
@@ -807,14 +845,17 @@ jobs:
           php-version: '8.3'
           extensions: redis, json, openssl, sodium
           coverage: none
-      - name: install PHP core
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
-      - name: install Symfony bundle
+      - name: install PHP core (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (cached)
         # predis is a DEV dependency of the bundle (composer.json
         # require-dev) — the install brings it without an explicit require.
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
       - name: verify phpredis extension is loaded
         run: php -r 'if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";'
       - name: phpredis idempotency-store smoke (real Redis, \Redis branch)
@@ -860,11 +901,15 @@ jobs:
         run: vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
 
   redis-compat:
-    # Non-gating forward-compatibility probe: runs the risk real-Redis
-    # suites against newer Redis (8.x, digest-pinned) so future Redis
-    # behavior changes surface as visible warnings, while the release gate
-    # keeps testing the deterministic pinned Redis 7 digest. Deliberately
-    # NOT in the protected-main required-check set.
+    # Non-gating forward-compatibility probe against newer Redis (8.x,
+    # digest-pinned): the risk real-Redis suites (Rust and PHP), the
+    # PHP core real-Redis suites and the Symfony real-Redis suites all
+    # run against the Redis 8 service, so future Redis behavior
+    # changes surface as visible warnings while the release gate keeps
+    # testing the deterministic pinned Redis 7 digest. Deliberately
+    # NOT in the protected-main required-check set; the reference
+    # deployment ships Valkey 8, so this lane is the coherence bridge
+    # to the 8.x line.
     name: Redis 8 compatibility (non-gating)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -882,6 +927,7 @@ jobs:
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - name: risk Rust real-Redis suite on Redis 8
         env:
           RISK_REDIS_URL: redis://127.0.0.1:6379
@@ -890,13 +936,58 @@ jobs:
         with:
           tools: composer:v2.9
           php-version: '8.2'
-          extensions: gmp, json, openssl, sodium
+          extensions: gmp, pcntl, posix, json, openssl, sodium
           coverage: none
+      - name: install local redis binaries (PHP core topology suites)
+        # The PHP core cluster and sentinel suites boot their own
+        # redis-server processes from the binaries on `PATH`; the apt
+        # postinst starts a systemd redis on 6379 which would fight the
+        # docker service published on the same port, so it is stopped
+        # right away, leaving the binaries for the suites.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y redis-server redis-tools
+          sudo systemctl stop redis-server || true
+      - name: risk PHP real-Redis suite on Redis 8 (cached install)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
       - name: risk PHP real-Redis suite on Redis 8
         working-directory: packages/kiwicaptcha-risk-php
-        run: |
-          composer install --no-interaction --prefer-dist
-          RISK_REDIS_URL=tcp://127.0.0.1:6379 vendor/bin/phpunit
+        env:
+          RISK_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit
+      - name: install PHP core (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: PHP core real-Redis fault/topology/death suites on Redis 8
+        # The same four suites the required Redis 7 lane runs, against
+        # the Redis 8 service; KIWI_REQUIRE_REAL_REDIS_TESTS=1 fails
+        # instead of skipping when the Redis env or the local binaries
+        # are missing.
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          TEST_REDIS_URL: redis://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+      - name: install Symfony bundle (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: Symfony real-Redis suite on Redis 8
+        # The real-Redis bundle suites and the protocol-v3 upgrade walk
+        # against the Redis 8 service, mirroring the required Redis 7
+        # concurrency lane's filter and env.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        env:
+          KC_REDIS_URL: tcp://127.0.0.1:6379
+          TEST_REDIS_URL: tcp://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
 
   risk-rust:
     name: Risk Rust (fmt, clippy, test + Redis)
@@ -915,6 +1006,7 @@ jobs:
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -943,8 +1035,10 @@ jobs:
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium
           coverage: none
-      - name: composer install
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
       - name: phpunit (incl. real-Redis suite)
         env:
           RISK_REDIS_URL: tcp://127.0.0.1:6379
@@ -958,17 +1052,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium
           coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
       - name: PHP fixture hash
         working-directory: packages/kiwicaptcha-risk-php
-        run: |
-          composer install --no-interaction --prefer-dist
-          php tools/fixture_hash.php
+        run: php tools/fixture_hash.php
       - name: Rust fixture hash
         working-directory: packages/kiwicaptcha-risk
         run: cargo run --example fixture_hash
@@ -994,16 +1091,27 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
         with:
           node-version: '22'
-      - name: install PHP core (fixture server)
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
-      - name: install Symfony bundle (real ApiJsController for the compat endpoints)
+      - name: install PHP core (fixture server, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (real ApiJsController for the compat endpoints, cached)
         # The fixture router serves /kiwi-captcha/api.js and
         # /kiwi-captcha/widget.css through the real bundle controller: the
         # bundle vendor must exist so the production code path (not a
         # hard-coded concat) is what the browser tests exercise.
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: cache the Playwright Chromium browser
+        # Keyed on the committed lockfile, so a Playwright bump
+        # reinstalls and an ordinary push reuses the engine bytes; the
+        # install step below still runs and is a cheap no-op on a hit.
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
       - name: install Playwright
         working-directory: tests/browser
         run: |
@@ -1034,12 +1142,22 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
         with:
           node-version: '22'
-      - name: install PHP core (fixture server)
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
-      - name: install Symfony bundle (real controllers for the fixture)
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+      - name: install PHP core (fixture server, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (real controllers for the fixture, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: cache the Playwright browser engines
+        # All three engines keyed on the committed lockfile; the
+        # install step below still runs and is a cheap no-op on a hit.
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-all-engines-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
       - name: install Playwright + all three engines
         working-directory: tests/browser
         run: |
@@ -1271,6 +1389,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - name: release asset contract (workflow asset lists == manifests)
         run: bash tools/ci/release-asset-contract.sh
+      - name: protocol manifest check (execution-v1 register coherence)
+        # The execution register must stay coherent across the four
+        # consumers (the manifest, the PHP core, the Rust core and the
+        # interpreter asset) on every push: the gate runs on plain
+        # `POSIX` tooling with no network, composer or cargo.
+        run: bash tools/ci/protocol-manifest-check.sh
       - name: release governance fixtures (tag-ruleset parser matrix)
         run: bash tools/ci/release-governance-fixture.sh
       - name: version prose lint (stale execution-version/bypass claims)
@@ -1337,6 +1461,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - name: cargo package (risk crate)
         working-directory: packages/kiwicaptcha-risk
         run: |
@@ -1446,6 +1571,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - name: redis_verify integration tests (real Redis)
         # The production RedisChallengeStore + verifier are feature-gated
         # behind `redis`, so the default-feature build never compiles or
@@ -1475,6 +1601,11 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The standalone wasm crate (excluded from the root
+          # workspace, its own target directory).
+          workspaces: packages/kiwicaptcha-wasm
       - name: clean strict build (runner A)
         env:
           WASM_OPT_STRICT: "1"
@@ -1503,6 +1634,11 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The standalone wasm crate (excluded from the root
+          # workspace, its own target directory).
+          workspaces: packages/kiwicaptcha-wasm
       - name: clean strict build (runner B)
         env:
           WASM_OPT_STRICT: "1"
@@ -1540,49 +1676,6 @@ jobs:
           done
           echo "two INDEPENDENT runners produced byte-identical assets"
 
-  build-reproducibility:
-    # Two fully clean build-tree/cache runs in ONE controlled runner
-    # (same Rust env + registry) demonstrate reproducibility; the
-    # build-repro-a/b pair extends the proof to independent environments.
-    name: Build reproducibility (two clean strict builds, one runner)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: packages/kiwicaptcha-wasm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
-        with:
-          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      - name: first clean strict build
-        # Reproducibility is demonstrated, not inferred from version pins:
-        # two fully clean strict builds (fresh target dir, fresh pkg dir,
-        # fresh wasm-opt download) must produce identical asset hashes.
-        env:
-          WASM_OPT_STRICT: "1"
-        run: |
-          bash build.sh
-          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build1.sha256
-      - name: second clean strict build (fresh cache + target)
-        env:
-          WASM_OPT_STRICT: "1"
-        run: |
-          cargo clean
-          rm -rf pkg
-          rm -rf "$HOME/.cache/kiwicaptcha-wasm"
-          bash build.sh
-          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build2.sha256
-      - name: byte-compare the two builds
-        run: |
-          diff /tmp/build1.sha256 /tmp/build2.sha256
-          echo "two clean isolated strict builds produce identical asset hashes"
-
   symfony-assets:
     name: Symfony widget assets (byte parity)
     runs-on: ubuntu-latest
@@ -1593,6 +1686,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The embed-worker glue tool runs from its own standalone
+          # crate directory (excluded from the root workspace).
+          workspaces: packages/kiwicaptcha-wasm/tools/embed-worker
       - name: core crate resources must be byte-identical to the canonical assets
         # The core crate embeds assets from its own resources/ directory
         # (cargo package verification cannot reach outside the crate);
@@ -1677,15 +1775,18 @@ jobs:
         # python3 brotli module and notes a skipped cap when neither is
         # available on a local machine).
         run: sudo apt-get update && sudo apt-get install -y brotli
-      - name: install PHP core (the challenge-response measure issues real challenges)
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
-      - name: install Symfony bundle (risk-enabled controller benchmark)
+      - name: install PHP core (the challenge-response measure issues real challenges, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (risk-enabled controller benchmark, cached)
         # perf-bench-risk.php drives the real ChallengeController with
         # the adaptive risk engine wired, so the bundle vendor must
         # exist (the kiwicaptcha-php/risk-php dependencies ride along).
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
       - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge responses)
         run: bash packages/kiwicaptcha/tools/perf-budget.sh
       - name: client-performance release-baseline gate (CI mode)
@@ -1806,12 +1907,15 @@ jobs:
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium
           coverage: none
-      - name: install PHP core (the benchmarks issue real challenges)
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
-      - name: install Symfony bundle (risk-enabled controller benchmark)
-        working-directory: packages/kiwicaptcha/integrations/symfony
-        run: composer install --no-interaction --no-scripts --prefer-dist
+      - name: install PHP core (the benchmarks issue real challenges, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (risk-enabled controller benchmark, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
       - name: manual-benchmark Redis preflight (the hard-ratchet run requires a reachable Redis)
         env:
           KC_REDIS_URL: ${{ inputs.redis_url }}
@@ -1873,15 +1977,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
           php-version: '8.2'
           extensions: gmp, json, openssl, sodium
           coverage: none
-      - name: composer install (PHP core)
-        working-directory: packages/kiwicaptcha-php
-        run: composer install --no-interaction --prefer-dist
+      - name: composer install (PHP core, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
       - name: PHP issues a SHA-256 challenge
         working-directory: packages/kiwicaptcha-php
         env:

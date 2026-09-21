@@ -11,17 +11,53 @@
 # deploy/app/composer.json path repository ("../../packages/
 # kiwicaptcha-php") resolves the same way it does in a developer
 # checkout.
+#
+# The base tag stays pinned to php:8.4-cli-alpine; digest-pinning the
+# base image is the release posture and belongs to the deployment
+# that publishes the image (a digest is recorded at release time from
+# the exact image the release pipeline built against, never invented
+# here).
 FROM php:8.4-cli-alpine
-RUN apk add --no-cache git unzip gmp-dev \
+
+# The sha384 of https://getcomposer.org/installer, pinned in the build
+# argument and verified before the installer runs; bump the value in
+# lockstep with composer releases (the published hash of the current
+# installer, from https://getcomposer.org/download/).
+ARG COMPOSER_INSTALLER_SHA384=c8b085408188070d5f52bcfe4ecfbee5f727afa458b2573b8eaaf77b3419b0bf2768dc67c86944da1544f06fa544fd47
+
+RUN apk add --no-cache git unzip gmp-dev curl \
  && docker-php-ext-install -j"$(nproc)" bcmath gmp \
- && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+ && curl -fsSL -o /tmp/composer-setup.php https://getcomposer.org/installer \
+ && php -r 'if (hash_file("sha384", "/tmp/composer-setup.php") !== $argv[1]) { fwrite(STDERR, "composer installer sha384 mismatch\n"); exit(1); }' "$COMPOSER_INSTALLER_SHA384" \
+ && php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer \
+ && rm /tmp/composer-setup.php
+
 WORKDIR /srv/kiwicaptcha
-COPY deploy/app/composer.json deploy/app/composer.json
+# The lock file rides the build: the vendor tree is installed from the
+# audited lock, so the shipped vendor is exactly the locked dependency
+# set. Only the composer manifests and the core sources precede the
+# install; the app files land after it, and vendor/ is never
+# overwritten by a later copy.
+COPY deploy/app/composer.json deploy/app/composer.lock deploy/app/
 COPY packages/kiwicaptcha-php/composer.json packages/kiwicaptcha-php/composer.json
 COPY packages/kiwicaptcha-php/src packages/kiwicaptcha-php/src
 WORKDIR /srv/kiwicaptcha/deploy/app
-RUN composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
-COPY deploy/app/ /srv/kiwicaptcha/deploy/app/
+# The vendor tree installs exactly from the copied lock: composer
+# validate confirms the lock is in sync with the manifest, and
+# composer install from a lock refuses an out-of-sync state, so the
+# shipped vendor is the audited locked dependency set.
+RUN composer validate --strict \
+ && composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
+# The app files land after the install (the working directory), so
+# vendor/ is never overwritten by a later copy.
+COPY deploy/app/bootstrap.php deploy/app/health.php deploy/app/router.php deploy/app/solve.php ./
+
+# The serving runtime is unprivileged: the app writes nothing under
+# /srv, so it runs as a dedicated non-root user owning the tree.
+RUN addgroup -S kiwi && adduser -S -G kiwi -H -h /srv/kiwicaptcha kiwi \
+ && chown -R kiwi:kiwi /srv/kiwicaptcha
+USER kiwi
+
 EXPOSE 8080
 # The healthcheck runs the real /healthz handler, which round-trips the
 # configured challenge store (write, read, delete-if-pending) and
