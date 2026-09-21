@@ -487,12 +487,22 @@ function kiwiIssuanceAllowed(string $redisUrl, string $ip, int $perMinute): bool
         return true;
     }
     $key = 'kiwi:rl:issuance:'.$ip;
+    // One script both increments and arms the window: a split INCR and
+    // EXPIRE can leave a counter without an expiry when the process or
+    // connection dies between them, and every later request would feed
+    // a never-resetting counter that throttles the address forever.
+    // The script arms the sixty-second window exactly when the counter
+    // is minted, atomically.
+    $window = <<<'LUA'
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+end
+return n
+LUA;
     try {
         $client = kiwiRedisClient($redisUrl);
-        $count = (int) $client->incr($key);
-        if ($count === 1) {
-            $client->expire($key, 60);
-        }
+        $count = (int) $client->eval($window, 1, $key, 60);
     } catch (\Throwable $e) {
         error_log(sprintf('kiwicaptcha deploy: issuance limiter unavailable: %s', $e->getMessage()));
 
