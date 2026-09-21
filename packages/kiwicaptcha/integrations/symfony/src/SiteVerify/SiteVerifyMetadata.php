@@ -92,11 +92,18 @@ final readonly class SiteVerifyMetadata
         if ($cdata !== null && preg_match('/^[a-z0-9_-]{1,255}$/iD', $cdata) !== 1) {
             throw new SiteVerifyMetadataCorruptException('metadata field "cdata" does not match the cdata grammar ([a-z0-9_-]{1,255})');
         }
-        foreach (['sitekey', 'scope', 'chainId'] as $identifierField) {
+        foreach (['sitekey', 'scope'] as $identifierField) {
             $value = ${$identifierField};
             if ($value !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $value) !== 1) {
                 throw new SiteVerifyMetadataCorruptException(sprintf('metadata field "%s" does not match the identifier grammar ([A-Za-z0-9._:-]{1,128})', $identifierField));
             }
+        }
+        // The chain id carries the exact grammar the chain protocol
+        // mints and every chain component validates (the shared
+        // validator), never the looser identifier family: corrupted
+        // persisted state shaped like a foreign id fails closed.
+        if ($chainId !== null && !\BelConsulting\KiwiCaptchaBundle\Risk\ChainId::isValid($chainId)) {
+            throw new SiteVerifyMetadataCorruptException('metadata field "chainId" does not match the chain-id grammar ([A-Za-z0-9_-]{1,64})');
         }
         if ($chainDepth !== 0 && $chainDepth !== 2) {
             throw new SiteVerifyMetadataCorruptException('metadata field "chainDepth" must be exactly 0 or 2');

@@ -23,7 +23,6 @@ final class ChainedChallengeTicketService
     private const TICKET_VERSION = 1;
 
     /** The chain id alphabet (base64url of 16 random bytes). */
-    private const CHAIN_ID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
 
     /** The wire bound shared with the controller's accepted pattern. */
     private const MAX_TICKET_BYTES = 256;
@@ -283,7 +282,7 @@ final class ChainedChallengeTicketService
         if (!\is_int($version) || $version !== self::TICKET_VERSION) {
             return null;
         }
-        if (!\is_string($chainId) || preg_match(self::CHAIN_ID_PATTERN, $chainId) !== 1) {
+        if (!\is_string($chainId) || preg_match(ChainId::PATTERN, $chainId) !== 1) {
             return null;
         }
         if (!\is_int($expiresAt)) {

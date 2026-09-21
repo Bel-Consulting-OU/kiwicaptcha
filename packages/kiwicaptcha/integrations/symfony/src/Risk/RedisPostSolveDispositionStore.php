@@ -109,7 +109,6 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
     private const LEASE_SECS = 15;
 
     /** The chain id shape (base64url of 16 random bytes — the ticket service's alphabet). */
-    private const CHAIN_ID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
 
     /**
      * Single-Lua claim: one atomic transition per nonce.
@@ -823,7 +822,7 @@ LUA;
                 throw new MalformedPostSolveDispositionException('post-solve disposition record decision_id must be a non-empty string or null');
             }
             $chainId = $disposition['chain_id'] ?? null;
-            if ($chainId !== null && (!\is_string($chainId) || preg_match(self::CHAIN_ID_PATTERN, $chainId) !== 1)) {
+            if ($chainId !== null && (!\is_string($chainId) || preg_match(ChainId::PATTERN, $chainId) !== 1)) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_id must match the chain id shape or be null');
             }
             if ($kind === PostSolveDispositionKind::ChainRequired->value && ($chainId === null || $chainId === '')) {
