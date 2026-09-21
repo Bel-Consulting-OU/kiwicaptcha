@@ -240,7 +240,7 @@ LUA;
         // each per-scope set) is derived from it with a plain suffix, so
         // the family is structurally confined to one Cluster slot — a
         // derived key cannot forget its tag. Lease sets live at most one
-        // lease lifetime, so the older untagged key shape simply expires
+        // lease lifetime, so the prior untagged key shape simply expires
         // away rather than needing a migration.
         $this->root = '{kiwicaptcha:argon2:leases:'.$suffix.'}';
         $this->key = $this->root.':global';
