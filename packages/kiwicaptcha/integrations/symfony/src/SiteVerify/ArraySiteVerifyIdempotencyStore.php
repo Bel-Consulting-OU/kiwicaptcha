@@ -91,6 +91,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner || $existing['hash'] !== $responseHash) {
             return false;
         }
+        SiteVerifyResult::validate($canonicalResponse);
         $this->records[$key] = array_replace($existing, ['state' => 'complete', 'result' => $canonicalResponse, 'owner' => null, 'lease_expires_at' => null]);
 
         return true;
@@ -125,6 +126,7 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         if (!\is_array($existing['result'] ?? null)) {
             throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
         }
+        SiteVerifyResult::validate($existing['result']);
 
         return $existing['result'];
     }

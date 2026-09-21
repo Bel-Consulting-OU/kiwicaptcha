@@ -230,6 +230,10 @@ LUA;
 
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
     {
+        // The one canonical provider-response validator: a non-canonical
+        // shape refuses the write, so only shapes a cached read can
+        // re-validate ever reach the stored record.
+        SiteVerifyResult::validate($canonicalResponse);
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
         $result = $this->lua->executeSecurityFinal(self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
         $finalized = (int) $result === 1;
@@ -282,6 +286,12 @@ LUA;
             if (!\is_array($rec['result'] ?? null)) {
                 throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
             }
+            // A completed result is authorization-bearing cached state:
+            // the canonical-response validator runs on the read too, so
+            // a corrupted persisted result (a shape no conforming
+            // finalize could have written) fails closed as the typed
+            // corrupt exception instead of becoming a cached success.
+            SiteVerifyResult::validate($rec['result']);
             // Failed-barrier replay guard: the finalize that wrote this
             // completed record may have landed on the primary with its
             // WAIT failing. Returning the stored success read-only would
