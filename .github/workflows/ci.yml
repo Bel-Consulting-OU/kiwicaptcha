@@ -27,7 +27,7 @@ jobs:
           toolchain: 1.96.0
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
         with:
           # Both build trees: the root workspace and the standalone
           # wasm crate (excluded from the workspace, its own target
@@ -76,7 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - name: quick-start end-to-end
         run: cargo test -p kiwicaptcha --example quickstart
 
@@ -927,7 +927,7 @@ jobs:
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - name: risk Rust real-Redis suite on Redis 8
         env:
           RISK_REDIS_URL: redis://127.0.0.1:6379
@@ -1006,7 +1006,7 @@ jobs:
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -1052,7 +1052,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
@@ -1461,7 +1461,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - name: cargo package (risk crate)
         working-directory: packages/kiwicaptcha-risk
         run: |
@@ -1571,7 +1571,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - name: redis_verify integration tests (real Redis)
         # The production RedisChallengeStore + verifier are feature-gated
         # behind `redis`, so the default-feature build never compiles or
@@ -1601,7 +1601,7 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
         with:
           # The standalone wasm crate (excluded from the root
           # workspace, its own target directory).
@@ -1634,7 +1634,7 @@ jobs:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
         with:
           # The standalone wasm crate (excluded from the root
           # workspace, its own target directory).
@@ -1686,7 +1686,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
         with:
           # The embed-worker glue tool runs from its own standalone
           # crate directory (excluded from the root workspace).
@@ -1977,7 +1977,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
           toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1, SHA-pinned
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
           tools: composer:v2.9
