@@ -283,6 +283,77 @@ final class VerifierHardeningTest extends TestCase
         self::assertNull($storage->find($record->nonce), 'the untimed record must be burned');
     }
 
+    public function testProtocolVersionOneWithADecoyIsMalformed(): void
+    {
+        // The grammar matrix: the legacy v1 canonical signs neither
+        // extension segment, so a stored v1 record carrying a decoy
+        // field holds semantics its signature never authenticated and
+        // is rejected as malformed before any signature work.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+
+        $withDecoy = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->ipHash(),
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: 0,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+            decoyField: 'company_website',
+        );
+        $mutated = new ArrayStorage();
+        $mutated->store($withDecoy);
+
+        $outcome = (new Verifier($mutated, acceptLegacyV1: true))->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a v1 record carrying a decoy is malformed');
+    }
+
+    public function testProtocolVersionOneWithTheExecutionTripletIsMalformed(): void
+    {
+        // The same invariant on the execution side: the legacy canonical
+        // never signs the commitment, so a v1 record carrying the
+        // execution extension is rejected before any work.
+        $storage = new ArrayStorage();
+        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+
+        $withExecution = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->ipHash(),
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: 0,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+            executionProgram: 'AAAA',
+            executionVersion: 1,
+            executionCommitment: str_repeat('a', 64),
+        );
+        $mutated = new ArrayStorage();
+        $mutated->store($withExecution);
+
+        $outcome = (new Verifier($mutated, acceptLegacyV1: true))->verify($token, Vectors::SECRET, 'login', '198.51.100.77');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a v1 record carrying the execution triplet is malformed');
+    }
+
     public function testTelemetryRejectedOnlyWhenEnforced(): void
     {
         $storage = new ArrayStorage();

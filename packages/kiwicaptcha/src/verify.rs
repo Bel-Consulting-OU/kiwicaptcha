@@ -654,17 +654,22 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if !(1..=crate::challenge::MAX_PROTOCOL_VERSION).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
     }
-    if record.protocol_version == 2 && record.decoy_field.is_some() {
-        return Err(VerifyError::MalformedRecord);
-    }
-    if record.protocol_version == 3 && record.decoy_field.is_none() {
-        return Err(VerifyError::MalformedRecord);
-    }
+    // The protocol-vs-extension grammar is one explicit matrix, the
+    // same table in every core: v1 and v2 carry no decoy and no
+    // execution (the legacy v1 canonical signs neither segment, so a
+    // stored v1 record carrying either extension would hold
+    // unauthenticated semantics), v3 requires the decoy and carries no
+    // execution, v4 requires the execution triplet and may also carry
+    // the decoy (the canonical appends both segments).
+    let decoy_present = record.decoy_field.is_some();
     let execution_present = record.execution_program.is_some();
-    if (record.protocol_version == 2 || record.protocol_version == 3) && execution_present {
-        return Err(VerifyError::MalformedRecord);
-    }
-    if record.protocol_version == 4 && !execution_present {
+    let grammar_ok = match record.protocol_version {
+        1 | 2 => !decoy_present && !execution_present,
+        3 => decoy_present && !execution_present,
+        4 => execution_present,
+        _ => false,
+    };
+    if !grammar_ok {
         return Err(VerifyError::MalformedRecord);
     }
     // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
@@ -2574,6 +2579,39 @@ mod tests {
             policy_version: 1,
         };
         assert!(issue_challenge(&max_bits, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None).is_ok());
+    }
+
+    #[test]
+    fn protocol_version_one_with_a_decoy_is_malformed() {
+        // The legacy v1 canonical signs neither extension segment, so a
+        // stored v1 record carrying a decoy holds semantics the
+        // signature never authenticated: the grammar matrix rejects the
+        // combination structurally, before any signature work.
+        let mut record = make_record(8);
+        record.protocol_version = 1;
+        record.decoy_field = Some("company_website".to_string());
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn protocol_version_one_with_the_execution_triplet_is_malformed() {
+        // The same invariant on the execution side: a v1 record carrying
+        // the execution extension is malformed (the legacy canonical
+        // never signs the commitment), rejected before any work.
+        let mut record = make_record(8);
+        record.protocol_version = 1;
+        record.execution_program = Some("AAAA".to_string());
+        record.execution_version = Some(1);
+        record.execution_commitment = Some("a".repeat(64));
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
     }
 
     #[test]

@@ -1778,17 +1778,22 @@ final class Verifier
         if ($record->protocolVersion < 1 || $record->protocolVersion > ChallengeRecord::MAX_PROTOCOL_VERSION) {
             return false;
         }
-        if ($record->protocolVersion === 2 && $record->decoyField !== null) {
-            return false;
-        }
-        if ($record->protocolVersion === 3 && $record->decoyField === null) {
-            return false;
-        }
+        // The protocol-vs-extension grammar is one explicit matrix, the
+        // same table in every core: v1 and v2 carry no decoy and no
+        // execution (the legacy v1 canonical signs neither segment, so
+        // a stored v1 record carrying either extension would hold
+        // unauthenticated semantics), v3 requires the decoy and carries
+        // no execution, v4 requires the execution triplet and may also
+        // carry the decoy (the canonical appends both segments).
+        $decoyPresent = $record->decoyField !== null;
         $executionPresent = $record->executionProgram !== null;
-        if (($record->protocolVersion === 2 || $record->protocolVersion === 3) && $executionPresent) {
-            return false;
-        }
-        if ($record->protocolVersion === 4 && !$executionPresent) {
+        $grammarOk = match ($record->protocolVersion) {
+            1, 2 => !$decoyPresent && !$executionPresent,
+            3 => $decoyPresent && !$executionPresent,
+            4 => $executionPresent,
+            default => false,
+        };
+        if (!$grammarOk) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
