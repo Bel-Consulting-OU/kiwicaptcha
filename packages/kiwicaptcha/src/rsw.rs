@@ -51,7 +51,10 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The modulus is a 2048-bit composite: exactly 256 bytes.
 pub const MODULUS_BYTES: usize = 256;
@@ -61,6 +64,29 @@ pub const MODULUS_BYTES: usize = 256;
 /// trapdoor expectation render into this exact shape, so the
 /// constant-time comparison runs over equal-length strings.
 pub const PROOF_HEX_LENGTH: usize = 512;
+
+/// The process-wide memo of validated `(modulus, lambda)` pairs (see
+/// [`RswTrapdoor::validated`]). The pair strings are operator
+/// configuration, never client input, so the map stays tiny and
+/// unbounded growth is not a concern.
+type ValidatedPairs = Mutex<HashMap<(String, String), Arc<RswTrapdoor>>>;
+static VALIDATED_PAIRS: OnceLock<ValidatedPairs> = OnceLock::new();
+
+/// Process-wide count of [`RswTrapdoor::validated`] invocations — a
+/// one-relaxed-atomic observability seam proving the memo works: the
+/// second validation of the same pair must not re-run the expensive
+/// primality tests (the count still advances on the cache hit; the
+/// derivation-count seam in `crate::keys` is the model). Diagnostic
+/// only; not part of the stable API surface.
+static VALIDATION_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// The number of [`RswTrapdoor::validated`] calls this process has
+/// made (the validated-pair memo's observability seam — see
+/// [`VALIDATION_CALLS`]).
+#[doc(hidden)]
+pub fn validation_call_count() -> u64 {
+    VALIDATION_CALLS.load(Ordering::Relaxed)
+}
 
 /// A decoded and validated rsw trapdoor: the public 2048-bit composite
 /// modulus `n = p*q` and the secret `lambda = lcm(p-1, q-1)`.
@@ -148,6 +174,32 @@ impl RswTrapdoor {
         }
 
         Ok(RswTrapdoor { n, lambda })
+    }
+
+    /// Resolve a validated trapdoor through the process-wide memo: the
+    /// first validation of a `(modulus, lambda)` pair runs the full
+    /// decode (the ~10 2048-bit modexps of Miller-Rabin, the strong
+    /// Lucas test and the 8-base spot-check), and every later
+    /// validation of the same pair is served from the cache. Both
+    /// call sites — issuance validation and the generic verifier's
+    /// per-verification decode — run operator-configured pairs, so the
+    /// cache turns the repeated cost into one HashMap hit. `None` when
+    /// the pair fails validation (a failed pair is not memoized: the
+    /// failure report stays the caller's, and validation of the same
+    /// bad pair simply re-runs).
+    pub fn validated(modulus_b64: &str, lambda_b64: &str) -> Option<Arc<RswTrapdoor>> {
+        VALIDATION_CALLS.fetch_add(1, Ordering::Relaxed);
+        let key = (modulus_b64.to_string(), lambda_b64.to_string());
+        let map = VALIDATED_PAIRS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(cached) = map.lock().unwrap().get(&key) {
+            return Some(Arc::clone(cached));
+        }
+        let trapdoor = Arc::new(RswTrapdoor::new(modulus_b64, lambda_b64).ok()?);
+        // The first computed allocation of a pair wins and is served
+        // forever (or-insert, never overwrite): concurrent first
+        // validations of the same pair resolve to one stable identity.
+        let mut guard = map.lock().unwrap();
+        Some(Arc::clone(guard.entry(key).or_insert_with(|| trapdoor)))
     }
 
     /// The decoded modulus n.
@@ -568,6 +620,28 @@ mod tests {
     #[test]
     fn fixture_trapdoor_pair_still_validates() {
         assert!(RswTrapdoor::new(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64).is_ok());
+    }
+
+    #[test]
+    fn the_second_validation_of_a_pair_is_served_from_the_memo() {
+        // A repeat of the same pair reuses the cached allocation
+        // (pointer identity) without re-running the expensive primality
+        // tests, and a failing pair is never memoized. The exact
+        // call-count window (the counter seam) is pinned by the
+        // dedicated tests/rsw_cache.rs binary — this shared binary's
+        // parallel issuance tests pollute global counts.
+        let first = RswTrapdoor::validated(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64)
+            .expect("the fixture pair validates");
+        let second = RswTrapdoor::validated(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64)
+            .expect("the memo serves the same pair");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same pair must reuse the cached trapdoor"
+        );
+        assert!(
+            RswTrapdoor::validated(PROBABLE_PRIME_N_B64, fixtures::LAMBDA_B64).is_none(),
+            "a weak modulus is refused"
+        );
     }
 
     #[test]

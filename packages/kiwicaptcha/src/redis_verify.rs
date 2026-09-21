@@ -183,15 +183,16 @@ use crate::keys::DerivedKeys;
 use crate::rsw::RswTrapdoor;
 use crate::token::SolutionToken;
 use crate::verify::{
-    check_execution_binding, check_request_binding, check_rsw_params, ct_eq, final_revalidate,
-    measurable_solve_duration_ms, proof_is_valid, signature_from_challenge, validate_record,
-    RequestBindingExpectation, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
+    check_execution_binding_cached, check_request_binding, check_rsw_params, ct_eq,
+    final_revalidate, measurable_solve_duration_ms, proof_is_valid, signature_from_challenge,
+    validate_record, ExecutionEvidenceCache, RequestBindingExpectation, VerifyError, VerifyOutcome,
+    SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Default number of pooled Redis connections.
@@ -313,6 +314,9 @@ struct StoreScripts {
     delete_if_pending: redis::Script,
     cancel: redis::Script,
     commit_result: redis::Script,
+    claim_resume: redis::Script,
+    release_resume: redis::Script,
+    commit_clearing_claim: redis::Script,
 }
 
 impl StoreScripts {
@@ -322,6 +326,9 @@ impl StoreScripts {
             delete_if_pending: redis::Script::new(DELETE_IF_PENDING_LUA),
             cancel: redis::Script::new(CANCEL_TRANSITION_LUA),
             commit_result: redis::Script::new(COMMIT_RESULT_LUA),
+            claim_resume: redis::Script::new(CLAIM_RESUME_LUA),
+            release_resume: redis::Script::new(RELEASE_RESUME_LUA),
+            commit_clearing_claim: redis::Script::new(COMMIT_RESULT_CLEARING_CLAIM_LUA),
         }
     }
 }
@@ -417,9 +424,17 @@ if ARGV[1] ~= '' then
         updated = withIdentity
     end
 end
-local ttl = redis.call('TTL', KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], updated, 'EX', ttl)
+-- The re-SET preserves the key's exact remaining TTL in milliseconds: a
+-- persistent (foreign) key is refused untouched (a negative `PTTL`
+-- means no expiry — the transition never destroys foreign state), and a
+-- sub-second remainder is floored at 1000 ms so the consumed evidence
+-- stays observable.
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+    return false
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], updated, 'PX', pttl)
 return {updated, 1}
 "#;
 
@@ -493,13 +508,19 @@ end
 if string.find(v, '"state":"cancelled"', 1, true) then
   return {'cancelled'}
 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
+-- The flip preserves the key's exact remaining TTL in milliseconds; a
+-- persistent (foreign) key is refused untouched (a negative `PTTL`
+-- means no expiry — the transition never destroys foreign state).
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return false
+end
+if pttl < 1000 then pttl = 1000 end
 local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
 if n ~= 1 then
   return false
 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
+redis.call("SET", KEYS[1], updated, "PX", pttl)
 return {'cancelled-now'}
 "#;
 
@@ -525,9 +546,190 @@ else
 end
 local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
 if n ~= 1 then return 0 end
-local ttl = redis.call('TTL', KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call('SET', KEYS[1], updated, 'EX', ttl)
+-- The re-SET preserves the key's exact remaining TTL in milliseconds; a
+-- persistent (foreign) key is refused with no write (a negative `PTTL`
+-- means no expiry — the commit never destroys foreign state).
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+    return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], updated, 'PX', pttl)
+return 1
+"#;
+
+/// One atomic resume-derivation claim: exactly one concurrent
+/// same-operation recovery may derive and commit; the losers re-read and
+/// resolve the winner's committed outcome. The claim lives inside the
+/// record envelope as `resume_owner` and `resume_until` (epoch
+/// microseconds), spliced before the closing brace, so the transition
+/// is a single-key splice that a Redis Cluster deployment routes to one
+/// slot. A crash leaves only the short lease given by `ttl_secs`: once
+/// `resume_until` passes, a later retry may claim again. The record
+/// checks use the raw markers, the same strategy as the rest of this
+/// storage layer, which never re-encodes the record's JSON bytes.
+/// Returns the owner token when the claim was taken, nil when the
+/// record is missing, not consumed-resultless, persistent (a negative
+/// `PTTL`), or already claimed by a live or unparseable owner. Mirrors
+/// the PHP `RedisStorage::claimResumeDerivation()` exactly.
+const CLAIM_RESUME_LUA: &str = r#"
+-- kiwicaptcha resume-derivation claim
+--
+-- The re-derivation claim for a resultless consumed record (the resume
+-- path): exactly one concurrent same-operation recovery may derive and
+-- commit; the losers re-read and resolve the winner's committed
+-- outcome. KEYS[1] = the record key only. ARGV[1] = the random owner
+-- token, ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the
+-- record envelope: `"resume_owner":"<hex token>","resume_until":<epoch
+-- useconds>` is spliced before the envelope's closing brace (the record
+-- key TTL is preserved in exact milliseconds), so this script touches
+-- exactly one key and is single-slot on a Redis Cluster. A crash leaves
+-- only the short lease: once resume_until (epoch useconds) passes, a
+-- later retry may claim again. The record checks use the RAW markers
+-- (the same strategy as the rest of this storage layer, which never
+-- re-encodes the record's JSON bytes): the envelope stores
+-- `"consumed_result":null`, and a cjson decode would map a JSON null to
+-- cjson.null, never Lua nil, refusing every resultless record.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return nil
+end
+if not string.find(v, '"state":"consumed"', 1, true) then
+  return nil
+end
+if not string.find(v, '"consumed_result":null', 1, true) then
+  return nil
+end
+-- Live-claim check: refuse while a live claim is held. An owner marker
+-- without a parseable expiry is treated as live (fail safe: never a
+-- second unsynchronized derivation). The lease clock is epoch
+-- useconds.
+local untilStr = string.match(v, '"resume_until":(%d+)')
+if string.find(v, '"resume_owner":"', 1, true) then
+  local t = redis.call("TIME")
+  local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+  if untilStr == nil or tonumber(untilStr) > now_us then
+    return nil
+  end
+  -- Expired claim: strip the stale fields before appending the fresh
+  -- ones. The fields always sit at the envelope's end (only this script
+  -- family writes them); a shape that cannot be stripped is refused as
+  -- still-claimed rather than duplicated.
+  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
+  if n ~= 1 then
+    return nil
+  end
+  v = stripped
+end
+local t = redis.call("TIME")
+local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+-- Plain decimal rendering: a usecond value would switch to scientific
+-- notation through Lua's default number formatting, so the splice keeps
+-- the bare JSON integer shape (~1.79e15 fits exactly) both language
+-- cores parse digit for digit.
+local untilVal = string.format('%d', now_us + tonumber(ARGV[2]) * 1000000)
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return nil
+end
+if pttl < 1000 then pttl = 1000 end
+local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
+redis.call("SET", KEYS[1], updated, "PX", pttl)
+return ARGV[1]
+"#;
+
+/// Compare-and-delete the resume claim: only the claim's owner may
+/// release it (a stale owner after a crash + TTL expiry can never
+/// delete a newer recovery's claim). One key: the claim is embedded in
+/// the record envelope, so the compare-and-clear runs over the record
+/// key only, single-slot on a Redis Cluster. Returns 1 when the release
+/// cleared the claim, 0 when the claim is missing, owned by another
+/// token, or the key is persistent (a negative `PTTL` — the release
+/// never touches a foreign key).
+const RELEASE_RESUME_LUA: &str = r#"
+-- kiwicaptcha resume-derivation claim release (compare-and-delete)
+--
+-- KEYS[1] = the record key only (the claim is embedded in the record
+-- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
+-- owner token. The claim fields are cleared from the envelope only when
+-- they still hold exactly this owner: a stale owner after a crash and
+-- TTL expiry can never delete a newer recovery's claim. The record key
+-- TTL is preserved in exact milliseconds.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
+end
+local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
+if n ~= 1 then
+  return 0
+end
+local pttl = redis.call("PTTL", KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call("SET", KEYS[1], updated, "PX", pttl)
+return 1
+"#;
+
+/// The resume-path commit that fences on the live claim and clears it
+/// atomically with the result write: ownership lost (missing, expired
+/// at the epoch-microsecond fence, or owned by a different token)
+/// returns 2 with no write; the successful write splices the result and
+/// clears the claim fields in the same single-key run, preserving the
+/// record key's exact remaining TTL in milliseconds (a persistent,
+/// foreign key is refused with no write).
+const COMMIT_RESULT_CLEARING_CLAIM_LUA: &str = r#"
+-- kiwicaptcha commit result
+--
+-- The resume-path claim is a fencing precondition carried in ARGV[3]:
+-- the envelope must hold a live claim owned by exactly this token
+-- before the protected mutation is written. Ownership lost (missing,
+-- expired, or owned by a different token) returns 2 with no write, so
+-- a stale owner whose claim expired mid-derivation can never commit,
+-- and the successful write clears the claim fields in the same atomic
+-- transition. The claim is embedded in the record envelope, so this
+-- script touches exactly one key (single-slot on a Redis Cluster).
+-- The `"consumed_result":null` marker is replaced in place; only the
+-- small result object is encoded (valid a real JSON boolean, binding
+-- a string or null), never the record's own JSON bytes. The lease
+-- clock is epoch useconds.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
+end
+if not string.find(v, '"state":"consumed"', 1, true) then
+  return 0
+end
+if not string.find(v, '"consumed_result":null', 1, true) then
+  return 0
+end
+-- Fencing: a live claim owned by this exact token. The owner token is
+-- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim must
+-- be live: an expired claim no longer fences (the stale owner may not
+-- commit). An unparseable expiry refuses too (fail safe).
+local untilStr = string.match(v, '"resume_owner":"' .. ARGV[3] .. '","resume_until":(%d+)')
+local t = redis.call("TIME")
+local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+if untilStr == nil or tonumber(untilStr) <= now_us then
+  return 2
+end
+local result
+if ARGV[2] ~= '' then
+    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
+else
+    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
+end
+local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
+if n ~= 1 then return 0 end
+local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[3] .. '","resume_until":%d+}$', '}')
+if m ~= 1 then return 0 end
+local pttl = redis.call('PTTL', KEYS[1])
+if pttl < 0 then
+  return 0
+end
+if pttl < 1000 then pttl = 1000 end
+redis.call('SET', KEYS[1], cleared, 'PX', pttl)
 return 1
 "#;
 
@@ -673,20 +875,85 @@ struct StoredChallenge {
 /// serde_json and never drives a large allocation.
 pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 
+/// The single-parse shadow of a stored value: every canonical record
+/// field carries the exact serde attribute of [`ChallengeRecord`] (the
+/// legacy alias and defaults), plus the five runtime-envelope keys as
+/// raw JSON values, so one `from_str` pass accepts exactly the language
+/// the strict record parse accepted after the runtime keys were
+/// stripped. `deny_unknown_fields` keeps the strictness: any key
+/// outside this shape makes the whole value undecodable.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEnvelope {
+    nonce: String,
+    scope: String,
+    #[serde(alias = "ip_hash")]
+    binding_tag: String,
+    issued_at: u64,
+    expires_at: u64,
+    algorithm: crate::challenge::PoWAlgorithm,
+    m_kib: u32,
+    t: u32,
+    p: u32,
+    target_bits: u32,
+    salt: String,
+    prefix: String,
+    challenge: String,
+    min_duration_ms: u64,
+    #[serde(default)]
+    issued_at_ns: u64,
+    #[serde(default)]
+    attempts_used: u32,
+    #[serde(default = "crate::challenge::default_protocol_version")]
+    protocol_version: u8,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default = "crate::challenge::default_policy_version")]
+    policy_version: u32,
+    #[serde(default)]
+    request_binding: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    decoy_field: Option<String>,
+    #[serde(default)]
+    execution_program: Option<String>,
+    #[serde(default)]
+    execution_version: Option<u8>,
+    #[serde(default)]
+    execution_commitment: Option<String>,
+    #[serde(default = "crate::challenge::default_kid")]
+    kid: u32,
+    #[serde(default)]
+    state: Option<serde_json::Value>,
+    #[serde(default)]
+    consumed_result: Option<serde_json::Value>,
+    #[serde(default)]
+    operation_identity: Option<serde_json::Value>,
+    // The claim fields are accepted and dropped (the canonical record
+    // parse must never see them); the underscore names mark them
+    // intentionally unread.
+    #[serde(default)]
+    _resume_owner: Option<serde_json::Value>,
+    #[serde(rename = "resume_until", default)]
+    _resume_until: Option<serde_json::Value>,
+}
+
 /// Decode a stored value that MAY carry the storage-level runtime fields
 /// `state` / `consumed_result` / `operation_identity` and the shared
-/// resume-claim fields `resume_owner` / `resume_until`. The runtime fields
-/// are stripped before the strict [`ChallengeRecord`] parse, so
-/// `deny_unknown_fields` stays effective: any other foreign key makes the
-/// whole value undecodable. The claim fields are the same runtime
-/// envelope that PHP writes (both languages embed the claim in the
-/// record), so a PHP-claimed record stays readable here. A non-null
-/// `operation_identity` (a PHP-written
-/// record whose identity-aware consume spliced a value in — the PHP core
-/// rejects malformed identities before the transition, so any stored value
-/// is at most 128 bytes of `[A-Za-z0-9_-]`) parses and is
-/// stripped like any other runtime field — the canonical record never sees
-/// it. Returns `None` on any parse failure — a corrupt key must never blow
+/// resume-claim fields `resume_owner` / `resume_until`. One `from_str`
+/// pass parses the whole envelope (see [`StoredEnvelope`]); the runtime
+/// values keep their lenient conversions — a non-string `state` or
+/// `operation_identity` reads as absent, and a malformed
+/// `consumed_result` reads as absent while the record still decodes. A
+/// non-null `operation_identity` (a PHP-written record whose
+/// identity-aware consume spliced a value in — the PHP core rejects
+/// malformed identities before the transition, so any stored value is
+/// at most 128 bytes of `[A-Za-z0-9_-]`) parses and is stripped like
+/// any other runtime field — the canonical record never sees it.
+/// Returns `None` on any parse failure — a corrupt key must never blow
 /// up the verify path, mirroring the PHP `RedisStorage::decode()`.
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     // Bound before the parse: the canonical record JSON is a
@@ -696,29 +963,50 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     if raw.len() > MAX_STORED_RECORD_JSON_BYTES {
         return None;
     }
-    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let consumed_result = value
-        .get("consumed_result")
+    let envelope: StoredEnvelope = serde_json::from_str(raw).ok()?;
+    let state = envelope
+        .state
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let consumed_result = envelope
+        .consumed_result
+        .as_ref()
         .and_then(|v| serde_json::from_value(v.clone()).ok());
-    let state = value
-        .get("state")
+    let operation_identity = envelope
+        .operation_identity
+        .as_ref()
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let operation_identity = value
-        .get("operation_identity")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let obj = value.as_object_mut()?;
-    obj.remove("state");
-    obj.remove("consumed_result");
-    obj.remove("operation_identity");
-    // The shared resume-claim fields: PHP and Rust write them into the
-    // envelope atomically with the claim, so the canonical record parse
-    // must never see them (a live claim must not make the record
-    // undecodable for the other language's recovery).
-    obj.remove("resume_owner");
-    obj.remove("resume_until");
-    let record: ChallengeRecord = serde_json::from_value(value).ok()?;
+    let record = ChallengeRecord {
+        nonce: envelope.nonce,
+        scope: envelope.scope,
+        binding_tag: envelope.binding_tag,
+        issued_at: envelope.issued_at,
+        expires_at: envelope.expires_at,
+        algorithm: envelope.algorithm,
+        m_kib: envelope.m_kib,
+        t: envelope.t,
+        p: envelope.p,
+        target_bits: envelope.target_bits,
+        salt: envelope.salt,
+        prefix: envelope.prefix,
+        challenge: envelope.challenge,
+        min_duration_ms: envelope.min_duration_ms,
+        issued_at_ns: envelope.issued_at_ns,
+        attempts_used: envelope.attempts_used,
+        protocol_version: envelope.protocol_version,
+        region: envelope.region,
+        policy_version: envelope.policy_version,
+        request_binding: envelope.request_binding,
+        issuer: envelope.issuer,
+        hostname: envelope.hostname,
+        decoy_field: envelope.decoy_field,
+        execution_program: envelope.execution_program,
+        execution_version: envelope.execution_version,
+        execution_commitment: envelope.execution_commitment,
+        kid: envelope.kid,
+    };
     Some(StoredChallenge {
         record,
         state,
@@ -852,6 +1140,17 @@ fn operation_identity_json(identity: &str) -> redis::RedisResult<String> {
 /// `expires_at - now` (min 1 s) — byte-compatible with the PHP core's
 /// `RedisStorage` (same key layout, same JSON schema, same TTL rule), so
 /// records written by one side verify on the other.
+///
+/// Storage-boundary byte-exactness constraint: the stored value is the
+/// compact serde JSON of the record plus the runtime envelope, and
+/// every later transition splices raw string markers into those exact
+/// bytes (`"state":"pending"` → `"state":"consumed"` and the small
+/// result object) — the record's JSON is never re-encoded, because a
+/// `cjson`/JSON re-encode would rewrite large integers
+/// (`issued_at_ns` ~1.7e15) into scientific notation that both strict
+/// parsers reject. Any writer at this boundary must preserve the
+/// compact form, the exact marker bytes and the no-re-encode rule, or
+/// the cross-language record interchange breaks.
 ///
 /// `consume()` is a Lua transition: the pending record is kept
 /// with a storage-level `state = "consumed"` field so a concurrent loser
@@ -1436,77 +1735,23 @@ impl RedisChallengeStore {
         // could otherwise observe the same apparent owner across a lease
         // expiry). Secure RNG failure -> no claim -> the recovery
         // answers StorageUnavailable.
-        let owner: String = security_random::<16>()
-            .map(|token| token.iter().map(|b| format!("{b:02x}")).collect())
-            .map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::IoError,
-                    "resume claim owner generation failed",
-                    e.to_string(),
-                ))
-            })?;
+        let owner: String = security_random::<16>().map(hex::encode).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "resume claim owner generation failed",
+                e.to_string(),
+            ))
+        })?;
+        let ttl_arg = ttl_secs.to_string();
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha resume-derivation claim
---
--- The re-derivation claim for a resultless consumed record (the resume
--- path): exactly one concurrent same-operation recovery may derive and
--- commit; the losers re-read and resolve the winner's committed outcome.
--- KEYS[1] = the record key only. ARGV[1] = the random owner token,
--- ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the record
--- envelope: `"resume_owner":"<hex token>","resume_until":<epoch secs>`
--- is spliced before the envelope's closing brace (the record key TTL is
--- preserved), so this script touches exactly one key and is single-slot
--- on a Redis Cluster. A crash leaves only the short lease: once
--- resume_until passes, a later retry may claim again. The record checks
--- use the RAW markers (the same strategy as the rest of this storage
--- layer, which never re-encodes the record's JSON bytes): the envelope
--- stores `"consumed_result":null`, and a cjson decode would map a JSON
--- null to cjson.null, never Lua nil, refusing every resultless record.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return nil
-end
-if not string.find(v, '"state":"consumed"', 1, true) then
-  return nil
-end
-if not string.find(v, '"consumed_result":null', 1, true) then
-  return nil
-end
--- Live-claim check: refuse while a live claim is held. An owner marker
--- without a parseable expiry is treated as live (fail safe: never a
--- second unsynchronized derivation).
-local untilStr = string.match(v, '"resume_until":(%d+)')
-if string.find(v, '"resume_owner":"', 1, true) then
-  local time = redis.call("TIME")
-  local now = tonumber(time[1])
-  if untilStr == nil or tonumber(untilStr) > now then
-    return nil
-  end
-  -- Expired claim: strip the stale fields before appending the fresh
-  -- ones. The fields always sit at the envelope's end (only this script
-  -- family writes them); a shape that cannot be stripped is refused as
-  -- still-claimed rather than duplicated.
-  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
-  if n ~= 1 then
-    return nil
-  end
-  v = stripped
-end
-local time = redis.call("TIME")
-local untilVal = tonumber(time[1]) + tonumber(ARGV[2])
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
-redis.call("SET", KEYS[1], updated, "EX", ttl)
-return ARGV[1]
-"#,
-        );
-        let claimed: Option<String> = script
-            .key(&record_key)
-            .arg(&owner)
-            .arg(ttl_secs)
-            .invoke(&mut conn)?;
+        let claimed: Option<String> = Self::run_command(&mut conn, |c| {
+            Self::invoke_script(
+                c,
+                &self.scripts.claim_resume,
+                &record_key,
+                &[&owner, &ttl_arg],
+            )
+        })?;
 
         Ok(claimed)
     }
@@ -1528,30 +1773,9 @@ return ARGV[1]
         validate_resume_owner(owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha resume-derivation claim release (compare-and-delete)
---
--- KEYS[1] = the record key only (the claim is embedded in the record
--- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
--- owner token. The claim fields are cleared from the envelope only when
--- they still hold exactly this owner: a stale owner after a crash and
--- TTL expiry can never delete a newer recovery's claim. The record key
--- TTL is preserved.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return 0
-end
-local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
-if n ~= 1 then
-  return 0
-end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], updated, "EX", ttl)
-return 1
-"#,
-        );
-        let released: i64 = script.key(&record_key).arg(owner).invoke(&mut conn)?;
+        let released: i64 = Self::run_command(&mut conn, |c| {
+            Self::invoke_script(c, &self.scripts.release_resume, &record_key, &[owner])
+        })?;
 
         Ok(released == 1)
     }
@@ -1744,63 +1968,14 @@ return 1
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
-        let script = redis::Script::new(
-            r#"-- kiwicaptcha commit result
---
--- The resume-path claim is a fencing precondition carried in ARGV[3]:
--- the envelope must hold a live claim owned by exactly this token
--- before the protected mutation is written. Ownership lost (missing,
--- expired, or owned by a different token) returns 2 with no write, so
--- a stale owner whose claim expired mid-derivation can never commit,
--- and the successful write clears the claim fields in the same atomic
--- transition. The claim is embedded in the record envelope, so this
--- script touches exactly one key (single-slot on a Redis Cluster).
--- The `"consumed_result":null` marker is replaced in place; only the
--- small result object is encoded (valid a real JSON boolean, binding
--- a string or null), never the record's own JSON bytes.
-local v = redis.call("GET", KEYS[1])
-if not v then
-  return 0
-end
-if not string.find(v, '"state":"consumed"', 1, true) then
-  return 0
-end
-if not string.find(v, '"consumed_result":null', 1, true) then
-  return 0
-end
--- Fencing: a live claim owned by this exact token. The owner token is
--- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim must
--- be live: an expired claim no longer fences (the stale owner may not
--- commit). An unparseable expiry refuses too (fail safe).
-local untilStr = string.match(v, '"resume_owner":"' .. ARGV[3] .. '","resume_until":(%d+)')
-local time = redis.call("TIME")
-local now = tonumber(time[1])
-if untilStr == nil or tonumber(untilStr) <= now then
-  return 2
-end
-local result
-if ARGV[2] ~= '' then
-    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
-else
-    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
-end
-local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-if n ~= 1 then return 0 end
-local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[3] .. '","resume_until":%d+}$', '}')
-if m ~= 1 then return 0 end
-local ttl = redis.call("TTL", KEYS[1])
-if ttl < 1 then ttl = 1 end
-redis.call("SET", KEYS[1], cleared, "EX", ttl)
-return 1
-"#,
-        );
         let stored = Self::run_command(&mut conn, |c| {
-            let r: i64 = script
-                .key(&record_key)
-                .arg(if valid { "1" } else { "0" })
-                .arg(binding.unwrap_or(""))
-                .arg(claim_owner)
-                .invoke(c)?;
+            let args = [
+                if valid { "1" } else { "0" },
+                binding.unwrap_or(""),
+                claim_owner,
+            ];
+            let r: i64 =
+                Self::invoke_script(c, &self.scripts.commit_clearing_claim, &record_key, &args)?;
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
@@ -1836,14 +2011,21 @@ return 1
                 e.to_string(),
             )));
         }
-        let token_hex: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let token_hex: String = hex::encode(token);
         let mut conn = self.checkout()?;
-        redis::cmd("SETEX")
-            .arg(&fence_key)
-            .arg(60)
-            .arg(&token_hex)
-            .query::<String>(&mut conn)?;
-        Self::wait_verified(&mut conn, wait_replicas, wait_timeout_ms).map_err(|e| {
+        // The fence write rides the same error-handling path as every
+        // other command on a checked-out connection: an I/O failure
+        // poisons the connection (the no-retry rule), never returns it
+        // to the idle pool possibly desynced.
+        Self::run_command(&mut conn, |c| {
+            redis::cmd("SETEX")
+                .arg(&fence_key)
+                .arg(60)
+                .arg(&token_hex)
+                .query::<String>(c)?;
+            Self::wait_verified(c, wait_replicas, wait_timeout_ms)
+        })
+        .map_err(|e| {
             redis::RedisError::from((
                 e.kind(),
                 "replication fence not satisfied",
@@ -2002,6 +2184,9 @@ pub enum AdmissionError {
 ///
 /// See the module docs for the check order, the one-shot semantics, the
 /// storage error semantics, and the consume no-retry rule.
+/// The lazily derived per-(tenant, kid) purpose keys of a verifier.
+type DerivedKeysCache = HashMap<(u32, Option<String>), Arc<DerivedKeys>>;
+
 pub struct ProductionVerifier {
     store: RedisChallengeStore,
     secret_key: String,
@@ -2021,30 +2206,38 @@ pub struct ProductionVerifier {
     expected_region: Option<String>,
     expected_policy_version: Option<u32>,
     expected_issuer: Option<String>,
-    /// The `HKDF` purpose keys per signing key id, derived once per kid for
-    /// the verifier's lifetime (the verifier owns immutable secrets — a
-    /// master secret never changes under a running verifier; the only
-    /// exception is the builder's [`ProductionVerifier::with_secrets_by_kid`],
-    /// which replaces the secret set and resets this cache so the prior
-    /// keys can never survive the replacement). The cheap
-    /// phase runs up to four `HKDF` derivations per verification without
-    /// this cache (signature + IP binding, each re-checked after the
-    /// consume); with it, every signature / binding check after the first
-    /// per kid reuses the cached [`DerivedKeys`] — see
-    /// [`ProductionVerifier::resolve_derived_keys`].
-    derived_keys: OnceLock<HashMap<u32, Arc<DerivedKeys>>>,
+    /// The tenant id every purpose key derives under (see
+    /// [`crate::challenge::ChallengeConfig::tenant`]): `None` keeps the
+    /// global keys, byte-identical to the tenant-free verification.
+    tenant: Option<String>,
+    /// The per-(tenant, kid) `HKDF` purpose keys, derived lazily on the
+    /// first verification that resolves a given `(tenant, kid)` pair and
+    /// cached for the verifier's lifetime (the verifier owns immutable
+    /// secrets and one fixed tenant; the only invalidation is the
+    /// builder's [`ProductionVerifier::with_secrets_by_kid`] /
+    /// [`ProductionVerifier::with_tenant`], which replaces the secret
+    /// set or the tenant and resets this cache so keys derived earlier
+    /// can never survive the replacement). A cold start derives exactly
+    /// the pair the first record names, never the whole keyring. A
+    /// poisoned lock (a panic while deriving — none of this code
+    /// panics) recovers the intact map instead of failing every later
+    /// verification.
+    derived_keys: Mutex<DerivedKeysCache>,
     /// Clock override (the PHP Verifier's `$now` closure equivalent):
     /// returns the current Unix time in seconds used by the TTL checks and
     /// the post-derive final re-validation. Defaults to the real clock.
     now_unix: fn() -> u64,
-    /// The decoded rsw trapdoor of this verifier (modulus + secret
-    /// lambda), or `None` when the deployment does not verify rsw
-    /// records. A signed rsw record then fails with
+    /// The configured rsw trapdoor pair, stored raw (canonical base64
+    /// strings) and decoded lazily through the process-wide
+    /// validated-pair memo at first use — the builder never panics on a
+    /// malformed pair. `None` when the deployment does not verify rsw
+    /// records; a configured-but-invalid pair resolves to no trapdoor,
+    /// and a signed rsw record then fails with
     /// [`VerifyError::UnsupportedRswParams`] at the proof site: the
     /// record is authentic but this verifier cannot represent the
-    /// trapdoor computation, exactly the Argon2id configuration-mismatch
-    /// semantics of the PHP core.
-    rsw: Option<RswTrapdoor>,
+    /// trapdoor computation, exactly the Argon2id
+    /// configuration-mismatch semantics of the PHP core.
+    rsw: Option<(String, String)>,
 }
 
 fn real_now_unix() -> u64 {
@@ -2093,7 +2286,8 @@ impl ProductionVerifier {
             expected_region: None,
             expected_policy_version: None,
             expected_issuer: None,
-            derived_keys: OnceLock::new(),
+            tenant: None,
+            derived_keys: Mutex::new(HashMap::new()),
             now_unix: real_now_unix,
             rsw: None,
         }
@@ -2101,21 +2295,51 @@ impl ProductionVerifier {
 
     /// Configure the rsw time-lock trapdoor: the modulus n and the
     /// secret lambda = lcm(p-1, q-1), both canonical standard base64
-    /// (generated with the shipped tools/rsw-keygen binary and
-    /// validated at build time with the shared decode, including the
-    /// weak-input rejections). When set, rsw records verify through
-    /// the trapdoor; the default (unset) treats a signed rsw record as
-    /// authentic but unsupported
-    /// ([`VerifyError::UnsupportedRswParams`]).
+    /// (generated with the shipped tools/rsw-keygen binary). The pair
+    /// is stored raw and decoded lazily through the process-wide
+    /// validated-pair memo (including the weak-input rejections); when
+    /// set, rsw records verify through the trapdoor. The default
+    /// (unset) treats a signed rsw record as authentic but unsupported
+    /// ([`VerifyError::UnsupportedRswParams`]); a configured-but-invalid
+    /// pair resolves to no trapdoor at verification time and yields the
+    /// same typed rejection — the builder never panics.
     pub fn with_rsw_trapdoor(
         mut self,
         modulus_b64: impl Into<String>,
         lambda_b64: impl Into<String>,
     ) -> Self {
-        self.rsw = Some(
-            RswTrapdoor::new(&modulus_b64.into(), &lambda_b64.into())
-                .expect("rsw trapdoor configuration is validated at build time"),
+        self.rsw = Some((modulus_b64.into(), lambda_b64.into()));
+        self
+    }
+
+    /// The verifier's resolved rsw trapdoor: the raw configured pair
+    /// decoded through the validated-pair memo. `None` when no pair is
+    /// configured or the pair fails validation.
+    fn rsw_trapdoor(&self) -> Option<Arc<RswTrapdoor>> {
+        let (modulus, lambda) = self.rsw.as_ref()?;
+        RswTrapdoor::validated(modulus, lambda)
+    }
+
+    /// Configure the tenant scope of every verification: the purpose
+    /// keys derive under the per-tenant root (see
+    /// [`crate::challenge::ChallengeConfig::tenant`]), so this verifier
+    /// accepts only challenges issued under the same tenant of the same
+    /// master. The tenant id must be 1..=64 bytes of the narrow
+    /// identifier alphabet (the issuance-boundary rule).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `tenant` fails the identifier gate.
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        let tenant = tenant.into();
+        assert!(
+            crate::challenge::valid_identifier(&tenant, 64),
+            "the tenant id must be 1..=64 bytes of [A-Za-z0-9._:-]"
         );
+        self.tenant = Some(tenant);
+        // The cache is keyed by (kid, tenant): the switch invalidates
+        // every key derived under the prior scope.
+        self.derived_keys = Mutex::new(HashMap::new());
         self
     }
 
@@ -2137,7 +2361,7 @@ impl ProductionVerifier {
     /// keys).
     pub fn with_secrets_by_kid(mut self, secrets: impl IntoIterator<Item = (u32, String)>) -> Self {
         self.secrets_by_kid = Some(secrets.into_iter().collect());
-        self.derived_keys = OnceLock::new();
+        self.derived_keys = Mutex::new(HashMap::new());
         self
     }
 
@@ -2362,6 +2586,12 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
+        // This verification call's execution-evidence memo: the armed
+        // program decodes (and its trace walks and digests compute)
+        // once, and the post-consume re-check of the same inputs reuses
+        // the verdict.
+        let mut exec_cache = ExecutionEvidenceCache::default();
+
         // 2. checkout A — the snapshot connection of the three-checkout
         //    model (snapshot/cheap on A, consume+WAIT on B, commit on C;
         //    the derivation holds no connection): it covers the
@@ -2446,6 +2676,7 @@ impl ProductionVerifier {
                 expected_request_binding,
                 token.execution_digest.as_deref(),
                 token.execution_trace.as_deref(),
+                &mut exec_cache,
             ) {
                 // The replay-exemption split (VerifyError::is_replay_exempt):
                 // only the narrow set of failures that describe the original
@@ -2490,6 +2721,7 @@ impl ProductionVerifier {
                                 expected_request_binding,
                                 token.execution_digest.as_deref(),
                                 token.execution_trace.as_deref(),
+                                &mut exec_cache,
                             ) {
                                 // A hard verdict masked by the exempt
                                 // circumstance: the evidence stays preserved
@@ -2673,19 +2905,21 @@ impl ProductionVerifier {
             expected_request_binding,
             token.execution_digest.as_deref(),
             token.execution_trace.as_deref(),
+            &mut exec_cache,
         ) {
             return VerifyOutcome::Invalid(e);
         }
 
         // 8. Single proof verdict. SHA-256/Argon2id derive the hash; an
         //    rsw record compares the presented final value against the
-        //    trapdoor expectation (the verifier's own decoded trapdoor,
+        //    trapdoor expectation (the verifier's own resolved trapdoor,
         //    never a record field).
+        let trapdoor = self.rsw_trapdoor();
         let valid = match proof_is_valid(
             &record,
             token.counter,
             token.rsw_proof.as_deref(),
-            self.rsw.as_ref(),
+            trapdoor.as_deref(),
         ) {
             Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -2799,6 +3033,11 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
+        // This recovery call's execution-evidence memo (the cheap phase
+        // and the replay gate below share one program decode when both
+        // evaluate the same inputs).
+        let mut exec_cache = ExecutionEvidenceCache::default();
+
         // 2. The retained consumed state must exist (the record was
         //    consumed and retained, or expired away).
         let state = match self.store.consumed_state(&token.nonce) {
@@ -2839,6 +3078,7 @@ impl ProductionVerifier {
                 expected_request_binding,
                 token.execution_digest.as_deref(),
                 token.execution_trace.as_deref(),
+                &mut exec_cache,
             ) {
                 return VerifyOutcome::Invalid(e);
             }
@@ -2862,6 +3102,7 @@ impl ProductionVerifier {
             expected_request_binding,
             token.execution_digest.as_deref(),
             token.execution_trace.as_deref(),
+            &mut exec_cache,
         ) {
             return VerifyOutcome::Invalid(e);
         }
@@ -2962,11 +3203,12 @@ impl ProductionVerifier {
         //    resultless recovery whose fresh mutation was not proven
         //    durable cannot authorize anything, exactly like the
         //    original consume whose WAIT failed).
+        let resume_trapdoor = self.rsw_trapdoor();
         let valid = match proof_is_valid(
             &state.record,
             token.counter,
             token.rsw_proof.as_deref(),
-            self.rsw.as_ref(),
+            resume_trapdoor.as_deref(),
         ) {
             Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -3159,7 +3401,10 @@ impl ProductionVerifier {
     /// execution fields of the decoded solution token (the optional
     /// digest and digest:trace wire segments); the execution binding is
     /// evaluated against the record's stored program exactly like the
-    /// [`crate::verify::verify_solution`] reference flow.
+    /// [`crate::verify::verify_solution`] reference flow. `exec_cache`
+    /// is this verification call's evidence memo: the peek and the
+    /// post-consume re-check of the same inputs share one program
+    /// decode, trace walk and digest computation.
     #[allow(clippy::too_many_arguments)]
     fn check_cheap(
         &self,
@@ -3171,6 +3416,7 @@ impl ProductionVerifier {
         expected_request_binding: RequestBindingExpectation<'_>,
         execution_digest: Option<&str>,
         execution_trace: Option<&str>,
+        exec_cache: &mut ExecutionEvidenceCache,
     ) -> Result<(), VerifyError> {
         // The record must carry the nonce it was loaded under: a stored
         // nonce that differs from the lookup key is impossible in a
@@ -3188,7 +3434,7 @@ impl ProductionVerifier {
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_ip_binding(record, client_ip)?;
         self.check_deployment_expectations(record)?;
-        check_execution_binding(record, execution_digest, execution_trace)?;
+        check_execution_binding_cached(record, execution_digest, execution_trace, exec_cache)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3217,6 +3463,7 @@ impl ProductionVerifier {
     /// tail can never replay a retained success around an exempt
     /// expiry). The fresh-challenge path never calls this: the public
     /// first-error precedence for pending records is unchanged.
+    #[allow(clippy::too_many_arguments)]
     fn replay_security_check(
         &self,
         record: &ChallengeRecord,
@@ -3225,6 +3472,7 @@ impl ProductionVerifier {
         expected_request_binding: RequestBindingExpectation<'_>,
         execution_digest: Option<&str>,
         execution_trace: Option<&str>,
+        exec_cache: &mut ExecutionEvidenceCache,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
@@ -3234,7 +3482,7 @@ impl ProductionVerifier {
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_deployment_expectations(record)?;
-        check_execution_binding(record, execution_digest, execution_trace)?;
+        check_execution_binding_cached(record, execution_digest, execution_trace, exec_cache)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3330,48 +3578,45 @@ impl ProductionVerifier {
         }
     }
 
-    /// The `HKDF` purpose keys of the record's signing secret, derived once
-    /// per key id and cached for the verifier's lifetime (the secrets are
-    /// immutable once configured — the builder's
-    /// [`ProductionVerifier::with_secrets_by_kid`] replacement resets the
-    /// cache, so the derivation is a pure function of the kid under the
-    /// current secret set). The
-    /// cache is precomputed as ONE map on first use — every configured
-    /// kid under a `secrets_by_kid` map, or the single secret under the
-    /// `u32::MAX` sentinel (the single-key path always derives from the
-    /// same master, so it shares ONE entry instead of one per kid) —
-    /// because a [`OnceLock`] is write-once: the full map is built and
-    /// installed in a single `set`, and every later lookup is a pure map
-    /// hit. A concurrent first-derivation race is benign: both threads
-    /// compute identical maps, and the loser's `set` is simply ignored.
+    /// The `HKDF` purpose keys of the record's signing secret, derived
+    /// lazily per `(tenant, kid)` pair and cached for the verifier's
+    /// lifetime (the secrets and the tenant are immutable once
+    /// configured — the builder's
+    /// [`ProductionVerifier::with_secrets_by_kid`] and
+    /// [`ProductionVerifier::with_tenant`] replacements reset the cache,
+    /// so the derivation is a pure function of the pair under the
+    /// current configuration). The first miss derives exactly the pair
+    /// the record names — never the whole keyring — so a verifier with
+    /// many configured kids pays one derivation per kid it actually
+    /// verifies. The single-key path always derives from the same
+    /// master and shares ONE `(u32::MAX sentinel, tenant)` entry.
     fn resolve_derived_keys(
         &self,
         record: &ChallengeRecord,
     ) -> Result<Arc<DerivedKeys>, VerifyError> {
         let secret = self.resolve_signing_secret(record)?;
-        let cache_key = if self.secrets_by_kid.is_some() {
-            record.kid
-        } else {
-            u32::MAX
-        };
-        if let Some(keys) = self.derived_keys.get().and_then(|map| map.get(&cache_key)) {
+        let cache_key = (
+            if self.secrets_by_kid.is_some() {
+                record.kid
+            } else {
+                u32::MAX
+            },
+            self.tenant.clone(),
+        );
+        // A poisoned lock (a panic while a derivation held it — none of
+        // this code panics) recovers the intact map: the cache is pure
+        // derived state, and failing every later verification would
+        // serve nothing.
+        let mut cache = self
+            .derived_keys
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(keys) = cache.get(&cache_key) {
             return Ok(Arc::clone(keys));
         }
-        let map = match &self.secrets_by_kid {
-            Some(secrets) => secrets
-                .iter()
-                .map(|(kid, secret)| (*kid, Arc::new(DerivedKeys::from_master(secret, None))))
-                .collect(),
-            None => HashMap::from([(u32::MAX, Arc::new(DerivedKeys::from_master(secret, None)))]),
-        };
-        let _ = self.derived_keys.set(map);
-        // Read back through the installed map: a concurrent builder may
-        // have won the `set` with an identical computation.
-        self.derived_keys
-            .get()
-            .and_then(|installed| installed.get(&cache_key))
-            .map(Arc::clone)
-            .ok_or(VerifyError::UnknownKid)
+        let keys = Arc::new(DerivedKeys::from_master(secret, self.tenant.as_deref()));
+        cache.insert(cache_key, Arc::clone(&keys));
+        Ok(keys)
     }
 
     /// The TTL on the server clock, like the PHP `time()`. The challenge
@@ -3533,6 +3778,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3639,6 +3885,7 @@ mod tests {
                         RequestBindingExpectation::Unenforced,
                         None,
                         None,
+                        &mut ExecutionEvidenceCache::default(),
                     )
                     .expect("the issued record passes its own cheap phase");
             }
@@ -4529,6 +4776,83 @@ mod tests {
     }
 
     #[test]
+    fn a_one_second_claim_is_a_true_one_second_lease() {
+        // The millisecond TTL rule: a `ttl_secs` of 1 writes an exact
+        // 1 s lease (no whole-second rounding), so the claim is live
+        // immediately after it is taken and re-claimable shortly after
+        // the second elapses.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-lease-1s:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+
+        let _owner = store
+            .claim_resume_derivation(&rec.nonce, 1)
+            .unwrap()
+            .expect("the 1 s claim is taken");
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "the lease is live immediately after the claim"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_some(),
+            "the lease expires after the exact second and the claim is re-takeable"
+        );
+    }
+
+    #[test]
+    fn persistent_keys_are_refused_untouched_by_the_transitions() {
+        // A persistent (TTL-less, foreign) key reports a negative
+        // `PTTL`: the consume, cancel and commit transitions refuse it
+        // with their missing shapes and never write, so foreign state
+        // survives byte-intact.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:persistent-key:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+
+        let raw = "{\"state\":\"pending\",\"consumed_result\":null,\"operation_identity\":null}";
+        let key = format!("{prefix}persistent-nonce");
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(raw)
+            .query::<()>(&mut conn)
+            .unwrap();
+        assert!(
+            redis::cmd("PTTL")
+                .arg(&key)
+                .query::<i64>(&mut conn)
+                .unwrap()
+                == -1,
+            "the seeded key is persistent"
+        );
+
+        assert!(
+            store.consume("persistent-nonce").unwrap().is_none(),
+            "the consume refuses a persistent key as missing"
+        );
+        assert!(
+            store.cancel("persistent-nonce").unwrap().is_none(),
+            "the cancel refuses a persistent key as missing"
+        );
+        assert!(
+            !store.commit_result("persistent-nonce", true, None).unwrap(),
+            "the commit refuses a persistent key"
+        );
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, raw, "the refused transitions leave the bytes intact");
+    }
+
+    #[test]
     fn resume_commit_fences_on_a_live_claim_and_clears_the_fields() {
         // The fencing commit: a stale owner (mismatched token) and an
         // expired owner are refused before any write, and the current
@@ -4749,11 +5073,7 @@ mod tests {
         );
         let valid = "0123456789abcdef0123456789abcdef";
         assert!(validate_resume_owner(valid).is_ok());
-        let random_owner: String = security_random::<16>()
-            .expect("secure RNG")
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let random_owner: String = hex::encode(security_random::<16>().expect("secure RNG"));
         assert!(
             validate_resume_owner(&random_owner).is_ok(),
             "the production owner shape must pass"

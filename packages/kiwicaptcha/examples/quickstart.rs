@@ -40,6 +40,7 @@ fn config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None, // None = global purpose keys (Some("t1") for tenant-scoped deployments)
     }
 }
 
@@ -83,8 +84,9 @@ fn quickstart() -> Result<(), String> {
     let mut ctx = VerifyContext {
         record: &mut record,
         secret_key: &config.secret_key,
+        tenant: None, // None = the global purpose keys (single-tenant deployment)
         secrets_by_kid: None, // None = single-key path (kid 1 verified)
-        revoked_kids: None,   // None = no compromise-revoked keys
+        revoked_kids: None, // None = no compromise-revoked keys
         counter: decoded.counter,
         duration_ms: decoded.duration_ms,
         // The safe default: no injected clock — the verifier reads the

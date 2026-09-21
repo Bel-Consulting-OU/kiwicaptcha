@@ -91,6 +91,7 @@ fn config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -787,6 +788,7 @@ fn verify_probe(
     let mut ctx = VerifyContext {
         record,
         secret_key: KEY,
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter: probe.counter,

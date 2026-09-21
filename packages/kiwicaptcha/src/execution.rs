@@ -322,6 +322,14 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "dsdep",
 ];
 
+/// The trace-entry name of an opcode with a deterministic fallback: a
+/// hand-constructed op outside the opcode register names `op?` instead
+/// of panicking. The blob decoder bounds opcodes by grammar version,
+/// so submitted evidence never carries one.
+fn trace_name(opcode: u8) -> &'static str {
+    TRACE_NAMES.get(opcode as usize).copied().unwrap_or("op?")
+}
+
 /// A parsed op: the opcode plus its canonical operands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op {
@@ -1132,7 +1140,7 @@ pub fn canonical_trace(program: &Program) -> String {
 
     for op in &program.ops {
         let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-        entries.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], result));
+        entries.push(format!("{}({})", trace_name(op.opcode), result));
     }
     entries.join(";")
 }
@@ -1389,12 +1397,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let out = hasher.finalize();
-    let mut s = String::with_capacity(64);
-    for b in out {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    hex::encode(hasher.finalize())
 }
 
 fn operand_bytes(op: &Op, key: &str) -> Vec<u8> {
@@ -2145,7 +2148,7 @@ pub mod fixtures {
                 entries.push(format!("durlc({FABRICATED_URL_DIGEST})"));
             } else {
                 let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-                entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
+                entries.push(format!("{}({result})", trace_name(op.opcode)));
             }
         }
         entries.join(";")
@@ -2202,6 +2205,13 @@ pub mod fixtures {
 pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
     let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
     let program = decode(program_b64)?;
+    verify_executed_trace_decoded(&program, trace)
+}
+
+/// The trace walk over an already decoded program — the decoded-program
+/// core of [`verify_executed_trace`], so a caller that holds the
+/// program decodes once and verifies without a second blob parse.
+pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> Option<String> {
     if trace.is_empty() {
         return None;
     }
@@ -2251,7 +2261,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
             }
         }
         let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
-        let name = TRACE_NAMES[op.opcode as usize];
+        let name = trace_name(op.opcode);
         let name_open = format!("{name}(");
         if pos + name_open.len() > bytes.len()
             || &bytes[pos..pos + name_open.len()] != name_open.as_bytes()
@@ -2267,7 +2277,10 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 let mut parts = body.splitn(2, ',');
                 let top: i64 = parts.next()?.parse().ok()?;
                 let height: i64 = parts.next()?.parse().ok()?;
-                if height < 1 || top < prev_top {
+                // The layout offsets are construction-order positions:
+                // each is non-negative and monotonic (never below the
+                // previous entry's offset).
+                if height < 1 || top < 0 || top < prev_top {
                     return None;
                 }
                 prev_top = top;
@@ -2397,12 +2410,26 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
 /// client actually executed, so the verifier can bind the
 /// browser-observed entries. `None` when the program is malformed.
 pub fn expected_digest_over_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let program = decode(program_b64)?;
+    expected_digest_over_trace_decoded(program_b64, &program, nonce, trace)
+}
+
+/// The digest computation over an already decoded program — the
+/// decoded-program core of [`expected_digest_over_trace`], so a caller
+/// that holds the parsed program computes the digest without a second
+/// blob parse. The HMAC key stays the program blob's decoded bytes (the
+/// content-derived digest key); `None` when `program_b64` is not the
+/// canonical base64 of its own bytes.
+pub(crate) fn expected_digest_over_trace_decoded(
+    program_b64: &str,
+    program: &Program,
+    nonce: &str,
+    trace: &str,
+) -> Option<String> {
     let bytes = B64.decode(program_b64).ok()?;
     if B64.encode(&bytes) != program_b64 {
         return None;
     }
-    let program = decode(program_b64)?;
-
     let mut msg = Vec::new();
     msg.extend_from_slice(LABEL.as_bytes());
     msg.push(b'|');
@@ -2944,6 +2971,134 @@ mod tests {
             verify_executed_trace(&p, &nonce, truncated).is_none(),
             "a trace without the probe entries must be rejected"
         );
+    }
+
+    // ── layout-probe invariants over hand-constructed programs ────────
+
+    fn op(opcode: u8, operands: &[(&str, Operand)]) -> Op {
+        Op {
+            opcode,
+            operands: operands
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    fn probe_program(with_append: bool) -> Program {
+        let create = op(
+            OP_DOM_CREATE,
+            &[
+                ("tag", Operand::Int(0)),
+                ("id", Operand::Bytes(b"probe-id-1".to_vec())),
+            ],
+        );
+        let geometry = op(
+            OP_DOM_GEOMETRY,
+            &[("id", Operand::Bytes(b"probe-id-1".to_vec()))],
+        );
+        let point = op(
+            OP_DOM_POINT,
+            &[("x", Operand::Int(1)), ("y", Operand::Int(2))],
+        );
+        let mut ops = vec![create];
+        if with_append {
+            ops.push(op(OP_DOM_APPEND, &[]));
+        }
+        ops.push(geometry);
+        ops.push(point);
+        Program {
+            format: FORMAT_VERSION,
+            scope: "login".into(),
+            action: "login-action".into(),
+            op_version: 1,
+            ops,
+        }
+    }
+
+    #[test]
+    fn the_point_predicate_rejects_a_construction_lie() {
+        // The `POINT` entry names the whole-program construction
+        // predicate: a program that appends claims `point(div)`, a
+        // no-append program claims `point(none)`. A trace that lies in
+        // either direction is rejected.
+        let with_append = probe_program(true);
+        let honest_append = executed_trace_for(&with_append);
+        assert!(honest_append.contains("point(div)"));
+        assert!(
+            verify_executed_trace_decoded(&with_append, &honest_append).is_some(),
+            "the honest trace of an appending program verifies"
+        );
+        let lie_none = honest_append.replace("point(div)", "point(none)");
+        assert!(
+            verify_executed_trace_decoded(&with_append, &lie_none).is_none(),
+            "an appending program cannot claim point(none)"
+        );
+
+        let no_append = probe_program(false);
+        let honest_none = executed_trace_for(&no_append);
+        assert!(honest_none.contains("point(none)"));
+        assert!(
+            verify_executed_trace_decoded(&no_append, &honest_none).is_some(),
+            "the honest trace of a no-append program verifies"
+        );
+        let lie_div = honest_none.replace("point(none)", "point(div)");
+        assert!(
+            verify_executed_trace_decoded(&no_append, &lie_div).is_none(),
+            "a no-append program cannot claim point(div)"
+        );
+    }
+
+    #[test]
+    fn a_negative_geometry_offset_is_rejected() {
+        // Layout offsets are construction-order positions: the first
+        // entry must already be non-negative (the walk seeds its
+        // monotonic floor at -1 and a `top` of -1 must fail the
+        // non-negativity bound, not just the ordering).
+        let program = probe_program(false);
+        let trace = executed_trace_for(&program);
+        assert!(
+            verify_executed_trace_decoded(&program, &trace).is_some(),
+            "the honest trace verifies"
+        );
+        let negative = trace.replace("geom(0,", "geom(-1,");
+        assert_ne!(negative, trace, "the mutated trace must differ");
+        assert!(
+            verify_executed_trace_decoded(&program, &negative).is_none(),
+            "a geometry entry with a negative top must be rejected"
+        );
+    }
+
+    #[test]
+    fn an_out_of_register_opcode_never_panics_the_trace_paths() {
+        // A hand-constructed op outside the opcode register names `op?`
+        // deterministically: the canonical trace renders it, the walk
+        // completes over the self-consistent entry (arithmetic ops only
+        // — the canonical trace emits the layout probes' placeholders,
+        // which the submitted-trace walk never accepts), and the blob
+        // decoder keeps the shape out of submitted evidence.
+        let program = Program {
+            format: FORMAT_VERSION,
+            scope: "login".into(),
+            action: "login-action".into(),
+            op_version: 1,
+            ops: vec![
+                op(u8::MAX, &[("a", Operand::Int(1))]),
+                op(OP_ADD, &[("a", Operand::Int(2)), ("b", Operand::Int(3))]),
+            ],
+        };
+        let trace = canonical_trace(&program);
+        assert!(
+            trace.starts_with("op?("),
+            "the out-of-register op names the fallback: {trace}"
+        );
+        assert!(
+            verify_executed_trace_decoded(&program, &trace).is_some(),
+            "the walk completes over the self-consistent fallback entry"
+        );
+        // The synthesizer renders the same fallback without panicking.
+        let synthesized = executed_trace_for(&program);
+        assert!(synthesized.starts_with("op?("));
     }
 
     #[test]

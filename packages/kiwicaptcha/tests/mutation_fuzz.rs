@@ -37,6 +37,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -99,6 +100,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
             let mut ctx = VerifyContext {
                 record: &mut rec,
                 secret_key: SECRET,
+                tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
                 counter: 1,

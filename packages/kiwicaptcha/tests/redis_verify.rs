@@ -230,6 +230,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -256,6 +257,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
         algorithm: PoWAlgorithm::Argon2id,
         m_kib: 128,
         t: 3,
@@ -7152,5 +7154,232 @@ fn v4_execution_armed_record_verifies_at_the_production_boundary() {
         kiwicaptcha::verify::validate_record(&old),
         Ok(()),
         "the v4 shape itself is structurally valid"
+    );
+}
+
+// ── the pending-envelope integrity guard (hermetic) ─────────────────
+
+/// The raw stored JSON of an issued record: the canonical record bytes
+/// plus the pending runtime envelope, exactly what the real store
+/// writes — the corrupt-envelope suites splice their forged fields into
+/// this base.
+fn pending_envelope_json(record: &ChallengeRecord) -> String {
+    let mut json = serde_json::to_string(record).unwrap();
+    json.truncate(json.len() - 1);
+    json.push_str(",\"state\":\"pending\",\"consumed_result\":null,\"operation_identity\":null}");
+    json
+}
+
+#[test]
+fn consume_refuses_a_pending_envelope_carrying_a_terminal_result() {
+    // A genuinely issued pending record carries only the null markers;
+    // a pending envelope that ALSO carries a committed result is a
+    // corrupt or forged rewrite, and the transition refuses it with the
+    // missing shape, leaving the stored bytes untouched.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("pending-guard-result");
+    let store = store_for(&url, &prefix);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut forged = pending_envelope_json(&issued.record);
+    forged = forged.replace(
+        "\"consumed_result\":null",
+        "\"consumed_result\":{\"valid\":true,\"binding\":null}",
+    );
+    assert!(forged.contains("\"state\":\"pending\""));
+    endpoint.seed_raw(&key, &forged);
+
+    assert!(
+        store.consume(&issued.record.nonce).unwrap().is_none(),
+        "the corrupt pending envelope reads as missing"
+    );
+    assert_eq!(
+        endpoint.raw_record(&key).as_deref(),
+        Some(forged.as_str()),
+        "the refused transition leaves the stored bytes byte-intact"
+    );
+}
+
+#[test]
+fn consume_refuses_a_pending_envelope_carrying_a_claim_marker() {
+    // A resume marker on a pending envelope is the same forged shape:
+    // only the claim scripts write those fields, and only into an
+    // already-consumed envelope.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("pending-guard-claim");
+    let store = store_for(&url, &prefix);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let base = pending_envelope_json(&issued.record);
+    let forged = format!("{},\"resume_owner\":\"x\"}}", &base[..base.len() - 1]);
+    endpoint.seed_raw(&key, &forged);
+
+    assert!(
+        store.consume(&issued.record.nonce).unwrap().is_none(),
+        "the claimed pending envelope reads as missing"
+    );
+    assert_eq!(
+        endpoint.raw_record(&key).as_deref(),
+        Some(forged.as_str()),
+        "the refused transition leaves the stored bytes byte-intact"
+    );
+}
+
+// ── the lazy rsw builder (hermetic) ──────────────────────────────────
+
+#[test]
+fn with_rsw_trapdoor_with_a_malformed_pair_never_panics() {
+    // The builder stores the raw pair and never validates eagerly: a
+    // malformed pair builds cleanly, and the verification of an rsw
+    // record surfaces the typed UnsupportedRswParams at the proof site
+    // (the record is authentic; this verifier cannot represent the
+    // trapdoor computation).
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("rsw-malformed");
+    let mut config = sha_config(4);
+    config.algorithm = PoWAlgorithm::Rsw;
+    config.rsw_modulus_n = Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into());
+    config.rsw_lambda = Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into());
+    config.rsw_t = kiwicaptcha::challenge::MIN_RSW_T;
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some("0".repeat(512)),
+    }
+    .encode();
+    endpoint.seed(&prefix, &issued.record);
+
+    // The malformed pair (not base64 at all) builds without panicking.
+    let verifier = verifier_for(&url, &prefix).with_rsw_trapdoor("!!!not-base64!!!", "also-bad");
+    assert_eq!(
+        verify_at(&verifier, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        "a malformed trapdoor pair surfaces the typed unsupported verdict"
+    );
+
+    // A well-formed but INVALID pair (a weak modulus) behaves the same;
+    // re-seed first — the malformed-pair verification above consumed
+    // the record without committing a result.
+    endpoint.seed(&prefix, &issued.record);
+    let verifier_weak = verifier_for(&url, &prefix).with_rsw_trapdoor(
+        "AQID", // 3 bytes — refused by the shape gate
+        "AgQ",
+    );
+    assert_eq!(
+        verify_at(&verifier_weak, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        "an invalid trapdoor pair surfaces the same typed verdict"
+    );
+}
+
+#[test]
+fn with_rsw_trapdoor_verifies_rsw_records_through_the_trapdoor() {
+    // The positive control of the lazy pair: the fixture trapdoor
+    // resolves through the validated-pair memo and the sequential
+    // final value verifies end to end.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("rsw-valid");
+    let mut config = sha_config(4);
+    config.algorithm = PoWAlgorithm::Rsw;
+    config.rsw_modulus_n = Some(kiwicaptcha::rsw::fixtures::MODULUS_N_B64.into());
+    config.rsw_lambda = Some(kiwicaptcha::rsw::fixtures::LAMBDA_B64.into());
+    config.rsw_t = kiwicaptcha::challenge::MIN_RSW_T;
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let proof = kiwicaptcha::rsw::fixtures::sequential_proof(
+        &issued.record.prefix,
+        &issued.record.nonce,
+        issued.record.t as u64,
+    );
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter: 0,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+        rsw_proof: Some(proof),
+    }
+    .encode();
+    endpoint.seed(&prefix, &issued.record);
+    let verifier = verifier_for(&url, &prefix).with_rsw_trapdoor(
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued.record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the fixture trapdoor verifies the sequential proof end to end"
+    );
+}
+
+// ── tenant-scoped production verification (hermetic) ────────────────
+
+#[test]
+fn tenant_scoped_records_verify_only_under_the_same_tenant() {
+    // The t1-issued record verifies under a t1 verifier and fails
+    // under t2 and under the global keys (BadSignature, before any
+    // consume of the pending record).
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("tenant-prod");
+    let mut config = sha_config(4);
+    config.secret_key = SECRET.into();
+    config.tenant = Some("t1".into());
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    endpoint.seed(&prefix, &issued.record);
+
+    let same = verifier_for(&url, &prefix).with_tenant("t1");
+    assert!(
+        matches!(
+            verify_at(&same, &token, issued.record.issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the t1 record verifies under the t1 verifier"
+    );
+
+    // Cross-tenant negatives: re-seed a fresh pending record per verdict
+    // (the first failure burned the pending original through the
+    // cheap-failure cleanup).
+    endpoint.seed(&prefix, &issued.record);
+    let cross = verifier_for(&url, &prefix).with_tenant("t2");
+    assert_eq!(
+        verify_at(&cross, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "a t2 verifier rejects the t1 record"
+    );
+    endpoint.seed(&prefix, &issued.record);
+    let global = verifier_for(&url, &prefix);
+    assert_eq!(
+        verify_at(&global, &token, issued.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "the global (tenant-free) verifier rejects the t1 record"
     );
 }

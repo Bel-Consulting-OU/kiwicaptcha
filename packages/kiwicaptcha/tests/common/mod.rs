@@ -171,6 +171,22 @@ impl FakeEndpoint {
             .insert(format!("{prefix}{}", record.nonce), json);
     }
 
+    /// Seeds a raw stored value under the key verbatim: the corrupt-
+    /// envelope suites land their hand-written bytes in the store
+    /// byte-exact, with no canonical envelope wrapped around them.
+    pub fn seed_raw(&self, key: &str, value: &str) {
+        self.records
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// The raw stored bytes under the key (the byte-exactness oracle of
+    /// the refused-transition suites).
+    pub fn raw_record(&self, key: &str) -> Option<String> {
+        self.records.lock().unwrap().get(key).cloned()
+    }
+
     /// The recorded command log: `(conn_id, args)` in arrival order.
     pub fn commands(&self) -> Vec<(usize, Vec<String>)> {
         self.commands.lock().unwrap().clone()
@@ -258,24 +274,41 @@ impl FakeEndpoint {
                     // the empty identity of the no-identity call). The
                     // identity ARGV is the JSON-escaped string the real
                     // Lua splices into the marker in the same write.
-                    5 => Some(match stored {
-                        Some(v) if v.contains("\"state\":\"pending\"") => {
-                            let mut consumed =
-                                v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
-                            if !args[4].is_empty() {
-                                consumed = consumed.replace(
-                                    "\"operation_identity\":null",
-                                    &format!("\"operation_identity\":{}", args[4]),
-                                );
+                    // The pending-envelope integrity guard mirrors the
+                    // real consume script: a pending value that also
+                    // carries a terminal or claim field (a non-null
+                    // result, a non-null identity, or any resume
+                    // marker) is refused with the missing shape and
+                    // the stored bytes are never touched.
+                    5 => {
+                        let guard_refuses = stored.as_deref().is_some_and(|v| {
+                            (v.contains("\"consumed_result\":")
+                                && !v.contains("\"consumed_result\":null"))
+                                || (v.contains("\"operation_identity\":")
+                                    && !v.contains("\"operation_identity\":null"))
+                                || v.contains("\"resume_owner\":\"")
+                                || v.contains("\"resume_until\":")
+                        });
+                        Some(match stored {
+                            Some(_) if guard_refuses => "$-1\r\n".to_string(),
+                            Some(v) if v.contains("\"state\":\"pending\"") => {
+                                let mut consumed =
+                                    v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
+                                if !args[4].is_empty() {
+                                    consumed = consumed.replace(
+                                        "\"operation_identity\":null",
+                                        &format!("\"operation_identity\":{}", args[4]),
+                                    );
+                                }
+                                self.records.lock().unwrap().insert(key, consumed.clone());
+                                format!("*2\r\n${}\r\n{}\r\n:1\r\n", consumed.len(), consumed)
                             }
-                            self.records.lock().unwrap().insert(key, consumed.clone());
-                            format!("*2\r\n${}\r\n{}\r\n:1\r\n", consumed.len(), consumed)
-                        }
-                        Some(v) if v.contains("\"state\":\"consumed\"") => {
-                            format!("*2\r\n${}\r\n{}\r\n:0\r\n", v.len(), v)
-                        }
-                        _ => "$-1\r\n".to_string(),
-                    }),
+                            Some(v) if v.contains("\"state\":\"consumed\"") => {
+                                format!("*2\r\n${}\r\n{}\r\n:0\r\n", v.len(), v)
+                            }
+                            _ => "$-1\r\n".to_string(),
+                        })
+                    }
                     // commit ([`EVALSHA`, sha, numkeys, key, valid, binding]).
                     // The result is spliced into the stored envelope the
                     // way the real Lua splice does, so a later

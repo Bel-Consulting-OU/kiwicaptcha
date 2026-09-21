@@ -77,8 +77,9 @@ pub fn siteverify_response(
 ///   `CounterTooLarge`, `WrongScope`, `RequestBindingMismatch`,
 ///   `WrongRegion`, `WrongIssuer`, `WrongPolicyVersion`, `UnknownKid`,
 ///   `TooManyAttempts`, `InsufficientWork`, `MalformedRecord`,
-///   `UnsupportedArgon2Params`, `BotDetected`, `MalformedToken`,
-///   `RecordNotFound`): `invalid-input-response`.
+///   `UnsupportedArgon2Params`, `UnsupportedRswParams`, `BotDetected`,
+///   `MalformedToken`, `RecordNotFound`, `ExecutionMismatch`):
+///   `invalid-input-response`.
 fn map_error(reason: &VerifyError) -> String {
     match reason {
         VerifyError::Expired | VerifyError::AlreadyConsumed => "timeout-or-duplicate".into(),
@@ -188,13 +189,15 @@ mod tests {
                 VerifyError::UnsupportedArgon2Params,
                 "invalid-input-response",
             ),
+            (VerifyError::UnsupportedRswParams, "invalid-input-response"),
             (VerifyError::BotDetected, "invalid-input-response"),
             (VerifyError::MalformedToken, "invalid-input-response"),
             (VerifyError::RecordNotFound, "invalid-input-response"),
+            (VerifyError::ExecutionMismatch, "invalid-input-response"),
         ];
         assert_eq!(
             cases.len(),
-            24,
+            26,
             "the table must cover EVERY VerifyError variant"
         );
         for (reason, expected) in cases {

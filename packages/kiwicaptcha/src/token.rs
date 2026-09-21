@@ -297,6 +297,13 @@ impl SolutionToken {
             _ => return Err(DecodeError::Malformed),
         }
 
+        // Canonical numeric segments: a leading zero is not part of the
+        // wire language ("0042" is a different, rejected spelling of 42)
+        // except the exact value "0" itself — both implementations
+        // accept exactly one spelling per value.
+        if counter_str.len() > 1 && counter_str.starts_with('0') {
+            return Err(DecodeError::InvalidCounter);
+        }
         let counter: u64 = counter_str
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
@@ -306,6 +313,9 @@ impl SolutionToken {
         // was not minted by a real solve (matches PHP exactly).
         if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
+        }
+        if duration_str.len() > 1 && duration_str.starts_with('0') {
+            return Err(DecodeError::InvalidDuration);
         }
         let duration_ms: u64 = duration_str
             .parse()
@@ -622,6 +632,44 @@ mod tests {
             rsw_proof: None,
         };
         assert!(SolutionToken::decode(&ok.encode()).is_ok());
+    }
+
+    #[test]
+    fn decode_rejects_numeric_segments_with_leading_zeros() {
+        // Canonical numeric wire segments: "0042" is a different,
+        // rejected spelling of 42; the exact "0" and a plain "10" are
+        // the accepted spellings (both implementations agree).
+        for (counter, duration, counter_bad) in [("0042", "10", true), ("42", "0070", false)] {
+            let plain = format!("{VALID_NONCE}.{counter}.{duration}.{{}}");
+            let wrapped = B64.encode(plain.into_bytes());
+            let expected = if counter_bad {
+                DecodeError::InvalidCounter
+            } else {
+                DecodeError::InvalidDuration
+            };
+            assert!(
+                matches!(SolutionToken::decode(&wrapped), Err(e) if e == expected),
+                "counter {counter:?} / duration {duration:?} must be rejected with {expected:?}"
+            );
+        }
+        let ok_counter = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
+        };
+        assert!(SolutionToken::decode(&ok_counter.encode()).is_ok());
+        let ok_ten = SolutionToken {
+            counter: 10,
+            duration_ms: 10,
+            ..ok_counter
+        };
+        let decoded = SolutionToken::decode(&ok_ten.encode()).unwrap();
+        assert_eq!(decoded.counter, 10);
+        assert_eq!(decoded.duration_ms, 10);
     }
 
     #[test]

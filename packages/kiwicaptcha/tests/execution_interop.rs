@@ -317,6 +317,7 @@ fn config() -> ChallengeConfig {
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+        tenant: None,
     }
 }
 
@@ -385,6 +386,7 @@ fn armed_issuance_verifies_with_correct_digest() {
     let mut ctx = VerifyContext {
         record: &mut record,
         secret_key: std::str::from_utf8(KEY).unwrap(),
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -438,6 +440,7 @@ fn armed_record_without_digest_is_execution_mismatch() {
     let mut ctx = VerifyContext {
         record: &mut record,
         secret_key: std::str::from_utf8(KEY).unwrap(),
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,
@@ -514,6 +517,7 @@ fn wrong_digest_and_digest_from_another_challenge_are_execution_mismatch() {
         let mut ctx = VerifyContext {
             record: &mut record,
             secret_key: std::str::from_utf8(KEY).unwrap(),
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -596,6 +600,7 @@ fn unarmed_issuance_rejects_a_stray_digest() {
     let mut ctx = VerifyContext {
         record: &mut record,
         secret_key: std::str::from_utf8(KEY).unwrap(),
+        tenant: None,
         secrets_by_kid: None,
         revoked_kids: None,
         counter,

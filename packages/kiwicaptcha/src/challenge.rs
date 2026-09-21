@@ -333,15 +333,15 @@ pub struct ChallengeRecord {
     pub kid: u32,
 }
 
-fn default_kid() -> u32 {
+pub(crate) fn default_kid() -> u32 {
     1
 }
 
-fn default_policy_version() -> u32 {
+pub(crate) fn default_policy_version() -> u32 {
     1
 }
 
-fn default_protocol_version() -> u8 {
+pub(crate) fn default_protocol_version() -> u8 {
     1
 }
 
@@ -453,6 +453,16 @@ pub struct ChallengeConfig {
     /// The client performs T sequential modular squarings; the server
     /// verifies instantly through lambda.
     pub rsw_t: u32,
+    /// The tenant id every issued challenge is derived under: the
+    /// purpose keys come from the per-tenant root
+    /// (`"kiwi/v2/tenant/" + tenant`, see [`crate::keys::DerivedKeys`]),
+    /// so tenants of a shared master secret cannot forge each other's
+    /// challenges or binding tags. `None` (the default) derives under
+    /// the global purpose keys — byte-identical to the tenant-free
+    /// issuance. Validated like `region` (1..=64 bytes of the narrow
+    /// identifier alphabet); the cross-language reference vectors pin
+    /// tenant `t1` under master `0123456789abcdef0123456789abcdef`.
+    pub tenant: Option<String>,
 }
 
 impl fmt::Debug for ChallengeConfig {
@@ -485,6 +495,7 @@ impl fmt::Debug for ChallengeConfig {
                 &self.rsw_lambda.as_ref().map(|_| "<redacted>"),
             )
             .field("rsw_t", &self.rsw_t)
+            .field("tenant", &self.tenant)
             .finish()
     }
 }
@@ -571,11 +582,16 @@ impl ChallengeConfig {
 ///
 /// The `salt` prevents identical IPs from producing identical hashes across
 /// deployments that use different secret keys.
+///
+/// Expiry reminder: this v1 binding is a stable per-IP identifier — the
+/// same IP hashes to the same value across every v1 record of a
+/// deployment, unlike the v2 nonce-bound tag. It exists for the v1
+/// migration window only and must be retired with protocol v1.
 pub fn hash_ip(ip: &str, salt: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(ip.as_bytes());
-    hex::encode(&hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Compute the nonce-bound IP binding tag for a challenge.
@@ -592,10 +608,23 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 /// challenge, so the record creates no stable IP-derived identifier. An
 /// unparsable IP string is rejected with [`SignError::InvalidIp`].
 pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignError> {
+    binding_tag_for_tenant(nonce, ip, secret, None)
+}
+
+/// The nonce-bound IP binding tag derived under the optional tenant
+/// root (see [`ChallengeConfig::tenant`]): identical to [`binding_tag`]
+/// for `None`, and derived under the per-tenant purpose keys for
+/// `Some(tenant_id)` so a shared master secret never crosses tenants.
+pub fn binding_tag_for_tenant(
+    nonce: &str,
+    ip: &str,
+    secret: &str,
+    tenant: Option<&str>,
+) -> Result<String, SignError> {
     if secret.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, None))
+    binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, tenant))
 }
 
 /// The nonce-bound IP binding tag computed with an already derived
@@ -624,7 +653,7 @@ pub(crate) fn binding_tag_with_keys(
     mac.update(&[0]);
     mac.update(&[family]);
     mac.update(&canonical_bytes);
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// The canonical current-time value for the `now_ns` parameter: epoch
@@ -637,7 +666,12 @@ pub fn now_epoch_micros() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "KiwiCaptcha: system clock read failed — issuance timestamps fall back to 0"
+            );
+            0
+        })
 }
 
 /// Whether `s` is a conforming identifier: non-empty and every
@@ -802,7 +836,7 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
 /// `SHA256(stored program) == signed commitment` is byte-exact in both
 /// languages. Mirrors the PHP `Issuer::executionCommitment`.
 pub fn execution_commitment(program_b64: &str) -> String {
-    hex::encode(&Sha256::digest(program_b64.as_bytes()))
+    hex::encode(Sha256::digest(program_b64.as_bytes()))
 }
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
@@ -819,21 +853,26 @@ fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError
     let mut mac =
         HmacSha256::new_from_slice(secret_key.as_bytes()).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Sign a canonical input with the `HKDF`-derived challenge-signing purpose key
 /// (`K_challenge` — protocol v2). The master secret is never used
-/// directly as the signing key.
-pub(crate) fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
+/// directly as the signing key; `tenant` selects the per-tenant root
+/// (see [`ChallengeConfig::tenant`]), `None` the global keys.
+pub(crate) fn sign_canonical_v2(
+    canonical: &str,
+    secret_key: &str,
+    tenant: Option<&str>,
+) -> Result<String, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
-    let derived = DerivedKeys::from_master(secret_key, None);
+    let derived = DerivedKeys::from_master(secret_key, tenant);
     let key = derived.challenge_key();
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
-    Ok(hex::encode(&mac.finalize().into_bytes()))
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Sign the payload with the secret key, returning a hex HMAC tag
@@ -872,7 +911,27 @@ pub fn verify_signature_v2(
     signature: &str,
     secret_key: &str,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2(&canonical_signing_input_v2(record), signature, secret_key)
+    verify_signature_v2_with_tenant(record, signature, secret_key, None)
+}
+
+/// The tenant-scoped v2 signature verification: the challenge-signing
+/// key derives under the per-tenant root (see
+/// [`ChallengeConfig::tenant`]), so a record issued under tenant `t1`
+/// verifies only under `Some("t1")` — never under another tenant and
+/// never under the global (`None`) keys. Identical verdicts to
+/// [`verify_signature_v2`] for `None`.
+pub fn verify_signature_v2_with_tenant(
+    record: &ChallengeRecord,
+    signature: &str,
+    secret_key: &str,
+    tenant: Option<&str>,
+) -> Result<bool, SignError> {
+    verify_canonical_v2(
+        &canonical_signing_input_v2(record),
+        signature,
+        secret_key,
+        tenant,
+    )
 }
 
 /// Verify a v2 signature with an already derived challenge-signing key —
@@ -901,7 +960,7 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     if signature.len() != 64 {
         return Ok(false);
     }
-    let signature_bytes = match hex::decode(signature) {
+    let signature_bytes = match hex_decode_strict(signature) {
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
     };
@@ -912,11 +971,13 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
 }
 
 /// Verify a canonical input against the `HKDF`-derived challenge key (protocol
-/// v2). Same constant-time guarantee as [`verify_canonical`].
+/// v2), under the optional tenant root. Same constant-time guarantee as
+/// [`verify_canonical`].
 fn verify_canonical_v2(
     canonical: &str,
     signature: &str,
     secret_key: &str,
+    tenant: Option<&str>,
 ) -> Result<bool, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
@@ -924,7 +985,7 @@ fn verify_canonical_v2(
     verify_canonical_v2_with_keys(
         canonical,
         signature,
-        &DerivedKeys::from_master(secret_key, None),
+        &DerivedKeys::from_master(secret_key, tenant),
     )
 }
 
@@ -941,7 +1002,7 @@ fn verify_canonical_v2_with_keys(
     if signature.len() != 64 {
         return Ok(false);
     }
-    let signature_bytes = match hex::decode(signature) {
+    let signature_bytes = match hex_decode_strict(signature) {
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
     };
@@ -962,10 +1023,11 @@ pub struct Issued {
 /// In-memory challenge cache that reduces Redis writes when the same client
 /// (identified by IP hash + scope) re-requests within a 1-second window.
 ///
-/// Entries older than 1 second are pruned lazily on every `get` and `put`,
+/// Entries older than 1 second are pruned lazily on every `get` and `put`.
+/// A fresh `get` refreshes the entry's timestamp, so recency tracks use,
 /// and the map is HARD-bounded: a `put` that would exceed the maximum
-/// evicts the least-recently-used entry, so 256 is a real memory maximum regardless of
-/// how many distinct IP+scope pairs arrive within a window.
+/// evicts the least-recently-used entry, so 256 is a real memory maximum
+/// regardless of how many distinct IP+scope pairs arrive within a window.
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
     /// Fresh entries survive up to this age before being pruned.
@@ -1330,7 +1392,7 @@ pub fn compose_decoy_prefix(slot1: usize, slot2: usize, slot3: usize) -> String 
 /// impossible. Mirrors the PHP `Issuer::decoyNameSuffix`.
 fn decoy_name_suffix() -> Result<String, SignError> {
     let bytes = security_random::<8>().map_err(|_| SignError::Rng)?;
-    Ok(hex::encode(&bytes))
+    Ok(hex::encode(bytes))
 }
 
 /// Pick a random armed decoy field name with the `CSPRNG` (never a
@@ -1400,20 +1462,26 @@ impl ChallengeCache {
         format!("{ip_hash}|{scope}")
     }
 
-    fn is_fresh(&self, ts: &Instant) -> bool {
-        ts.elapsed() < self.ttl
-    }
-
     pub fn get(&mut self, ip_hash: &str, scope: &str) -> Option<&Issued> {
+        // One entry lookup decides freshness: a fresh hit refreshes the
+        // entry's timestamp so the eviction below evicts by
+        // least-recently-USED, and a stale entry is removed so the map
+        // stays self-pruning.
+        let ttl = self.ttl;
         let key = Self::cache_key(ip_hash, scope);
-        if let Some((_, ts)) = self.entries.get(&key) {
-            if self.is_fresh(ts) {
-                return self.entries.get(&key).map(|(issued, _)| issued);
+        match self.entries.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if entry.get().1.elapsed() < ttl {
+                    let (issued, ts) = entry.into_mut();
+                    *ts = Instant::now();
+                    Some(issued)
+                } else {
+                    entry.remove();
+                    None
+                }
             }
-            // Stale entry: remove it now so the map stays self-pruning.
-            self.entries.remove(&key);
+            std::collections::hash_map::Entry::Vacant(_) => None,
         }
-        None
     }
 
     pub fn put(&mut self, ip_hash: &str, scope: &str, issued: Issued) {
@@ -1659,6 +1727,14 @@ fn issue_challenge_inner(
             return Err(SignError::InvalidIdentifier);
         }
     }
+    // The tenant id shares the narrow identifier alphabet with the
+    // region and the same 64-byte cap; it feeds the HKDF info label,
+    // so a non-conforming value must never reach a derivation.
+    if let Some(tenant) = &config.tenant {
+        if !valid_identifier(tenant, 64) {
+            return Err(SignError::InvalidIdentifier);
+        }
+    }
     if let Some(binding) = request_binding {
         if !valid_identifier(binding, 128) {
             return Err(SignError::InvalidIdentifier);
@@ -1725,7 +1801,11 @@ fn issue_challenge_inner(
         ) else {
             return Err(SignError::InvalidRswParams);
         };
-        if crate::rsw::RswTrapdoor::new(modulus, lambda).is_err() {
+        // The validated-pair memo serves the repeated issuance
+        // validation: the expensive primality tests run once per
+        // process for a configured pair, and every later issuance is a
+        // cache hit.
+        if crate::rsw::RswTrapdoor::validated(modulus, lambda).is_none() {
             return Err(SignError::InvalidRswParams);
         }
         if config.rsw_t < MIN_RSW_T || config.rsw_t > MAX_RSW_T {
@@ -1760,8 +1840,13 @@ fn issue_challenge_inner(
     }
 
     // Nonce-bound IP binding tag (v2) — or empty when binding is disabled.
+    // Both the tag and the signature below derive under the configured
+    // tenant root when one is set (see ChallengeConfig::tenant).
+    let tenant = config.tenant.as_deref();
     let binding = match config.binding_mode {
-        BindingMode::Bound => binding_tag(&nonce, client_ip, &config.secret_key)?,
+        BindingMode::Bound => {
+            binding_tag_for_tenant(&nonce, client_ip, &config.secret_key, tenant)?
+        }
         BindingMode::None => String::new(),
     };
 
@@ -1895,7 +1980,7 @@ fn issue_challenge_inner(
         execution_commitment: execution_commitment.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
-    let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
+    let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
     let challenge = format!("{}.{}", B64.encode(&canonical), signature);
     record.challenge = challenge.clone();
     // The prefix binds the client's counter input to this exact challenge.
@@ -2038,39 +2123,11 @@ pub enum SignError {
     InvalidRswParams,
 }
 
-// Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
-// HMAC outputs and IP hashes are the only consumers.
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            s.push_str(&format!("{b:02x}"));
-        }
-        s
-    }
-
-    /// Decode a hex string (lower- or upper-case) into bytes, or `None` if it
-    /// has an odd length or contains a non-hex character.
-    pub fn decode(s: &str) -> Option<Vec<u8>> {
-        if !s.len().is_multiple_of(2) {
-            return None;
-        }
-        let mut out = Vec::with_capacity(s.len() / 2);
-        let mut high = None;
-        for c in s.bytes() {
-            let nibble = match c {
-                b'0'..=b'9' => c - b'0',
-                b'a'..=b'f' => c - b'a' + 10,
-                b'A'..=b'F' => c - b'A' + 10,
-                _ => return None,
-            };
-            match high.take() {
-                Some(h) => out.push((h << 4) | nibble),
-                None => high = Some(nibble),
-            }
-        }
-        Some(out)
-    }
+// The `hex` 0.4 crate supplies the hex encoding of HMAC tags and IP
+// hashes (lowercase, byte-identical to the former in-module encoder)
+// and the strict even-length, mixed-case decode of signature tags.
+fn hex_decode_strict(s: &str) -> Option<Vec<u8>> {
+    hex::decode(s).ok()
 }
 
 #[cfg(test)]
@@ -2093,6 +2150,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             argon2_target_bits: 8,
@@ -2232,6 +2290,7 @@ mod tests {
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 0,
                 t: 1,
@@ -2269,15 +2328,15 @@ mod tests {
 
     #[test]
     fn hex_decode_round_trips() {
-        assert_eq!(hex::decode("").unwrap(), Vec::<u8>::new());
-        assert_eq!(hex::decode("00ff").unwrap(), vec![0x00, 0xff]);
-        assert_eq!(hex::decode("00FF").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(hex_decode_strict(""), Some(Vec::<u8>::new()));
+        assert_eq!(hex_decode_strict("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(hex_decode_strict("00FF"), Some(vec![0x00, 0xff]));
         assert_eq!(
-            hex::decode(&hex::encode(b"kiwi")).unwrap(),
-            b"kiwi".to_vec()
+            hex_decode_strict(&hex::encode(b"kiwi")),
+            Some(b"kiwi".to_vec())
         );
-        assert!(hex::decode("0").is_none(), "odd length must fail");
-        assert!(hex::decode("0g").is_none(), "non-hex char must fail");
+        assert!(hex_decode_strict("0").is_none(), "odd length must fail");
+        assert!(hex_decode_strict("0g").is_none(), "non-hex char must fail");
     }
 
     #[test]
@@ -2289,6 +2348,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2364,6 +2424,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2413,6 +2474,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2462,6 +2524,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2506,6 +2569,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2543,6 +2607,7 @@ mod tests {
                 rsw_modulus_n: None,
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -2594,6 +2659,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2641,6 +2707,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2695,6 +2762,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2738,6 +2806,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2778,6 +2847,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2807,6 +2877,7 @@ mod tests {
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
             rsw_t: t,
+            tenant: None,
             algorithm: PoWAlgorithm::Rsw,
             m_kib: 0,
             t: 1,
@@ -3628,6 +3699,7 @@ mod tests {
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -3726,6 +3798,7 @@ mod tests {
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
                 secret_key: "test-key-16-bytes!",
+                tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
                 counter,
@@ -3784,6 +3857,7 @@ mod tests {
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4373,5 +4447,137 @@ mod tests {
         assert!(debug.contains("execution_key: None"));
         assert!(debug.contains("rsw_lambda: None"));
         assert!(debug.contains("rsw_modulus_n: None"));
+        assert!(debug.contains("tenant: None"));
+    }
+
+    // ── tenant-scoped key derivation ──────────────────────────────────
+
+    /// The cross-language tenant vector inputs: tenant id `t1` under the
+    /// shared reference master (the tenant-root construction pinned by
+    /// the keys suite — both language cores derive the same root).
+    const TENANT_MASTER: &str = "0123456789abcdef0123456789abcdef";
+    const TENANT_IP: &str = "198.51.100.7";
+
+    fn tenant_config(tenant: Option<&str>) -> ChallengeConfig {
+        let mut config = sha_issue_config();
+        config.secret_key = TENANT_MASTER.into();
+        config.tenant = tenant.map(str::to_string);
+        config
+    }
+
+    fn sha_issue_config() -> ChallengeConfig {
+        ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
+            algorithm: PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 4,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
+            tenant: None,
+        }
+    }
+
+    fn embedded_signature(record: &ChallengeRecord) -> &str {
+        record
+            .challenge
+            .rsplit_once('.')
+            .map(|(_, sig)| sig)
+            .unwrap()
+    }
+
+    #[test]
+    fn tenant_issuance_signs_and_binds_under_the_tenant_root() {
+        // The t1-issued record verifies only under tenant t1: the v2
+        // signature and the nonce-bound binding tag both derive under
+        // the per-tenant root, so t2 and the global keys fail.
+        let issued = issue_challenge(
+            &tenant_config(Some("t1")),
+            "login",
+            TENANT_IP,
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        let sig = embedded_signature(&issued.record);
+        assert!(
+            verify_signature_v2_with_tenant(&issued.record, sig, TENANT_MASTER, Some("t1"))
+                .unwrap(),
+            "the t1 record verifies under the t1 root"
+        );
+        assert!(
+            !verify_signature_v2_with_tenant(&issued.record, sig, TENANT_MASTER, Some("t2"))
+                .unwrap(),
+            "a different tenant root never verifies the t1 record"
+        );
+        assert!(
+            !verify_signature_v2(&issued.record, sig, TENANT_MASTER).unwrap(),
+            "the global keys never verify the t1 record"
+        );
+        // The binding tag is the t1-derived tag, byte-exact.
+        assert_eq!(
+            issued.record.binding_tag,
+            binding_tag_for_tenant(&issued.record.nonce, TENANT_IP, TENANT_MASTER, Some("t1"))
+                .unwrap()
+        );
+        assert_ne!(
+            issued.record.binding_tag,
+            binding_tag(&issued.record.nonce, TENANT_IP, TENANT_MASTER).unwrap(),
+            "the global binding key produces a different tag"
+        );
+        // None keeps the byte-identical tenant-free issuance.
+        let unscoped = issue_challenge(
+            &tenant_config(None),
+            "login",
+            TENANT_IP,
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(verify_signature_v2(
+            &unscoped.record,
+            embedded_signature(&unscoped.record),
+            TENANT_MASTER
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn tenant_issuance_rejects_a_malformed_tenant_id() {
+        for bad in ["", "has space", "uni\u{e9}id", &"x".repeat(65)] {
+            assert!(
+                matches!(
+                    issue_challenge(
+                        &tenant_config(Some(bad)),
+                        "login",
+                        TENANT_IP,
+                        1_000_000,
+                        1_700_000_000_000_000,
+                        0,
+                        None,
+                    ),
+                    Err(SignError::InvalidIdentifier)
+                ),
+                "tenant {bad:?} must be refused at issuance"
+            );
+        }
     }
 }
