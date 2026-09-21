@@ -116,6 +116,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Keyring state' => $this->checkKeyring(),
             'Public origin' => $this->checkPublicOrigin(),
             'Client-IP policy' => $this->checkClientIpPolicy(),
+            'Continuity cookie' => $this->checkContinuityCookie(),
             'Risk Redis' => $this->checkRiskRedis(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
@@ -500,6 +501,49 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['WARN', 'symfony_global mode inherits the process-global trusted-proxy state; verify it matches this deployment'];
+    }
+
+    /**
+     * The continuity cookie's privacy posture. A `__Host-` prefixed name
+     * forces the Secure flag in {@see ContinuityCookie::cookie()}
+     * regardless of the request scheme (the prefix's browser contract),
+     * so a TLS-terminating proxy can never silently drop it. A custom
+     * name without the prefix keeps the configured/derived Secure flag:
+     * when forwarding headers are trusted (the proxy tier exists) but
+     * the flag is still scheme-derived (secure: null), the request
+     * scheme at the PHP layer is the proxy's plain-http hop unless
+     * X-Forwarded-Proto is propagated and trusted, so the cookie can be
+     * minted without Secure and dropped by the browser — the warn tells
+     * the operator to set risk.contuity_cookie.secure explicitly (or
+     * keep a `__Host-` name).
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkContinuityCookie(): array
+    {
+        if (!($this->config['risk']['enabled'] ?? false)) {
+            return ['PASS', 'risk engine disabled: no continuity cookie is minted'];
+        }
+        $cookie = $this->config['risk']['continuity_cookie'] ?? [];
+        $name = (string) ($cookie['name'] ?? '');
+        $secure = $cookie['secure'] ?? null;
+        if (str_starts_with($name, '__Host-')) {
+            return ['PASS', 'the __Host- prefixed name forces the Secure flag regardless of the request scheme (TLS-terminating proxies cannot drop it)'];
+        }
+        if ($secure === true) {
+            return ['PASS', 'Secure flag configured explicitly'];
+        }
+        $mode = (string) ($this->config['risk']['client_ip_mode'] ?? 'symfony_trusted_proxies');
+        $proxies = $this->config['risk']['trusted_proxies'] ?? [];
+        $trustsForwarding = $mode === 'symfony_global' || ($mode === 'symfony_trusted_proxies' && $proxies !== []);
+        if ($secure === null && $trustsForwarding) {
+            return ['WARN', sprintf('continuity_cookie "%s" keeps a scheme-derived Secure flag while forwarding headers are trusted: behind a TLS-terminating proxy the PHP-side scheme is the proxy\'s plain-http hop unless X-Forwarded-Proto is trusted, so the cookie can be minted without Secure and dropped by the browser — set risk.continuity_cookie.secure: true or use a __Host- prefixed name', $name)];
+        }
+        if ($secure === false) {
+            return ['WARN', sprintf('continuity_cookie "%s" has Secure explicitly disabled: the session signal travels in cleartext on any http hop', $name)];
+        }
+
+        return ['PASS', 'scheme-derived Secure flag (no trusted proxy configured, so the scheme is the client connection)'];
     }
 
     /**

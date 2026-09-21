@@ -215,7 +215,14 @@ final class KiwiCaptchaRuntime
             return '';
         }
         $assets = $this->assets();
-        $nonceAttr = $nonce !== null && $nonce !== '' ? ' nonce="'.$nonce.'"' : '';
+        // The nonce is interpolated into a raw HTML attribute string that
+        // the template emits unescaped (|raw), so it is HTML-escaped
+        // here: a quote-bearing nonce value must never break out of the
+        // attribute and inject markup into the script tag. A real CSP
+        // nonce is base64 and passes through unchanged.
+        $nonceAttr = $nonce !== null && $nonce !== ''
+            ? ' nonce="'.htmlspecialchars($nonce, ENT_QUOTES).'"'
+            : '';
         $out = '';
         foreach (['widget', 'driver'] as $key) {
             if (isset($this->emittedAssetKeys[$key])) {

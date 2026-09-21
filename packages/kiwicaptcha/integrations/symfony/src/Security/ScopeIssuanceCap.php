@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
+
 /**
  * Per-scope issuance cap: a Redis fixed-window counter bounding how many
  * challenges a scope may issue per minute.
@@ -230,20 +232,25 @@ LUA;
 
     /**
      * Run the Lua script against whichever client implementation is in use.
+     * The script rides the typed seam's ordinary mutation lane
+     * ({@see RedisSecurityCommandExecutor::executeMutation()}): a quota
+     * window counter is a non-final mutation, so under ha_authority
+     * pinned_primary it serves within the guard's verification window
+     * instead of being classified by the plain-EVAL shape as
+     * security-final (which would force an INFO + pin revalidation round
+     * trip per issuance). Without the wrapper the lane declaration is
+     * inert and the packing is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args
      */
     private function eval(string $script, array $keys, array $args): mixed
     {
-        if ($this->redis instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->redis->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
+        return ($this->luaSeam ??= new RedisSecurityCommandExecutor($this->redis))
+            ->executeMutation($script, $keys, $args);
     }
+
+    private ?RedisSecurityCommandExecutor $luaSeam = null;
 
     private function minute(): int
     {

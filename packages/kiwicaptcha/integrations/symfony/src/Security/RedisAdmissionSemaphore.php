@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\VerificationAdmissionGate;
 
 /**
@@ -380,18 +381,24 @@ LUA;
 
     /**
      * Run a Lua script against whichever client implementation is in use.
+     * The script rides the typed seam's ordinary mutation lane
+     * ({@see RedisSecurityCommandExecutor::executeMutation()}): an
+     * admission lease is a non-final mutation (a claim/release, never a
+     * terminal security transition), so under ha_authority pinned_primary
+     * it serves within the guard's verification window instead of being
+     * classified by the plain-EVAL shape as security-final (which would
+     * force an INFO + pin revalidation round trip per acquisition).
+     * Without the wrapper the lane declaration is inert and the packing
+     * is byte-identical.
      *
      * @param list<string> $keys
      * @param list<string> $args
      */
     private function eval(string $script, array $keys, array $args): mixed
     {
-        if ($this->client instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->client->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->client->eval($script, \count($keys), ...$keys, ...$args);
+        return ($this->luaSeam ??= new RedisSecurityCommandExecutor($this->client))
+            ->executeMutation($script, $keys, $args);
     }
+
+    private ?RedisSecurityCommandExecutor $luaSeam = null;
 }

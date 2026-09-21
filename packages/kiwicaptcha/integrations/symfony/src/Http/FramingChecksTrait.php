@@ -20,6 +20,16 @@ use Symfony\Component\HttpFoundation\Request;
  * A duplicated header (two different values) is the kind of ambiguity
  * different proxies and application layers interpret differently, so it
  * is refused rather than silently collapsed.
+ *
+ * SAPI caveat: duplicate-header detection only fires where the SAPI
+ * preserves duplicate occurrences as separate values in the request
+ * bag. Conventional php-fpm/nginx typically collapse duplicates into
+ * one comma-joined value before PHP sees them, so under that stack the
+ * duplicate rows of this contract are enforced by the intermediary's
+ * own collapse (a single non-canonical value is still refused by the
+ * grammar checks). The full duplicate-refusal behavior is effective
+ * under FrankenPHP, Swoole, and the test harness (built Symfony
+ * Requests), where every occurrence reaches the application verbatim.
  */
 trait FramingChecksTrait
 {

@@ -658,6 +658,7 @@ final class ConfigurationTest extends TestCase
 
     public function testSiteverifySecretsRequireStrongKeys(): void
     {
+
         // The siteverify secrets are the entire server-to-server
         // authentication boundary — configuration rejects weak keys.
         $processed = $this->process(['risk' => ['siteverify_secrets' => ['0123456789abcdef' => 'login']]])['risk']['siteverify_secrets'];
@@ -670,6 +671,44 @@ final class ConfigurationTest extends TestCase
             } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
                 // expected
             }
+        }
+    }
+
+    public function testSiteverifyNumericStringSecretStaysAStringKey(): void
+    {
+        // A >=16-byte numeric secret that PHP preserves as a string key
+        // (beyond PHP_INT_MAX, so no integer coercion happens) survives
+        // processing as the exact string key, and key normalization is
+        // off: a dash-bearing secret is never rewritten to underscores.
+        $numeric = '9999999999999999999'; // 19 digits > PHP_INT_MAX: stays a string key
+        self::assertIsString((string) $numeric);
+        $secrets = [$numeric => 'login'];
+        self::assertIsString(array_key_first($secrets), 'precondition: a >PHP_INT_MAX decimal key stays a string');
+
+        $processed = $this->process(['risk' => ['siteverify_secrets' => $secrets]])['risk']['siteverify_secrets'];
+        self::assertSame([$numeric => 'login'], $processed, 'the numeric-string secret key is preserved verbatim');
+
+        $dashBearing = 'ab-cd-ef-01-23-45';
+        $processed = $this->process(['risk' => ['siteverify_secrets' => [$dashBearing => 'login']]])['risk']['siteverify_secrets'];
+        self::assertSame([$dashBearing => 'login'], $processed, 'normalizeKeys(false): a dash-bearing secret key is never rewritten to underscores');
+    }
+
+    public function testSiteverifyIntegerCoercedSecretKeyIsRejectedWithAnActionableMessage(): void
+    {
+        // A canonical-decimal numeric secret within int range becomes an
+        // INTEGER array key at array-construction time (PHP semantics no
+        // config tree can undo); the validation rejects it with the
+        // actionable remedy instead of letting an integer secret key
+        // reach hash_equals() and fail every /siteverify request.
+        $secrets = ['999999999999999999' => 'login']; // 18 digits <= PHP_INT_MAX: coerced to int
+        self::assertIsInt(array_key_first($secrets), 'precondition: PHP coerced the canonical-decimal key to int');
+
+        try {
+            $this->process(['risk' => ['siteverify_secrets' => $secrets]]);
+            self::fail('an integer-coerced siteverify secret key must be rejected at config load');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
+            self::assertStringContainsString('must be a string', $e->getMessage(), 'the refusal explains the string-key contract');
+            self::assertStringContainsString('numeric', $e->getMessage(), 'the refusal explains the numeric-key coercion remedy');
         }
     }
 

@@ -4063,5 +4063,143 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
         return $url;
     }
+
+    public function testNumericStringSecretAuthenticatesWithoutATypeError(): void
+    {
+        // A legal >=16-byte purely numeric secret: PHP itself coerces the
+        // canonical-decimal string key to an integer array key, and the
+        // controller must still authenticate the presented secret exactly
+        // (never a hash_equals TypeError 500, never a silent mismatch).
+        $secrets = ['999999999999999999' => 'login'];
+        self::assertIsInt(array_key_first($secrets), 'precondition: PHP coerced the numeric string key to int');
+
+        $storage = new ArrayStorage();
+        [$token] = $this->issuedToken($storage);
+        $controller = $this->controller($secrets, storage: $storage);
+
+        // Match: the numeric secret authenticates and the verification
+        // proceeds to a successful provider outcome.
+        $match = $controller->siteverify($this->siteverifyRequest([
+            'secret' => '999999999999999999',
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+        ]));
+        self::assertSame(200, $match->getStatusCode(), 'a matching numeric secret must authenticate (never a 500)');
+        $matchBody = json_decode((string) $match->getContent(), true);
+        self::assertTrue($matchBody['success'] ?? null, 'the numeric-string secret resolves the expected scope and verifies the token');
+
+        // No-match: a different numeric secret is the invalid-secret
+        // vocabulary, again never a 500.
+        $noMatch = $controller->siteverify($this->siteverifyRequest([
+            'secret' => '888888888888888888',
+            'response' => $token,
+            'remoteip' => '127.0.0.1',
+        ]));
+        self::assertSame(200, $noMatch->getStatusCode());
+        $noMatchBody = json_decode((string) $noMatch->getContent(), true);
+        self::assertFalse($noMatchBody['success'] ?? null);
+        self::assertSame(['invalid-input-secret'], $noMatchBody['error-codes'] ?? null);
+    }
+
+    public function testResponsesCarryThePrivateNoStoreEnvelopeOfTheNativeEndpoints(): void
+    {
+        // Header parity with the native endpoints: every SiteVerify
+        // response path routes through the same private-document
+        // envelope the ChallengeController applies (no-store/private,
+        // Pragma, Referrer-Policy, nosniff), so verification outcomes
+        // and the error-code vocabulary are never cached, mirrored or
+        // sniffed by an intermediary.
+        $expected = $this->nativePrivateEnvelope();
+
+        $paths = [
+            'not-configured (404)' => [(new SiteVerifyController(new Verifier(new ArrayStorage()), self::SECRET, []))->siteverify($this->siteverifyRequest(['secret' => 'x', 'response' => 'y'])), 404],
+            'non-POST method (400)' => [$this->controller()->siteverify(Request::create('/kiwi-captcha/siteverify', 'GET')), 400],
+            'framing (400)' => [$this->controller()->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_CONTENT_LENGTH' => '1', 'HTTP_TRANSFER_ENCODING' => 'chunked'], '{}')), 400],
+            'missing response (200)' => [$this->controller()->siteverify($this->siteverifyRequest(['secret' => self::SITEVERIFY_SECRET], 'application/json')), 200],
+            'missing secret (200)' => [$this->controller()->siteverify($this->siteverifyRequest(['response' => 'x'])), 200],
+            'invalid secret (200)' => [$this->controller()->siteverify($this->siteverifyRequest(['secret' => str_repeat('k', 20), 'response' => 'x'])), 200],
+            'success (200)' => (static function (): array {
+                $storage = new ArrayStorage();
+                $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+                $challenge = $issuer->issue('login', '127.0.0.1');
+                $saltBytes = base64_decode($challenge->salt, true);
+                $counter = 0;
+                do {
+                    $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+                    $counter++;
+                } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+                usleep(($challenge->minDurationMs + 10) * 1000);
+                $token = SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
+                $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage);
+
+                return [$controller->siteverify(Request::create('/kiwi-captcha/siteverify', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], http_build_query(['secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1']))), 200];
+            })(),
+        ];
+
+        foreach ($paths as [$response, $expectedStatus]) {
+            self::assertSame($expectedStatus, $response->getStatusCode());
+            foreach ($expected as $header => $value) {
+                self::assertSame($value, $response->headers->get($header), sprintf('%s: the %s header must match the native private envelope', $header, $header));
+            }
+        }
+    }
+
+    /**
+     * The native endpoints' private-document envelope, read from the
+     * ChallengeController's own privateJson() (reflection): the parity
+     * assertion compares against the implementation, not a copy.
+     *
+     * @return array<string, string>
+     */
+    private function nativePrivateEnvelope(): array
+    {
+        $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController(
+            new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), new ArrayStorage()),
+        );
+        $method = new \ReflectionMethod($controller, 'privateJson');
+        $response = $method->invoke($controller, ['ok' => true]);
+
+        return [
+            'Cache-Control' => (string) $response->headers->get('Cache-Control'),
+            'Pragma' => (string) $response->headers->get('Pragma'),
+            'Referrer-Policy' => (string) $response->headers->get('Referrer-Policy'),
+            'X-Content-Type-Options' => (string) $response->headers->get('X-Content-Type-Options'),
+        ];
+    }
+
+    public function testAStreamlessRequestNeverMaterializesTheBufferedBody(): void
+    {
+        // The bounded-read fallback: when Symfony hands back no stream
+        // resource, the reader returns the empty string instead of the
+        // unbounded buffered content, so the strict decoder refuses the
+        // request and the megabyte body is never even read.
+        $controller = $this->controller();
+        $bufferedReads = 0;
+        $request = new class($bufferedReads) extends Request {
+            public function __construct(public int $bufferedReads)
+            {
+                parent::__construct([], [], [], [], [], [
+                    'REQUEST_METHOD' => 'POST',
+                    'CONTENT_TYPE' => 'application/json',
+                    'REQUEST_URI' => '/kiwi-captcha/siteverify',
+                ]);
+            }
+
+            public function getContent(bool $asResource = false): string|false
+            {
+                if ($asResource) {
+                    return false;
+                }
+                $this->bufferedReads++;
+
+                return str_repeat('A', 1024 * 1024);
+            }
+        };
+
+        $response = $controller->siteverify($request);
+        self::assertSame(400, $response->getStatusCode(), 'a streamless request is refused by the strict decoder, never a 500');
+        self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes'] ?? null);
+        self::assertSame(0, $request->bufferedReads, 'the unbounded buffered content is never materialized');
+    }
 }
 

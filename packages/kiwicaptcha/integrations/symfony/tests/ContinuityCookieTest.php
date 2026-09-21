@@ -1,0 +1,64 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BelConsulting\KiwiCaptchaBundle\Tests;
+
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpFoundation\Request;
+
+/**
+ * The continuity cookie's Secure-flag contract: a `__Host-` prefixed
+ * name forces Secure regardless of the request scheme (the prefix's
+ * browser contract), so a TLS-terminating proxy — where the PHP-side
+ * request scheme is the proxy's plain-http hop — can never cause the
+ * browser to silently drop the session cookie. A custom name without
+ * the prefix keeps the configured/derived flag.
+ */
+final class ContinuityCookieTest extends TestCase
+{
+    private function httpProxyHopRequest(): Request
+    {
+        // The PHP-side view of a TLS-terminating proxy without a trusted
+        // X-Forwarded-Proto: the request itself is plain http.
+        return Request::create('/', 'GET', [], [], [], ['REMOTE_ADDR' => '10.0.0.4']);
+    }
+
+    public function testAHostPrefixedNameForcesSecureOnAPlainHttpRequest(): void
+    {
+        $cookie = new ContinuityCookie(); // default name __Host-kiwi-session
+        $value = $cookie->mint();
+        $rendered = $cookie->cookie($this->httpProxyHopRequest(), $value);
+
+        self::assertTrue($rendered->isSecure(), 'a __Host- prefixed cookie forces the Secure flag regardless of the request scheme');
+        self::assertTrue($rendered->isHttpOnly());
+        self::assertSame('__Host-kiwi-session', $rendered->getName());
+    }
+
+    public function testAHostPrefixedNameForcesSecureEvenWhenSecureIsExplicitlyNull(): void
+    {
+        // secure: null (the default) means "follow the request scheme";
+        // the __Host- prefix overrides the derivation.
+        $cookie = new ContinuityCookie('__Host-kiwi-session', 1800, '/', null, 'strict', true);
+        self::assertTrue($cookie->cookie($this->httpProxyHopRequest(), $cookie->mint())->isSecure());
+    }
+
+    public function testAHostPrefixedNameNeverDowngradesAnExplicitlySecureConfiguration(): void
+    {
+        $cookie = new ContinuityCookie('__Host-kiwi-session', 1800, '/', true, 'strict', true);
+        self::assertTrue($cookie->cookie($this->httpProxyHopRequest(), $cookie->mint())->isSecure());
+    }
+
+    public function testACustomNameKeepsTheSchemeDerivedFlag(): void
+    {
+        // Without the prefix the configured/derived semantics apply: a
+        // plain-http request mints a non-Secure cookie (the doctor warns
+        // about this combination behind trusted proxies).
+        $cookie = new ContinuityCookie('kiwi-session', 1800, '/', null, 'strict', true);
+        self::assertFalse($cookie->cookie($this->httpProxyHopRequest(), $cookie->mint())->isSecure(), 'a non-prefixed name keeps the scheme-derived flag');
+
+        $secureCookie = new ContinuityCookie('kiwi-session', 1800, '/', true, 'strict', true);
+        self::assertTrue($secureCookie->cookie($this->httpProxyHopRequest(), $secureCookie->mint())->isSecure(), 'an explicit secure configuration is honored for a non-prefixed name');
+    }
+}

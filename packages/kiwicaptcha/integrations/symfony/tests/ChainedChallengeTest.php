@@ -426,6 +426,57 @@ final class ChainedChallengeTest extends TestCase
 
     // ── Stage-1 verification opens the obligation-anchored chain ───────
 
+    public function testATicketlessFloodPerformsNoObligationReadsBeforeTheRateLimiterDenies(): void
+    {
+        // The admission ordering of the chain gate: a presented SIGNED
+        // ticket is validated before the limiter (cheap, local crypto,
+        // and its one chain-record read is gated by possession of a
+        // server-signed one-shot ticket), but the TICKETLESS obligation
+        // lookup runs only AFTER the per-IP rate limiter admits the
+        // request — an unthrottled flood performs zero obligation reads
+        // before the limiter denies it.
+        $storage = new ArrayStorage();
+        $chainStore = new CountingChainStore(new ArrayChainedChallengeStateStore());
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA16_VECTOR), $resolver);
+        $service = $this->chainService($chainStore);
+        $limiter = new IssuanceRateLimiter(2, 60, pepper: 'chain-flood-test');
+
+        // An OPEN obligation exists for the transaction (scope login,
+        // unbound transaction, policy epoch 1): every ticketless request
+        // of this transaction auto-resumes at stage 2 when admitted.
+        $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Argon32, time() + 300);
+
+        $controller = new ChallengeController(
+            $this->issuer($storage),
+            $limiter,
+            true,
+            $risk['gateway'],
+            new ContinuityCookie(),
+            storage: $storage,
+            chainTickets: $service,
+            policyVersion: 1,
+        );
+
+        $obligationReadsBefore = $chainStore->obligationChainIdReads;
+        self::assertSame(0, $obligationReadsBefore, 'precondition: creating the obligation through the service is not a controller read');
+
+        // Flood: 5 ticketless requests from one source; the limiter
+        // admits 2 and denies 3.
+        $statuses = [];
+        for ($i = 0; $i < 5; $i++) {
+            $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+            $statuses[] = $response->getStatusCode();
+        }
+        $denied = \count(array_filter($statuses, static fn (int $s): bool => $s === 429));
+        self::assertSame(3, $denied, 'the per-IP limiter denies the requests beyond the 2-per-window cap: '.implode(',', $statuses));
+
+        // Only the ADMITTED requests read the obligation: the denied
+        // requests performed zero obligation reads before the limiter
+        // refused them.
+        self::assertSame(2, $chainStore->obligationChainIdReads, 'exactly the admitted requests perform the ticketless obligation lookup (never the denied ones)');
+    }
+
     public function testStage1VerifyIssuesChainTicketAndCreatesTheTransactionObligation(): void
     {
         $storage = new ArrayStorage();
@@ -4945,5 +4996,102 @@ final class AbortAwareFakeRedis extends \Predis\Client
         }
 
         throw new \LogicException('unexpected script');
+    }
+}
+
+/**
+ * A transactional chain-state store that counts the obligation-read
+ * entry point (obligationChainId, the lookup behind the controller's
+ * ticketless auto-resume), so the admission-ordering test can assert
+ * exactly which requests performed the read.
+ */
+final class CountingChainStore implements TransactionalChainedChallengeStateStore
+{
+    public int $obligationChainIdReads = 0;
+
+    public function __construct(private readonly TransactionalChainedChallengeStateStore $inner)
+    {
+    }
+
+    public function obligationChainId(string $obligationId): ?string
+    {
+        $this->obligationChainIdReads++;
+
+        return $this->inner->obligationChainId($obligationId);
+    }
+
+    public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
+    {
+        return $this->inner->createOrGetObligation($obligationId, $chainId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $requiredRank, $policyVersion, $expiresAt, $ttlSecs);
+    }
+
+    public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
+    {
+        $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+    }
+
+    public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string
+    {
+        return $this->inner->reserve($chainId, $ownerToken, $leaseSecs);
+    }
+
+    public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
+    {
+        return $this->inner->markIssued($chainId, $ownerToken, $stage2Nonce);
+    }
+
+    public function markVerified(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markVerified($chainId, $stage2Nonce);
+    }
+
+    public function markStepUpRequired(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markStepUpRequired($chainId, $stage2Nonce);
+    }
+
+    public function markDenied(string $chainId, string $stage2Nonce): string
+    {
+        return $this->inner->markDenied($chainId, $stage2Nonce);
+    }
+
+    public function markTransactionDenied(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionDenied($chainId, $obligationId);
+    }
+
+    public function markTransactionStepUpRequired(string $chainId, string $obligationId): string
+    {
+        return $this->inner->markTransactionStepUpRequired($chainId, $obligationId);
+    }
+
+    public function rearmIssued(string $chainId, string $expectedStage2Nonce): bool
+    {
+        return $this->inner->rearmIssued($chainId, $expectedStage2Nonce);
+    }
+
+    public function deleteObligation(string $chainId, string $obligationId): void
+    {
+        $this->inner->deleteObligation($chainId, $obligationId);
+    }
+
+    public function create(string $chainId, string $stage1Nonce, string $scope, int $ttlSecs, ?string $requestBinding = null, ?string $requiredAction = null, int $policyVersion = 1): void
+    {
+        $this->inner->create($chainId, $stage1Nonce, $scope, $ttlSecs, $requestBinding, $requiredAction, $policyVersion);
+    }
+
+    public function read(string $chainId): ?array
+    {
+        return $this->inner->read($chainId);
+    }
+
+    public function release(string $chainId, string $ownerToken): void
+    {
+        $this->inner->release($chainId, $ownerToken);
+    }
+
+    public function complete(string $chainId, string $ownerToken, string $stage2Nonce): ?array
+    {
+        return $this->inner->complete($chainId, $ownerToken, $stage2Nonce);
     }
 }

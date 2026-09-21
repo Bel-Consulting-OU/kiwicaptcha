@@ -267,6 +267,17 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
 Argon queue fullness and transient timeouts never fail readiness.
 All responses carry `Cache-Control: no-store` + `Pragma: no-cache`.
 
+Edge restriction expectation: the health endpoints answer unauthenticated
+infrastructure state — the machine-readable readiness reason codes, the
+failing authority label, protocol floors and probe outcomes are deployment
+internals, not client-facing data. Restrict both routes at the edge (an
+`internal`-only location in nginx, a security-group/inbound rule, or the
+orchestrator's probe path) so they are reachable by the load balancer and
+the platform probes, never by the public internet. The endpoints carry no
+secrets and never mutate state, but an unrestricted `/health/ready` leaks
+the infrastructure posture (Redis reachability, policy floors, HA
+authority health) to anyone who asks.
+
 Operator contract (mixed-version deployments): set the policy hash on the security Redis to keep old binaries out of the pool during a rolling upgrade, and to protect rollbacks after a protocol/policy bump:
 
 ```bash

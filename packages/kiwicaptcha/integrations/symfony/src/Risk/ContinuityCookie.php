@@ -72,11 +72,21 @@ final class ContinuityCookie
 
     /**
      * The Symfony Cookie to attach to a response so the client carries the
-     * session value in subsequent requests.
+     * session value in subsequent requests. A `__Host-` prefixed name
+     * forces Secure=true regardless of the request scheme: the browser
+     * contract for the prefix requires Secure (and no Domain attribute,
+     * path /), and behind a TLS-terminating proxy the request scheme at
+     * the PHP layer is plain http even though the client connection is
+     * HTTPS — a scheme-derived Secure flag would then silently drop the
+     * cookie and the session signal would never survive the first
+     * response.
      */
     public function cookie(Request $request, string $value): Cookie
     {
         $secure = $this->secure ?? $request->isSecure();
+        if (str_starts_with($this->name, '__Host-')) {
+            $secure = true;
+        }
 
         return new Cookie(
             name: $this->name,

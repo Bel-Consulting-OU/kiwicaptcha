@@ -728,9 +728,25 @@ final class Configuration implements ConfigurationInterface
                         ->arrayNode('siteverify_secrets')
                             ->info('PROVIDER-COMPATIBLE SITEVERIFY SECRETS: map of server-to-server secret -> EXPECTED SCOPE for the {prefix}/siteverify endpoint. Empty (default) DISABLES the endpoint. Each secret authenticates an application backend (never browsers — a browser must not see it) AND resolves the scope the verifier requires: a login page backend presents its own secret and a financial-action backend presents its secret, so the token scope is enforced server-side (the verifier rejects a weaker login token for the financial secret — no expectedScope=null for multi-scope deployments). `remoteip` is only honored after a valid secret.')
                             ->useAttributeAsKey('secret')
+                            // The secrets ARE the map keys, so key
+                            // normalization must stay off: a dash-bearing
+                            // secret would otherwise be rewritten to
+                            // underscores and authenticate against the
+                            // wrong bytes, and numeric-string keys must
+                            // never be coerced. PHP itself casts a
+                            // canonical-decimal string key to int at array
+                            // construction; the validation below rejects
+                            // that shape with an actionable message instead
+                            // of letting an integer secret key reach
+                            // hash_equals() and fail every /siteverify
+                            // request with a TypeError.
+                            ->normalizeKeys(false)
                             ->validate()
-                                ->ifTrue(static fn (array $v): bool => \array_filter(\array_keys($v), static fn (string $k): bool => \strlen($k) < 16) !== [])
-                                ->thenInvalid('Siteverify secrets are the entire server-to-server authentication boundary — each key must be at least 16 bytes (32 random bytes recommended).')
+                                ->ifTrue(static fn (array $v): bool => \array_filter(
+                                    \array_keys($v),
+                                    static fn ($k): bool => !\is_string($k) || \strlen((string) $k) < 16,
+                                ) !== [])
+                                ->thenInvalid('Siteverify secrets are the entire server-to-server authentication boundary — each key must be a string of at least 16 bytes (32 random bytes recommended). A purely numeric secret is coerced to an integer array key by PHP itself; choose a secret outside the canonical decimal shape (e.g. base64 with letters, or any 32 random bytes) so it stays a string key.')
                             ->end()
                             ->scalarPrototype()
                                 ->validate()

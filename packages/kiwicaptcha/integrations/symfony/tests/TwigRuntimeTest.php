@@ -343,4 +343,27 @@ final class TwigRuntimeTest extends TestCase
         self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random in the eager core must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');
         self::assertSame(1, substr_count($risk, 'Math.random'), 'Math.random in widget-risk.js must be limited to the decoy-strategy fallback — bindings are never synthesized client-side');
     }
+
+    public function testAQuoteBearingCspNonceIsEscapedInTheRawAssetTags(): void
+    {
+        // files mode emits the nonce inside a raw HTML attribute string
+        // (asset_tags|raw), so the nonce itself must be HTML-escaped
+        // before interpolation: a quote-bearing value can never break
+        // out of the attribute and inject markup into the script tag.
+        $loader = new ArrayLoader([
+            '@KiwiCaptcha/form_div_layout.html.twig' => file_get_contents(__DIR__.'/../src/Resources/views/form_div_layout.html.twig'),
+        ]);
+        $env = new Environment($loader);
+        $runtime = new KiwiCaptchaRuntime('/kiwi-captcha', template: '@KiwiCaptcha/form_div_layout.html.twig');
+
+        $html = $runtime->renderWidget($env, ['nonce' => 'abc"def\'onload=alert(1)>&lt;']);
+
+        // The emitted driver tag carries the ESCAPED nonce (quotes and
+        // angle brackets encoded), never the raw value.
+        self::assertStringContainsString('nonce="abc&quot;def&#039;onload=alert(1)&gt;&amp;lt;"', $html, 'the CSP nonce is HTML-escaped inside the raw attribute');
+        self::assertStringNotContainsString('nonce="abc"def', $html, 'a raw double quote must never break out of the nonce attribute');
+        // The asset tags are emitted exactly once (the request-scoped
+        // dedup registry), and the stylesheet link stays nonce-free.
+        self::assertSame(1, substr_count($html, '<script src="/kiwi-captcha/assets/driver.'), 'the driver asset tag is emitted exactly once');
+    }
 }

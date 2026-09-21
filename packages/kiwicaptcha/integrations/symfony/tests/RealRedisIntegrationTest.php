@@ -276,9 +276,67 @@ final class RealRedisIntegrationTest extends TestCase
         self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
     }
 
-    public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
+    public function testOrdinaryLaneMutationsDoNotForceAnAuthorityRevalidationPerEvalUnderPinnedPrimary(): void
     {
-        // The admission write is protected by the configured
+        // The per-challenge mutation components (rate limiter, Argon
+        // semaphore, outstanding accounting, scope cap, issuance
+        // counter) ride the typed seam's ORDINARY mutation lane, so
+        // under ha_authority pinned_primary their EVALs serve within
+        // the guard's verification window: the INFO + pin reads of the
+        // authority revalidation do NOT multiply per EVAL. Before the
+        // seam, the wrapper's fail-closed plain-EVAL classification
+        // forced one revalidation round trip per script (an INFO storm
+        // per challenge).
+        $url = getenv('KC_REDIS_URL');
+        $counting = new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient($url, ['timeout' => 2.0, 'read_write_timeout' => 2.0]);
+        $counting->flushdb();
+        $ns = 'ci-authority-'.bin2hex(random_bytes(4));
+        $guard = new \BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard($counting, $ns, 30, 'storage');
+        $guard->initializePin();
+        $wrapped = new \BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient($guard, $counting);
+
+        $secret = '0123456789abcdef0123456789abcdef';
+        $limiter = new IssuanceRateLimiter(1000, 60, pepper: 'ci-ordinary', redis: $wrapped, globalMax: 1000, namespace: 'ci-ordinary');
+        $semaphore = new RedisAdmissionSemaphore($wrapped, 8, 'ci-ordinary');
+        $outstanding = new OutstandingChallenges($wrapped, '{'.$ns.'}:outstanding:', RiskKeys::fromMaster($secret), 20, 100, 5);
+        $scopeCap = new \BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap($wrapped, '{'.$ns.'}:issuance:', 1000, \BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap::deriveScopeHmacKey($secret));
+        $issuanceCounter = new \BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter($wrapped, '{'.$ns.'}:issuance-rate:');
+
+        // Warm the guard's verification window with one ordinary
+        // command, mirroring a worker that already served a request.
+        $wrapped->set($ns.':warm', '1');
+
+        $infoCount = static function (array $commands): int {
+            return \count(array_filter($commands, static fn (array $c): bool => $c[0] === 'INFO'));
+        };
+        $infosBefore = $infoCount($counting->commands);
+        $evalsBefore = \count(array_filter($counting->commands, static fn (array $c): bool => $c[0] === 'EVAL'));
+
+        $iterations = 5;
+        for ($i = 0; $i < $iterations; $i++) {
+            self::assertSame(1, $limiter->check('198.51.100.7'));
+            $lease = $semaphore->acquire();
+            self::assertNotNull($lease);
+            $semaphore->release($lease);
+            self::assertSame(1, $outstanding->issue('198.51.100.7', base64_encode(random_bytes(32)), 60));
+            self::assertTrue($scopeCap->allow('login', 1));
+            $issuanceCounter->record();
+        }
+
+        $commands = $counting->commands;
+        $evals = \count(array_filter($commands, static fn (array $c): bool => $c[0] === 'EVAL')) - $evalsBefore;
+        self::assertGreaterThanOrEqual($iterations * 5, $evals, 'the full-risk issuance workload actually ran (>= 5 EVALs per iteration)');
+        $revalidations = $infoCount($commands) - $infosBefore;
+        self::assertLessThanOrEqual(
+            1,
+            $revalidations,
+            sprintf('the ordinary-lane mutations serve within the guard verification window: %d EVALs performed %d authority revalidations (INFO reads), not one per EVAL', $evals, $revalidations),
+        );
+        $counting->disconnect();
+    }
+
+    public function testOutstandingAdmissionIssuesAVerifiedWaitAgainstRealRedis(): void
+    {        // The admission write is protected by the configured
         // replica-durability barrier exactly like the challenge storage —
         // a successful admission issues one verified WAIT, and a refused
         // admission (no write) never WAITs.

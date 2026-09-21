@@ -814,4 +814,34 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('[FAIL]', $display, 'a valid armed rsw configuration must not fail any check');
     }
 
+    public function testDoctorWarnsOnASchemeDerivedSecureFlagBehindTrustedProxies(): void
+    {
+        // A custom (non-__Host-) continuity cookie with secure: null
+        // while forwarding headers are trusted: behind a TLS-terminating
+        // proxy the PHP-side scheme is the proxy's plain-http hop, so
+        // the cookie can be minted without Secure and dropped by the
+        // browser. The doctor warns with the explicit remediation.
+        $tester = $this->doctor($this->containerFor(new \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorContinuityCookieSchemeDerivedKernel('test', true)));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Continuity cookie', $display);
+        self::assertStringContainsString('scheme-derived Secure flag', $display);
+        self::assertStringContainsString('continuity_cookie.secure: true', $display, 'the warn names the explicit-secure remediation');
+        self::assertStringContainsString('__Host-', $display, 'the warn names the __Host- alternative');
+        self::assertStringNotContainsString('[FAIL] Continuity cookie', $display);
+    }
+
+    public function testDoctorPassesOnAHostPrefixedCookieBehindTrustedProxies(): void
+    {
+        // The __Host- prefixed name forces the Secure flag regardless
+        // of the request scheme, so the same proxy topology passes.
+        $tester = $this->doctor($this->containerFor(new \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorContinuityCookieHostPrefixedKernel('test', true)));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Continuity cookie', $display);
+        self::assertStringContainsString('forces the Secure flag', $display);
+        self::assertStringNotContainsString('[WARN] Continuity cookie', $display);
+    }
 }

@@ -345,7 +345,7 @@ final class SiteVerifyController
     public function siteverify(Request $request): Response
     {
         if ($this->siteverifySecrets === []) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
+            return $this->privateJson(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
 
         // The universal canonical-framing rule (the ONE definition of the
@@ -356,14 +356,14 @@ final class SiteVerifyController
         // Content-Encoding singular + identity only (the provider
         // contract never compresses).
         if (!$request->isMethod('POST')) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         if (!$this->framingHeadersAcceptable($request)) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $contentEncoding = strtolower(trim((string) $request->headers->get('Content-Encoding', '')));
         if ($contentEncoding !== '' && $contentEncoding !== 'identity') {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
 
         // The body is read with a hard byte cap: at most MAX_BODY_BYTES +
@@ -375,12 +375,12 @@ final class SiteVerifyController
         // already-materialized content is length-guarded directly too.
         $requestBody = $this->readBoundedBody($request);
         if (\strlen($requestBody) > self::MAX_BODY_BYTES) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_REQUEST_ENTITY_TOO_LARGE);
         }
 
         $body = $this->parseBody($request, $requestBody);
         if ($body === null) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
         $response = $body['response'] ?? null;
         $secret = $body['secret'] ?? null;
@@ -396,10 +396,10 @@ final class SiteVerifyController
         // fits comfortably under 8192, the documented bound here (the
         // 16 KiB whole-body ceiling stays as the outer envelope).
         if (!\is_string($response) || $response === '') {
-            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-response']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['missing-input-response']]);
         }
         if (\strlen($response) > self::MAX_RESPONSE_BYTES) {
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-response']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['invalid-input-response']]);
         }
 
         // The remoteip is validated early, before any idempotency claim or
@@ -414,7 +414,7 @@ final class SiteVerifyController
             if ($remoteIp === '') {
                 $remoteIp = null;
             } elseif (@inet_pton($remoteIp) === false) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
         }
 
@@ -423,10 +423,10 @@ final class SiteVerifyController
         // attacker-controlled shapes).
         if ($idempotencyKey !== null) {
             if (!\preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $idempotencyKey)) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($this->idempotencyStore === null) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
         }
 
@@ -440,10 +440,16 @@ final class SiteVerifyController
         if (!\is_string($secret) || $secret === '') {
             $this->noteInvalidSecret('missing', $this->logGateKey());
 
-            return new JsonResponse(['success' => false, 'error-codes' => ['missing-input-secret']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['missing-input-secret']]);
         }
         foreach ($this->siteverifySecrets as $configuredSecret => $scope) {
-            if (hash_equals($configuredSecret, $secret)) {
+            // The configured secret is cast to string before the
+            // constant-time comparison: a canonical-decimal secret key is
+            // coerced to an integer array key by PHP itself, and
+            // hash_equals(int, string) is a TypeError under strict_types
+            // that would fail every request with a 500. The cast never
+            // weakens the comparison — the bytes are identical.
+            if (hash_equals((string) $configuredSecret, $secret)) {
                 $expectedScope = $scope;
                 break;
             }
@@ -451,7 +457,7 @@ final class SiteVerifyController
         if ($expectedScope === null) {
             $this->noteInvalidSecret('invalid', $this->logGateKey());
 
-            return new JsonResponse(['success' => false, 'error-codes' => ['invalid-input-secret']]);
+            return $this->privateJson(['success' => false, 'error-codes' => ['invalid-input-secret']]);
         }
 
         // The security-policy epoch is refreshed at the start of every
@@ -531,7 +537,7 @@ final class SiteVerifyController
             try {
                 $resolved = $this->bindingAuthority->resolve($request, $expectedScope, $presentedBinding);
             } catch (\InvalidArgumentException) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             } catch (\Throwable) {
                 return $this->internalErrorResponse();
             }
@@ -541,7 +547,7 @@ final class SiteVerifyController
             // outside it is refused at the trust boundary, never allowed
             // into the idempotency fingerprint/store.
             if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $resolved) !== 1) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             $canonicalBinding = $resolved;
         } else {
@@ -557,7 +563,7 @@ final class SiteVerifyController
             // secret is the authentication gate; a browser cannot reach
             // this path).
             if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/', $presentedBinding) !== 1) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             $canonicalBinding = $presentedBinding;
         }
@@ -628,7 +634,7 @@ final class SiteVerifyController
                 }
             }
             if ($claim === IdempotencyClaim::Conflict) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
                 try {
@@ -636,14 +642,14 @@ final class SiteVerifyController
                 } catch (SiteVerifyIdempotencyCorruptException $e) {
                     // Corrupt security state is never "nothing here": the
                     // typed fail-closed 503, never a fresh claim.
-                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: corrupt siteverify idempotency record: {message}', ['message' => $e->getMessage()]);
 
                     return $this->internalErrorResponse();
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
 
-                return new JsonResponse($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                return $this->privateJson($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             $canonical = $this->canonicalizeResponse([
                 'success' => false,
@@ -658,7 +664,7 @@ final class SiteVerifyController
                 }
             }
 
-            return new JsonResponse($canonical);
+            return $this->privateJson($canonical);
         }
 
         // Provider-style verification idempotency. The claim is atomic;
@@ -692,7 +698,7 @@ final class SiteVerifyController
                 return $this->internalErrorResponse();
             }
             if ($claim === IdempotencyClaim::Conflict) {
-                return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
                 try {
@@ -700,7 +706,7 @@ final class SiteVerifyController
                 } catch (SiteVerifyIdempotencyCorruptException $e) {
                     // Corrupt security state is never "nothing here": the
                     // typed fail-closed 503, never a fresh claim.
-                    error_log(sprintf('kiwicaptcha: corrupt siteverify idempotency record: %s', $e->getMessage()));
+                    $this->logGate('kiwicaptcha: corrupt siteverify idempotency record: {message}', ['message' => $e->getMessage()]);
 
                     return $this->internalErrorResponse();
                 } catch (\Throwable) {
@@ -711,10 +717,10 @@ final class SiteVerifyController
                         return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
                     }
 
-                    return new JsonResponse($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($stored));
                 }
 
-                return new JsonResponse(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                return $this->privateJson(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             if ($claim === IdempotencyClaim::Claimed) {
                 $claimedAt = microtime(true);
@@ -825,7 +831,7 @@ final class SiteVerifyController
                     return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
                 }
 
-                return new JsonResponse($this->canonicalizeResponse($stored));
+                return $this->privateJson($this->canonicalizeResponse($stored));
             }
         }
 
@@ -925,7 +931,7 @@ final class SiteVerifyController
                 return $this->releaseAndJsonResponse($resumeOutcome->nonce(), $canonical);
             }
 
-            return new JsonResponse($canonical);
+            return $this->privateJson($canonical);
         }
 
         // The same atomic verifier as the native path, with the expected
@@ -985,7 +991,7 @@ final class SiteVerifyController
             // unexpected InvalidArgumentException maps to the provider
             // bad-request JSON; exceptions must not cross the HTTP
             // compatibility boundary.
-            return new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         } catch (\Throwable) {
             // Hardened boundary tail: anything else escaping the verifier
             // (a storage failure past its own internal handling) maps to
@@ -1019,7 +1025,7 @@ final class SiteVerifyController
                         return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
                     }
 
-                    return new JsonResponse($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($stored));
                 }
 
                 return $this->internalErrorResponse();
@@ -1105,7 +1111,7 @@ final class SiteVerifyController
             }
         }
 
-        return new JsonResponse($canonical);
+        return $this->privateJson($canonical);
     }
 
     /**
@@ -1169,7 +1175,46 @@ final class SiteVerifyController
      */
     private function internalErrorResponse(): JsonResponse
     {
-        return new JsonResponse(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+        return $this->privateJson(['success' => false, 'error-codes' => ['internal-error']], Response::HTTP_SERVICE_UNAVAILABLE);
+    }
+
+    /**
+     * The gate-path diagnostic channel: the backend exception detail
+     * reaches the injected logger (structured, PSR-3 context), never the
+     * provider response and never the raw SAPI log stream. A raising or
+     * absent logger must never turn a guarded failure into a 500.
+     *
+     * @param array<string, string> $context
+     */
+    private function logGate(string $message, array $context = []): void
+    {
+        try {
+            $this->logger?->warning($message, $context);
+        } catch (\Throwable) {
+            // A raising logger must never break the guarded path.
+        }
+    }
+
+    /**
+     * Every SiteVerify response shares the private-document headers of
+     * the native endpoints ({@see ChallengeController::privateJson()}):
+     * Cache-Control no-store/private, Pragma no-cache, Referrer-Policy
+     * no-referrer and X-Content-Type-Options nosniff, so verification
+     * outcomes and the error-code vocabulary (which narrows the cause of
+     * a refusal) are never cached, mirrored or sniffed by an
+     * intermediary.
+     *
+     * @param array<string, mixed> $data
+     */
+    private function privateJson(array $data, int $status = Response::HTTP_OK): JsonResponse
+    {
+        $response = new JsonResponse($data, $status);
+        $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
+        $response->headers->set('Pragma', 'no-cache');
+        $response->headers->set('Referrer-Policy', 'no-referrer');
+        $response->headers->set('X-Content-Type-Options', 'nosniff');
+
+        return $response;
     }
 
     /**
@@ -1290,7 +1335,7 @@ final class SiteVerifyController
     {
         $this->outstanding?->solved($nonce);
 
-        return new JsonResponse($canonical);
+        return $this->privateJson($canonical);
     }
 
     private function outcomeToCanonical(VerifyOutcome $outcome): array|JsonResponse
@@ -1466,6 +1511,10 @@ LUA;
      * chunked body is refused by the caller's length check without ever
      * being materialized in full. When Symfony hands back a buffered
      * stream (tests, already-consumed input), the read is still bounded.
+     * When no stream resource is available at all, the fallback is the
+     * empty string — never the unbounded buffered content — so the
+     * caller's strict decoder refuses the request instead of
+     * materializing a body the byte cap never measured.
      */
     private function readBoundedBody(Request $request): string
     {
@@ -1474,7 +1523,7 @@ LUA;
             return (string) stream_get_contents($stream, self::MAX_BODY_BYTES + 1);
         }
 
-        return (string) $request->getContent();
+        return '';
     }
 
     /**

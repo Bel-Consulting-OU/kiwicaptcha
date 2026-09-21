@@ -113,7 +113,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $cookies[0]->getValue());
         self::assertTrue($cookies[0]->isHttpOnly());
         self::assertSame('strict', $cookies[0]->getSameSite());
-        self::assertFalse($cookies[0]->isSecure(), 'secure=null must follow the (http) request scheme');
+        self::assertTrue($cookies[0]->isSecure(), 'the __Host- prefix forces Secure regardless of the (http) request scheme');
 
         // The engine saw the pre-issue assessment and the post-issue signal.
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
@@ -458,9 +458,15 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1800, $http->getExpiresTime() - time(), 'spec: 15-30 minute expiry');
         self::assertTrue($http->isHttpOnly());
         self::assertTrue($http->isHttpOnly());
-        self::assertFalse($http->isSecure(), 'secure=null follows the http request');
+        self::assertTrue($http->isSecure(), 'the __Host- prefix forces Secure on the http request too');
         $https = JsonRequest::create('https://example.com/challenge', 'POST');
-        self::assertTrue($cookie->cookie($https, $minted)->isSecure(), 'secure=null follows the https request');
+        self::assertTrue($cookie->cookie($https, $minted)->isSecure(), 'the https request is Secure as well');
+
+        // A custom (non-prefixed) name keeps the scheme-derived flag:
+        // plain http mints non-Secure, https mints Secure.
+        $custom = new ContinuityCookie('kiwi-session');
+        self::assertFalse($custom->cookie($request, $minted)->isSecure(), 'a non-prefixed name follows the http request');
+        self::assertTrue($custom->cookie($https, $minted)->isSecure(), 'a non-prefixed name follows the https request');
     }
 
     public function testConfigTreeRiskDefaults(): void

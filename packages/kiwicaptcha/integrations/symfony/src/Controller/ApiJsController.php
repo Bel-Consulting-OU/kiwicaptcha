@@ -76,7 +76,17 @@ final class ApiJsController
      */
     private function localesMarker(): string
     {
-        $body = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget-locales.js');
+        $path = rtrim($this->assetsDir, '/').'/widget-locales.js';
+        $body = @file_get_contents($path);
+        if ($body === false) {
+            // A missing locales asset must never hash the empty string
+            // (the SRI digest would then pin bytes that exist nowhere and
+            // every lazy locale fetch fails the browser's integrity
+            // check with no server-side signal). Fail loudly at loader
+            // construction with the actionable remedy, the same contract
+            // as KiwiCaptchaRuntime::readAsset().
+            throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
+        }
         $hash = hash('sha256', $body);
 
         $sri = 'sha256-'.base64_encode(hash('sha256', $body, true));

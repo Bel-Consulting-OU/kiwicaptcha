@@ -1586,6 +1586,39 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         if ($config['public_base_url'] !== null) {
             $expectedOriginRef = $this->buildExpectedOriginService((string) $config['public_base_url'], $container);
         }
+        // The cancellation endpoint's own admission window when the
+        // anti-stockpiling layer is not wired (risk disabled): a
+        // dedicated IssuanceRateLimiter mirroring
+        // OutstandingChallenges::cancellationAdmission()'s shape (the
+        // same per-source and deployment-global caps over one 60 s
+        // sliding window) under its own key namespace, so the endpoint
+        // is never left bounded only by the body ceiling and the origin
+        // checks, and cancellation traffic never consumes issuance
+        // budget. With the storage/limiter Redis client it is an exact
+        // distributed window; without one it rides the shared PSR-6 pool
+        // (rate_limit_cache) or the per-process window, the same
+        // degradation ladder as the issuance limiter.
+        $cancellationLimiterRef = null;
+        if ($outstandingRef === null) {
+            $poolRef = $config['rate_limit_cache'] !== null ? new Reference($config['rate_limit_cache']) : null;
+            $container->setDefinition('kiwi_captcha.cancellation_limiter', (new Definition(IssuanceRateLimiter::class, [
+                OutstandingChallenges::CANCELLATION_PER_IP_CAP,
+                intdiv(OutstandingChallenges::CANCELLATION_WINDOW_MS, 1000),
+                $poolRef,
+                null,
+                // Purpose-separated pepper over the same configured
+                // rate-limit pepper, so the cancellation window's
+                // per-source pseudonyms are independent keys by
+                // construction (the namespace below already separates
+                // the namespaces; this keeps the HMAC domains apart
+                // too).
+                'kiwicaptcha-cancel|'.($config['rate_limit_pepper'] ?? $config['secret_key']),
+                $redisRef,
+                OutstandingChallenges::CANCELLATION_GLOBAL_CAP,
+                ($config['argon2_semaphore_namespace'] !== '' ? $config['argon2_semaphore_namespace'].'-' : '').'cancel',
+            ]))->setPublic(true));
+            $cancellationLimiterRef = new Reference('kiwi_captcha.cancellation_limiter');
+        }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
@@ -1683,6 +1716,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // min_execution_version floor >= 2.
             ->setArgument('$executionVersionCap', $config['execution_version'])
             ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
+            // The cancellation admission window used when the
+            // anti-stockpiling layer is not wired (risk disabled): null
+            // when OutstandingChallenges provides the authoritative
+            // cancellationAdmission window instead.
+            ->setArgument('$cancellationLimiter', $cancellationLimiterRef)
             // The issuance-side logger (when the app has one) receives
             // the once-per-process decoy_v3_enabled-but-floor-too-low
             // warning.
@@ -1713,7 +1751,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // non-atomic combination (Psr6Storage included) at compile
             // time.
             $riskConfig['siteverify_secrets'] !== [] ? new Reference(StorageInterface::class) : null,
-            null, // logger (autowired position — kept explicit for stability)
+            // The injected logger receives the corrupt-idempotency-record
+            // diagnostics (the same gate-path channel the issuance
+            // controller uses); null only when the app has no logger at
+            // all.
+            $loggerRef,
             $riskConfig['siteverify_secrets'] !== [] ? $metadataStoreRef : null,
             $riskConfig['siteverify_secrets'] !== [] ? $idempotencyStoreRef : null,
             // The shared Redis log gate for
@@ -2563,7 +2605,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * The fail-closed DSN shape contract shared by the build-time and
      * runtime lanes: a redis:// or rediss:// URL with a host. Returns a
      * description of the violation, or null when the DSN shape is
-     * acceptable.
+     * acceptable. Any DSN interpolated into the description is
+     * credential-redacted first ({@see self::redactDsn()}): the message
+     * crosses into container-build output, exception pages and logs, so
+     * the userinfo component (a password) must never travel with it.
      */
     private static function dsnShapeViolation(mixed $dsn): ?string
     {
@@ -2576,10 +2621,25 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         if (!\is_string($scheme) || !\in_array($scheme, ['redis', 'rediss'], true)
             || !\is_string($host) || $host === ''
         ) {
-            return sprintf('must be a redis:// or rediss:// URL with a host (got "%s")', $dsn);
+            return sprintf('must be a redis:// or rediss:// URL with a host (got "%s")', self::redactDsn($dsn));
         }
 
         return null;
+    }
+
+    /**
+     * Redact the userinfo component of a Redis DSN: everything between
+     * the scheme separator and the host (a username and/or password) is
+     * replaced with `***`, so a credential-bearing DSN can be quoted in
+     * a violation message without leaking the secret into build output,
+     * exception pages or logs. The scheme, host, port, path and query
+     * survive (they are the actionable part of the message).
+     */
+    private static function redactDsn(string $dsn): string
+    {
+        $redacted = (string) preg_replace('#^(redis|rediss)://[^/@?]+@#i', '$1://***@', $dsn);
+
+        return $redacted;
     }
 
     /**
