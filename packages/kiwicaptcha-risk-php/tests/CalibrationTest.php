@@ -665,6 +665,12 @@ final class CalibrationTest extends TestCase
         $c = new AggregateCalibrator($client, namespace: 'rt' . bin2hex(random_bytes(4)), samplingMode: 'complete', minSamples: 100);
         $this->recordOutcomes($c, 100, 100, false);
 
+        // Sha warm-up: the script bytes ship to Redis once per process
+        // (SCRIPT LOAD on the first invocation); the steady-state
+        // round-trip contract below measures the cached-sha EVALSHA path.
+        $c->biasForScope(1, $this->nowMs());
+        $this->clearCache($c);
+
         $before = $client->commands;
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()), 'first call seeds the state');
         self::assertSame($before + 1, $client->commands, '24 buckets + rate clamp + state must be ONE round trip (no singleton counters)');
@@ -678,6 +684,14 @@ final class CalibrationTest extends TestCase
         $client = $this->countingClient();
         $c = new AggregateCalibrator($client, namespace: 'inv' . bin2hex(random_bytes(4)), samplingMode: 'complete', minSamples: 100);
         $this->recordOutcomes($c, 100, 100, false);
+
+        // Sha warm-up for the calibration/register/confirm scripts (the
+        // script bytes ship once per process); the measured flow below
+        // counts only steady-state EVALSHA commands.
+        $c->biasForScope(1, $this->nowMs());
+        $c->recordReceipt('inv-warm', 9, 1, RiskAction::Sha20, 100, 1, $this->decisionHour());
+        $c->confirmOutcome('inv-warm', false);
+        $this->clearCache($c);
 
         $before = $client->commands;
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()));
@@ -925,6 +939,12 @@ final class CalibrationTest extends TestCase
         $c = new AggregateCalibrator($client, namespace: 'atm' . bin2hex(random_bytes(4)), samplingMode: 'complete');
         $c->recordReceipt('atomic-1', 7, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
 
+        // Sha warm-up for the confirm script (the bytes ship once per
+        // process); the measured confirm below is the steady-state
+        // pre-read GET + ONE cached-sha EVALSHA.
+        $c->recordReceipt('atomic-warm', 8, 4, RiskAction::Argon16, 100, 1, $this->decisionHour());
+        $c->confirmOutcome('atomic-warm', false);
+
         // The confirm is the bucket-key pre-read + ONE atomic script (the
         // receipt delete, the ledger CAS and the bucket increment cannot be
         // split).
@@ -1075,6 +1095,65 @@ final class CalibrationTest extends TestCase
         self::assertSame('0', (string) $client->hget($bucketKey, 'abuse_score_sum'));
         self::assertSame('5', (string) $client->hget($bucketKey, 'legit_count'));
         self::assertSame('1000', (string) $client->hget($bucketKey, 'legit_score_sum'), 'score 200 x correction weight 5');
+    }
+
+    public function testBoundsKnobsRejectZeroAndBelowOne(): void
+    {
+        // maxAdjustment / maxChangePerMinute must be >= 1 (the Rust mirror
+        // enforces the identical bounds).
+        foreach ([
+            ['maxAdjustment' => 0],
+            ['maxAdjustment' => -5],
+            ['maxChangePerMinute' => 0],
+            ['maxChangePerMinute' => -1],
+        ] as $knob) {
+            try {
+                $args = ['client' => $this->requireClient(), 'namespace' => 'b' . bin2hex(random_bytes(4))];
+                $args += $knob;
+                new AggregateCalibrator(...$args);
+                self::fail('out-of-range bound must throw: ' . json_encode($knob));
+            } catch (\InvalidArgumentException) {
+            }
+        }
+        // Boundary value 1 is accepted.
+        new AggregateCalibrator($this->requireClient(), namespace: 'bone' . bin2hex(random_bytes(4)), maxAdjustment: 1, maxChangePerMinute: 1);
+        self::assertTrue(true);
+    }
+
+    public function testBiasCacheEvictsTheOldestWriteNotTheFirstInsert(): void
+    {
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'evict' . bin2hex(random_bytes(4)), samplingMode: 'complete');
+        $now = $this->nowMs();
+
+        // Seed a full cache (CACHE_CAP scopes) with strictly increasing
+        // write timestamps via reflection; scope 1 is the FIRST inserted
+        // but artificially expired so the next biasForScope(1) refreshes
+        // it — a refresh re-ages the entry (Rust parity).
+        $entries = [];
+        for ($scope = 1; $scope <= AggregateCalibrator::CACHE_CAP; $scope++) {
+            $entries[$scope] = [
+                'bias' => 0,
+                'expiresAt' => microtime(true) + 60.0,
+                'writtenAt' => 1_000.0 + $scope,
+            ];
+        }
+        $entries[1]['expiresAt'] = 0.0; // stale -> the next read refreshes it
+        $prop = new \ReflectionProperty(AggregateCalibrator::class, 'biasCache');
+        $prop->setValue($c, $entries);
+
+        // The refresh: scope 1 is re-written NOW (the newest write by far).
+        $c->biasForScope(1, $now);
+
+        // One more scope: the cache is full, so the OLDEST-WRITE entry is
+        // evicted — scope 2 (writtenAt 1002), NOT the refreshed scope 1.
+        $fresh = AggregateCalibrator::CACHE_CAP + 1;
+        $c->biasForScope($fresh, $now);
+
+        $cache = $prop->getValue($c);
+        self::assertArrayNotHasKey(2, $cache, 'the oldest-written entry (scope 2) must be evicted');
+        self::assertArrayHasKey(1, $cache, 'the refreshed first-inserted scope must survive (its write is the newest)');
+        self::assertArrayHasKey($fresh, $cache, 'the newly inserted scope must be cached');
+        self::assertArrayHasKey(AggregateCalibrator::CACHE_CAP, $cache, 'a recently written non-refreshed scope must survive');
     }
 
     private function countingClient(): CountingClient

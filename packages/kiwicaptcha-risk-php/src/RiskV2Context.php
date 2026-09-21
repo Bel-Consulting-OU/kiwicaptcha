@@ -13,10 +13,12 @@ namespace KiwiCaptcha\Risk;
  *   RiskEventKind::isHoneypot() kinds or a decoy marker observed by the
  *   caller. The engine maps it to the bounded `honeypot` signal.
  * - clientContextTag: the ephemeral coarse capability tag of the current
- *   request (bounded, keyed to deployment + session, never a stable
- *   device identifier and stable for the session's whole lifetime). The
- *   engine compares it against the tag recorded for this session's
- *   first tag-bearing request.
+ *   request (bounded to 64 bytes, keyed to deployment + session, never a
+ *   stable device identifier and stable for the session's whole lifetime).
+ *   The engine compares it against the tag recorded for this session's
+ *   first tag-bearing request; a longer tag rejects the assessment input
+ *   (never a silent truncation, which would split one session's identity
+ *   across tag records).
  * - tlsTag: the coarse, server-attested TLS classification tag supplied
  *   by trusted reverse-proxy/CDN infrastructure (e.g. "tls13|http2"),
  *   never a raw fingerprint database. The engine records only the
@@ -26,6 +28,11 @@ namespace KiwiCaptcha\Risk;
  */
 final class RiskV2Context
 {
+    /** The contract bound on the risk-v2 session tag strings (bytes),
+     * shared with Rust: assess_v2.lua rejects longer tags as the last
+     * line of defense, and the engines reject the assessment input up
+     * front. */
+    public const MAX_TAG_BYTES = 64;
     public function __construct(
         public readonly bool $honeypotHit = false,
         public readonly ?string $clientContextTag = null,

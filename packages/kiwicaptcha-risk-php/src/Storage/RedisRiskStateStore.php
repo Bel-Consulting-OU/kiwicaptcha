@@ -197,7 +197,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         $key = "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
-            if ($set === 'OK') {
+            // predis answers SET with a Status object (whose payload is
+            // 'OK'), never a bare 'OK' string; null is the NX miss.
+            if ($set instanceof \Predis\Response\Status && $set->getPayload() === 'OK') {
                 return $tag;
             }
             $stored = $this->client->get($key);
@@ -224,7 +226,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         $key = "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
-            if ($set === 'OK') {
+            // predis answers SET with a Status object (whose payload is
+            // 'OK'), never a bare 'OK' string; null is the NX miss.
+            if ($set instanceof \Predis\Response\Status && $set->getPayload() === 'OK') {
                 return $tag;
             }
             $stored = $this->client->get($key);
@@ -235,7 +239,15 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
     }
 
-    public function observe(RiskObservation $observation): SignalVector
+    /**
+     * Applies the observation and returns the full reply as a value
+     * object (the PHP mirror of Rust's `Observed`): vector, global level,
+     * cooldown deadline and dedupe verdict of THIS call — no side-channel
+     * reads.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function observeWithReply(RiskObservation $observation): ObservationReply
     {
         $keys = $this->observationKeys($observation);
         $this->assertSameSlot($keys);
@@ -247,11 +259,29 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             throw new RiskStoreException('Risk script returned an unexpected payload');
         }
 
-        $this->lastGlobalLevel = (int) $result[13];
-        $this->lastCooldownUntilMs = (int) $result[14];
-        $this->lastIsDuplicate = ((int) $result[15]) === 1;
+        return new ObservationReply(
+            vector: $this->signalVectorFromReply($result, $observation->networkRisk),
+            globalLevel: (int) $result[13],
+            cooldownUntilMs: (int) $result[14],
+            isDuplicate: ((int) $result[15]) === 1,
+        );
+    }
 
-        return $this->signalVectorFromReply($result, $observation->networkRisk);
+    /**
+     * @deprecated use observeWithReply(): the reply object is call-scoped
+     *             and immutable, while this method's companion side
+     *             channels (lastGlobalLevel()/lastCooldownUntilMs()/
+     *             lastIsDuplicate()) are shared mutable state — racy when
+     *             a coroutine runtime interleaves two observations on one
+     *             store instance. Kept as a delegating BC shim.
+     */
+    public function observe(RiskObservation $observation): SignalVector
+    {
+        $reply = $this->observeWithReply($observation);
+        $this->lastGlobalLevel = $reply->globalLevel;
+        $this->lastCooldownUntilMs = $reply->cooldownUntilMs;
+        $this->lastIsDuplicate = $reply->isDuplicate;
+        return $reply->vector;
     }
 
     /**
@@ -284,17 +314,39 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      *         true when the pending ledger entry was created, false when
      *         none was requested or the decision is already registered.
      */
-    public function assessV2(RiskObservation $observation, ?string $contextTag, ?string $tlsTag, ?OutcomeRegistration $registration = null): array
-    {
+    /**
+     * The consolidated risk-v2 assessment as a value object (the PHP
+     * mirror of Rust's `AssessV2Reply`): the signal vector, the global
+     * level, the cooldown deadline, the dedupe verdict, the recorded tag
+     * values and the registration status of THIS call — no side-channel
+     * reads.
+     *
+     * $contextTag / $tlsTag are the presented tags of the current request
+     * (null/'' = none presented; the corresponding record is untouched and
+     * its existing value is reported as null). The engine passes them only
+     * when a session pseudonym exists and the tag passes the contract
+     * bounds. The records use the exact keys and TTL of
+     * sessionFirstContextTag()/sessionFirstTlsTag(), so the two surfaces
+     * are interchangeable. The ledger registration mirrors
+     * registerOutcome() byte-for-byte (the score is computed inside the
+     * script from the exact base risk and weights the engine scores
+     * with). All keys share the hash tag — Cluster safe.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function assessV2WithReply(
+        RiskObservation $observation,
+        ?string $contextTag,
+        ?string $tlsTag,
+        ?OutcomeRegistration $registration = null,
+    ): AssessV2Reply {
         $sessionId = $observation->sessionId ?? str_repeat('0', 32);
         $keys = [...$this->observationKeys($observation),
             "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}",
             "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}",
         ];
-        $registrationKey = null;
         if ($registration !== null) {
-            $registrationKey = $this->ledgerKey($registration->decisionId);
-            $keys[] = $registrationKey;
+            $keys[] = $this->ledgerKey($registration->decisionId);
         }
         $this->assertSameSlot($keys);
 
@@ -320,15 +372,43 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             throw new RiskStoreException('Risk script returned an unexpected payload');
         }
 
-        $this->lastGlobalLevel = (int) $result[13];
-        $this->lastCooldownUntilMs = (int) $result[14];
-        $this->lastIsDuplicate = ((int) $result[15]) === 1;
+        return new AssessV2Reply(
+            vector: $this->signalVectorFromReply($result, $observation->networkRisk),
+            globalLevel: (int) $result[13],
+            cooldownUntilMs: (int) $result[14],
+            isDuplicate: ((int) $result[15]) === 1,
+            existingContextTag: (is_string($result[16]) && $result[16] !== '') ? $result[16] : null,
+            existingTlsTag: (is_string($result[17]) && $result[17] !== '') ? $result[17] : null,
+            registrationStatus: ((int) $result[18]) === 1,
+        );
+    }
 
+    /**
+     * @deprecated use assessV2WithReply(): the reply object is call-scoped
+     *             and immutable, while this method's companion side
+     *             channels (lastGlobalLevel()/lastCooldownUntilMs()/
+     *             lastIsDuplicate()) are shared mutable state — racy when
+     *             a coroutine runtime interleaves two assessments on one
+     *             store instance. Kept as a delegating BC shim.
+     *
+     * @return array{0: SignalVector, 1: ?string, 2: ?string, 3: bool} the
+     *         signal vector, the recorded client-context tag (null when
+     *         none recorded/presented), and the recorded TLS tag (null
+     *         when none recorded/presented). The registration status is
+     *         true when the pending ledger entry was created, false when
+     *         none was requested or the decision is already registered.
+     */
+    public function assessV2(RiskObservation $observation, ?string $contextTag, ?string $tlsTag, ?OutcomeRegistration $registration = null): array
+    {
+        $reply = $this->assessV2WithReply($observation, $contextTag, $tlsTag, $registration);
+        $this->lastGlobalLevel = $reply->globalLevel;
+        $this->lastCooldownUntilMs = $reply->cooldownUntilMs;
+        $this->lastIsDuplicate = $reply->isDuplicate;
         return [
-            $this->signalVectorFromReply($result, $observation->networkRisk),
-            (is_string($result[16]) && $result[16] !== '') ? $result[16] : null,
-            (is_string($result[17]) && $result[17] !== '') ? $result[17] : null,
-            ((int) $result[18]) === 1,
+            $reply->vector,
+            $reply->existingContextTag,
+            $reply->existingTlsTag,
+            $reply->registrationStatus,
         ];
     }
 

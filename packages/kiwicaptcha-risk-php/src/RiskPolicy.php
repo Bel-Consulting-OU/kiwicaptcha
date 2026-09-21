@@ -62,10 +62,11 @@ final class RiskPolicy
     /**
      * Parses and validates a policy config. Rejects: a version that does
      * not match the requested (default: contract) version, base_risk
-     * outside 0..1000, scope ids outside 1..4294967295, and global_floors
-     * that are not exactly 5 actions (index 0 = Allow, entries 1..4 valid
-     * actions). Enforced in the parser itself, not only in the Symfony
-     * config layer.
+     * outside 0..1000, scope ids outside 1..4294967295, and a missing /
+     * short / malformed global_floors (exactly 5 entries required, index
+     * 0 = Allow, entries 1..4 valid actions — fail-closed, identical to
+     * the Rust parser). Enforced in the parser itself, not only in the
+     * Symfony config layer.
      */
     public static function fromConfig(array $config, int $version = self::CONTRACT_VERSION): self
     {
@@ -113,36 +114,37 @@ final class RiskPolicy
             ];
         }
 
-        // global_floors: exactly 5 actions (0..4), index 0 = Allow, entries
-        // 1..4 valid actions. Missing levels 1..4 default from the contract
-        // defaults; anything outside 0..4, or a level-0 action other than
-        // Allow, is rejected.
-        $floors = [0 => RiskAction::Allow];
-        if (isset($config['global_floors'])) {
-            if (!is_array($config['global_floors'])) {
-                throw new \InvalidArgumentException('Policy config "global_floors" must be an array');
-            }
-            foreach ($config['global_floors'] as $level => $action) {
-                $level = (int) $level;
-                if ($level < 0 || $level > 4) {
-                    throw new \InvalidArgumentException(
-                        sprintf('Global floor level %d must be within 0..4', $level)
-                    );
-                }
-                $parsed = is_string($action)
-                    ? RiskAction::from($action)
-                    : $action;
-                if ($level === 0 && $parsed !== RiskAction::Allow) {
-                    throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
-                }
-                $floors[$level] = $parsed;
-            }
+        // global_floors: REQUIRED with exactly 5 entries (levels 0..4) —
+        // the strict fail-closed semantics of the Rust parser (missing,
+        // short or malformed floors reject the config instead of silently
+        // defaulting). Index 0 must be Allow; entries 1..4 are valid
+        // actions; keys outside 0..4 are rejected.
+        if (!isset($config['global_floors']) || !is_array($config['global_floors'])) {
+            throw new \InvalidArgumentException('Policy config requires a "global_floors" array');
         }
-        $floors += self::DEFAULT_GLOBAL_FLOORS;
+        if (count($config['global_floors']) !== 5) {
+            throw new \InvalidArgumentException(sprintf(
+                'global_floors requires exactly 5 entries (levels 0..4), got %d',
+                count($config['global_floors'])
+            ));
+        }
+        $floors = [];
+        foreach ($config['global_floors'] as $level => $action) {
+            if (!is_int($level) || $level < 0 || $level > 4) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Global floor level %s must be within 0..4',
+                    is_int($level) ? (string) $level : gettype($level)
+                ));
+            }
+            $parsed = is_string($action)
+                ? RiskAction::from($action)
+                : $action;
+            if ($level === 0 && $parsed !== RiskAction::Allow) {
+                throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
+            }
+            $floors[$level] = $parsed;
+        }
         ksort($floors);
-        if (count($floors) !== 5) {
-            throw new \InvalidArgumentException('global_floors must resolve to exactly 5 actions (levels 0..4)');
-        }
 
         return new self(
             version: (int) $config['version'],

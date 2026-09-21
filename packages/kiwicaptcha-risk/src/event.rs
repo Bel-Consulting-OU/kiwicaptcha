@@ -173,8 +173,10 @@ pub struct RiskObservation {
     pub subnet_id_next: String,
     pub session_id: Option<[u8; 16]>,
     pub principal_id: Option<[u8; 16]>,
-    /// Dedupe key: 16 random bytes in hex (32 chars); `''` = dedupe
-    /// disabled.
+    /// Dedupe key: 16 random bytes in hex (32 chars) or the 64-hex
+    /// HMAC-SHA256 of a normalized caller idempotency key — the same
+    /// 32-or-64 lowercase-hex contract the PHP mirror's constructor
+    /// enforces and the Redis store validates at its boundary.
     pub event_id: String,
     /// Classifier-derived network risk (0..1000), side-channel into the
     /// Lua's reserved `network_risk` slot.
@@ -245,7 +247,7 @@ impl Default for RiskObservation {
             subnet_id_next: "0".repeat(32),
             session_id: None,
             principal_id: None,
-            event_id: String::new(),
+            event_id: "0".repeat(32),
             network_risk: 0,
             now_ms: 0,
         }
@@ -334,7 +336,9 @@ mod tests {
         assert_eq!(o.source_id.len(), 32);
         assert_eq!(o.session_id, None);
         assert_eq!(o.network_risk, 0);
-        assert_eq!(o.event_id, "");
+        // The canonical placeholder event id is valid 32-hex (an empty id
+        // is rejected at the store boundary, mirroring PHP).
+        assert_eq!(o.event_id, "0".repeat(32));
     }
 
     #[test]

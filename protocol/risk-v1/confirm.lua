@@ -83,15 +83,34 @@ end
 
 local outcome = tonumber(ARGV[3]) == 1 and 'L' or 'A'
 
+-- Score read + clamp here (before any mutation): the product guard below
+-- needs the exact bounded score 0..1000.
+local score = tonumber(receipt.score or 0)
+if score < 0 then score = 0 end
+if score > 1000 then score = 1000 end
+
+-- PRODUCT GUARD (pre-mutation, the calibration.lua non-finite-guard style):
+-- a finite-but-huge weight (>= ~1.7e305) makes score * weight overflow to
+-- +Inf, and HINCRBYFLOAT errors on a non-finite increment — AFTER the
+-- receipt DEL / ledger SET, with no rollback. Any product that is NaN or
+-- beyond ±1e100 (score is bounded 0..1000, so a legitimate product is
+-- bounded by ~1e100 for any weight a caller could legitimately supply as
+-- an inverse sampling probability) rejects the whole confirmation BEFORE
+-- the receipt is consumed, leaving every key untouched for a retry with a
+-- sane weight.
+if status == 1 then
+    local product = score * weight
+    if not (product == product) or product > 1e100 or product < -1e100 then
+        return redis.error_reply('invalid calibration weight product')
+    end
+end
+
 redis.call('DEL', KEYS[1])
 ledger.o = outcome
 ledger.w = weight
 redis.call('SET', KEYS[3], cjson.encode(ledger), 'EX', tonumber(ARGV[5]))
 
 if status == 1 then
-    local score = tonumber(receipt.score or 0)
-    if score < 0 then score = 0 end
-    if score > 1000 then score = 1000 end
     if outcome == 'L' then
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_count', weight)
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_score_sum', score * weight)

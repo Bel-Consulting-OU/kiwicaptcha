@@ -50,10 +50,13 @@ impl<'a> RiskContext<'a> {
 ///   ([`RiskEventKind::is_honeypot`] kinds, or a decoy marker observed by
 ///   the caller). The engine maps it to the bounded `honeypot` signal.
 /// - `client_context_tag`: the ephemeral coarse capability tag of the
-///   current request (bounded, keyed to deployment + session — never a
-///   stable device identifier, stable for the session's whole lifetime).
-///   The engine compares it against the tag recorded for this session's
-///   first tag-bearing request.
+///   current request (bounded to [`MAX_CONTEXT_TAG_BYTES`] = 64 bytes,
+///   keyed to deployment + session — never a stable device identifier,
+///   stable for the session's whole lifetime). The engine compares it
+///   against the tag recorded for this session's first tag-bearing
+///   request; a longer tag rejects the assessment input (never a silent
+///   truncation, which would split one session's identity across tag
+///   records).
 /// - `tls_tag`: the coarse, server-attested TLS classification tag
 ///   supplied by trusted reverse-proxy/CDN infrastructure (e.g.
 ///   "tls13|http2") — never a raw fingerprint database. The engine records
@@ -67,6 +70,11 @@ pub struct RiskV2Context {
     pub client_context_tag: Option<String>,
     pub tls_tag: Option<String>,
 }
+
+/// The contract bound on the risk-v2 session tag strings (bytes), shared
+/// with PHP: `assess_v2.lua` rejects longer tags as the last line of
+/// defense, and the engines reject the assessment input up front.
+pub const MAX_CONTEXT_TAG_BYTES: usize = 64;
 
 impl RiskV2Context {
     /// True when the context carries NO risk-v2 evidence at all.

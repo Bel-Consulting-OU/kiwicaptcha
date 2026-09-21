@@ -133,6 +133,15 @@ identical in:
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
 - `risk-v1.lua` — canonical Redis state script (authoritative, embedded).
+- `assess_v2.lua`: canonical consolidated assessment script (the full
+  risk-v1 observation plus the risk-v2 first-seen session tag records and
+  the outcome-ledger registration in ONE atomic invocation; authoritative,
+  embedded verbatim by both packages).
+- `calibration.lua`, `confirm.lua`, `correction.lua`,
+  `register_decision.lua`, `sampling_metrics.lua`,
+  `outcome_register.lua`, `outcome_confirm.lua`, `outcome_correct.lua`:
+  canonical calibration / outcome-ledger scripts (authoritative, embedded
+  verbatim by both packages).
 
 12. Request vs feedback: only `PreIssue` (1) counts as a request. It
    increments `rf`/`rs` and the scope-switch channel. Feedback events

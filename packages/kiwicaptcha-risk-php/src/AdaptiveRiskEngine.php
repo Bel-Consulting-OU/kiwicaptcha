@@ -160,6 +160,7 @@ final class AdaptiveRiskEngine
     private function assessPreIssueInternal(RiskContext $c, ?string $idempotencyKey, ?RiskV2Context $v2, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
         $nowMs = (int) floor(microtime(true) * 1000);
+        $this->validateV2Context($v2);
 
         if (!$this->limiter->allow()) {
             $this->metrics->increment('denied:limiter');
@@ -173,7 +174,9 @@ final class AdaptiveRiskEngine
                 band: 10,
             );
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+            // A limiter hard-deny never reached the state backend; the
+            // ledger/receipt registration is skipped for the same reason
+            // (no backend call on a decision the backend never saw).
             return $decision;
         }
 
@@ -221,6 +224,7 @@ final class AdaptiveRiskEngine
      */
     private function runPipeline(RiskContext $c, int $nowMs, ?string $idempotencyKey, ?RiskV2Context $v2 = null, ?RiskV2Weights $v2Weights = null): RiskDecision
     {
+        $this->validateV2Context($v2);
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey);
         $this->outcomeRegisteredByConsolidated = false;
 
@@ -228,7 +232,8 @@ final class AdaptiveRiskEngine
             $this->metrics->increment('degraded:breaker');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+            // While the breaker is open the engine skips the state backend
+            // entirely — including the ledger/receipt registration.
             return $decision;
         }
 
@@ -255,6 +260,12 @@ final class AdaptiveRiskEngine
         }
 
         $start = microtime(true);
+        // Global level / cooldown: taken from the reply object when the
+        // store offers one (call-scoped, immutable — no racy
+        // shared-mutable side-channel reads under coroutine runtimes);
+        // null defers to the side channels for stores without the surface.
+        $globalLevel = null;
+        $cooldownUntilMs = null;
         try {
             if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
                 // Consolidated assessment: ONE atomic script call runs the
@@ -264,18 +275,39 @@ final class AdaptiveRiskEngine
                 // tags plus the registration status — an established
                 // risk-v2 session costs one script call instead of the
                 // separate tag round trips and the separate registration.
-                [$vector, $existingContextTag, $existingTlsTag, $_registered] = $this->store->assessV2(
-                    $observation,
-                    $this->presentedContextTag($v2, $observation),
-                    $this->presentedTlsTag($v2, $observation),
-                    $registration,
-                );
+                if (method_exists($this->store, 'assessV2WithReply')) {
+                    $reply = $this->store->assessV2WithReply(
+                        $observation,
+                        $this->presentedContextTag($v2, $observation),
+                        $this->presentedTlsTag($v2, $observation),
+                        $registration,
+                    );
+                    $vector = $reply->vector;
+                    $globalLevel = $reply->globalLevel;
+                    $cooldownUntilMs = $reply->cooldownUntilMs;
+                    $existingContextTag = $reply->existingContextTag;
+                    $existingTlsTag = $reply->existingTlsTag;
+                } else {
+                    [$vector, $existingContextTag, $existingTlsTag, $_registered] = $this->store->assessV2(
+                        $observation,
+                        $this->presentedContextTag($v2, $observation),
+                        $this->presentedTlsTag($v2, $observation),
+                        $registration,
+                    );
+                }
                 if ($registration !== null) {
                     // The pending ledger entry was created (or already
                     // existed for a retried decision_id) atomically with
                     // the observation — no separate registration call.
                     $this->outcomeRegisteredByConsolidated = true;
                 }
+            } elseif (method_exists($this->store, 'observeWithReply')) {
+                $reply = $this->store->observeWithReply($observation);
+                $vector = $reply->vector;
+                $globalLevel = $reply->globalLevel;
+                $cooldownUntilMs = $reply->cooldownUntilMs;
+                $existingContextTag = null;
+                $existingTlsTag = null;
             } else {
                 $vector = $this->store->observe($observation);
                 $existingContextTag = null;
@@ -286,7 +318,8 @@ final class AdaptiveRiskEngine
             $this->metrics->increment('degraded:store');
             $decision = $this->policy->degradedDecision($c->scope, $this->storeGlobalLevel());
             $this->recordDecisionMetrics($c->scope, $decision);
-            $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+            // The store just failed on this assessment: no ledger/receipt
+            // registration against the failing backend.
             return $decision;
         }
         $this->metrics->recordLatency('store:observe', (microtime(true) - $start) * 1000);
@@ -331,14 +364,21 @@ final class AdaptiveRiskEngine
         $score = $v2Signals !== null
             ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
             : $this->scorer->score($base, $vector, $this->policy->weights);
+        if (!$this->enableGlobalPressure) {
+            $globalLevel = 0;
+            $cooldownUntilMs = 0;
+        } else {
+            $globalLevel ??= $this->storeGlobalLevel();
+            $cooldownUntilMs ??= $this->storeCooldownUntilMs();
+        }
         $decision = $this->policy->decide(
             scope: $c->scope,
             score: $score,
             s: $vector,
             r: $c->resources,
-            globalLevel: $this->storeGlobalLevel(),
+            globalLevel: $globalLevel,
             nowMs: $nowMs,
-            cooldownUntilMs: $this->storeCooldownUntilMs(),
+            cooldownUntilMs: $cooldownUntilMs,
             hysteresis: $this->hysteresis,
             decisionId: $decisionId,
         );
@@ -395,8 +435,16 @@ final class AdaptiveRiskEngine
         $nowMs = (int) floor(microtime(true) * 1000);
         $observation = $this->buildObservation($c, $nowMs, $idempotencyKey, $event);
         try {
-            $vector = $this->store->observe($observation);
-            $isDuplicate = method_exists($this->store, 'lastIsDuplicate') && (bool) $this->store->lastIsDuplicate();
+            if (method_exists($this->store, 'observeWithReply')) {
+                // Reply-object surface: the dedupe verdict comes back with
+                // the observation — no racy side-channel read.
+                $reply = $this->store->observeWithReply($observation);
+                $vector = $reply->vector;
+                $isDuplicate = $reply->isDuplicate;
+            } else {
+                $vector = $this->store->observe($observation);
+                $isDuplicate = method_exists($this->store, 'lastIsDuplicate') && (bool) $this->store->lastIsDuplicate();
+            }
         } catch (RiskStoreException $e) {
             $this->breaker->recordFailure();
             $vector = SignalVector::zero();
@@ -623,10 +671,33 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * Rejects a risk-v2 context whose client-context tag exceeds the
+     * 64-byte contract bound (fail-closed: the assessment input is
+     * rejected, never silently truncated — a truncation would split one
+     * session's identity across tag records). The TLS tag keeps its
+     * documented over-bound handling (treated as absent). Rust mirrors
+     * this exactly.
+     */
+    private function validateV2Context(?RiskV2Context $v2): void
+    {
+        if ($v2 === null) {
+            return;
+        }
+        if ($v2->clientContextTag !== null
+            && strlen($v2->clientContextTag) > RiskV2Context::MAX_TAG_BYTES) {
+            throw new \InvalidArgumentException(sprintf(
+                'client context tag must not exceed %d bytes',
+                RiskV2Context::MAX_TAG_BYTES
+            ));
+        }
+    }
+
+    /**
      * The client-context tag to present to the consolidated assessment
      * call: the v2 context's tag when a session pseudonym exists and the
      * tag is non-empty, else null (no record is written). Mirrors the
-     * guards of the fallback buildV2Signals() path exactly.
+     * guards of the fallback buildV2Signals() path exactly. The 64-byte
+     * bound is enforced by validateV2Context() before any store call.
      */
     private function presentedContextTag(?RiskV2Context $v2, RiskObservation $observation): ?string
     {
@@ -831,6 +902,11 @@ final class AdaptiveRiskEngine
      * atomically by the script) and true when calibration is null.
      * decisionHour anchors the outcome to the hour the decision was made.
      * Failures are silent, so registration never breaks issuance.
+     *
+     * The DEGRADED paths never call this: a limiter hard-deny never
+     * reached the state backend, and while the breaker is open or right
+     * after a store failure the engine skips the state backend entirely —
+     * receipt/ledger registration included.
      */
     private function registerDecisionOutcome(int $scope, RiskDecision $decision, int $nowMs): void
     {

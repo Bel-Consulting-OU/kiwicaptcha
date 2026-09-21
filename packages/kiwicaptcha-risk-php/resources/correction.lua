@@ -66,6 +66,27 @@ if score > 1000 then score = 1000 end
 
 -- Reverse the original contribution (exact recorded weight).
 local old_w = tonumber(ledger.w or 1)
+
+-- PRODUCT GUARD (pre-mutation, the calibration.lua non-finite-guard style):
+-- both bucket contributions are score * weight products (the reversal uses
+-- the ledger's recorded weight, the redo the caller's). A finite-but-huge
+-- weight (>= ~1.7e305) or a tampered ledger weight ("1e999" -> +Inf) makes
+-- the product +Inf/NaN and HINCRBYFLOAT errors mid-script with no
+-- rollback. Any weight that is not a finite number, or any product that is
+-- NaN or beyond ±1e100 (score is bounded 0..1000, so a legitimate product
+-- is bounded by ~1e100), rejects the whole correction BEFORE the first
+-- bucket mutation, leaving the ledger and bucket untouched for a retry
+-- with a sane weight.
+if not old_w or old_w < 0 or old_w ~= old_w or old_w == math.huge then
+    return redis.error_reply('invalid calibration weight product')
+end
+local product_old = score * old_w
+local product_new = score * weight
+if not (product_old == product_old) or product_old > 1e100 or product_old < -1e100
+   or not (product_new == product_new) or product_new > 1e100 or product_new < -1e100 then
+    return redis.error_reply('invalid calibration weight product')
+end
+
 if ledger.o == 'L' then
     redis.call('HINCRBYFLOAT', KEYS[2], 'legit_count', -old_w)
     redis.call('HINCRBYFLOAT', KEYS[2], 'legit_score_sum', -(score * old_w))

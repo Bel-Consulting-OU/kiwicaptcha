@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Risk\Calibration;
 
 use KiwiCaptcha\Risk\RiskAction;
 use Predis\Client;
+use Predis\Response\ServerException;
 
 /**
  * Aggregate calibrator: Redis-backed bounded exact-score calibration.
@@ -187,7 +188,10 @@ final class AggregateCalibrator implements CalibrationStore
 
     private readonly string $namespace;
 
-    /** @var array<int, array{bias:int, expiresAt:float}> bounded per-scope cache */
+    /** @var array<string, string> cached sha1 of every static script, keyed by the script content */
+    private array $scriptShas = [];
+
+    /** @var array<int, array{bias:int, expiresAt:float, writtenAt:float}> bounded per-scope cache */
     private array $biasCache = [];
 
     public function __construct(
@@ -323,28 +327,27 @@ final class AggregateCalibrator implements CalibrationStore
         $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$decisionHour}";
         $ledgerKey = $this->ledgerKey($decisionId);
 
-        $result = $this->client->eval(
+        $result = $this->runScript(
             $this->registerDecisionScript,
-            3,
-            $receiptKey,
-            $bucketKey,
-            $ledgerKey,
-            (string) json_encode([
-                'scope' => $scope,
-                'band' => $band,
-                'action' => $action->value,
-                'decision_hour' => $decisionHour,
-                'score' => $score,
-                'sampled' => $sampled ? 1 : 0,
-            ]),
-            (string) $this->receiptTtlSecs,
-            $sampled ? '1' : '0',
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $decisionHour,
-            (string) $score,
-            (string) $weight,
+            [$receiptKey, $bucketKey, $ledgerKey],
+            [
+                (string) json_encode([
+                    'scope' => $scope,
+                    'band' => $band,
+                    'action' => $action->value,
+                    'decision_hour' => $decisionHour,
+                    'score' => $score,
+                    'sampled' => $sampled ? 1 : 0,
+                ]),
+                (string) $this->receiptTtlSecs,
+                $sampled ? '1' : '0',
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $decisionHour,
+                (string) $score,
+                (string) $weight,
+            ],
         );
         return ((int) $result) === 1;
     }
@@ -400,19 +403,18 @@ final class AggregateCalibrator implements CalibrationStore
             throw new \InvalidArgumentException('weighted mode requires a sampling probability weight');
         }
 
-        $status = (int) $this->client->eval(
+        $status = (int) $this->runScript(
             $this->confirmScript,
-            3,
-            $receiptKey,
-            $bucketKey,
-            $ledgerKey,
-            (string) $mode,
-            (string) ($weight ?? 1.0),
-            $legitimate ? '1' : '0',
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $hour,
+            [$receiptKey, $bucketKey, $ledgerKey],
+            [
+                (string) $mode,
+                (string) ($weight ?? 1.0),
+                $legitimate ? '1' : '0',
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $hour,
+            ],
         );
 
         if ($status !== 0) {
@@ -457,17 +459,17 @@ final class AggregateCalibrator implements CalibrationStore
         }
         $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$hour}";
 
-        $result = (int) $this->client->eval(
+        $result = (int) $this->runScript(
             $this->correctionScript,
-            2,
-            $ledgerKey,
-            $bucketKey,
-            $legitimate ? 'L' : 'A',
-            (string) ($weight ?? 1.0),
-            (string) self::BUCKET_TTL_SECS,
-            (string) $this->outcomeTtlSecs,
-            (string) $scope,
-            (string) $hour,
+            [$ledgerKey, $bucketKey],
+            [
+                $legitimate ? 'L' : 'A',
+                (string) ($weight ?? 1.0),
+                (string) self::BUCKET_TTL_SECS,
+                (string) $this->outcomeTtlSecs,
+                (string) $scope,
+                (string) $hour,
+            ],
         );
         if ($result === 1) {
             unset($this->biasCache[$scope]);
@@ -488,7 +490,7 @@ final class AggregateCalibrator implements CalibrationStore
         for ($i = 0; $i < self::WINDOW_HOURS; $i++) {
             $keys[] = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:" . ($hour - $i);
         }
-        $result = $this->client->eval($this->samplingMetricsScript, count($keys), ...$keys);
+        $result = $this->runScript($this->samplingMetricsScript, $keys, [$now]);
         $total = (int) ($result[0] ?? 0);
         $resolved = (int) ($result[1] ?? 0);
         // (float) cast: PHP 8.5 division returns exact INT results. The
@@ -530,10 +532,10 @@ final class AggregateCalibrator implements CalibrationStore
         };
 
         $bias = self::toBoundedBias(
-            $this->client->eval(
+            $this->runScript(
                 $this->calibrationScript,
-                count($keys),
-                ...array_merge($keys, [
+                $keys,
+                [
                     $now,
                     $this->minSamples,
                     $this->maxAdjustment,
@@ -542,17 +544,34 @@ final class AggregateCalibrator implements CalibrationStore
                     $mode,
                     $this->falsePositiveCost,
                     $this->falseNegativeCost,
-                ]),
+                ],
             ),
             $this->maxAdjustment,
         );
 
         if (count($this->biasCache) >= self::CACHE_CAP && !isset($this->biasCache[$scope])) {
-            // Evict the least-recently-used entry (array_shift would renumber the int
-            // keys and corrupt the scope -> entry map, so unset instead).
-            unset($this->biasCache[array_key_first($this->biasCache)]);
+            // Evict the OLDEST-WRITE entry (Rust parity: a refresh re-ages
+            // the entry, so a recently refreshed scope survives eviction
+            // over scopes written earlier — not simply the first-inserted
+            // one; array_shift would renumber the int keys and corrupt the
+            // scope -> entry map).
+            $oldestScope = null;
+            $oldestWrittenAt = null;
+            foreach ($this->biasCache as $cachedScope => $entry) {
+                if ($oldestWrittenAt === null || $entry['writtenAt'] < $oldestWrittenAt) {
+                    $oldestScope = $cachedScope;
+                    $oldestWrittenAt = $entry['writtenAt'];
+                }
+            }
+            if ($oldestScope !== null) {
+                unset($this->biasCache[$oldestScope]);
+            }
         }
-        $this->biasCache[$scope] = ['bias' => $bias, 'expiresAt' => $nowFloat + self::CACHE_TTL_SECS];
+        $this->biasCache[$scope] = [
+            'bias' => $bias,
+            'expiresAt' => $nowFloat + self::CACHE_TTL_SECS,
+            'writtenAt' => $nowFloat,
+        ];
         return $bias;
     }
 
@@ -588,6 +607,60 @@ final class AggregateCalibrator implements CalibrationStore
             $bias = (int) $raw;
         }
         return max(-$maxAdjustment, min($maxAdjustment, $bias));
+    }
+
+    /**
+     * evalsha with the cached-sha + SCRIPT LOAD repair pattern of
+     * RedisRiskStateStore: the script bytes ship to Redis only on a
+     * NOSCRIPT miss (SCRIPT LOAD once per script per process, the sha
+     * cached in memory); every steady-state call is an EVALSHA of the
+     * 40-char sha — never a full-body EVAL of the multi-kilobyte script.
+     *
+     * @param list<string> $keys
+     * @param list<int|string|float> $args
+     * @return array<int|string>|int|string
+     * @throws \RuntimeException on any redis failure (the calibrator's
+     *         callers degrade silently)
+     */
+    private function runScript(string $script, array $keys, array $args)
+    {
+        $sha = $this->shaOf($script);
+        $numKeys = count($keys);
+        $callArgs = [...$keys, ...$args];
+
+        try {
+            return $this->client->evalsha($sha, $numKeys, ...$callArgs);
+        } catch (ServerException $e) {
+            if (str_contains($e->getMessage(), 'NOSCRIPT')) {
+                try {
+                    $sha = $this->scriptLoad($script);
+                    return $this->client->evalsha($sha, $numKeys, ...$callArgs);
+                } catch (\Predis\Exception\Exception $inner) {
+                    throw new \RuntimeException('Calibration script execution failed: ' . $inner->getMessage(), 0, $inner);
+                }
+            }
+            throw new \RuntimeException('Calibration script execution failed: ' . $e->getMessage(), 0, $e);
+        } catch (\Predis\Exception\Exception $e) {
+            throw new \RuntimeException('Calibration store connection failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /** Cached sha1 of every static script (script load once per script per process). */
+    private function shaOf(string $script): string
+    {
+        if (!isset($this->scriptShas[$script])) {
+            $this->scriptShas[$script] = $this->scriptLoad($script);
+        }
+        return $this->scriptShas[$script];
+    }
+
+    private function scriptLoad(string $script): string
+    {
+        $sha = $this->client->script('LOAD', $script);
+        if (!is_string($sha) || $sha === '') {
+            throw new \RuntimeException('SCRIPT LOAD returned no sha');
+        }
+        return $sha;
     }
 
     private static function loadScript(string $file): string

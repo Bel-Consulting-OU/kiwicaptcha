@@ -428,5 +428,174 @@
       },
       "expected_score": 1000
     }
+  ],
+  "policy_parse_rejects": [
+    {
+      "name": "missing global_floors",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        }
+      }
+    },
+    {
+      "name": "short global_floors (4 entries)",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20"
+        }
+      }
+    },
+    {
+      "name": "level 0 not allow",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "0": "sha16",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20"
+        }
+      }
+    },
+    {
+      "name": "out-of-range level 5",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": {
+          "0": "allow",
+          "1": "sha16",
+          "2": "sha18",
+          "3": "sha20",
+          "4": "sha20",
+          "5": "deny"
+        }
+      }
+    },
+    {
+      "name": "global_floors not an object",
+      "config": {
+        "version": 3,
+        "weights": {
+          "source_fast": 190,
+          "source_slow": 110,
+          "subnet_fast": 80,
+          "issue_debt": 150,
+          "bad_proof": 220,
+          "malformed": 260,
+          "replay": 320,
+          "action_failure": 120,
+          "scope_switch": 60,
+          "global_pressure": 170,
+          "network_risk": 100,
+          "trust_credit": 130,
+          "principal_credit": 100
+        },
+        "scopes": {
+          "1": {
+            "base_risk": 100,
+            "minimum": "allow",
+            "post_solve_check": true,
+            "degraded": "sha20"
+          }
+        },
+        "global_floors": "sha20"
+      }
+    }
   ]
 }

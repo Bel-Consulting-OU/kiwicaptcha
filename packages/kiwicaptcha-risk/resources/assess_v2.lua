@@ -322,6 +322,15 @@ local function apply_principal_event(s, event, scope)
     end
 end
 
+-- ── Contract bounds (last line of defense): the presented session tags
+-- are bounded to 64 bytes by the engines; a direct script caller that
+-- exceeds the bound rejects the whole assessment BEFORE any state
+-- mutation — never a silent truncation, which would split one session's
+-- identity across tag records.
+if #ARGV[23] > 64 or #ARGV[24] > 64 then
+    return redis.error_reply('session tag exceeds 64 bytes')
+end
+
 -- ── Dedupe: identical event_id must not double-increment state. On a
 -- duplicate, SKIP the event application but still decay/read/return the
 -- current signals (shared risk-v1 semantics across Rust and PHP).

@@ -53,7 +53,7 @@ use crate::context::{RiskContext, RiskV2Context};
 use crate::event::{normalize_idempotency_key, RiskEventKind, RiskObservation};
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
-use crate::metrics::Metrics;
+use crate::metrics::{FixedMetric, Metrics};
 use crate::network::NetworkClassifier;
 use crate::policy::{RiskPolicy, RiskReason};
 use crate::score::score as compute_score;
@@ -69,6 +69,10 @@ pub enum RiskError {
     /// The caller idempotency key exceeds the 4096-byte contract limit.
     #[error("idempotency key must not exceed 4096 bytes (got {0})")]
     InvalidIdempotencyKey(usize),
+    /// The risk-v2 client-context tag exceeds the 64-byte contract bound
+    /// (the assessment input is rejected, never silently truncated).
+    #[error("client context tag must not exceed 64 bytes (got {0})")]
+    InvalidContextTag(usize),
     /// A confirmed outcome requires the decision_id of the assessed
     /// decision.
     #[error("confirmed outcomes require the decision_id of the assessed decision")]
@@ -537,7 +541,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// # Errors
     ///
     /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
-    /// 4096-byte contract limit.
+    /// 4096-byte contract limit; [`RiskError::InvalidContextTag`] when the
+    /// v2 client-context tag exceeds the 64-byte bound.
     pub fn assess_pre_issue_v2(
         &self,
         ctx: RiskContext<'_>,
@@ -548,6 +553,20 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.assess_pre_issue_impl(ctx, Some(v2), idempotency_key, v2_weights)
     }
 
+    /// Rejects a risk-v2 context whose client-context tag exceeds the
+    /// 64-byte contract bound (fail-closed: the assessment input is
+    /// rejected, never silently truncated — a truncation would split one
+    /// session's identity across tag records). The TLS tag keeps its
+    /// documented over-bound handling (treated as absent).
+    fn validate_v2_context(v2: &RiskV2Context) -> Result<(), RiskError> {
+        if let Some(tag) = v2.client_context_tag.as_deref() {
+            if tag.len() > crate::context::MAX_CONTEXT_TAG_BYTES {
+                return Err(RiskError::InvalidContextTag(tag.len()));
+            }
+        }
+        Ok(())
+    }
+
     fn assess_pre_issue_impl(
         &self,
         ctx: RiskContext<'_>,
@@ -555,8 +574,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
+        if let Some(v2) = v2 {
+            Self::validate_v2_context(v2)?;
+        }
         if !self.limiter.allow() {
-            self.metrics.incr("denied:limiter");
+            self.metrics.incr_fixed(FixedMetric::DeniedLimiter);
             let decision = RiskDecision {
                 score: 1000,
                 action: RiskAction::Deny,
@@ -569,7 +591,10 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 decision_id: String::new(),
             };
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+            // A limiter hard-deny never reached the state backend; the
+            // ledger/receipt registration is skipped for the same reason
+            // (no backend call on a decision the backend never saw).
+            return Ok(self.finalize_degraded_decision(decision));
         }
         self.assess_inner(ctx, v2, idempotency_key, v2_weights)
     }
@@ -614,7 +639,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// # Errors
     ///
     /// [`RiskError::InvalidIdempotencyKey`] when the caller key exceeds the
-    /// 4096-byte contract limit.
+    /// 4096-byte contract limit; [`RiskError::InvalidContextTag`] when the
+    /// v2 client-context tag exceeds the 64-byte bound.
     pub fn reassess_v2(
         &self,
         ctx: RiskContext<'_>,
@@ -634,16 +660,21 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         v2_weights: Option<RiskV2Weights>,
     ) -> Result<RiskDecision, RiskError> {
+        if let Some(v2) = v2 {
+            Self::validate_v2_context(v2)?;
+        }
         let now_ms = now_ms();
         let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
 
         if self.breaker.is_open() {
-            self.metrics.incr("degraded:breaker");
+            self.metrics.incr_fixed(FixedMetric::DegradedBreaker);
             let decision = self
                 .policy
                 .degraded_decision(ctx.scope, self.current_global_level());
             self.record_decision_metrics(ctx.scope, &decision);
-            return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+            // While the breaker is open the engine skips the state backend
+            // entirely — including the ledger registration.
+            return Ok(self.finalize_degraded_decision(decision));
         }
 
         // The pending outcome-ledger registration to fold into the
@@ -679,16 +710,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let outcome = match consolidated {
             Err(_) => {
                 self.breaker.record_failure();
-                self.metrics.incr("degraded:store");
+                self.metrics.incr_fixed(FixedMetric::DegradedStore);
                 let decision = self
                     .policy
                     .degraded_decision(ctx.scope, self.current_global_level());
                 self.record_decision_metrics(ctx.scope, &decision);
-                return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+                // The store just failed on this assessment: no
+                // ledger/receipt registration against the failing backend.
+                return Ok(self.finalize_degraded_decision(decision));
             }
             Ok(Some(reply)) => {
                 self.metrics
-                    .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
+                    .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
                 let v2_signals = v2.map(|v2ctx| {
                     self.derive_v2_signals_from_records(
@@ -708,16 +741,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     Ok(o) => o,
                     Err(_) => {
                         self.breaker.record_failure();
-                        self.metrics.incr("degraded:store");
+                        self.metrics.incr_fixed(FixedMetric::DegradedStore);
                         let decision = self
                             .policy
                             .degraded_decision(ctx.scope, self.current_global_level());
                         self.record_decision_metrics(ctx.scope, &decision);
-                        return Ok(self.finalize_decision(ctx.scope, decision, None, false));
+                        // The store just failed on this assessment: no
+                        // ledger/receipt registration against the failing
+                        // backend.
+                        return Ok(self.finalize_degraded_decision(decision));
                     }
                 };
                 self.metrics
-                    .add_latency_us("store:observe", start.elapsed().as_micros() as u64);
+                    .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
                 let v2_signals = v2
                     .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
@@ -950,15 +986,21 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             }
         }
 
-        let observed = self
-            .store
-            .observe(&observation)
-            .unwrap_or_else(|_| Observed {
-                vector: SignalVector::zero(),
-                global_level: 0,
-                cooldown_until_ms: 0,
-                is_duplicate: false,
-            });
+        let observed = match self.store.observe(&observation) {
+            Ok(o) => o,
+            Err(_) => {
+                // A feedback-path store failure feeds the circuit breaker
+                // exactly like an assessment-path failure (PHP parity): a
+                // wedged backend trips the breaker through either surface.
+                self.breaker.record_failure();
+                Observed {
+                    vector: SignalVector::zero(),
+                    global_level: 0,
+                    cooldown_until_ms: 0,
+                    is_duplicate: false,
+                }
+            }
+        };
 
         Ok(EventReceipt {
             event_id: observation.event_id,
@@ -1253,6 +1295,16 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         decision.reasons = out;
     }
 
+    /// Assigns the decision_id only — NO store or calibration call. The
+    /// degraded paths use this: while the breaker is open, after a store
+    /// failure on this assessment, and on a limiter hard-deny (which never
+    /// reached the state backend), the engine skips the state backend
+    /// entirely, receipt/ledger registration included.
+    fn finalize_degraded_decision(&self, mut decision: RiskDecision) -> RiskDecision {
+        decision.decision_id = hex::encode(fresh_decision_id());
+        decision
+    }
+
     /// Assigns the decision_id and registers the decision with its exact
     /// risk score (silently on failure — never breaks issuance). The
     /// outcome ledger is always on and independent of calibration:
@@ -1310,11 +1362,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     fn record_decision_metrics(&self, scope: u32, decision: &RiskDecision) {
-        self.metrics.incr(&format!(
-            "decisions:{scope}:{}:{}",
-            decision.action.as_str(),
-            decision.band
-        ));
+        self.metrics
+            .incr_decision(scope, decision.action.as_str(), decision.band);
     }
 }
 
@@ -1479,6 +1528,7 @@ mod tests {
         vector: SignalVector,
         cooldown_until_ms: u64,
         calls: AtomicUsize,
+        register_calls: AtomicUsize,
         fail: bool,
         fail_calls: usize,
         outcomes: OutcomeLedger,
@@ -1491,6 +1541,7 @@ mod tests {
                 vector,
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: false,
                 fail_calls: 0,
                 outcomes: OutcomeLedger::default(),
@@ -1503,6 +1554,7 @@ mod tests {
                 vector,
                 cooldown_until_ms,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: false,
                 fail_calls: 0,
                 outcomes: OutcomeLedger::default(),
@@ -1515,6 +1567,7 @@ mod tests {
                 vector: SignalVector::zero(),
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls: usize::MAX,
                 outcomes: OutcomeLedger::default(),
@@ -1530,6 +1583,7 @@ mod tests {
                 },
                 cooldown_until_ms: 0,
                 calls: AtomicUsize::new(0),
+                register_calls: AtomicUsize::new(0),
                 fail: true,
                 fail_calls,
                 outcomes: OutcomeLedger::default(),
@@ -1558,6 +1612,7 @@ mod tests {
             _decision_hour: i64,
             _score: u32,
         ) -> Result<bool, RiskStoreError> {
+            self.register_calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.outcomes.register(decision_id))
         }
 
@@ -2608,6 +2663,159 @@ mod tests {
             2,
             "open breaker must bypass the store"
         );
+    }
+
+    #[test]
+    fn degraded_paths_book_no_outcome_ledger_entry() {
+        // A limiter hard-deny never reached the state backend: no ledger
+        // registration against a backend that never saw the decision.
+        let store = MockStore::new(SignalVector::zero(), 0);
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1, 0.0);
+        assert!(limiter.allow(), "burn the single admission");
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            limiter,
+        );
+        let denied = engine.assess_pre_issue(context(), None).unwrap();
+        assert!(denied.has_reason(RiskReason::HardRateLimit));
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "a limiter hard-deny must book no ledger entry"
+        );
+
+        // A store failure on the assessment: the decision degrades and no
+        // registration runs against the failing backend.
+        let store = MockStore::failing();
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::new(2, 60_000),
+            ProcessEmergencyCap::new(),
+        );
+        let d1 = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(d1.action, RiskAction::Sha20);
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "a failed assessment must book no ledger entry"
+        );
+
+        // Breaker open (the two failures above): the store is skipped
+        // entirely, ledger registration included.
+        engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        // The feedback failure opened the breaker: the next assessment
+        // bypasses the store entirely (the two calls are d1 + the
+        // feedback observe).
+        let d2 = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(
+            engine.store.calls.load(Ordering::Relaxed),
+            2,
+            "d2 must be breaker-open degraded (no new store call)"
+        );
+        assert_eq!(d2.action, RiskAction::Sha20);
+        assert_eq!(
+            engine.store.register_calls.load(Ordering::Relaxed),
+            0,
+            "an open breaker must book no ledger entry"
+        );
+    }
+
+    #[test]
+    fn feedback_store_failure_feeds_the_breaker() {
+        // Two feedback-path store failures open the breaker (PHP parity):
+        // a wedged backend trips the breaker through either surface.
+        let store = MockStore::failing();
+        let engine = RiskEngine::with_components(
+            store,
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::new(2, 60_000),
+            ProcessEmergencyCap::new(),
+        );
+
+        let receipt = engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        assert!(!receipt.is_duplicate);
+        assert!(!engine.breaker.is_open(), "one failure must not open");
+
+        let _ = engine
+            .record_feedback(RiskEventKind::SolveSuccess, context(), None, None)
+            .unwrap();
+        assert!(
+            engine.breaker.is_open(),
+            "two feedback-path failures must open the breaker"
+        );
+
+        // The next assessment degrades without touching the store.
+        let decision = engine.assess_pre_issue(context(), None).unwrap();
+        assert_eq!(decision.action, RiskAction::Sha20);
+        assert_eq!(engine.store.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn client_context_tag_is_bounded_to_64_bytes_fail_closed() {
+        let engine = RiskEngine::new(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+        );
+
+        // 64 bytes: accepted.
+        let ok = engine
+            .assess_pre_issue_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(64)), None),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(ok.score, 100);
+
+        // 65 bytes: the assessment input is rejected — never a silent
+        // truncation (which would split one session's identity across tag
+        // records).
+        assert!(matches!(
+            engine.assess_pre_issue_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(65)), None),
+                None,
+                None
+            ),
+            Err(RiskError::InvalidContextTag(65))
+        ));
+        assert!(matches!(
+            engine.reassess_v2(
+                context(),
+                &v2_context(false, Some(&"x".repeat(65)), None),
+                None,
+                None
+            ),
+            Err(RiskError::InvalidContextTag(65))
+        ));
+
+        // The TLS tag keeps its documented over-bound handling: treated as
+        // absent (no record written), never a rejection.
+        let tls = engine
+            .assess_pre_issue_v2(
+                context(),
+                &v2_context(false, None, Some(&"t".repeat(65))),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(tls.score, 100, "an over-bound TLS tag is absent-neutral");
     }
 
     #[test]

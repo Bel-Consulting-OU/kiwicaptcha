@@ -3,7 +3,7 @@
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
 --   max keys touched:     10 (KEYS[1..10])
---   max Redis calls:      22 (1 TIME + 9 HMGET + 6 HSET + 4 EXPIRE +
+--   max Redis calls:      21 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
 --                           1 GET + 1 SET — every call is fixed-cost;
 --                           no KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections)
@@ -339,7 +339,12 @@ end
 
 -- ── Global: rolling (no expiry). The global hash's `scope` field carries
 -- the CURRENT LEVEL; apply_event clobbers it with the event scope, so the
--- level is captured BEFORE the event and restored after the ratchet. ──
+-- level is captured BEFORE the event and restored after the ratchet. The
+-- state is saved ONCE, after the ratchet — the event application only
+-- mutates the in-memory table `g`; the single unconditional save below
+-- persists the final level, cooldown and channels in one HSET (a save
+-- inside the non-duplicate branch here would be a strict subset of it:
+-- the same fields one HSET earlier, doubled for no effect).
 local g = read_state(KEYS[9], now)
 local prev_level = g.scope
 if not is_duplicate then
@@ -350,7 +355,6 @@ if not is_duplicate then
         -- source/session/principal reputation.
         g.bad = g.bad + 3000
     end
-    save(KEYS[9], g, 0)
 end
 
 -- ── Global pressure level with hysteresis (normalized thresholds). ──

@@ -89,6 +89,13 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 pub struct RedisRiskStateStore {
     client: redis_crate::Client,
     namespace: String,
+    /// The pre-built hash-tag prefix `{kiwi:<ns>}` shared by every key the
+    /// store touches: computed once at construction, so the per-assessment
+    /// key construction prefixes it instead of re-interpolating the
+    /// namespace, and the cluster-safety check compares the prefix (a
+    /// shared prefix implies a shared cluster slot) instead of recomputing
+    /// CRC-16 over each key's tag.
+    key_tag: String,
     state_ttl_secs: u64,
     dedupe_ttl_secs: u64,
     hysteresis_ms: u64,
@@ -226,8 +233,13 @@ impl RedisRiskStateStore {
     /// would be malformed), mirroring the PHP constructor's
     /// `InvalidArgumentException`.
     pub fn new(client: redis_crate::Client, namespace: &str) -> RedisRiskStateStore {
+        assert!(
+            !namespace.is_empty() && !namespace.contains(['{', '}']),
+            "Risk namespace must be non-empty and free of braces"
+        );
         RedisRiskStateStore {
             client,
+            key_tag: format!("{{kiwi:{namespace}}}"),
             namespace: namespace.to_string(),
             state_ttl_secs: 1800,
             dedupe_ttl_secs: 60,
@@ -385,54 +397,136 @@ impl RedisRiskStateStore {
         ]
     }
 
-    /// Applies the observation and returns the full script reply
-    /// (vector + global level + cooldown deadline + dedupe verdict).
-    pub fn observe_full(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
-        let now_ms = o.now_ms;
-
-        let keys = Self::keys_for(
-            &self.namespace,
-            o.source_epoch,
+    /// Validates the observation's key material at the store boundary —
+    /// the mirror of the PHP `RiskObservation` constructor's rejection
+    /// conditions: the six epoch-scoped source/subnet pseudonyms are
+    /// 32-char lowercase hex, the event_id is 32- or 64-char lowercase
+    /// hex (the canonical fresh/HMAC ids the engines produce), and the
+    /// network risk stays within the 0..1000 contract band. Malformed
+    /// input fails closed before any Redis call.
+    fn validate_observation(o: &RiskObservation) -> Result<(), RiskStoreError> {
+        for id in [
             &o.source_id_prev,
             &o.source_id,
             &o.source_id_next,
-            o.subnet_epoch,
             &o.subnet_id_prev,
             &o.subnet_id,
             &o.subnet_id_next,
-            o.session_id.as_ref().map(|v| v.as_slice()),
-            o.principal_id.as_ref().map(|v| v.as_slice()),
-            &o.event_id,
-        );
-        Self::assert_same_slot(&keys)?;
+        ] {
+            if !is_lower_hex(id, 32) {
+                return Err(RiskStoreError::ScriptError(
+                    "source/subnet pseudonyms must be 16-byte hex".to_string(),
+                ));
+            }
+        }
+        if !(is_lower_hex(&o.event_id, 32) || is_lower_hex(&o.event_id, 64)) {
+            return Err(RiskStoreError::ScriptError(
+                "event_id must be 16 random bytes in hex or a normalized 32-byte sha256 in hex"
+                    .to_string(),
+            ));
+        }
+        if o.network_risk > 1000 {
+            return Err(RiskStoreError::ScriptError(
+                "network_risk must be within 0..1000".to_string(),
+            ));
+        }
+        Ok(())
+    }
 
-        // The full 22-value argv contract, in order.
-        let mut args: Vec<String> = Vec::with_capacity(22);
-        args.push(o.event.as_u8().to_string());
-        args.push(o.scope.to_string());
-        args.push(now_ms.to_string());
-        args.push(o.event_id.clone());
-        args.push(self.dedupe_ttl_secs.to_string());
-        args.push(self.state_ttl_secs.to_string());
-        args.push(self.hysteresis_ms.to_string());
-        args.extend(self.saturations.iter().map(|s| s.to_string()));
-        args.push((if o.session_id.is_some() { "1" } else { "0" }).to_string());
-        args.push((if o.principal_id.is_some() { "1" } else { "0" }).to_string());
-        args.push(self.session_ttl_secs.to_string());
-        args.push(self.principal_ttl_secs.to_string());
+    /// Cheap per-assessment cluster-safety check: every key must carry the
+    /// store's hash-tag prefix (a shared prefix implies a shared cluster
+    /// slot — the tag's slot is fixed at construction, so the per-key
+    /// CRC-16 recomputation is unnecessary).
+    fn check_key_tag(&self, keys: &[String]) -> Result<(), RiskStoreError> {
+        for key in keys {
+            if !key.starts_with(&self.key_tag) {
+                return Err(RiskStoreError::ScriptError(format!(
+                    "key {key} does not carry the {{kiwi:{}}} hash tag",
+                    self.namespace
+                )));
+            }
+        }
+        Ok(())
+    }
 
-        // The script handle is borrowed through the Arc (no per-assessment
-        // source clone); the invocation is configured with this call's keys
-        // and argv, then run on the next pool slot. A failed invocation
-        // evicts the slot (see ConnectionPool::with_connection).
+    /// The ten risk-v1 observation keys for `o`, in the Lua keys order,
+    /// built on the cached hash-tag prefix.
+    fn observation_keys(&self, o: &RiskObservation) -> Vec<String> {
+        let tag = &self.key_tag;
+        let session_id = o
+            .session_id
+            .map(hex::encode)
+            .unwrap_or_else(|| "0".repeat(32));
+        let principal_id = o
+            .principal_id
+            .map(hex::encode)
+            .unwrap_or_else(|| "0".repeat(32));
+        vec![
+            format!("{}:risk:src:{}:{}", tag, o.source_epoch, o.source_id),
+            format!(
+                "{}:risk:src:{}:{}",
+                tag,
+                o.source_epoch - 1,
+                o.source_id_prev
+            ),
+            format!(
+                "{}:risk:src:{}:{}",
+                tag,
+                o.source_epoch + 1,
+                o.source_id_next
+            ),
+            format!("{}:risk:net:{}:{}", tag, o.subnet_epoch, o.subnet_id),
+            format!(
+                "{}:risk:net:{}:{}",
+                tag,
+                o.subnet_epoch - 1,
+                o.subnet_id_prev
+            ),
+            format!(
+                "{}:risk:net:{}:{}",
+                tag,
+                o.subnet_epoch + 1,
+                o.subnet_id_next
+            ),
+            format!("{tag}:risk:session:{session_id}"),
+            format!("{tag}:risk:principal:{principal_id}"),
+            format!("{tag}:risk:global"),
+            format!("{tag}:risk:dedupe:{}", o.event_id),
+        ]
+    }
+
+    /// Applies the observation and returns the full script reply
+    /// (vector + global level + cooldown deadline + dedupe verdict).
+    pub fn observe_full(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+        Self::validate_observation(o)?;
+        let keys = self.observation_keys(o);
+        self.check_key_tag(&keys)?;
+
+        // The full 22-value argv contract, in order. Integers are pushed
+        // typed (the redis crate serializes them as their decimal strings,
+        // byte-identical to the previous per-arg `to_string()` while
+        // avoiding the per-assessment argv `String` churn).
         let mut invocation = self.script.prepare_invoke();
         for key in &keys {
             invocation.key(key.as_str());
         }
-        for arg in &args {
-            invocation.arg(arg.as_str());
+        invocation.arg(o.event.as_u8());
+        invocation.arg(o.scope);
+        invocation.arg(o.now_ms);
+        invocation.arg(o.event_id.as_str());
+        invocation.arg(self.dedupe_ttl_secs);
+        invocation.arg(self.state_ttl_secs);
+        invocation.arg(self.hysteresis_ms);
+        for s in self.saturations {
+            invocation.arg(s);
         }
+        invocation.arg(if o.session_id.is_some() { 1u8 } else { 0u8 });
+        invocation.arg(if o.principal_id.is_some() { 1u8 } else { 0u8 });
+        invocation.arg(self.session_ttl_secs);
+        invocation.arg(self.principal_ttl_secs);
 
+        // A failed invocation evicts the pool slot (see
+        // ConnectionPool::with_connection).
         let reply: Vec<i64> = self
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
@@ -444,8 +538,11 @@ impl RedisRiskStateStore {
             )));
         }
 
-        let global_level = reply[13] as u8;
-        let cooldown_until_ms = reply[14] as u64;
+        // Clamped slot decode: the script guarantees the bands, a tampered
+        // or shifted reply must never widen them (a raw i64 -> u16 cast
+        // would wrap).
+        let global_level = clamp_level(reply[13]);
+        let cooldown_until_ms = clamp_cooldown(reply[14]);
         let is_duplicate = reply[15] != 0;
         self.last_global_level
             .store(global_level, Ordering::Relaxed);
@@ -454,19 +551,19 @@ impl RedisRiskStateStore {
 
         Ok(Observed {
             vector: SignalVector {
-                source_fast: reply[0] as u16,
-                source_slow: reply[1] as u16,
-                subnet_fast: reply[2] as u16,
-                issue_debt: reply[3] as u16,
-                bad_proof: reply[4] as u16,
-                malformed: reply[5] as u16,
-                replay: reply[6] as u16,
-                action_failure: reply[7] as u16,
-                scope_switch: reply[8] as u16,
-                global_pressure: reply[9] as u16,
+                source_fast: clamp_signal(reply[0]),
+                source_slow: clamp_signal(reply[1]),
+                subnet_fast: clamp_signal(reply[2]),
+                issue_debt: clamp_signal(reply[3]),
+                bad_proof: clamp_signal(reply[4]),
+                malformed: clamp_signal(reply[5]),
+                replay: clamp_signal(reply[6]),
+                action_failure: clamp_signal(reply[7]),
+                scope_switch: clamp_signal(reply[8]),
+                global_pressure: clamp_signal(reply[9]),
                 network_risk: o.network_risk,
-                trust_credit: reply[11] as u16,
-                principal_credit: reply[12] as u16,
+                trust_credit: clamp_signal(reply[11]),
+                principal_credit: clamp_signal(reply[12]),
             },
             global_level,
             cooldown_until_ms,
@@ -503,111 +600,86 @@ impl RedisRiskStateStore {
         tls_tag: Option<&str>,
         registration: Option<&OutcomeRegistration>,
     ) -> Result<AssessV2Reply, RiskStoreError> {
-        let now_ms = o.now_ms;
+        Self::validate_observation(o)?;
 
-        let mut keys = Self::keys_for(
-            &self.namespace,
-            o.source_epoch,
-            &o.source_id_prev,
-            &o.source_id,
-            &o.source_id_next,
-            o.subnet_epoch,
-            &o.subnet_id_prev,
-            &o.subnet_id,
-            &o.subnet_id_next,
-            o.session_id.as_ref().map(|v| v.as_slice()),
-            o.principal_id.as_ref().map(|v| v.as_slice()),
-            &o.event_id,
-        );
+        let mut keys = self.observation_keys(o);
         let session_hex = o
             .session_id
             .map(hex::encode)
             .unwrap_or_else(|| "0".repeat(32));
-        keys.push(format!(
-            "{{kiwi:{}}}:risk:ctx:{session_hex}",
-            self.namespace
-        ));
-        keys.push(format!(
-            "{{kiwi:{}}}:risk:tls:{session_hex}",
-            self.namespace
-        ));
+        keys.push(format!("{}:risk:ctx:{session_hex}", self.key_tag));
+        keys.push(format!("{}:risk:tls:{session_hex}", self.key_tag));
         if let Some(reg) = registration {
             keys.push(self.outcome_ledger_key(&reg.decision_id));
         }
-        Self::assert_same_slot(&keys)?;
+        self.check_key_tag(&keys)?;
 
         // The full argv contract: the 22 v1 values + the two presented
-        // tags + the 23 registration values (ARGV[25..47]).
-        let mut args: Vec<String> = Vec::with_capacity(47);
-        args.push(o.event.as_u8().to_string());
-        args.push(o.scope.to_string());
-        args.push(now_ms.to_string());
-        args.push(o.event_id.clone());
-        args.push(self.dedupe_ttl_secs.to_string());
-        args.push(self.state_ttl_secs.to_string());
-        args.push(self.hysteresis_ms.to_string());
-        args.extend(self.saturations.iter().map(|s| s.to_string()));
-        args.push((if o.session_id.is_some() { "1" } else { "0" }).to_string());
-        args.push((if o.principal_id.is_some() { "1" } else { "0" }).to_string());
-        args.push(self.session_ttl_secs.to_string());
-        args.push(self.principal_ttl_secs.to_string());
-        args.push(context_tag.unwrap_or("").to_string());
-        args.push(tls_tag.unwrap_or("").to_string());
-        match registration {
-            Some(reg) => {
-                args.push(reg.decision_id.clone());
-                args.push(reg.decision_hour.to_string());
-                args.push(self.outcome_ttl_secs.to_string());
-                args.push(o.network_risk.to_string());
-                args.push(
-                    (if reg.global_pressure_enabled {
-                        "1"
-                    } else {
-                        "0"
-                    })
-                    .to_string(),
-                );
-                args.push(reg.base_risk.to_string());
-                args.push((if reg.honeypot_hit { "1" } else { "0" }).to_string());
-                let w = &reg.v1_weights;
-                args.extend(
-                    [
-                        w.source_fast,
-                        w.source_slow,
-                        w.subnet_fast,
-                        w.issue_debt,
-                        w.bad_proof,
-                        w.malformed,
-                        w.replay,
-                        w.action_failure,
-                        w.scope_switch,
-                        w.global_pressure,
-                        w.network_risk,
-                        w.trust_credit,
-                        w.principal_credit,
-                    ]
-                    .iter()
-                    .map(u16::to_string),
-                );
-                let w2 = &reg.v2_weights;
-                args.extend(
-                    [w2.honeypot, w2.session_inconsistency, w2.tls]
-                        .iter()
-                        .map(u16::to_string),
-                );
-            }
-            None => {
-                args.push(String::new());
-                args.extend((0..22).map(|_| "0".to_string()));
-            }
-        }
-
+        // tags + the 23 registration values (ARGV[25..47]). Integers are
+        // pushed typed (decimal serialization byte-identical to the
+        // previous per-arg `to_string()`, without the argv `String` churn).
         let mut invocation = self.assess_v2_script.prepare_invoke();
         for key in &keys {
             invocation.key(key.as_str());
         }
-        for arg in &args {
-            invocation.arg(arg.as_str());
+        invocation.arg(o.event.as_u8());
+        invocation.arg(o.scope);
+        invocation.arg(o.now_ms);
+        invocation.arg(o.event_id.as_str());
+        invocation.arg(self.dedupe_ttl_secs);
+        invocation.arg(self.state_ttl_secs);
+        invocation.arg(self.hysteresis_ms);
+        for s in self.saturations {
+            invocation.arg(s);
+        }
+        invocation.arg(if o.session_id.is_some() { 1u8 } else { 0u8 });
+        invocation.arg(if o.principal_id.is_some() { 1u8 } else { 0u8 });
+        invocation.arg(self.session_ttl_secs);
+        invocation.arg(self.principal_ttl_secs);
+        invocation.arg(context_tag.unwrap_or(""));
+        invocation.arg(tls_tag.unwrap_or(""));
+        match registration {
+            Some(reg) => {
+                invocation.arg(reg.decision_id.as_str());
+                invocation.arg(reg.decision_hour);
+                invocation.arg(self.outcome_ttl_secs);
+                invocation.arg(o.network_risk);
+                invocation.arg(if reg.global_pressure_enabled {
+                    1u8
+                } else {
+                    0u8
+                });
+                invocation.arg(reg.base_risk);
+                invocation.arg(if reg.honeypot_hit { 1u8 } else { 0u8 });
+                let w = &reg.v1_weights;
+                for weight in [
+                    w.source_fast,
+                    w.source_slow,
+                    w.subnet_fast,
+                    w.issue_debt,
+                    w.bad_proof,
+                    w.malformed,
+                    w.replay,
+                    w.action_failure,
+                    w.scope_switch,
+                    w.global_pressure,
+                    w.network_risk,
+                    w.trust_credit,
+                    w.principal_credit,
+                ] {
+                    invocation.arg(weight);
+                }
+                let w2 = &reg.v2_weights;
+                for weight in [w2.honeypot, w2.session_inconsistency, w2.tls] {
+                    invocation.arg(weight);
+                }
+            }
+            None => {
+                invocation.arg("");
+                for _ in 0..22 {
+                    invocation.arg(0u16);
+                }
+            }
         }
 
         let reply: Vec<redis_crate::Value> = self
@@ -639,8 +711,11 @@ impl RedisRiskStateStore {
             }
         };
 
-        let global_level = value_i64(&reply[13]) as u8;
-        let cooldown_until_ms = value_i64(&reply[14]) as u64;
+        // Clamped slot decode: the script guarantees the bands, a tampered
+        // or shifted reply must never widen them (a raw i64 -> u16 cast
+        // would wrap).
+        let global_level = clamp_level(value_i64(&reply[13]));
+        let cooldown_until_ms = clamp_cooldown(value_i64(&reply[14]));
         let is_duplicate = value_i64(&reply[15]) != 0;
         self.last_global_level
             .store(global_level, Ordering::Relaxed);
@@ -654,19 +729,19 @@ impl RedisRiskStateStore {
         Ok(AssessV2Reply {
             observed: Observed {
                 vector: SignalVector {
-                    source_fast: value_i64(&reply[0]) as u16,
-                    source_slow: value_i64(&reply[1]) as u16,
-                    subnet_fast: value_i64(&reply[2]) as u16,
-                    issue_debt: value_i64(&reply[3]) as u16,
-                    bad_proof: value_i64(&reply[4]) as u16,
-                    malformed: value_i64(&reply[5]) as u16,
-                    replay: value_i64(&reply[6]) as u16,
-                    action_failure: value_i64(&reply[7]) as u16,
-                    scope_switch: value_i64(&reply[8]) as u16,
-                    global_pressure: value_i64(&reply[9]) as u16,
+                    source_fast: clamp_signal(value_i64(&reply[0])),
+                    source_slow: clamp_signal(value_i64(&reply[1])),
+                    subnet_fast: clamp_signal(value_i64(&reply[2])),
+                    issue_debt: clamp_signal(value_i64(&reply[3])),
+                    bad_proof: clamp_signal(value_i64(&reply[4])),
+                    malformed: clamp_signal(value_i64(&reply[5])),
+                    replay: clamp_signal(value_i64(&reply[6])),
+                    action_failure: clamp_signal(value_i64(&reply[7])),
+                    scope_switch: clamp_signal(value_i64(&reply[8])),
+                    global_pressure: clamp_signal(value_i64(&reply[9])),
                     network_risk: o.network_risk,
-                    trust_credit: value_i64(&reply[11]) as u16,
-                    principal_credit: value_i64(&reply[12]) as u16,
+                    trust_credit: clamp_signal(value_i64(&reply[11])),
+                    principal_credit: clamp_signal(value_i64(&reply[12])),
                 },
                 global_level,
                 cooldown_until_ms,
@@ -732,6 +807,31 @@ impl RedisRiskStateStore {
         }
         Ok(())
     }
+}
+
+/// True when `s` is exactly `len` lowercase hex characters (`[0-9a-f]`,
+/// the PHP `^[0-9a-f]{len}$` pseudonym/id contract).
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Clamps a raw i64 signal slot to the 0..1000 band (the script guarantees
+/// the band; a tampered or shifted reply must never widen it — the raw
+/// `as u16` cast would wrap).
+fn clamp_signal(v: i64) -> u16 {
+    v.clamp(0, 1000) as u16
+}
+
+/// Clamps the raw global-level slot to 0..4.
+fn clamp_level(v: i64) -> u8 {
+    v.clamp(0, 4) as u8
+}
+
+/// Clamps the raw cooldown slot to a non-negative epoch-ms value.
+fn clamp_cooldown(v: i64) -> u64 {
+    v.max(0) as u64
 }
 
 fn map_redis_error(e: redis_crate::RedisError) -> RiskStoreError {
@@ -968,12 +1068,16 @@ mod tests {
 
     fn epoch_ids(source: &str) -> (i64, String, String, String) {
         let epoch = ((T0 / 1000) / 900) as i64;
-        (
-            epoch,
-            format!("{source}00"),
-            format!("{source}11"),
-            format!("{source}22"),
-        )
+        // 32-char lowercase-hex pseudonyms per epoch (the store boundary
+        // validates the exact contract shape).
+        let id = |suffix: &str| {
+            let mut base = source.to_string();
+            while base.len() < 30 {
+                base.push('0');
+            }
+            format!("{base}{suffix}")
+        };
+        (epoch, id("00"), id("11"), id("22"))
     }
 
     fn observation(event_id: &str, scope: u32, now_ms: u64, network_risk: u16) -> RiskObservation {
@@ -1097,6 +1201,222 @@ mod tests {
             "the next acquire on the evicted slot must have reconnected"
         );
         assert_eq!(store.live_pool_connections(), 0);
+    }
+
+    // ── Hermetic input-validation tests (no Redis URL needed) ──
+
+    /// A client pointing at a guaranteed-refused port (a listener is bound
+    /// and dropped): the store constructor is lazy, and any real command
+    /// fails fast with a connection error.
+    fn dead_port_client() -> redis_crate::Client {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        redis_crate::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap()
+    }
+
+    #[test]
+    #[should_panic(expected = "Risk namespace must be non-empty and free of braces")]
+    fn empty_namespace_is_rejected_at_construction() {
+        let _ = RedisRiskStateStore::new(dead_port_client(), "");
+    }
+
+    #[test]
+    #[should_panic(expected = "Risk namespace must be non-empty and free of braces")]
+    fn open_brace_namespace_is_rejected_at_construction() {
+        let _ = RedisRiskStateStore::new(dead_port_client(), "ns{");
+    }
+
+    #[test]
+    #[should_panic(expected = "Risk namespace must be non-empty and free of braces")]
+    fn close_brace_namespace_is_rejected_at_construction() {
+        let _ = RedisRiskStateStore::new(dead_port_client(), "ns}");
+    }
+
+    #[test]
+    fn malformed_observations_are_rejected_at_the_store_boundary() {
+        let store = RedisRiskStateStore::new(dead_port_client(), "validate");
+        let expect_reject = |o: &RiskObservation| {
+            let err = store.observe(o).unwrap_err();
+            assert!(
+                matches!(err, RiskStoreError::ScriptError(_)),
+                "malformed observation must fail closed with the script error (got {err:?})"
+            );
+        };
+
+        // Short pseudonym.
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.source_id = "aa00".to_string();
+        expect_reject(&o);
+        // Uppercase hex is outside the contract.
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.subnet_id_next = "A".repeat(32);
+        expect_reject(&o);
+        // Non-hex characters.
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.source_id_prev = format!("z{}", "0".repeat(31));
+        expect_reject(&o);
+        // Event id: empty, wrong length, non-hex — the 32-or-64 lowercase
+        // hex contract (PHP mirrors these exactly).
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.event_id = String::new();
+        expect_reject(&o);
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.event_id = "0".repeat(31);
+        expect_reject(&o);
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.event_id = format!("g{}", "0".repeat(63));
+        expect_reject(&o);
+        // Network risk outside the 0..1000 band.
+        let o = observation(&event_id(1), 0, T0, 1001);
+        expect_reject(&o);
+
+        // The consolidated surface validates identically.
+        let mut o = observation(&event_id(1), 0, T0, 0);
+        o.source_id = "aa00".to_string();
+        assert!(matches!(
+            store.assess_v2_full(&o, None, None, None),
+            Err(RiskStoreError::ScriptError(_))
+        ));
+
+        // A valid observation passes validation and reaches the backend
+        // (the dead port fails with a connection error, NOT a validation
+        // error).
+        let o = observation(&event_id(1), 0, T0, 0);
+        assert!(matches!(
+            store.observe(&o),
+            Err(RiskStoreError::BackendUnavailable(_))
+        ));
+    }
+
+    /// A miniature fake Redis endpoint that answers every command with one
+    /// fixed RESP payload: the tampered-reply harness. The script reply's
+    /// integer slots are out of band (negative / >1000 / level 9 / negative
+    /// cooldown) — the store must clamp every slot to the contract bands
+    /// instead of wrapping the raw i64 casts.
+    #[test]
+    fn reply_slots_are_clamped_to_the_contract_bands() {
+        // Serves the fixed RESP payload once per COMPLETE command: the
+        // client pipelines its connection-setup commands ahead of the
+        // script call, so the frame count (not the byte count) decides
+        // the reply count. The listener lives inside the spawned thread,
+        // so the port stays bound for the test's duration.
+        let serve = |payload: String| -> u16 {
+            // The bytes consumed by the first complete RESP array in
+            // `acc` (a `*N` header followed by N complete bulk strings),
+            // or 0 while the frame is still partial.
+            fn complete_resp_array(acc: &[u8]) -> usize {
+                if acc.first() != Some(&b'*') {
+                    return 0;
+                }
+                let Some(header_end) = acc.windows(2).position(|w| w == b"\r\n") else {
+                    return 0;
+                };
+                let Some(count) = std::str::from_utf8(&acc[1..header_end])
+                    .ok()
+                    .and_then(|h| h.trim().parse::<usize>().ok())
+                else {
+                    return acc.len();
+                };
+                let mut pos = header_end + 2;
+                for _ in 0..count {
+                    // A frame that stops short of its next bulk header
+                    // is incomplete until more bytes arrive.
+                    if acc.get(pos) != Some(&b'$') {
+                        return 0;
+                    }
+                    let Some(len_end) = acc[pos..].windows(2).position(|w| w == b"\r\n") else {
+                        return 0;
+                    };
+                    let Some(len) = std::str::from_utf8(&acc[pos + 1..pos + len_end])
+                        .ok()
+                        .and_then(|l| l.trim().parse::<usize>().ok())
+                    else {
+                        return acc.len();
+                    };
+                    pos += len_end + 2 + len + 2;
+                    if pos > acc.len() {
+                        return 0;
+                    }
+                }
+                pos
+            }
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                use std::time::Duration;
+                // One handler thread per connection: a client that
+                // reconnects (the pool evicts and re-acquires after a
+                // failed reply) never waits behind a prior connection's
+                // reply cycle.
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let payload = payload.clone();
+                    std::thread::spawn(move || {
+                        // Every read is bounded so the reply loop always
+                        // re-checks its deadline instead of blocking past
+                        // it on a quiet client. One payload per complete
+                        // RESP frame keeps the pipelined setup commands
+                        // and the script call each paired with a reply.
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
+                        let mut buf = [0u8; 4096];
+                        let mut acc: Vec<u8> = Vec::new();
+                        let idle = std::time::Instant::now() + Duration::from_millis(2_000);
+                        while std::time::Instant::now() < idle {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => acc.extend_from_slice(&buf[..n]),
+                                Err(_) => continue,
+                            }
+                            while let consumed_at @ 1.. = complete_resp_array(&acc) {
+                                acc.drain(..consumed_at);
+                                let _ = stream.write_all(payload.as_bytes());
+                                let _ = stream.flush();
+                            }
+                        }
+                    });
+                }
+            });
+            port
+        };
+
+        // observe_full: the 16-slot tampered reply.
+        let reply = b"*16\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n".to_vec();
+        let port = serve(String::from_utf8(reply).unwrap());
+        let client = redis_crate::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap();
+        let store =
+            RedisRiskStateStore::with_pool_size(client, "clamp", 1).with_io_timeouts(2_000, 2_000);
+        let observed = store
+            .observe(&observation(&event_id(1), 0, T0, 0))
+            .expect("the tampered reply must still parse");
+        assert_eq!(observed.vector.source_fast, 1000, "70000 clamps to 1000");
+        assert_eq!(observed.vector.source_slow, 0, "-5 clamps to 0");
+        assert_eq!(observed.vector.subnet_fast, 1000);
+        assert_eq!(observed.vector.trust_credit, 1000, "65541 clamps to 1000");
+        assert_eq!(observed.global_level, 4, "level 9 clamps to 4");
+        assert_eq!(observed.cooldown_until_ms, 0, "-7 clamps to 0");
+        assert!(observed.is_duplicate);
+
+        // assess_v2_full: the same clamps in the 19-slot consolidated
+        // reply (slots 16..18 are the tag/registration strings).
+        let reply = b"*19\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n".to_vec();
+        let port2 = serve(String::from_utf8(reply).unwrap());
+        let client = redis_crate::Client::open(format!("redis://127.0.0.1:{port2}/")).unwrap();
+        let store = RedisRiskStateStore::with_pool_size(client, "clampv2", 1)
+            .with_io_timeouts(2_000, 2_000);
+        let reply = store
+            .assess_v2_full(&observation(&event_id(1), 0, T0, 0), None, None, None)
+            .expect("the tampered consolidated reply must still parse");
+        assert_eq!(reply.observed.vector.source_fast, 1000);
+        assert_eq!(reply.observed.vector.source_slow, 0);
+        assert_eq!(reply.observed.vector.trust_credit, 1000);
+        assert_eq!(reply.observed.global_level, 4);
+        assert_eq!(reply.observed.cooldown_until_ms, 0);
+        assert_eq!(reply.existing_context_tag.as_deref(), Some("aa"));
+        assert_eq!(reply.existing_tls_tag, None);
+        assert!(!reply.registration_status);
     }
 
     // ── Redis-backed tests (skipped unless the Redis test URL is set) ──

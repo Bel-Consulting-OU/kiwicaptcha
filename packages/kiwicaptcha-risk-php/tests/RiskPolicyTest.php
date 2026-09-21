@@ -23,7 +23,7 @@ final class RiskPolicyTest extends TestCase
                 2 => ['base_risk' => 150, 'minimum' => 'sha16', 'post_solve_check' => true, 'degraded' => 'sha20'],
                 3 => ['base_risk' => 200, 'minimum' => 'argon32', 'post_solve_check' => true, 'degraded' => 'argon16'],
             ],
-            'global_floors' => [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
         ];
     }
 
@@ -203,6 +203,36 @@ final class RiskPolicyTest extends TestCase
     {
         $config = $this->config();
         $config['scopes'][0] = ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => true, 'degraded' => 'sha20'];
+        $this->expectException(\InvalidArgumentException::class);
+        RiskPolicy::fromConfig($config);
+    }
+
+    public function testGlobalFloorsStrictFailClosedValidation(): void
+    {
+        // Missing global_floors entirely rejects the config (no silent
+        // defaults — Rust parity).
+        $config = $this->config();
+        unset($config['global_floors']);
+        try {
+            RiskPolicy::fromConfig($config);
+            self::fail('a missing global_floors must be rejected');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('global_floors', $e->getMessage());
+        }
+
+        // Short floors (4 entries) reject the config.
+        $config = $this->config();
+        $config['global_floors'] = [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20'];
+        try {
+            RiskPolicy::fromConfig($config);
+            self::fail('a short global_floors must be rejected');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('5 entries', $e->getMessage());
+        }
+
+        // A non-array global_floors rejects the config.
+        $config = $this->config();
+        $config['global_floors'] = 'sha20';
         $this->expectException(\InvalidArgumentException::class);
         RiskPolicy::fromConfig($config);
     }

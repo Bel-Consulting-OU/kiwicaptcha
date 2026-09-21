@@ -444,6 +444,12 @@ impl RedisCalibrationStore {
     pub const CACHE_TTL_S: u64 = 30;
     /// Bounded in-process cache capacity (oldest entries are evicted).
     pub const CACHE_CAP: usize = 1024;
+    /// Connection timeout for establishing the TCP connection (the risk
+    /// state store's fail-fast value).
+    pub const CONNECTION_TIMEOUT_MS: u64 = 5;
+    /// Command (read/write) timeout applied to the socket (the risk state
+    /// store's fail-fast value).
+    pub const COMMAND_TIMEOUT_MS: u64 = 10;
 
     /// Builds a store on a fresh connection (lazy) with the default safety
     /// knobs (min_samples 1000, max_adjustment 150, max_change_per_minute
@@ -486,7 +492,7 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, or if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`.
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`.
     pub fn with_limits(
         client: redis::Client,
         namespace: &str,
@@ -510,7 +516,7 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`,
     /// or if `receipt_ttl_secs < 1`.
     pub fn with_receipt_ttl(
         client: redis::Client,
@@ -550,10 +556,10 @@ impl RedisCalibrationStore {
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}`, if
-    /// `min_samples < 1` / `max_adjustment < 0` / `max_change_per_minute < 0`,
+    /// `min_samples < 1` / `max_adjustment < 1` / `max_change_per_minute < 1`,
     /// if `receipt_ttl_secs < 1` or `outcome_ttl_secs < 1`, if
     /// `minimum_resolution_ratio` is outside 0..=1, or if either cost is
-    /// not > 0.
+    /// outside 0.1..=10.0.
     #[allow(clippy::too_many_arguments)]
     pub fn with_options(
         client: redis::Client,
@@ -574,10 +580,10 @@ impl RedisCalibrationStore {
             "Calibration namespace must be non-empty and free of braces"
         );
         assert!(min_samples >= 1, "min_samples must be >= 1");
-        assert!(max_adjustment >= 0, "max_adjustment must be >= 0");
+        assert!(max_adjustment >= 1, "max_adjustment must be >= 1");
         assert!(
-            max_change_per_minute >= 0,
-            "max_change_per_minute must be >= 0"
+            max_change_per_minute >= 1,
+            "max_change_per_minute must be >= 1"
         );
         assert!(receipt_ttl_secs >= 1, "receipt_ttl_secs must be >= 1");
         assert!(outcome_ttl_secs >= 1, "outcome_ttl_secs must be >= 1");
@@ -585,8 +591,14 @@ impl RedisCalibrationStore {
             (0.0..=1.0).contains(&minimum_resolution_ratio),
             "minimum_resolution_ratio must be within 0..=1"
         );
-        assert!(false_positive_cost > 0.0, "false_positive_cost must be > 0");
-        assert!(false_negative_cost > 0.0, "false_negative_cost must be > 0");
+        assert!(
+            (0.1..=10.0).contains(&false_positive_cost),
+            "false_positive_cost must be within 0.1..=10.0"
+        );
+        assert!(
+            (0.1..=10.0).contains(&false_negative_cost),
+            "false_negative_cost must be within 0.1..=10.0"
+        );
         RedisCalibrationStore {
             client,
             namespace: namespace.to_string(),
@@ -654,24 +666,23 @@ impl RedisCalibrationStore {
         } else {
             ("abuse_count", "abuse_score_sum")
         };
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
+        self.with_connection(|conn| {
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(count_field)
+                .arg(1.0)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(sum_field)
+                .arg(score as f64)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
+                .map_err(backend)?;
+            Ok(())
         })?;
-        redis::cmd("HINCRBYFLOAT")
-            .arg(&key)
-            .arg(count_field)
-            .arg(1.0)
-            .query::<()>(conn)
-            .map_err(backend)?;
-        redis::cmd("HINCRBYFLOAT")
-            .arg(&key)
-            .arg(sum_field)
-            .arg(score as f64)
-            .query::<()>(conn)
-            .map_err(backend)?;
-        conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
-            .map_err(backend)?;
         // A fresh outcome invalidates the scope's cached bias so the next
         // assessment re-aggregates.
         self.cache
@@ -721,17 +732,47 @@ impl RedisCalibrationStore {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
-    /// Lazy single connection.
+    /// Lazy single connection with the fail-fast timeouts of the risk
+    /// state store (connection 5 ms, command read/write 10 ms): the
+    /// calibration read runs synchronously in the assessment hot path, so
+    /// a wedged socket must never wedge every assessment thread.
     fn connection(&self) -> Result<MutexGuard<'_, Option<redis::Connection>>, CalibrationError> {
         let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_none() {
             let conn = self
                 .client
-                .get_connection()
+                .get_connection_with_timeout(Duration::from_millis(Self::CONNECTION_TIMEOUT_MS))
+                .map_err(|e| CalibrationError::Backend(e.to_string()))?;
+            conn.set_read_timeout(Some(Duration::from_millis(Self::COMMAND_TIMEOUT_MS)))
+                .map_err(|e| CalibrationError::Backend(e.to_string()))?;
+            conn.set_write_timeout(Some(Duration::from_millis(Self::COMMAND_TIMEOUT_MS)))
                 .map_err(|e| CalibrationError::Backend(e.to_string()))?;
             *guard = Some(conn);
         }
         Ok(guard)
+    }
+
+    /// Runs one unit of calibration work on the single connection. ANY
+    /// error evicts the connection (dropped from the slot) before the
+    /// error propagates, so the next call reconnects: a timed-out or
+    /// failed reply may still be in flight on the socket, and reusing the
+    /// connection could desync the Redis reply stream (the same eviction
+    /// policy the risk state store's pool applies).
+    fn with_connection<T>(
+        &self,
+        f: impl FnOnce(&mut redis::Connection) -> Result<T, CalibrationError>,
+    ) -> Result<T, CalibrationError> {
+        let mut guard = self.connection()?;
+        let result = match guard.as_mut() {
+            Some(conn) => f(conn),
+            None => Err(CalibrationError::Backend(
+                "calibration connection vanished".to_string(),
+            )),
+        };
+        if result.is_err() {
+            *guard = None;
+        }
+        result
     }
 }
 
@@ -762,11 +803,6 @@ impl CalibrationStore for RedisCalibrationStore {
         {
             return cached;
         }
-        let mut guard = match self.connection() {
-            Ok(guard) => guard,
-            Err(_) => return 0, // fail-open: never break issuance
-        };
-        let conn = guard.as_mut().expect("connection set by connection()");
 
         // Hot path: one canonical script invocation. Keys are the 24 hourly
         // buckets + the rate-limit state (the sample counters live
@@ -796,9 +832,9 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.mode.as_int().to_string());
         invoke.arg(self.false_positive_cost.to_string());
         invoke.arg(self.false_negative_cost.to_string());
-        let bias: i64 = match invoke.invoke(conn) {
+        let bias: i64 = match self.with_connection(|conn| invoke.invoke(conn).map_err(backend)) {
             Ok(bias) => bias,
-            Err(_) => return 0,
+            Err(_) => return 0, // fail-open: never break issuance
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
@@ -823,10 +859,6 @@ impl CalibrationStore for RedisCalibrationStore {
         let receipt_key = self.receipt_key(decision_id);
         let bucket_key = self.bucket_key(scope, decision_hour);
         let ledger_key = self.outcome_ledger_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // ONE canonical script invocation (register_decision.lua): SET NX EX
         // the receipt + create the pending outcome ledger + hincrby the
@@ -858,7 +890,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(decision_hour.to_string());
         invoke.arg(score.clamp(0, 1000).to_string());
         invoke.arg(weight.to_string());
-        let registered: i64 = invoke.invoke(conn).map_err(backend)?;
+        let registered: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         Ok(registered != 0)
     }
 
@@ -875,10 +907,6 @@ impl CalibrationStore for RedisCalibrationStore {
             return Err(CalibrationError::WeightRequired(decision_id.to_string()));
         }
         let receipt_key = self.receipt_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // Key discovery: the decision-time bucket and the outcome ledger
         // keys need the receipt's scope + decision_hour, which only the
@@ -887,10 +915,12 @@ impl CalibrationStore for RedisCalibrationStore {
         // concurrent consumption simply yields status 0 (the outcome is
         // recorded exactly once) and a receipt deleted in between is a
         // no-op, never a double record.
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&receipt_key)
-            .query(conn)
-            .map_err(backend)?;
+        let raw: Option<String> = self.with_connection(|conn| {
+            redis::cmd("GET")
+                .arg(&receipt_key)
+                .query(conn)
+                .map_err(backend)
+        })?;
         let Some(raw) = raw else {
             return Ok(0);
         };
@@ -932,7 +962,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.outcome_ttl_secs.to_string());
         invoke.arg(scope.to_string());
         invoke.arg(decision_hour.to_string());
-        let status: i64 = invoke.invoke(conn).map_err(backend)?;
+        let status: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         if status == 1 || status == 2 {
             // A first confirmation (status 1 or 2) invalidates the scope's
             // cached bias so the next assessment re-aggregates — status 2
@@ -955,18 +985,16 @@ impl CalibrationStore for RedisCalibrationStore {
         weight: Option<f64>,
     ) -> Result<bool, CalibrationError> {
         let ledger_key = self.outcome_ledger_key(decision_id);
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
 
         // Key discovery: the decision-time bucket needs the ledger's scope
         // + hour. The pre-read GET is non-destructive — correction.lua
         // re-checks the ledger under the same key.
-        let raw: Option<String> = redis::cmd("GET")
-            .arg(&ledger_key)
-            .query(conn)
-            .map_err(backend)?;
+        let raw: Option<String> = self.with_connection(|conn| {
+            redis::cmd("GET")
+                .arg(&ledger_key)
+                .query(conn)
+                .map_err(backend)
+        })?;
         let Some(raw) = raw else {
             return Ok(false);
         };
@@ -1002,7 +1030,7 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.outcome_ttl_secs.to_string());
         invoke.arg(scope.to_string());
         invoke.arg(hour.to_string());
-        let applied: i64 = invoke.invoke(conn).map_err(backend)?;
+        let applied: i64 = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         if applied != 0 {
             // A corrected outcome changes the scope's aggregate: drop the
             // cached bias so the next assessment re-aggregates.
@@ -1020,11 +1048,6 @@ impl CalibrationStore for RedisCalibrationStore {
         scope: u32,
         now_ms: i64,
     ) -> Result<SamplingMetrics, CalibrationError> {
-        let mut guard = self.connection()?;
-        let conn = guard.as_mut().ok_or_else(|| {
-            CalibrationError::Backend("calibration connection vanished".to_string())
-        })?;
-
         // ONE canonical script invocation (sampling_metrics.lua): 24
         // hgetall calls summing the scope's sample counters. argv[1] is
         // now_ms (informational).
@@ -1038,7 +1061,7 @@ impl CalibrationStore for RedisCalibrationStore {
             invoke.key(key.as_str());
         }
         invoke.arg(now_ms.to_string());
-        let counts: Vec<i64> = invoke.invoke(conn).map_err(backend)?;
+        let counts: Vec<i64> = self.with_connection(|conn| invoke.invoke(conn).map_err(backend))?;
         let sampled_total = counts.first().copied().unwrap_or(0);
         let sampled_resolved = counts.get(1).copied().unwrap_or(0);
         // The ratio is integer-derived (always finite); the
