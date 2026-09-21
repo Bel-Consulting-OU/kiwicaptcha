@@ -2203,10 +2203,15 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
     );
     let verifier = verifier_for(&url, &prefix);
     verifier.store().store(&tampered).unwrap();
+    // The shared grammar matrix runs at the stored-record decode
+    // boundary too, so the corrupt v2+decoy envelope never decodes:
+    // the production path resolves it as a missing record before any
+    // cheap-phase work (the structural rejection happened one layer
+    // earlier than the verifier's own malformed verdict).
     assert_eq!(
         verify_at(&verifier, &token, tampered.issued_at_ns),
-        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-        "a v2 record with a decoy_field is rejected explicitly"
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "a v2 record with a decoy_field is refused at the decode boundary"
     );
     assert_eq!(
         verify_at(

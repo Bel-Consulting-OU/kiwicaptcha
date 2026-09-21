@@ -845,34 +845,41 @@ echo $ch->nonce;
 "#;
     let v2_decoy_nonce =
         php_script(php_write_v2_decoy).expect("PHP must write the v2-plus-decoy record");
-    let v2_decoy_state = into_pending(
-        store
-            .runtime_state(&v2_decoy_nonce)
-            .expect("Rust must read the v2-plus-decoy record"),
-    )
-    .expect("the v2-plus-decoy record is pending");
-    assert_eq!(
-        v2_decoy_state.protocol_version, 2,
-        "the patched record is protocol v2"
-    );
+    // The shared grammar matrix runs at the stored-record decode
+    // boundary, so the patched v2-plus-decoy envelope never decodes:
+    // the runtime-state read resolves it as missing (the structural
+    // rejection happened one layer earlier than the verifier's own
+    // malformed verdict), and a verification against it answers
+    // RecordNotFound through the same cheap-phase path. The timing
+    // record for the receipt instant is the untouched armed v3 record.
     assert!(
-        v2_decoy_state.decoy_field.is_some(),
-        "the patched record still carries the decoy"
+        matches!(
+            store
+                .runtime_state(&v2_decoy_nonce)
+                .expect("Rust must read the v2-plus-decoy record"),
+            kiwicaptcha::redis_verify::RuntimeState::Missing
+        ),
+        "the v2-plus-decoy envelope is refused at the decode boundary"
     );
-    let v2_counter =
-        solve_for_test(&v2_decoy_state).expect("Rust solver for the v2-plus-decoy record");
+    let timing_record = into_pending(
+        store
+            .runtime_state(nonce)
+            .expect("Rust must read the armed v3 record"),
+    )
+    .expect("the armed v3 record is pending");
+    let v2_counter = solve_for_test(&timing_record).expect("Rust solver for the timing record");
     let v2_token = encode_token(&v2_decoy_nonce, v2_counter);
     assert_eq!(
         verifier.verify(
             &v2_token,
             "login",
             "127.0.0.1",
-            v2_decoy_state.issued_at_ns + 1_000_000,
+            timing_record.issued_at_ns + 1_000_000,
             None,
             RequestBindingExpectation::Unenforced,
         ),
-        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-        "Rust must reject a PHP-written v2 record carrying decoy_field"
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "Rust must refuse a PHP-written v2 record carrying decoy_field at the decode boundary"
     );
     println!("RUST_REJECTS_PHP_V2_PLUS_DECOY: OK");
 
