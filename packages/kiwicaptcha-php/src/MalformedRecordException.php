@@ -112,7 +112,12 @@ final class MalformedRecordException extends \RuntimeException
      * explicitly (the capability becomes inferable from
      * protocol_version, which is the point).
      */
-    public static function decoyOnV2Record(): self
+    public static function invalidProtocolFieldCombination(int $protocolVersion): self
+    {
+        return new self(sprintf('protocol_version %d does not admit this decoy/extension field combination (the protocol grammar matrix rejects the record)', $protocolVersion));
+    }
+
+        public static function decoyOnV2Record(): self
     {
         return new self('record protocol_version 2 must not carry a "decoy_field" (the decoy segment is a protocol v3 canonical extension)');
     }

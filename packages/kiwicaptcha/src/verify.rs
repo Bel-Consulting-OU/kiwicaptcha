@@ -654,24 +654,18 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     if !(1..=crate::challenge::MAX_PROTOCOL_VERSION).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
     }
-    // The protocol-vs-extension grammar is one explicit matrix, the
-    // same table in every core: v1 and v2 carry no decoy and no
-    // execution (the legacy v1 canonical signs neither segment, so a
-    // stored v1 record carrying either extension would hold
-    // unauthenticated semantics), v3 requires the decoy and carries no
-    // execution, v4 requires the execution triplet and may also carry
-    // the decoy (the canonical appends both segments).
-    let decoy_present = record.decoy_field.is_some();
-    let execution_present = record.execution_program.is_some();
-    let grammar_ok = match record.protocol_version {
-        1 | 2 => !decoy_present && !execution_present,
-        3 => decoy_present && !execution_present,
-        4 => execution_present,
-        _ => false,
-    };
-    if !grammar_ok {
+    // The protocol-vs-extension grammar is the one shared table (the
+    // stored-record decoder applies the same matrix at its boundary),
+    // so the verifier and the decoder can never disagree about which
+    // records are structurally valid.
+    if !crate::challenge::protocol_extension_grammar_ok(
+        record.protocol_version,
+        record.decoy_field.is_some(),
+        record.execution_program.is_some(),
+    ) {
         return Err(VerifyError::MalformedRecord);
     }
+    let execution_present = record.execution_program.is_some();
     // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
     // signed commitment is the exact mirror of the stored program.
     // A hand-rolled record that carries a program without the commitment

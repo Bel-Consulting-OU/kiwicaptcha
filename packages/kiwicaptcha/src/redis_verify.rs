@@ -978,6 +978,19 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
         .as_ref()
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // The protocol-extension grammar matrix at the storage boundary,
+    // the same table the verifier's structural validation applies (the
+    // PHP decoder enforces the identical table at its fromArray
+    // boundary): a record whose protocol version does not admit its
+    // decoy/extension combination is undecodable stored state, never a
+    // record that reaches verification to be rejected later.
+    if !crate::challenge::protocol_extension_grammar_ok(
+        envelope.protocol_version,
+        envelope.decoy_field.is_some(),
+        envelope.execution_program.is_some(),
+    ) {
+        return None;
+    }
     let record = ChallengeRecord {
         nonce: envelope.nonce,
         scope: envelope.scope,

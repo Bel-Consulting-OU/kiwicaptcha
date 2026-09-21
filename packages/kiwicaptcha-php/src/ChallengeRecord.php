@@ -404,6 +404,26 @@ final class ChallengeRecord
     }
 
     /**
+     * The protocol-vs-extension grammar, the one explicit matrix every
+     * boundary applies (this decoder and the verifier's structural
+     * validation). v1 and v2 carry neither extension: the legacy v1
+     * canonical signs no extension segment, so a stored v1 record
+     * carrying either would hold unauthenticated semantics. v3
+     * requires the decoy and carries no execution. v4 requires the
+     * execution triplet and may also carry the decoy (the canonical
+     * appends both segments).
+     */
+    public static function protocolExtensionGrammarOk(int $protocolVersion, bool $decoyPresent, bool $executionPresent): bool
+    {
+        return match ($protocolVersion) {
+            1, 2 => !$decoyPresent && !$executionPresent,
+            3 => $decoyPresent && !$executionPresent,
+            4 => $executionPresent,
+            default => false,
+        };
+    }
+
+    /**
      * Rebuild a record from persisted (JSON-decoded) data; the strict
      * serde-mirror parser.
      *
@@ -649,17 +669,13 @@ final class ChallengeRecord
         // enforces the same split.
         $protocolVersion = (int) ($data['protocol_version'] ?? 1);
         $decoyField = \array_key_exists('decoy_field', $data) ? $data['decoy_field'] : null;
-        if ($protocolVersion === 2 && $decoyField !== null) {
-            throw MalformedRecordException::decoyOnV2Record();
-        }
-        if ($protocolVersion === 3 && $decoyField === null) {
-            throw MalformedRecordException::decoylessV3Record();
-        }
-        if (($protocolVersion === 2 || $protocolVersion === 3) && $executionProgram !== null) {
-            throw MalformedRecordException::executionOnLegacyProtocol($protocolVersion);
-        }
-        if ($protocolVersion === 4 && $executionProgram === null) {
-            throw MalformedRecordException::executionlessV4Record();
+        // The shared grammar matrix: every protocol-version and
+        // extension combination is judged by one table, so the decoder
+        // and the verifier can never disagree about which records are
+        // structurally valid — including the legacy v1 shape, which
+        // admits neither extension.
+        if (!self::protocolExtensionGrammarOk($protocolVersion, $decoyField !== null, $executionProgram !== null)) {
+            throw MalformedRecordException::invalidProtocolFieldCombination($protocolVersion);
         }
 
         return new self(

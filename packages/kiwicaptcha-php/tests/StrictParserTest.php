@@ -308,19 +308,19 @@ final class StrictParserTest extends TestCase
         // The protocol-vs-execution grammar: v2/v3 never carry execution.
         yield 'protocol v2 with an execution program rejected' => [
             self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
-            'protocol v4 canonical extension',
+            'field combination',
         ];
 
         yield 'protocol v3 with an execution program rejected' => [
             self::mutate('protocol_version', 3) + ['decoy_field' => 'company_website', 'execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
-            'protocol v4 canonical extension',
+            'field combination',
         ];
 
         // A v4 record without the execution triplet is malformed (the
         // stored-version-flip window closes).
         yield 'protocol v4 without the execution triplet rejected' => [
             self::mutate('protocol_version', 4),
-            'must carry',
+            'field combination',
         ];
 
         // A program whose hash does not equal the signed commitment is
@@ -550,6 +550,49 @@ final class StrictParserTest extends TestCase
                 self::assertStringContainsString($field, $e->getMessage());
             }
         }
+    }
+
+    public function testProtocolOneExtensionCombinationsAreRejectedAtDecode(): void
+    {
+        // The decoder applies the same grammar matrix as the verifier:
+        // the legacy v1 shape admits neither extension, so a stored v1
+        // record carrying a decoy or the execution triplet fails
+        // decode instead of parsing and failing later at verification.
+        $v1Decoy = self::mutate('protocol_version', 1);
+        $v1Decoy['decoy_field'] = 'company_website';
+        try {
+            ChallengeRecord::fromArray($v1Decoy);
+            self::fail('a v1 record carrying a decoy must fail decode');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('field combination', $e->getMessage());
+        }
+
+        $v1Execution = self::mutate('protocol_version', 1);
+        $program = self::validProgram();
+        $v1Execution['execution_program'] = $program;
+        $v1Execution['execution_version'] = 1;
+        $v1Execution['execution_commitment'] = hash('sha256', $program);
+        try {
+            ChallengeRecord::fromArray($v1Execution);
+            self::fail('a v1 record carrying the execution triplet must fail decode');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('field combination', $e->getMessage());
+        }
+
+        // The valid shapes still decode: v1 bare, v3 with the decoy,
+        // v4 with the triplet (and v4 with both).
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray(self::mutate('protocol_version', 1)));
+        $v3 = self::mutate('protocol_version', 3);
+        $v3['decoy_field'] = 'company_website';
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v3));
+        $v4 = self::mutate('protocol_version', 4);
+        $v4['execution_program'] = $program;
+        $v4['execution_version'] = 1;
+        $v4['execution_commitment'] = hash('sha256', $program);
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v4));
+        $v4Both = $v4;
+        $v4Both['decoy_field'] = 'company_website';
+        self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v4Both));
     }
 
     public function testBase64IsNotValidatedAtParseTime(): void

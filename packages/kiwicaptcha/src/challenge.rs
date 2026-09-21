@@ -789,6 +789,27 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// tests and integrations can pin the byte-exact reconstruction against
 /// the client-visible challenge string (the PHP mirror exposes the same
 /// helper as `Issuer::canonicalPayload()`).
+/// The protocol-vs-extension grammar, the one explicit matrix every
+/// boundary applies (the stored-record decoder and the verifier's
+/// structural validation; the PHP core's `ChallengeRecord` exposes the
+/// identical table): v1 and v2 carry neither extension — the legacy v1
+/// canonical signs no extension segment, so a stored v1 record carrying
+/// either would hold unauthenticated semantics — v3 requires the decoy
+/// and carries no execution, and v4 requires the execution triplet and
+/// may also carry the decoy (the canonical appends both segments).
+pub fn protocol_extension_grammar_ok(
+    protocol_version: u8,
+    decoy_present: bool,
+    execution_present: bool,
+) -> bool {
+    match protocol_version {
+        1 | 2 => !decoy_present && !execution_present,
+        3 => decoy_present && !execution_present,
+        4 => execution_present,
+        _ => false,
+    }
+}
+
 pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     let base = format!(
         "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",

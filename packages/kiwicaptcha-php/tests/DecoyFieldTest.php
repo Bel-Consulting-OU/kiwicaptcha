@@ -426,7 +426,7 @@ final class DecoyFieldTest extends TestCase
             self::fail('a protocol-v2 record carrying decoy_field must be rejected by fromArray');
         } catch (MalformedRecordException $e) {
             self::assertStringContainsString('protocol_version 2', $e->getMessage());
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
 
         // The verifier's malformed-record path rejects the same
@@ -486,6 +486,8 @@ final class DecoyFieldTest extends TestCase
                 ChallengeRecord::fromArray($data);
                 self::fail("decoy name ".var_export($bad, true).' must be malformed');
             } catch (MalformedRecordException $e) {
+                // The name-shape gate fires before the grammar matrix
+                // when the name itself does not conform.
                 self::assertStringContainsString('decoy_field', $e->getMessage());
                 self::assertStringContainsString('[A-Za-z0-9_-]', $e->getMessage());
             }
@@ -699,7 +701,7 @@ final class DecoyFieldTest extends TestCase
             self::fail('a protocol-v3 record without a decoy must be rejected by fromArray');
         } catch (MalformedRecordException $e) {
             self::assertStringContainsString('protocol_version 3', $e->getMessage());
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
 
         // The verifier's malformed-record path rejects the same
@@ -775,7 +777,7 @@ final class DecoyFieldTest extends TestCase
             ChallengeRecord::fromArray($flipped);
             self::fail('a decoyless v3 record must be refused by fromArray');
         } catch (MalformedRecordException $e) {
-            self::assertStringContainsString('decoy_field', $e->getMessage());
+            self::assertStringContainsString('field combination', $e->getMessage());
         }
         // The hand-rolled equivalent (bypassing the parser) fails the
         // verifier's malformed-record path.
