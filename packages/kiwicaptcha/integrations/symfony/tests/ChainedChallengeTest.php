@@ -60,6 +60,9 @@ use Symfony\Component\Validator\Validation;
  */
 final class ChainedChallengeTest extends TestCase
 {
+    /** The widget solver's hash cap: a counter at or beyond it is not a legitimate solution. */
+    private const SOLVER_CAP = 5_000_000;
+
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     /** The ExecutionChallengeV1 keyed-PRF key of the execution tests. */
@@ -261,12 +264,16 @@ final class ChainedChallengeTest extends TestCase
      *
      * @param array<string, mixed> $challenge
      */
-    private function winningCounter(array $challenge): int
+    private function winningCounter(array $challenge): ?int
     {
+        // Bounded by the widget solver's hash cap: a counter at or
+        // beyond it is not a legitimate solution (the token codec
+        // refuses it), so the solver reports the honestly unsolvable
+        // draw as null instead of searching past the wire contract.
         $saltBytes = base64_decode($challenge['salt'], true);
         $counter = 0;
-        if (($challenge['algorithm'] ?? 'sha256') === 'argon2id') {
-            do {
+        while ($counter < self::SOLVER_CAP) {
+            if (($challenge['algorithm'] ?? 'sha256') === 'argon2id') {
                 $hash = sodium_crypto_pwhash(
                     32,
                     $challenge['prefix'].$counter,
@@ -275,16 +282,16 @@ final class ChainedChallengeTest extends TestCase
                     $challenge['mKib'] * 1024,
                     SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
                 );
-                $counter++;
-            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
-        } else {
-            do {
+            } else {
                 $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
-                $counter++;
-            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+            }
+            if (Verifier::leadingZeroBits($hash) >= $challenge['targetBits']) {
+                return $counter;
+            }
+            ++$counter;
         }
 
-        return $counter - 1;
+        return null;
     }
 
     /**
@@ -304,6 +311,11 @@ final class ChainedChallengeTest extends TestCase
         $digest = \KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($challenge['execution_program'], $challenge['nonce'], $trace);
         self::assertNotNull($digest, 'the digest over the canonical trace must compute');
         $counter = $this->winningCounter($challenge);
+        // The chained ladder's issued difficulties keep a draw's winning
+        // counter far inside the solver cap; the guard makes the
+        // astronomically rare beyond-cap draw a clear failure instead of
+        // a codec error.
+        self::assertNotNull($counter, 'the issued challenge carries no in-cap counter (a beyond-cap draw at these difficulties is not a plausible event)');
         usleep(((int) $challenge['minDurationMs'] + 10) * 1000);
 
         return \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [], $digest, base64_encode($trace))->encode();
