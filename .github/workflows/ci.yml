@@ -1108,7 +1108,7 @@ jobs:
         # Keyed on the committed lockfile, so a Playwright bump
         # reinstalls and an ordinary push reuses the engine bytes; the
         # install step below still runs and is a cheap no-op on a hit.
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.3, SHA-pinned
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
@@ -1154,7 +1154,7 @@ jobs:
       - name: cache the Playwright browser engines
         # All three engines keyed on the committed lockfile; the
         # install step below still runs and is a cheap no-op on a hit.
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5.0.3, SHA-pinned
         with:
           path: ~/.cache/ms-playwright
           key: playwright-all-engines-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
