@@ -401,10 +401,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The two deployments never shared an item: each wrote its own
         // global item and its own per-client items; the key families are
         // disjoint (and neither ever touches the legacy `kr_global`).
-        // The namespace segment is PSR-6-safe ('-' folds to '_').
+        // The namespace segment is a hex digest of the whole namespace.
+        $segA = substr(hash('sha256', 'deployment-a'), 0, 24);
+        $segB = substr(hash('sha256', 'deployment-b'), 0, 24);
         $keys = array_keys($pool->getValues());
-        self::assertContains('kr_global_deployment_a', $keys, 'deployment A has its own dedicated global item');
-        self::assertContains('kr_global_deployment_b', $keys, 'deployment B has its own dedicated global item');
+        self::assertContains('kr_global_'.$segA, $keys, 'deployment A has its own dedicated global item');
+        self::assertContains('kr_global_'.$segB, $keys, 'deployment B has its own dedicated global item');
         self::assertNotContains('kr_global', $keys, 'a namespaced deployment never touches the legacy literal item');
         foreach ($keys as $key) {
             self::assertMatchesRegularExpression('/^kr_(global_)?[A-Za-z0-9_.]+(_[0-9a-f]+)?$/', (string) $key, 'every PSR-6 key stays within the PSR-6 guaranteed character set');
@@ -427,6 +429,67 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // The budget separation is real state, not key cosmetics: A is
         // still saturated after B's admissions.
         self::assertSame(-1, $a->check('198.51.100.4'));
+    }
+
+    public function testPsr6NamespacesThatASanitizedTruncationWouldFoldStayIndependent(): void
+    {
+        // The digest segment distinguishes inputs a sanitized truncation
+        // merges: '-' and '_' fold onto one sanitized segment, and any
+        // two namespaces sharing their first twenty bytes fold onto one
+        // prefix budget. Both collision classes keep fully independent
+        // per-client and global budgets over one shared pool.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $dash = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment-a');
+        $underscore = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment_a');
+
+        self::assertSame(1, $dash->check('198.51.100.1'));
+        self::assertSame(1, $dash->check('198.51.100.2'));
+        self::assertSame(-1, $dash->check('198.51.100.3'), 'the dash deployment hits its own global cap');
+        self::assertSame(1, $underscore->check('198.51.100.1'), 'the underscore deployment keeps its own budget: the folded-segment collision is gone');
+        self::assertSame(1, $underscore->check('198.51.100.2'));
+        self::assertSame(-1, $underscore->check('198.51.100.3'), 'the underscore deployment now hits its own cap');
+        self::assertSame(-1, $dash->check('198.51.100.4'), 'the dash deployment is still saturated: the state never merged');
+
+        $segDash = substr(hash('sha256', 'deployment-a'), 0, 24);
+        $segUnderscore = substr(hash('sha256', 'deployment_a'), 0, 24);
+        self::assertNotSame($segDash, $segUnderscore, 'the folded pair derives distinct segments');
+        $keys = array_keys($pool->getValues());
+        self::assertContains('kr_global_'.$segDash, $keys);
+        self::assertContains('kr_global_'.$segUnderscore, $keys);
+    }
+
+    public function testPsr6NamespacesSharingTheirFirstTwentyBytesStayIndependent(): void
+    {
+        // The prefix-budget collision: two namespaces identical through
+        // byte twenty and differing after it. A truncated segment merged
+        // them; the digest keeps every byte significant.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $nsA = 'abcdefghijklmnopqrst-A';
+        $nsB = 'abcdefghijklmnopqrst-B';
+        $a = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $nsA);
+        $b = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $nsB);
+
+        self::assertSame(1, $a->check('198.51.100.1'));
+        self::assertSame(1, $a->check('198.51.100.2'));
+        self::assertSame(-1, $a->check('198.51.100.3'), 'the A deployment hits its own global cap');
+        self::assertSame(1, $b->check('198.51.100.1'), 'the B deployment keeps its own budget: the shared-prefix collision is gone');
+        self::assertSame(1, $b->check('198.51.100.2'));
+        self::assertSame(-1, $b->check('198.51.100.3'), 'the B deployment now hits its own cap');
+        self::assertSame(-1, $a->check('198.51.100.4'), 'the A deployment is still saturated: the state never merged');
+
+        // The per-client windows never merged either: the same client
+        // identity under the same pepper wrote distinct items.
+        $stateful = array_keys(array_filter($pool->getValues(), static fn ($v): bool => $v !== null));
+        $clientKeys = array_values(array_filter($stateful, static fn (string $k): bool => !str_starts_with($k, 'kr_global')));
+        self::assertCount(4, array_unique($clientKeys), 'each deployment keeps its own two admitted client windows');
     }
 
     public function testPsr6EmptyNamespaceKeepsTheLegacyKeyShapes(): void

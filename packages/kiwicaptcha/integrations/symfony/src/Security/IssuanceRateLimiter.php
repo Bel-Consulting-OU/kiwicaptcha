@@ -144,24 +144,20 @@ final class IssuanceRateLimiter
     private const GLOBAL_CACHE_KEY = 'kr_global';
 
     /**
-     * The namespace budget inside a PSR-6 key: the spec only guarantees
-     * implementations support keys up to 64 chars, and the namespaced
-     * shapes below are built to stay within that floor.
-     */
-    private const NS_KEY_BUDGET = 20;
-
-    /**
-     * The namespace segment of a PSR-6 key: the already sanitized
-     * namespace, truncated to the key budget, with any character outside
-     * PSR-6's guaranteed-supported set, A-Z a-z 0-9 _ . — note the
-     * namespace sanitizer permits '-', which Redis keys allow but strict
-     * pools may reject — folded to '_'. Two deployments whose sanitized
-     * prefixes agree after this mapping share a key segment. Distinct
-     * deployments on one shared pool must differ within it.
+     * The namespace segment of a PSR-6 key: a 24-hex digest of the
+     * complete namespace. A sanitized truncation is not injective.
+     * The sanitizer folds '-' and '_' onto one segment, and a prefix
+     * budget merges every namespace sharing its first bytes, so two
+     * deployments on one shared pool could consume each other's
+     * per-client and global budgets. The digest distinguishes every
+     * distinct namespace, uses only the PSR-6-guaranteed hex alphabet,
+     * and keeps the per-client key inside the 64-character portability
+     * bound the spec guarantees: 'kr_' + 24 segment hex + '_' + 36
+     * identity hex.
      */
     private static function namespaceKeySegment(string $namespace): string
     {
-        return (string) preg_replace('/[^A-Za-z0-9_.]/', '_', substr($namespace, 0, self::NS_KEY_BUDGET));
+        return substr(hash('sha256', $namespace), 0, 24);
     }
 
     /**
