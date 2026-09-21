@@ -433,4 +433,47 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(RiskAction::Deny->rank(), $maxRank, 'the ladder top must actually be reachable');
         self::assertSame(RiskAction::Deny, RiskAction::actionForScore(1000), 'the cap action is Deny at the top score');
     }
+
+    public function testSharedMalformedPolicyVectorsAreRejected(): void
+    {
+        $vectors = json_decode((string) file_get_contents(__DIR__ . '/../../../protocol/risk-v1/fixtures.json'), true, 8, JSON_THROW_ON_ERROR)['malformed_policy_vectors'] ?? null;
+        self::assertIsArray($vectors, 'the shared malformed-policy vectors must load');
+
+        $base = [
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']],
+        ];
+        foreach ($vectors['malformed_policy_scopes'] as $vector) {
+            $config = $base;
+            $config['scopes'] = [$vector['key'] => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => false, 'degraded' => 'sha20']];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed scope key %s must be rejected', var_export($vector['key'], true)));
+            } catch (\InvalidArgumentException $e) {
+                // A canonical-but-out-of-range integer key fails the
+                // range message; every non-canonical spelling fails
+                // the canonical-integer message.
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('canonical integer u32'),
+                        self::stringContains('must be within 1..4294967295')
+                    ),
+                    $vector['key']
+                );
+            }
+        }
+        foreach ($vectors['malformed_policy_flags'] as $vector) {
+            $config = $base;
+            $config['scopes'] = [1 => ['base_risk' => 100, 'minimum' => 'sha20', 'post_solve_check' => $vector['value'], 'degraded' => 'sha20']];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed flag %s must be rejected', var_export($vector['value'], true)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('literal boolean', $e->getMessage());
+            }
+        }
+    }
 }

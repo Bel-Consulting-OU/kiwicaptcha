@@ -597,5 +597,51 @@
         "global_floors": "sha20"
       }
     }
-  ]
+  ],
+  "malformed_policy_vectors": {
+    "malformed_policy_scopes": [
+      {
+        "key": "1admin",
+        "why": "trailing garbage collapses onto scope 1 under (int) coercion"
+      },
+      {
+        "key": "01",
+        "why": "non-canonical leading zero"
+      },
+      {
+        "key": "+1",
+        "why": "signed spelling"
+      },
+      {
+        "key": "4294967296",
+        "why": "u32 overflow"
+      },
+      {
+        "key": "0",
+        "why": "zero id"
+      },
+      {
+        "key": "-1",
+        "why": "negative id"
+      },
+      {
+        "key": "1.5",
+        "why": "fractional id"
+      }
+    ],
+    "malformed_policy_flags": [
+      {
+        "value": "false",
+        "why": "string truthiness coerces to true under (bool)"
+      },
+      {
+        "value": "true",
+        "why": "string spelling of a boolean"
+      },
+      {
+        "value": 1,
+        "why": "integer truthiness"
+      }
+    ]
+  }
 }

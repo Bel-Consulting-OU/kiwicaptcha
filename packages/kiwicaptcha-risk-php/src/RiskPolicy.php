@@ -89,7 +89,17 @@ final class RiskPolicy
 
         $scopes = [];
         foreach ($config['scopes'] as $scope => $spec) {
-            $scope = (int) $scope;
+            // The scope key is a canonical u32 and nothing else: a
+            // non-integer key (or a non-canonical decimal string) is a
+            // configuration error, never coerced — `(int)` casting
+            // would collapse "1admin" and "01" onto scope 1, silently
+            // overwriting policy rows (the rust parser rejects both
+            // under the same grammar).
+            if (!\is_int($scope)) {
+                throw new \InvalidArgumentException(
+                    sprintf('Scope id must be a canonical integer u32 (got %s); non-canonical keys like "1admin" or "01" are rejected, never coerced', var_export($scope, true))
+                );
+            }
             if ($scope < 1 || $scope > 4294967295) {
                 throw new \InvalidArgumentException(
                     sprintf('Scope id %d must be within 1..4294967295', $scope)
@@ -109,7 +119,7 @@ final class RiskPolicy
             $scopes[$scope] = [
                 'base_risk' => $baseRisk,
                 'minimum' => RiskAction::from((string) $spec['minimum']),
-                'post_solve_check' => (bool) $spec['post_solve_check'],
+                'post_solve_check' => self::requireBool($spec['post_solve_check'], $scope, 'post_solve_check'),
                 'degraded' => RiskAction::from((string) $spec['degraded']),
             ];
         }
@@ -366,5 +376,22 @@ final class RiskPolicy
                 self::sortRecursive($v);
             }
         }
+    }
+
+    /**
+     * A literal boolean, never a coerced truthiness: `(bool) "false"`
+     * is true, so a string flag would silently arm the post-solve
+     * check the rust parser (JSON as_bool) rejects under the same
+     * contract.
+     */
+    private static function requireBool(mixed $value, int $scope, string $field): bool
+    {
+        if (!\is_bool($value)) {
+            throw new \InvalidArgumentException(
+                sprintf('Scope %d field "%s" must be a literal boolean (got %s); coerced truthiness is rejected', $scope, $field, get_debug_type($value))
+            );
+        }
+
+        return $value;
     }
 }

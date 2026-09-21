@@ -192,6 +192,20 @@ impl RiskPolicy {
         let scopes_obj = scopes_value.as_object().ok_or(PolicyError::InvalidScopes)?;
         let mut scopes = HashMap::new();
         for (key, spec) in scopes_obj {
+            // The canonical grammar both languages share: a u32 spelled
+            // as [1-9][0-9]* — no leading zeros, no sign, no trailing
+            // garbage. "01" and "+1" are configuration errors exactly
+            // like the PHP parser's non-integer keys, never silently
+            // parsed onto scope 1.
+            if key.is_empty()
+                || !key
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_digit() && b != b'0')
+                || !key.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(PolicyError::InvalidScopeId(key.clone()));
+            }
             let scope: u32 = key
                 .parse()
                 .map_err(|_| PolicyError::InvalidScopeId(key.clone()))?;
@@ -529,6 +543,78 @@ fn escape_json_string(s: &str) -> String {
 }
 
 #[cfg(test)]
+
+mod malformed_vectors {
+    use super::*;
+
+    /// The shared malformed-policy vectors (protocol/risk-v1/fixtures.json):
+    /// every spelling both languages must reject under the identical
+    /// canonical grammar — [1-9][0-9]* within u32 — plus literal-boolean
+    /// post_solve_check flags.
+    #[test]
+    fn shared_malformed_scope_keys_and_flags_are_rejected() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let vectors = value
+            .get("malformed_policy_vectors")
+            .expect("the malformed-policy vectors must be recorded");
+
+        let scope_row = serde_json::json!({
+            "base_risk": 100, "minimum": "sha20", "post_solve_check": false, "degraded": "sha20"
+        });
+        for entry in vectors["malformed_policy_scopes"]
+            .as_array()
+            .expect("scope vectors")
+        {
+            let key = entry["key"].as_str().expect("the key is a string");
+            let mut scopes = serde_json::Map::new();
+            scopes.insert(key.to_string(), scope_row.clone());
+            let mut config = serde_json::json!({
+                "version": 3,
+                "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" },
+                "weights": {},
+            });
+            config
+                .as_object_mut()
+                .expect("config object")
+                .insert("scopes".into(), Value::Object(scopes));
+            let err = RiskPolicy::from_config(3, &config)
+                .err()
+                .unwrap_or_else(|| panic!("the malformed scope key {key} must be rejected"));
+            assert!(
+                matches!(err, PolicyError::InvalidScopeId(_)),
+                "the malformed key {key} fails the canonical-grammar rejection: {err}"
+            );
+        }
+
+        for entry in vectors["malformed_policy_flags"]
+            .as_array()
+            .expect("flag vectors")
+        {
+            let flag = entry["value"].clone();
+            let config = serde_json::json!({
+                "version": 3,
+                "global_floors": { "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" },
+                "weights": {},
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "sha20", "post_solve_check": flag, "degraded": "sha20"
+                }}
+            });
+            let err = RiskPolicy::from_config(3, &config)
+                .err()
+                .unwrap_or_else(|| panic!("the malformed flag {flag} must be rejected"));
+            assert!(
+                matches!(err, PolicyError::InvalidScope(_)),
+                "the malformed flag {flag} fails the literal-boolean rejection: {err}"
+            );
+        }
+    }
+}
+
 mod tests {
     use super::*;
     use serde_json::json;
