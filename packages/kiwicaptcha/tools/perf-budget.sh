@@ -467,7 +467,11 @@ MISSING=""
 # with or without thousand separators, so the guard strips the commas
 # and matches the bare digit strings from the record.
 for fig in "$dr_raw" "$dr_gz" "$dr_br" "$rk_raw" "$tm_raw" "$lc_raw" "$lc_gz" "$lc_br" "$cp_raw" "$ex_raw" "$ex_gz" "$ex_br"; do
-  if [ -n "$DOC_NORM" ] && ! printf '%s' "$DOC_NORM" | grep -qF "$fig"; then
+  # The match runs through a here-string, never a pipe: a piped
+  # grep -q exits on the first match while the producer still writes,
+  # and under pipefail the producer's write signal flips a successful match
+  # into a failed pipeline (a Linux-only false missing).
+  if [ -n "$DOC_NORM" ] && ! grep -qF -- "$fig" <<<"$DOC_NORM"; then
     MISSING="$MISSING $fig"
   fi
 done
