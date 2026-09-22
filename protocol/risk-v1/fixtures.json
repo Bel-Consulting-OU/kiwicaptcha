@@ -643,6 +643,28 @@
         "why": "integer truthiness"
       }
     ],
+    "malformed_global_floor_values": [
+      {
+        "level": "1",
+        "value": 1,
+        "why": "integer action value"
+      },
+      {
+        "level": "2",
+        "value": true,
+        "why": "boolean action value"
+      },
+      {
+        "level": "3",
+        "value": ["sha20"],
+        "why": "array action value"
+      },
+      {
+        "level": "4",
+        "value": {"action": "sha20"},
+        "why": "object action value"
+      }
+    ],
     "malformed_global_floor_sets": [
       {
         "floors": {"0": "allow", "1": "sha16", "01": "deny", "2": "sha18", "3": "sha20"},
@@ -666,6 +688,253 @@
       }
     ]
   },
+  "reason_vectors": [
+  {
+    "why": "weighted contributors are ordered by contribution descending",
+    "score": 0,
+    "weights": {
+      "source_fast": 300,
+      "source_slow": 100,
+      "subnet_fast": 200,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 500,
+      "source_slow": 500,
+      "subnet_fast": 500,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 1000,
+    "global_level": 0,
+    "expected_reasons": [
+      "source_burst",
+      "network_burst",
+      "source_sustained"
+    ]
+  },
+  {
+    "why": "equal contributions keep the SignalVector order (stable tie ordering)",
+    "score": 0,
+    "weights": {
+      "source_fast": 500,
+      "source_slow": 200,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 200,
+      "source_slow": 500,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 1000,
+    "global_level": 0,
+    "expected_reasons": [
+      "source_burst",
+      "source_sustained"
+    ]
+  },
+  {
+    "why": "a hard-policy reason deduplicates with its own contributor",
+    "score": 0,
+    "weights": {
+      "source_fast": 0,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 300,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 0,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 900,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 1000,
+    "global_level": 0,
+    "expected_reasons": [
+      "replay_traffic"
+    ]
+  },
+  {
+    "why": "the reason list is capped at the top four contributors",
+    "score": 0,
+    "weights": {
+      "source_fast": 100,
+      "source_slow": 100,
+      "subnet_fast": 100,
+      "issue_debt": 100,
+      "bad_proof": 100,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 900,
+      "source_slow": 800,
+      "subnet_fast": 700,
+      "issue_debt": 600,
+      "bad_proof": 500,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 1000,
+    "global_level": 0,
+    "expected_reasons": [
+      "source_burst",
+      "source_sustained",
+      "network_burst",
+      "challenge_debt"
+    ]
+  },
+  {
+    "why": "the Argon capacity downgrade joins the reasons before the contributors",
+    "score": 700,
+    "weights": {
+      "source_fast": 100,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 500,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 100,
+    "global_level": 0,
+    "expected_reasons": [
+      "capacity_pressure",
+      "source_burst"
+    ]
+  },
+  {
+    "why": "no contributor is surfaced below a positive integer contribution",
+    "score": 0,
+    "weights": {
+      "source_fast": 100,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "signals": {
+      "source_fast": 9,
+      "source_slow": 0,
+      "subnet_fast": 0,
+      "issue_debt": 0,
+      "bad_proof": 0,
+      "malformed": 0,
+      "replay": 0,
+      "action_failure": 0,
+      "scope_switch": 0,
+      "global_pressure": 0,
+      "network_risk": 0,
+      "trust_credit": 0,
+      "principal_credit": 0
+    },
+    "issuance_capacity": 1000,
+    "argon_capacity": 1000,
+    "global_level": 0,
+    "expected_reasons": []
+  }
+],
   "namespace_vectors": [
   {
     "raw": "prod",

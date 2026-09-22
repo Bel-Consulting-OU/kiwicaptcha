@@ -126,6 +126,21 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * caller applies the verified WAIT durability barrier to the
      * mutating arms only.
      */
+    /**
+     * The migration-only compare-delete of a stale legacy obligation
+     * mapping: one key, one namespace, so it can never span the two hash
+     * slots in a single transaction.
+     */
+    private const DELETE_LEGACY_OBLIGATION_LUA = <<<'LUA'
+-- kiwicaptcha legacy-obligation compare-delete (migration only)
+local mapped = redis.call('GET', KEYS[1])
+if mapped and mapped == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+return 0
+LUA;
+
     private const CREATE_OR_GET_OBLIGATION_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
 -- EVERY key the script touches is a declared KEYS argument: KEYS[3] is the
@@ -946,6 +961,28 @@ LUA;
         $chainKey = $this->key($chainId);
         $obligationKey = $this->obligationKey($obligationId);
 
+        // Migration provenance: a live obligation written before the
+        // namespace cutover must never be shadowed by a fresh primary
+        // one. The legacy chain is read (and validated) here; when its
+        // requirement is not weaker than the requested one it is
+        // returned untouched, and a stronger reassessment fails closed
+        // explicitly instead of creating a competing primary chain. Only
+        // a stale legacy mapping (dead, expired or corrupt record) is
+        // compare-deleted, so the primary create can never be blocked by
+        // a dead pointer — and no write ever spans the two namespaces in
+        // one transaction.
+        $lookup = $this->obligationLookup($obligationId);
+        if ($lookup !== null && $lookup['namespace'] === 'legacy') {
+            $legacyRequirement = $this->legacyRequirementOrNull($lookup['chainId']);
+            if ($legacyRequirement !== null) {
+                if ($requiredRank <= (int) $legacyRequirement['requiredRank']) {
+                    return $lookup['chainId'];
+                }
+                throw new \RuntimeException('the open obligation predates the namespace cutover: a stronger reassessment cannot be applied to the legacy chain (drain the legacy state before raising the requirement)');
+            }
+            $this->deleteLegacyObligationIfUnchanged($obligationId, $lookup['chainId']);
+        }
+
         // The pointed-at chain is resolved from a plain read and passed as
         // a declared key; a concurrent create-or-get that moved the
         // mapping between the read and the script answers 'moved' and the
@@ -1001,9 +1038,26 @@ LUA;
 
     public function obligationChainId(string $obligationId): ?string
     {
+        $lookup = $this->obligationLookup($obligationId);
+
+        return $lookup['chainId'] ?? null;
+    }
+
+    /**
+     * The obligation mapping with its provenance: the chain id plus the
+     * namespace it was read from ('primary' or 'legacy'), or null when no
+     * mapping exists. Callers that only read may use
+     * {@see obligationChainId()}; callers that write must consult the
+     * provenance, so a live legacy obligation can never be shadowed by a
+     * fresh primary one.
+     *
+     * @return array{chainId: string, namespace: 'primary'|'legacy'}|null
+     */
+    public function obligationLookup(string $obligationId): ?array
+    {
         $chainId = $this->redis->get($this->obligationKey($obligationId));
         if (\is_string($chainId) && $chainId !== '') {
-            return $chainId;
+            return ['chainId' => $chainId, 'namespace' => 'primary'];
         }
         if ($this->legacyNamespace === null) {
             return null;
@@ -1015,7 +1069,9 @@ LUA;
         // restarts the transaction at stage 1.
         $legacy = $this->redis->get($this->legacyObligationKey($obligationId));
 
-        return \is_string($legacy) && $legacy !== '' ? $legacy : null;
+        return \is_string($legacy) && $legacy !== ''
+            ? ['chainId' => $legacy, 'namespace' => 'legacy']
+            : null;
     }
 
     /**
@@ -1052,6 +1108,42 @@ LUA;
         }
 
         return self::wire(self::decodeState($raw));
+    }
+
+    /**
+     * The live legacy chain record for the migration branch, or null when
+     * the pointed-at record is missing, expired or corrupt — a stale
+     * mapping the create-or-get may heal. The record goes through the
+     * same strict decode as every other read, so a corrupt legacy record
+     * can never surface as a requirement.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function legacyRequirementOrNull(string $chainId): ?array
+    {
+        try {
+            return $this->read($chainId);
+        } catch (MalformedChainedChallengeStateException) {
+            return null;
+        }
+    }
+
+    /**
+     * Compare-delete a stale legacy obligation mapping (the record it
+     * pointed at is dead, expired or corrupt). One key, one namespace:
+     * the migration never spans the two hash slots in one transaction,
+     * and a mapping that moved since the read is left alone.
+     */
+    private function deleteLegacyObligationIfUnchanged(string $obligationId, string $expectedChainId): void
+    {
+        $deleted = (int) $this->lua->executeSecurityFinal(
+            self::DELETE_LEGACY_OBLIGATION_LUA,
+            [$this->legacyObligationKey($obligationId)],
+            [$expectedChainId],
+        );
+        if ($deleted === 1 && $this->waitReplicas > 0) {
+            $this->waitAndVerify('the stale legacy obligation cleanup');
+        }
     }
 
     public function reserve(string $chainId, string $ownerToken, int $leaseSecs): string

@@ -136,7 +136,7 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         // Seed a legitimate completed record directly (the exact
         // envelope a conforming finalize writes) so the read-side
         // validation runs against genuine stored bytes.
-        $key = '{kiwitest:result-corrupt:'.getmypid().'}:siteverify-idem:'.$backendId.':'.$uuid;
+        $key = '{kiwi:kiwitest_result-corrupt_'.getmypid().'}:siteverify-idem:'.$backendId.':'.$uuid;
         $client->set($key, json_encode([
             'state' => 'complete',
             'response_hash' => $hash,
@@ -184,7 +184,7 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         // Corrupt the persisted JSON in place: wrong types and an
         // impossible chain pair both surface as the store's corrupt
         // exception, never as emptied metadata.
-        $key = '{kiwitest:meta-corrupt:'.getmypid().'}:siteverify-meta:'.$nonce;
+        $key = '{kiwi:kiwitest_meta-corrupt_'.getmypid().'}:siteverify-meta:'.$nonce;
         foreach ([
             ['v' => 1, 'action' => 123, 'chainId' => 123, 'chainDepth' => '2'],
             ['v' => 1, 'chainDepth' => 2],

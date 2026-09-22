@@ -180,7 +180,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-000000000001';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
@@ -251,8 +251,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
         self::assertNotSame($staticBackendId, $effectiveBackendId, 'precondition: the effective epoch must differ from the static one');
-        $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
-        $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+        $staticKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+        $effectiveKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
         $probe->del([$effectiveKey, $staticKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
@@ -332,7 +332,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         $uuid = 'c0ffee00-0000-4000-8000-000000000002';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -390,7 +390,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $nonce = $challenge->nonce;
         $uuid = 'c0ffee00-0000-4000-8000-000000000003';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -525,7 +525,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         self::assertNotNull($record);
         $uuid = 'c0ffee00-0000-4000-8000-000000000004';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         // A short fixed store lease (1s) keeps the takeover instant; the
         // waiter bound (0.5s) stays below it (the per-request occupancy bound).
@@ -642,8 +642,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $uuidA = 'c0ffee00-0000-4000-8000-000000000005';
         $uuidB = 'c0ffee00-0000-4000-8000-000000000006';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -701,8 +701,8 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $uuid = 'c0ffee00-0000-4000-8000-000000000007';
         $backendId1 = hash('sha256', $secret1.'|login|0|');
         $backendId2 = hash('sha256', $secret2.'|login|0|');
-        $idemKey1 = '{kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
-        $idemKey2 = '{kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
+        $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
+        $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -750,7 +750,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-000000000008';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -788,7 +788,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuidB = 'c0ffee00-0000-4000-8000-000000000009';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyB]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
 
@@ -880,7 +880,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $nonce = $challenge->nonce;
             $uuid = 'c0ffee00-0000-4000-8000-00000000000a';
             $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-            $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+            $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
             $probe->del([$idemKey]);
             $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
             $lost = $this->lostConsumeReplyStorage($storage);
@@ -940,7 +940,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-00000000000b';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
@@ -1037,7 +1037,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         [$token, , $nonce] = $this->issueSha($storage);
         $uuid = 'c0ffee00-0000-4000-8000-00000000000c';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);

@@ -886,7 +886,7 @@ jobs:
             $store = new BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore($r);
             $backendId = hash("sha256", "smoke-secret");
             $uuid = "8f2a1c3e-4b5d-4e6f-9a0b-1c2d3e4f5a6b";
-            $key = "{kiwicaptcha}:siteverify-idem:" . $backendId . ":" . $uuid;
+            $key = "{kiwi:kiwicaptcha}:siteverify-idem:" . $backendId . ":" . $uuid;
             $r->del($key);
             [$claim, $owner] = $store->claim($backendId, $uuid, "smoke-response-hash", 60, "no-ip");
             if ($claim !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed || !is_string($owner)) {

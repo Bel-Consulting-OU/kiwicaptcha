@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
@@ -12,6 +13,8 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ChainRedisFake;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Risk\RiskAction;
@@ -308,6 +311,315 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         $guard2 = new PinnedPrimaryAuthorityGuard($client, self::RAW, 5, 'storage', null, RedisNamespace::VERSION_DIGEST);
         self::assertSame('primary|run-43', $guard2->state()['pinned'], 'an existing digest pin is authoritative');
         self::assertSame('primary|run-43', $client->strings[$digestKey]);
+    }
+
+    public function testTheFreshMigrationModeSelectsTheDigestDerivationForANewInstall(): void
+    {
+        // A brand-new install with no pre-cutover state selects the
+        // digest derivation without declaring itself "drained".
+        $container = $this->loadContainer([
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'namespace_migration' => 'fresh',
+            'risk' => ['namespace' => self::RAW],
+        ]);
+        $monitor = $container->getDefinition(SecurityEpochMonitor::class)->getArguments();
+        self::assertSame(self::RAW, $monitor[2], 'the raw discriminator is still the identity');
+        self::assertSame(
+            RedisNamespace::VERSION_DIGEST,
+            $monitor['$namespaceKeyVersion'] ?? null,
+            'fresh selects the digest derivation without the drained acknowledgment',
+        );
+    }
+
+    public function testAFreshMigrationContradictingAnExplicitLegacyVersionIsRejected(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setParameter('kernel.project_dir', self::RAW);
+        $container->register('fake_redis', FakePredisClient::class);
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessageMatches('/namespace_migration: fresh selects the digest/');
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'namespace_key_version' => RedisNamespace::VERSION_LEGACY,
+            'namespace_migration' => 'fresh',
+            'risk' => ['namespace' => self::RAW],
+        ]], $container);
+    }
+
+    public function testTheOmittedKeyVersionKeepsTheLegacyShapeAndEmitsTheAdvisory(): void
+    {
+        // An existing deployment that upgrades without choosing a version
+        // keeps its key space, and the bundle says so conspicuously.
+        $container = $this->loadContainer([
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'risk' => ['namespace' => self::RAW],
+        ]);
+        $monitor = $container->getDefinition(SecurityEpochMonitor::class)->getArguments();
+        self::assertSame(
+            RedisNamespace::VERSION_LEGACY,
+            $monitor['$namespaceKeyVersion'] ?? null,
+            'an omitted version keeps the legacy sanitized derivation',
+        );
+        $messages = array_map(
+            static fn ($entry): string => \is_array($entry) ? (string) ($entry['message'] ?? '') : (string) $entry,
+            $container->getCompiler()->getLog(),
+        );
+        self::assertNotEmpty(
+            array_filter($messages, static fn (string $message): bool => str_contains($message, 'namespace_key_version is not configured')),
+            'the omitted version is called out with a configuration advisory',
+        );
+    }
+
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function provideLegacyStates(): iterable
+    {
+        yield 'available' => ['available'];
+        yield 'reserved' => ['reserved'];
+        yield 'issued' => ['issued'];
+        yield 'denied' => ['denied'];
+        yield 'step_up_required' => ['step_up_required'];
+    }
+
+    /**
+     * @dataProvider provideLegacyStates
+     */
+    public function testALiveLegacyObligationIsNeverShadowedByAPrimaryOne(string $state): void
+    {
+        // Old namespace: a live obligation in the given state. New
+        // namespace: empty. requireStage2() on the upgraded node must
+        // resolve the legacy chain and write nothing in the primary
+        // namespace — a fresh primary obligation would shadow a retained
+        // denied/step-up requirement.
+        [$fake, $legacyService, $legacyChainId, $obligationId] = $this->buildLegacyChain($state);
+
+        $digestStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        $digestService = new ChainedChallengeTicketService($digestStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+
+        $requirement = $digestService->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-rollout',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Argon32,
+            $fake->clockSecs() + 300,
+        );
+
+        self::assertSame($legacyChainId, $requirement->chainId, 'the live legacy chain is resolved, never replaced');
+        self::assertSame(
+            $state === 'issued' ? 'issued' : $state,
+            $requirement->state,
+            'the retained legacy state is preserved',
+        );
+        $this->assertNoDigestChainState($fake);
+        self::assertSame(
+            $legacyChainId,
+            $digestStore->obligationChainId($obligationId),
+            'the legacy obligation mapping still resolves through the dual-read',
+        );
+    }
+
+    public function testAStrongerReassessmentOnALegacyObligationFailsClosed(): void
+    {
+        [$fake, $legacyService, $legacyChainId] = $this->buildLegacyChain('available');
+
+        $digestStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        $digestService = new ChainedChallengeTicketService($digestStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+
+        try {
+            $digestService->requireStage2(
+                base64_encode(random_bytes(32)),
+                'login',
+                'txn-rollout',
+                self::CONFIGURED_EPOCH,
+                RiskAction::Argon64,
+                $fake->clockSecs() + 300,
+            );
+            self::fail('a stronger reassessment on a live legacy obligation must fail closed');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('predates the namespace cutover', $e->getMessage());
+        }
+        $this->assertNoDigestChainState($fake);
+    }
+
+    public function testAStaleLegacyObligationIsClearedBeforeThePrimaryCreate(): void
+    {
+        // The legacy mapping points at a chain whose record is gone: the
+        // mapping is stale, so the create-or-get clears it (compare
+        // delete in the legacy namespace) and creates the primary chain
+        // instead of blocking forever on a dead pointer.
+        [$fake, $legacyService, $legacyChainId, $obligationId] = $this->buildLegacyChain('available');
+        $legacyChainKey = '{kiwi:'.self::legacyNamespace().'}:chain:'.$legacyChainId;
+        unset($fake->strings[$legacyChainKey]);
+
+        $digestStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        $digestService = new ChainedChallengeTicketService($digestStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        $requirement = $digestService->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-rollout',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Argon32,
+            $fake->clockSecs() + 300,
+        );
+
+        self::assertNotSame($legacyChainId, $requirement->chainId, 'the dead legacy pointer is replaced by a primary chain');
+        self::assertArrayNotHasKey(
+            '{kiwi:'.self::legacyNamespace().'}:chain-obligation:'.$obligationId,
+            $fake->strings,
+            'the stale legacy mapping is cleared',
+        );
+        self::assertSame(
+            $requirement->chainId,
+            $digestStore->obligationChainId($obligationId),
+            'the primary mapping is authoritative after the heal',
+        );
+    }
+
+    /**
+     * Build a legacy-namespace chain in the requested state and return
+     * the fake, the legacy ticket service, the chain id and the
+     * obligation id.
+     *
+     * @return array{0: ChainRedisFake, 1: ChainedChallengeTicketService, 2: string, 3: string}
+     */
+    private function buildLegacyChain(string $state): array
+    {
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_LEGACY);
+        $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        $requirement = $service->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-rollout',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Argon32,
+            $fake->clockSecs() + 300,
+        );
+        $obligationId = $service->obligationIdFor('login', 'txn-rollout', self::CONFIGURED_EPOCH);
+        $stage2Nonce = base64_encode(random_bytes(32));
+        if ($state !== 'available') {
+            $owner = bin2hex(random_bytes(16));
+            self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, $owner));
+            if ($state !== 'reserved') {
+                $service->markIssued($requirement->chainId, $owner, $stage2Nonce);
+                if ($state === 'denied') {
+                    $service->markDenied($requirement->chainId, $stage2Nonce);
+                } elseif ($state === 'step_up_required') {
+                    $service->markStepUpRequired($requirement->chainId, $stage2Nonce);
+                }
+            }
+        }
+
+        return [$fake, $service, $requirement->chainId, $obligationId];
+    }
+
+    private function assertNoDigestChainState(ChainRedisFake $fake): void
+    {
+        foreach (array_keys($fake->strings) as $key) {
+            self::assertStringNotContainsString(
+                '{kiwi:'.self::digestNamespace().'}',
+                (string) $key,
+                'no primary-namespace chain state may be created while the legacy obligation is live',
+            );
+        }
+    }
+
+    public function testTwoDeploymentsSharingOneRedisNeverShareSiteverifyState(): void
+    {
+        // Two containers, identical secrets and security context, one
+        // Redis, different risk.namespace. The Siteverify stores and the
+        // invalid-secret log gate must derive from the deployment
+        // namespace authority like every other key family.
+        $containerA = $this->loadContainer($this->siteverifyConfig('/srv/prod-a'));
+        $containerB = $this->loadContainer($this->siteverifyConfig('/srv/prod-b'));
+        $idemA = $containerA->getDefinition(RedisSiteVerifyIdempotencyStore::class)->getArguments();
+        $idemB = $containerB->getDefinition(RedisSiteVerifyIdempotencyStore::class)->getArguments();
+        self::assertSame('/srv/prod-a', $idemA[1], 'the idempotency store receives the raw discriminator');
+        self::assertSame('/srv/prod-b', $idemB[1], 'the other deployment receives its own raw discriminator');
+        $metaA = $containerA->getDefinition(RedisSiteVerifyMetadataStore::class)->getArguments();
+        self::assertSame('/srv/prod-a', $metaA[1], 'the metadata store receives the raw discriminator');
+        $controllerArgs = $containerA->getDefinition(SiteVerifyController::class)->getArguments();
+        self::assertSame('/srv/prod-a', $controllerArgs['$logGateNamespace'] ?? null, 'the log gate is namespaced');
+        self::assertNotSame(
+            RedisNamespace::derive('/srv/prod-a'),
+            RedisNamespace::derive('/srv/prod-b'),
+            'the two deployments derive disjoint key segments',
+        );
+
+        // Functional proof on one shared Redis: A completes, B receives
+        // the identical backend id and idempotency UUID and must not see
+        // (or replay) A's completed result.
+        $url = getenv('KC_REDIS_URL');
+        if (!\is_string($url) || $url === '') {
+            $flag = getenv('KIWI_REQUIRE_REAL_REDIS_TESTS');
+            if (\is_string($flag) && $flag !== '' && $flag !== '0') {
+                self::fail('KIWI_REQUIRE_REAL_REDIS_TESTS is set but KC_REDIS_URL is absent');
+            }
+            self::markTestSkipped('KC_REDIS_URL is not set');
+        }
+        $client = new \Predis\Client([
+            'host' => parse_url($url, PHP_URL_HOST) ?: '127.0.0.1',
+            'port' => parse_url($url, PHP_URL_PORT) ?: 6379,
+        ]);
+        $storeA = new RedisSiteVerifyIdempotencyStore($client, '/srv/prod-a');
+        $storeB = new RedisSiteVerifyIdempotencyStore($client, '/srv/prod-b');
+        $backendId = hash('sha256', 'shared-secret|login|'.self::CONFIGURED_EPOCH.'|shared-context-digest');
+        $uuid = 'rollout-shared-'.bin2hex(random_bytes(8));
+        $responseHash = hash('sha256', 'canonical-response');
+        $keyA = '{kiwi:'.RedisNamespace::derive('/srv/prod-a').'}:siteverify-idem:'.$backendId.':'.$uuid;
+        $keyB = '{kiwi:'.RedisNamespace::derive('/srv/prod-b').'}:siteverify-idem:'.$backendId.':'.$uuid;
+        $client->del([$keyA, $keyB]);
+
+        try {
+            [$claimA, $ownerA] = $storeA->claim($backendId, $uuid, $responseHash, 300, 'ip-fingerprint');
+            self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claimA);
+            self::assertNotNull($ownerA);
+            self::assertTrue($storeA->finalize($backendId, $uuid, $responseHash, $ownerA, [
+                'success' => true,
+                'challenge_ts' => null,
+                'hostname' => null,
+            ]));
+            self::assertNotNull($storeA->stored($backendId, $uuid), 'A reads back its completed result');
+            self::assertNull(
+                $storeB->stored($backendId, $uuid),
+                'B must never replay a result completed under another deployment namespace',
+            );
+            [$claimB, $ownerB] = $storeB->claim($backendId, $uuid, $responseHash, 300, 'ip-fingerprint');
+            self::assertSame(
+                \BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed,
+                $claimB,
+                'B claims the identical UUID independently of A',
+            );
+            self::assertNotNull($ownerB);
+            self::assertNotSame($ownerA, $ownerB);
+        } finally {
+            $client->del([$keyA, $keyB]);
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function siteverifyConfig(string $namespace): array
+    {
+        return [
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'risk' => [
+                'namespace' => $namespace,
+                // The provider-compatible surface requires a scope whose
+                // post-solve check is disabled.
+                'scopes' => ['siteverify' => ['post_solve_check' => false]],
+                'siteverify_secrets' => ['siteverify-secret' => 'siteverify'],
+                'redis' => ['ttl_margin_secs' => 2],
+            ],
+        ];
     }
 
     /**

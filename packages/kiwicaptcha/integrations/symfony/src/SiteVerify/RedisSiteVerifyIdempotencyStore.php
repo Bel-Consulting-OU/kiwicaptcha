@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 
 /**
  * Redis-backed atomic idempotency store.
@@ -168,13 +169,26 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 1
 LUA;
 
+    /**
+     * The encoded deployment namespace inside the `{kiwi:<ns>}` hash
+     * tag, derived from the raw configured discriminator.
+     */
+    private readonly string $namespace;
+
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
-        private readonly string $namespace = 'kiwicaptcha',
+        string $namespace = 'kiwicaptcha',
         private readonly int $leaseSeconds = self::LEASE_SECONDS,
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
+        // The RAW discriminator is derived here, so the idempotency
+        // entries live under the deployment namespace: two deployments
+        // sharing one Redis instance can never replay each other's
+        // completed results, even with identical secrets and security
+        // contexts (the backend id does not carry the namespace).
+        $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwicaptcha', $namespaceKeyVersion);
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
         $this->lua = new RedisSecurityCommandExecutor($redis);
     }
@@ -318,14 +332,14 @@ LUA;
 
     private function key(string $backendId, string $idempotencyKey): string
     {
-        return sprintf('{%s}:%s%s:%s', $this->namespace, self::PREFIX, $backendId, $idempotencyKey);
+        return sprintf('{kiwi:%s}:%s%s:%s', $this->namespace, self::PREFIX, $backendId, $idempotencyKey);
     }
     public function establishReplicationFence(string $what): void
     {
         if ($this->waitReplicas <= 0) {
             return;
         }
-        $fenceKey = '{'.$this->namespace.':siteverify-idem}:replication-fence';
+        $fenceKey = '{kiwi:'.$this->namespace.'}:siteverify-idem:replication-fence';
         $token = bin2hex(random_bytes(16));
         if ($this->redis instanceof \Redis) {
             $ok = $this->redis->set($fenceKey, $token, ['PX' => 60_000]);

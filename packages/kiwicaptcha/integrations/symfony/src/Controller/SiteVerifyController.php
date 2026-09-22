@@ -19,6 +19,7 @@ use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\VerifyOutcome;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -244,6 +245,8 @@ final class SiteVerifyController
          * never needed here, matching the provider contract.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway $riskGateway = null,
+        private readonly string $logGateNamespace = 'kiwicaptcha',
+        private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
         // The lease-ordering invariant is enforced at construction. The
@@ -337,7 +340,11 @@ final class SiteVerifyController
 
     private function logGateKey(): string
     {
-        return '{kiwicaptcha}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
+        // The invalid-secret diagnostic budget is a deployment key like
+        // every other one: two deployments sharing a Redis instance must
+        // not consume (and therefore suppress) each other's diagnostics.
+        return '{kiwi:'.RedisNamespace::deriveOr($this->logGateNamespace, 'kiwicaptcha', $this->namespaceKeyVersion)
+            .'}:log-gate:siteverify-invalid-secret:'.(string) floor(time() / self::INVALID_SECRET_LOG_INTERVAL);
     }
 
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;

@@ -975,7 +975,7 @@ final class RedisStorageTest extends TestCase
         self::assertArrayNotHasKey('resume_until', $data, 'the successful commit cleared the claim expiry in the same transition');
         self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a committed record is no longer claimable');
 
-        $claimEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha resume-derivation claim') && !str_contains($e['script'], 'release')));
+        $claimEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], '-- kiwicaptcha resume-derivation claim') && !str_contains($e['script'], 'release')));
         self::assertCount(4, $claimEvals, 'the four claim attempts (two refusals included) must each go through the claim Lua');
         foreach ($claimEvals as $claimEval) {
             self::assertCount(1, $claimEval['keys'], 'every claim EVAL must declare exactly one key (the record)');
@@ -986,7 +986,7 @@ final class RedisStorageTest extends TestCase
         foreach ($releaseEvals as $releaseEval) {
             self::assertCount(1, $releaseEval['keys'], 'every release EVAL must declare exactly one key (the record)');
         }
-        $commitEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha commit result')));
+        $commitEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], '-- kiwicaptcha commit result')));
         self::assertNotEmpty($commitEvals);
         foreach ($commitEvals as $commitEval) {
             self::assertCount(1, $commitEval['keys'], 'every commit EVAL (claim-bearing included) must declare exactly one key');

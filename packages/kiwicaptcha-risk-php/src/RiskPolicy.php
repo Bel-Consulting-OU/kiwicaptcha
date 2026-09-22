@@ -146,9 +146,19 @@ final class RiskPolicy
                     is_int($level) ? (string) $level : gettype($level)
                 ));
             }
-            $parsed = is_string($action)
-                ? RiskAction::from($action)
-                : $action;
+            // The action value is one of the literal action strings: a
+            // non-string value (integer, boolean, array, object) is a
+            // configuration error here exactly like the Rust parser's
+            // `parse_action` JSON-string requirement, never a value that
+            // travels deeper and fails at a call site.
+            if (!is_string($action)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Global floor level %d action must be a string, got %s',
+                    $level,
+                    gettype($action),
+                ));
+            }
+            $parsed = RiskAction::from($action);
             if ($level === 0 && $parsed !== RiskAction::Allow) {
                 throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
             }

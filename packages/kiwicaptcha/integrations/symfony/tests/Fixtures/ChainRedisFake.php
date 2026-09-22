@@ -202,6 +202,17 @@ final class ChainRedisFake extends \Predis\Client
         if (str_contains($script, 'Chain obligation compare-delete')) {
             return $this->luaDeleteObligation($keys[0], $args);
         }
+        if (str_contains($script, 'legacy-obligation compare-delete')) {
+            // The migration-only single-key compare-delete.
+            $key = (string) $keys[0];
+            if (isset($this->strings[$key]) && $this->strings[$key] === (string) $args[0]) {
+                unset($this->strings[$key]);
+
+                return 1;
+            }
+
+            return 0;
+        }
 
         throw new \LogicException('unexpected script');
     }

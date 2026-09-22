@@ -43,6 +43,15 @@ final class ConsumedResult
      */
     public static function fromArray(array $data): self
     {
+        // The exact supported key set: a result object carrying any other
+        // key is corrupt persisted state and is rejected here, mirroring
+        // the Rust StoredConsumedResult's deny_unknown_fields boundary.
+        $unknown = array_diff(array_keys($data), ['valid', 'binding']);
+        if ($unknown !== []) {
+            throw new \InvalidArgumentException(
+                'consumed_result carries unsupported keys: '.implode(',', array_map(strval(...), $unknown))
+            );
+        }
         $valid = $data['valid'] ?? null;
         // The production Lua now writes a real JSON boolean; legacy records
         // from earlier commits store 1/0 — both forms decode here.

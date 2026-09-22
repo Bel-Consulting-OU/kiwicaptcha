@@ -976,21 +976,25 @@ is never forced) are the privacy contract; see
     #                                       # instance must use different
     #                                       # namespaces
     # namespace_key_version: 1              # 1 = the legacy sanitized key
-    #                                       # shape (the default, so an
-    #                                       # existing deployment keeps its
-    #                                       # key space); 2 = the digest key
-    #                                       # shape. Version 2 changes every
-    #                                       # derived key family at once and
-    #                                       # requires namespace_migration:
-    #                                       # drained.
-    # namespace_migration: none             # none (default) or drained: the
-    #                                       # explicit acknowledgment that the
+    #                                       # shape (assumed when omitted, so
+    #                                       # an existing deployment keeps its
+    #                                       # key space; the extension emits a
+    #                                       # configuration advisory); 2 = the
+    #                                       # digest key shape. Version 2
+    #                                       # changes every derived key family
+    #                                       # at once and requires
+    #                                       # namespace_migration: drained or
+    #                                       # fresh.
+    # namespace_migration: none             # none (default) = keep the legacy
+    #                                       # derivation; drained = the
     #                                       # pre-cutover state was quiesced
-    #                                       # and drained before switching
-    #                                       # namespace_key_version to 2. The
-    #                                       # security-policy and chain
-    #                                       # readers additionally consult the
-    #                                       # legacy namespace.
+    #                                       # and drained before switching to
+    #                                       # the digest derivation; fresh = a
+    #                                       # new install with no pre-cutover
+    #                                       # state, which selects the digest
+    #                                       # derivation. The security-policy
+    #                                       # and chain readers additionally
+    #                                       # consult the legacy namespace.
     # redis_service: null                   # optional Redis client service id
     #                                       # (\Redis or Predis\Client) for the
     #                                       # cross-worker Argon2 admission

@@ -439,6 +439,13 @@ impl RiskPolicy {
             reasons.push(RiskReason::CapacityPressure);
         }
 
+        // The weighted top contributors, appended exactly like the PHP
+        // decision assembles them: hard-policy reasons first, then the
+        // contributor list, then one dedupe pass and the 4-entry cap. The
+        // two languages must surface the identical ordered reason list for
+        // identical inputs (the shared reason vectors pin it).
+        reasons.extend(contributor_reasons(s, &self.weights));
+
         // Deduplicate in priority order, cap at 4.
         let mut seen = std::collections::HashSet::new();
         reasons.retain(|r| seen.insert(*r));
@@ -485,6 +492,50 @@ impl RiskPolicy {
             decision_id: String::new(),
         }
     }
+}
+
+/// Top contributors: for the 11 positive signals in `SignalVector`
+/// order, contribution = (value * weight) / 1000 (integer division);
+/// contributions > 0 are kept in `SignalVector` order, then sorted by
+/// contribution descending (stable, so ties keep the `SignalVector`
+/// order). Mirrors the PHP `RiskPolicy::contributorReasons()` exactly,
+/// including the tie order, because the reason list is part of the
+/// cross-language decision contract.
+fn contributor_reasons(s: &SignalVector, w: &RiskWeights) -> Vec<RiskReason> {
+    let pairs = [
+        (s.source_fast, w.source_fast, RiskReason::SourceBurst),
+        (s.source_slow, w.source_slow, RiskReason::SourceSustained),
+        (s.subnet_fast, w.subnet_fast, RiskReason::NetworkBurst),
+        (s.issue_debt, w.issue_debt, RiskReason::ChallengeDebt),
+        (s.bad_proof, w.bad_proof, RiskReason::InvalidProofs),
+        (s.malformed, w.malformed, RiskReason::MalformedTraffic),
+        (s.replay, w.replay, RiskReason::ReplayTraffic),
+        (
+            s.action_failure,
+            w.action_failure,
+            RiskReason::ActionFailures,
+        ),
+        (s.scope_switch, w.scope_switch, RiskReason::ScopeHopping),
+        (
+            s.global_pressure,
+            w.global_pressure,
+            RiskReason::GlobalAttack,
+        ),
+        (s.network_risk, w.network_risk, RiskReason::LocalNetworkRisk),
+    ];
+    let mut contributions: Vec<(RiskReason, u32)> = Vec::new();
+    for (value, weight, reason) in pairs {
+        let contribution = (u32::from(value) * u32::from(weight)) / 1000;
+        if contribution > 0 {
+            contributions.push((reason, contribution));
+        }
+    }
+    contributions.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+
+    contributions
+        .into_iter()
+        .map(|(reason, _)| reason)
+        .collect()
 }
 
 fn strongest(a: RiskAction, b: RiskAction, c: RiskAction) -> RiskAction {
@@ -633,6 +684,101 @@ mod malformed_vectors {
             assert!(
                 matches!(err, PolicyError::InvalidScope(_)),
                 "the malformed flag {flag} fails the literal-boolean rejection: {err}"
+            );
+        }
+
+        // The shared reason vectors: identical inputs must surface the
+        // identical ordered reason list in PHP and Rust, including the
+        // contributor ordering and the stable tie order.
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let reason_vectors = fixtures["reason_vectors"]
+            .as_array()
+            .expect("reason vectors");
+        assert!(!reason_vectors.is_empty());
+        for vector in reason_vectors {
+            let config = serde_json::json!({
+                "version": 3,
+                "weights": vector["weights"].clone(),
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "allow", "post_solve_check": false, "degraded": "allow"
+                }},
+                "global_floors": {"0": "allow", "1": "allow", "2": "allow", "3": "allow", "4": "allow"},
+            });
+            let policy = RiskPolicy::from_config(3, &config).expect("the vector policy builds");
+            let signals: crate::signals::SignalVector =
+                serde_json::from_value(vector["signals"].clone())
+                    .expect("the vector signals parse");
+            let pressure = crate::resources::ResourcePressure {
+                argon_capacity: vector["argon_capacity"].as_u64().expect("argon") as u16,
+                issuance_capacity: vector["issuance_capacity"].as_u64().expect("issuance") as u16,
+            };
+            let decision = policy.decide(
+                1,
+                vector["score"].as_u64().expect("score") as u16,
+                &signals,
+                &pressure,
+                vector["global_level"].as_u64().expect("level") as u8,
+                1_700_000_000_000,
+                0,
+            );
+            let actual: Vec<&str> = decision
+                .reasons
+                .iter()
+                .flatten()
+                .map(|reason| reason.as_str())
+                .collect();
+            let expected: Vec<&str> = vector["expected_reasons"]
+                .as_array()
+                .expect("expected reasons")
+                .iter()
+                .map(|reason| reason.as_str().expect("reason"))
+                .collect();
+            assert_eq!(
+                expected,
+                actual,
+                "reason vector mismatch: {}",
+                vector["why"].as_str().unwrap_or("")
+            );
+        }
+
+        // The shared malformed global-floor values: an integer,
+        // boolean, array or object action is rejected exactly like the
+        // PHP parser's literal-string requirement — one shared
+        // acceptance set for the two policy readers.
+        for entry in vectors["malformed_global_floor_values"]
+            .as_array()
+            .expect("global-floor value vectors")
+        {
+            let level = entry["level"].as_str().expect("level");
+            let why = entry["why"].as_str().unwrap_or("malformed action");
+            let mut floors = serde_json::Map::new();
+            for canonical in ["0", "1", "2", "3", "4"] {
+                floors.insert(canonical.to_string(), serde_json::json!("sha20"));
+            }
+            floors.insert("0".to_string(), serde_json::json!("allow"));
+            floors.insert(level.to_string(), entry["value"].clone());
+            let config = serde_json::json!({
+                "version": 3,
+                "global_floors": floors,
+                "weights": {},
+                "scopes": { "1": {
+                    "base_risk": 100, "minimum": "sha20", "post_solve_check": false, "degraded": "sha20"
+                }}
+            });
+            let err = RiskPolicy::from_config(3, &config).err().unwrap_or_else(|| {
+                panic!("the malformed global floor action at level {level} must be rejected: {why}")
+            });
+            assert!(
+                matches!(
+                    err,
+                    PolicyError::InvalidGlobalFloors(_) | PolicyError::InvalidAction(_)
+                ),
+                "the malformed action at level {level} fails the literal-string rejection: {err}"
             );
         }
 

@@ -266,7 +266,7 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         self::assertNotSame($pinnedRunId, $this->runIdOf($client));
         self::assertSame('1', $wrapped->get('warm'), 'the ordinary lane serves inside the window: the cache is warm, not invalidated');
 
-        $recordKey = '{'.self::NS.'}:siteverify-idem:backend:idem-1';
+        $recordKey = '{kiwi:'.self::NS.'}:siteverify-idem:backend:idem-1';
         $raw = $this->client($port);
         $before = json_decode((string) $raw->get($recordKey), true, 8, JSON_THROW_ON_ERROR);
         self::assertSame('pending', $before['state'], 'the claim is pending before the finalize attempt');
@@ -306,7 +306,7 @@ final class HaAuthorityStoreSecurityFinalRealRedisTest extends TestCase
         self::assertSame(IdempotencyClaim::Claimed, $claim);
 
         self::assertTrue($store->finalize('backend', 'idem-ok', 'response-hash', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
-        $record = json_decode((string) $this->client($port)->get('{'.self::NS.'}:siteverify-idem:backend:idem-ok'), true, 8, JSON_THROW_ON_ERROR);
+        $record = json_decode((string) $this->client($port)->get('{kiwi:'.self::NS.'}:siteverify-idem:backend:idem-ok'), true, 8, JSON_THROW_ON_ERROR);
         self::assertSame('complete', $record['state'], 'a legitimate finalize still succeeds on the pinned authority');
     }
 

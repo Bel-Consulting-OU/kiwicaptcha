@@ -8,6 +8,7 @@ use KiwiCaptcha\Risk\ResourcePressure;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskReason;
+use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
 use PHPUnit\Framework\TestCase;
 
@@ -257,6 +258,67 @@ final class RiskPolicyTest extends TestCase
         $policy = RiskPolicy::fromConfig($config);
         self::assertSame(RiskAction::Allow, $policy->globalFloors[0]);
         self::assertCount(5, $policy->globalFloors);
+    }
+
+    public function testSharedReasonVectorsMatchTheCrossLanguageContract(): void
+    {
+        // The shared reason vectors: identical inputs must surface the
+        // identical ordered reason list in PHP and Rust, including the
+        // contributor ordering and the stable tie order.
+        $path = \dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        $fixtures = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
+        $vectors = $fixtures['reason_vectors'] ?? null;
+        self::assertIsArray($vectors);
+        self::assertNotEmpty($vectors);
+
+        foreach ($vectors as $vector) {
+            $policy = RiskPolicy::fromConfig([
+                'version' => 3,
+                'weights' => RiskWeights::fromArray($vector['weights'])->toArray(),
+                'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+                'global_floors' => [0 => 'allow', 1 => 'allow', 2 => 'allow', 3 => 'allow', 4 => 'allow'],
+            ]);
+            $decision = $policy->decide(
+                1,
+                (int) $vector['score'],
+                SignalVector::fromArray($vector['signals']),
+                new ResourcePressure(
+                    argonCapacity: (int) $vector['argon_capacity'],
+                    issuanceCapacity: (int) $vector['issuance_capacity'],
+                ),
+                (int) $vector['global_level'],
+                1_700_000_000_000,
+            );
+            self::assertSame(
+                $vector['expected_reasons'],
+                array_map(static fn (RiskReason $reason): string => $reason->value, $decision->reasons),
+                $vector['why'],
+            );
+        }
+    }
+
+    public function testGlobalFloorActionsMustBeStrings(): void
+    {
+        // The shared malformed value vectors: an integer, boolean, array
+        // or object action is rejected here exactly like the Rust
+        // parser's JSON-string requirement.
+        $path = \dirname(__DIR__).'/../../protocol/risk-v1/fixtures.json';
+        self::assertFileExists($path);
+        $fixtures = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
+        $vectors = $fixtures['malformed_policy_vectors']['malformed_global_floor_values'] ?? null;
+        self::assertIsArray($vectors);
+        self::assertNotEmpty($vectors);
+
+        foreach ($vectors as $vector) {
+            $config = $this->config();
+            $config['global_floors'][(int) $vector['level']] = $vector['value'];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed global floor action at level %s must be rejected (%s)', $vector['level'], $vector['why']));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('must be a string', $e->getMessage());
+            }
+        }
     }
 
     public function testGlobalFloorAppliedInDegradedMode(): void

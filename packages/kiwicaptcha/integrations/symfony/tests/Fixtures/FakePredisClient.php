@@ -78,6 +78,16 @@ final class FakePredisClient extends \Predis\Client
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
+    /**
+     * Adversarial-race hook for SET: invoked with the key and value right
+     * before the write lands, so a test can install a competing value
+     * inside a check-then-write window, such as the legacy-pin
+     * migration's read-then-write gap.
+     *
+     * @var \Closure|null
+     */
+    public ?\Closure $beforeSet = null;
+
     private float $clockMs = 0.0;
 
     /**
@@ -349,6 +359,12 @@ final class FakePredisClient extends \Predis\Client
     {
         $key = (string) $arguments[0];
         $value = (string) $arguments[1];
+        // Adversarial-race hook: runs after the caller resolved its write
+        // decision but before the write lands, so a test can install a
+        // competing value exactly inside a check-then-write window.
+        if ($this->beforeSet !== null) {
+            ($this->beforeSet)($key, $value);
+        }
         $ttl = null;
         $flags = [];
         $rest = \array_slice($arguments, 2);
@@ -658,7 +674,7 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        if (str_starts_with($script, '-- kiwicaptcha consume transition')) {
+        if (str_contains($script, '-- kiwicaptcha consume transition')) {
             // The core RedisStorage consume-transition script: a pending
             // record is flipped to consumed and kept; a consumed record
             // replays (consumed_before); a cancelled record is never
@@ -690,7 +706,7 @@ final class FakePredisClient extends \Predis\Client
             return [$this->strings[$key], 1, 0, ''];
         }
 
-        if (str_starts_with($script, '-- kiwicaptcha cancel transition')) {
+        if (str_contains($script, '-- kiwicaptcha cancel transition')) {
             // The core RedisStorage cancel-transition script: a pending
             // record is flipped to the terminal cancelled marker and kept;
             // a consumed record is finalized and never cancellable; an
@@ -716,7 +732,7 @@ final class FakePredisClient extends \Predis\Client
             return ['cancelled-now'];
         }
 
-        if (str_starts_with($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
+        if (str_contains($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
             // The core RedisStorage delete-if-pending script: missing
             // reports missing; a consumed record is returned verbatim and
             // kept; a cancelled record is returned verbatim and kept too
@@ -747,7 +763,7 @@ final class FakePredisClient extends \Predis\Client
             return ['deleted-pending'];
         }
 
-        if (str_starts_with($script, '-- kiwicaptcha commit result')) {
+        if (str_contains($script, '-- kiwicaptcha commit result')) {
             // The core RedisStorage commit-result script: stores
             // {valid, binding} on a consumed record without a result yet;
             // 1 on success, 0 otherwise (missing, pending or cancelled).

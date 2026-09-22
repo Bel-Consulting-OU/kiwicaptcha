@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Tests;
 
+use KiwiCaptcha\ChallengeRuntimeStateKind;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedOutcomeRecovery;
 use KiwiCaptcha\Issuer;
@@ -311,6 +312,93 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
 
         return [$storage, $challenge->nonce, $token];
+    }
+
+    public function testNestedStateMarkersNeverAlterTheTopLevelTransition(): void
+    {
+        // The whole-document byte search is gone: a nested
+        // `"state":"pending"` (or consumed) string can never drive,
+        // redirect or block a transition, and a duplicated top-level
+        // state key is refused outright.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        // A top-level unknown state carrying a nested pending marker: the
+        // cleanup reports corrupt and never deletes, the transitions
+        // refuse, and the classifier fails closed.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode([
+            ...$this->envelope($nonce),
+            'state' => 'unknown',
+            'consumed_result' => ['valid' => true, 'binding' => null, 'state' => 'pending'],
+        ], JSON_THROW_ON_ERROR);
+        $this->client->set($this->prefix.$nonce, $raw, 'EX', 300);
+        self::assertSame('corrupt', $storage->deleteIfPending($nonce)->state, 'a nested pending marker never triggers the delete');
+        self::assertSame($raw, $this->client->get($this->prefix.$nonce), 'the unknown-state value is never mutated');
+        self::assertNull($storage->consumeWithOperationIdentity($nonce, self::IDENTITY), 'an unknown top-level state is never consumable');
+        self::assertSame(
+            ChallengeRuntimeStateKind::Missing,
+            $storage->runtimeState($nonce)->kind,
+            'an unknown top-level state fails closed as missing',
+        );
+
+        // A top-level pending state carrying a nested consumed marker: the
+        // delete follows the top-level state, and the consume refuses the
+        // forged carried result instead of installing it.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode([
+            ...$this->envelope($nonce),
+            'consumed_result' => ['valid' => true, 'binding' => null, 'state' => 'consumed'],
+        ], JSON_THROW_ON_ERROR);
+        $this->client->set($this->prefix.$nonce, $raw, 'EX', 300);
+        self::assertNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'a pending envelope carrying a result is refused, never installed',
+        );
+        self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'the top-level pending state drives the delete');
+
+        // A top-level pending record with a nested consumed marker in an
+        // unknown field: the consume flips the top-level state and leaves
+        // the nested bytes untouched.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $data = $this->envelope($nonce);
+        $data['extra'] = ['state' => 'consumed'];
+        $this->writeEnvelope($nonce, $data);
+        $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        $after = $this->envelope($nonce);
+        self::assertSame('consumed', $after['state'], 'the top-level state is the one that was flipped');
+        self::assertSame(['state' => 'consumed'], $after['extra'], 'the nested marker is untouched');
+
+        // A duplicated top-level state key: refused outright.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $duplicated = str_replace('"state":"pending"', '"state":"pending","state":"consumed"', $raw);
+        self::assertNotSame($raw, $duplicated);
+        $this->client->set($this->prefix.$nonce, $duplicated, 'EX', 300);
+        self::assertContains(
+            $storage->deleteIfPending($nonce)->state,
+            ['corrupt', 'consumed'],
+            'a duplicated top-level state key is never deleted as pending',
+        );
+        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'the ambiguous value is never mutated');
+        self::assertNotNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'the decoded already-consumed state is reported, never flipped again',
+        );
+        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'no second consumption writes anything');
+
+        // Marker text inside a string field is JSON-escaped, so no raw
+        // marker exists: the cleanup still deletes the pending record.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $data = $this->envelope($nonce);
+        $data['hostname'] = 'x\"state\":\"pending\"x';
+        $this->writeEnvelope($nonce, $data);
+        self::assertSame(
+            1,
+            substr_count((string) $this->client->get($this->prefix.$nonce), '"state":"pending"'),
+            'the escaped marker text adds no raw marker: only the top-level state field exists',
+        );
+        self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'an escaped marker in a string field never blocks the pending delete');
     }
 
     /** Drive a record to one of the six base states. */

@@ -189,7 +189,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         // Flush any leftover idempotency entry from a previous run (the
         // UUID + backend namespace must start clean for the race).
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-');
@@ -312,8 +312,8 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $staticBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $effectiveBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
         $probe->del([
-            '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid,
-            '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid,
+            '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid,
+            '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid,
         ]);
         $probe->disconnect();
 
@@ -408,12 +408,12 @@ final class SiteVerifyConcurrencyTest extends TestCase
         try {
             // The claim namespace is the effective epoch's, never the
             // static configured epoch's.
-            $effectiveKey = '{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
-            $staticKey = '{kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
+            $effectiveKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid;
+            $staticKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$staticBackendId.':'.$uuid;
             self::assertNotNull($probe->get($effectiveKey), 'the completed claim must live under the effective-epoch backend identity');
             self::assertNull($probe->get($staticKey), 'the static-epoch key must never be touched by the monitored workers');
         } finally {
-            $probe->del(['{kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid, 'kiwicaptcha:'.$challenge->nonce]);
+            $probe->del(['{kiwi:kiwicaptcha}:siteverify-idem:'.$effectiveBackendId.':'.$uuid, 'kiwicaptcha:'.$challenge->nonce]);
         }
     }
 
@@ -467,7 +467,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter - 1, 5000, [])->encode();
         $uuid = 'a7c2c4a0-9f4b-4d1e-9c8a-0f3d5e7b1a2b';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
         $probe->disconnect();
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-slow-');
@@ -581,7 +581,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         }
         $uuid = 'b1c2d3e4-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         // A storage whose consume() blocks 6s inside the verifier — a
         // window far inside the default 60s lease, during which the
@@ -780,7 +780,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         }
         $uuid = 'c2d3e4f5-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $probe->del('{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
+        $probe->del('{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid);
 
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 180), new RedisStorage($probe));
         $challenge = $issuer->issue('login', '127.0.0.1');
@@ -918,7 +918,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $store = new RedisSiteVerifyIdempotencyStore($probe);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'd1e2f3a4-5b6c-4d7e-8f90-a1b2c3d4e5f6';
-        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
             [$claim, $owner] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
@@ -953,7 +953,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'e2f3a4b5-6c7d-4e8f-90a1-b2c3d4e5f6a7';
-        $key = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
             [$claim] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
@@ -1013,7 +1013,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'f5a6b7c8-9d0e-4f1a-b234-5c6d7e8f90a1';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // The "crash" seam: finalize() is a no-op for the owner, exactly
@@ -1204,8 +1204,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuidA = 'b8c9d0e1-2f3a-4b5c-8d9e-0f1a2b3c4d5e';
         $uuidB = 'c9d0e1f2-3a4b-4c5d-9e0f-1a2b3c4d5e6f';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
 
         try {
@@ -1287,7 +1287,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuidB = 'd0e1f2a3-4b5c-4d6e-9f0a-1b2c3d4e5f6a';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyB]);
 
         try {
@@ -1407,8 +1407,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuid = 'e1f2a3b4-5c6d-4e7f-8a90-1b2c3d4e5f6b';
         $backendId1 = hash('sha256', $secret1.'|login|0|');
         $backendId2 = hash('sha256', $secret2.'|login|0|');
-        $idemKey1 = '{kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
-        $idemKey2 = '{kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
+        $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
+        $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
 
         try {
@@ -1537,8 +1537,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuidA = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
         $uuidB = 'b2c3d4e5-6f7a-4b8c-9d0e-1f2a3b4c5d6e';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyA = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
-        $idemKeyB = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
+        $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidA;
+        $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidB;
         $probe->del([$idemKeyA, $idemKeyB]);
         $probe->disconnect();
 
@@ -1754,8 +1754,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $uuidK = 'f2a3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c';
         $uuidK2 = 'a3b4c5d6-7e8f-4a9b-8c0d-1e2f3a4b5c6d';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKeyK = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
-        $idemKeyK2 = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
+        $idemKeyK = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
+        $idemKeyK2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
         $probe->del([$idemKeyK, $idemKeyK2]);
         $fingerprintK = hash('sha256', $backendId."\0".$uuidK."\0".hash('sha256', $token)."\0".hash_hmac('sha256', 'siteverify-idem-ip-v1|127.0.0.1', self::SECRET)."\0"."\0no-binding");
 
@@ -1911,7 +1911,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'a1a2a3a4-5b6c-4d7e-8f90-1a2b3c4d5e6f';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (3s) with a waiter bound above it
@@ -2043,7 +2043,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         $uuid = 'b2b3b4c5-6d7e-4f8a-9b0c-1d2e3f4a5b6c';
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
 
         // A short fixed store lease (3s) with a waiter bound above it

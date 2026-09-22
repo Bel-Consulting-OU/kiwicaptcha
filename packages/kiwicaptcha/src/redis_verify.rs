@@ -309,6 +309,239 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// and borrowed immutably by every invocation. Building a
 /// `redis::Script` per call would re-hash the full source on the hot
 /// verify path; these objects are immutable and shareable by design.
+/// Shared envelope inspection for the runtime transition scripts.
+///
+/// Every script classifies the runtime state from the decoded top-level
+/// envelope (the byte ceiling bounds the parse) and splices the raw JSON
+/// bytes through the top-level field spans located by this scanner, so
+/// neither a nested state marker nor a nested `"state":"pending"` string
+/// can drive or redirect a transition. The record is never re-encoded
+/// through cjson, so large integers never switch to scientific notation.
+const ENVELOPE_LUA_PRELUDE: &str = r#"
+-- Shared envelope inspection for the runtime transition scripts.
+--
+-- The runtime state is classified from the decoded top-level envelope,
+-- never from a whole-document byte search: a corrupt or foreign value
+-- that merely CONTAINS a nested "state":"pending" (or consumed /
+-- cancelled) string can never drive a transition. The mutations still
+-- splice the raw JSON bytes (the record is never re-encoded through
+-- cjson, so large integers never switch to scientific notation), and
+-- every splice targets the top-level field span located by the scanner
+-- below, so a nested occurrence can never be rewritten either. The
+-- byte ceiling bounds the JSON parse before it happens.
+local KIWI_ENVELOPE_MAX_BYTES = 131072
+
+local function kiwiNullish(x)
+  return x == nil or x == cjson.null
+end
+
+local function kiwiIsSpace(c)
+  return string.find(' \t\r\n', c, 1, true) ~= nil
+end
+
+local function kiwiSkipSpace(v, i, n)
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if not kiwiIsSpace(c) then break end
+    i = i + 1
+  end
+  return i
+end
+
+local function kiwiSkipSpaceBack(v, j)
+  while j >= 1 do
+    local c = string.sub(v, j, j)
+    if not kiwiIsSpace(c) then break end
+    j = j - 1
+  end
+  return j
+end
+
+-- The index of the LAST byte of the JSON value starting at s, or nil
+-- when the value is malformed.
+local function kiwiValueEnd(v, s, n)
+  local c = string.sub(v, s, s)
+  if c == '"' then
+    local i = s + 1
+    local esc = false
+    while i <= n do
+      local ci = string.sub(v, i, i)
+      if esc then esc = false
+      elseif ci == '\\' then esc = true
+      elseif ci == '"' then return i end
+      i = i + 1
+    end
+    return nil
+  elseif c == '{' or c == '[' then
+    local open = c
+    local close = (c == '{') and '}' or ']'
+    local depth = 0
+    local i = s
+    while i <= n do
+      local ci = string.sub(v, i, i)
+      if ci == '"' then
+        i = i + 1
+        local esc = false
+        while i <= n do
+          local cj = string.sub(v, i, i)
+          if esc then esc = false
+          elseif cj == '\\' then esc = true
+          elseif cj == '"' then break end
+          i = i + 1
+        end
+        if i > n then return nil end
+      elseif ci == open then
+        depth = depth + 1
+      elseif ci == close then
+        depth = depth - 1
+        if depth == 0 then return i end
+      end
+      i = i + 1
+    end
+    return nil
+  end
+  local i = s
+  while i <= n do
+    local ci = string.sub(v, i, i)
+    if ci == ',' or ci == '}' or ci == ']' or ci == ' ' or ci == '\t' or ci == '\r' or ci == '\n' then
+      break
+    end
+    i = i + 1
+  end
+  if i == s then return nil end
+  return i - 1
+end
+
+-- The spans of the top-level field `key` in the JSON object v:
+-- {key_start, value_start, value_end}, or nil when v is not a JSON
+-- object, the key is absent or duplicated, the document exceeds the
+-- byte ceiling, or the document is malformed. Depth-, string- and
+-- escape-aware, so a nested field with the same name can never be
+-- mistaken for the envelope's own.
+local function kiwiTopLevelField(v, key)
+  local n = #v
+  if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
+  local i = 1
+  i = kiwiSkipSpace(v, i, n)
+  if string.sub(v, i, i) ~= '{' then return nil end
+  i = i + 1
+  local span = nil
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if string.find(' \t\r\n,', c, 1, true) then
+      i = i + 1
+    elseif c == '}' then
+      return span
+    elseif c == '"' then
+      local j = i + 1
+      local esc = false
+      while j <= n do
+        local cj = string.sub(v, j, j)
+        if esc then esc = false
+        elseif cj == '\\' then esc = true
+        elseif cj == '"' then break end
+        j = j + 1
+      end
+      if j > n then return nil end
+      local name = string.sub(v, i + 1, j - 1)
+      local p = j + 1
+      p = kiwiSkipSpace(v, p, n)
+      if string.sub(v, p, p) ~= ':' then return nil end
+      local s = p + 1
+      s = kiwiSkipSpace(v, s, n)
+      local e = kiwiValueEnd(v, s, n)
+      if e == nil then return nil end
+      if name == key then
+        if span ~= nil then return nil end
+        span = {i, s, e}
+      end
+      i = e + 1
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+-- Replace the value of the top-level field `key` with the raw literal,
+-- or nil when the field is absent, duplicated or the document is
+-- malformed.
+local function kiwiReplaceTopLevel(v, key, literal)
+  local span = kiwiTopLevelField(v, key)
+  if span == nil then return nil end
+  local head = string.sub(v, 1, span[2] - 1)
+  local tail = string.sub(v, span[3] + 1)
+  return head .. literal .. tail
+end
+
+-- Remove the top-level field `key` (with one adjacent comma), or nil
+-- when the field is absent, duplicated or the document is malformed.
+local function kiwiRemoveTopLevel(v, key)
+  local span = kiwiTopLevelField(v, key)
+  if span == nil then return nil end
+  local i = span[3] + 1
+  i = kiwiSkipSpace(v, i, #v)
+  if string.sub(v, i, i) == ',' then
+    return string.sub(v, 1, span[1] - 1) .. string.sub(v, i + 1)
+  end
+  local j = span[1] - 1
+  j = kiwiSkipSpaceBack(v, j)
+  if string.sub(v, j, j) == ',' then
+    return string.sub(v, 1, j - 1) .. string.sub(v, span[3] + 1)
+  end
+  return string.sub(v, 1, span[1] - 1) .. string.sub(v, span[3] + 1)
+end
+
+-- Append a raw field literal before the object's closing brace, or nil
+-- when the document is not a JSON object.
+local function kiwiAppendTopLevel(v, literal)
+  local n = #v
+  local i = 1
+  i = kiwiSkipSpace(v, i, n)
+  if string.sub(v, i, i) ~= '{' then return nil end
+  local depth = 0
+  local last = nil
+  local first = i
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if c == '"' then
+      i = i + 1
+      local esc = false
+      while i <= n do
+        local ci = string.sub(v, i, i)
+        if esc then esc = false
+        elseif ci == '\\' then esc = true
+        elseif ci == '"' then break end
+        i = i + 1
+      end
+      if i > n then return nil end
+    elseif c == '{' or c == '[' then
+      depth = depth + 1
+    elseif c == '}' or c == ']' then
+      depth = depth - 1
+      if depth == 0 then last = i break end
+    end
+    i = i + 1
+  end
+  if last == nil then return nil end
+  local p = last - 1
+  p = kiwiSkipSpaceBack(v, p)
+  if p == first then
+    return string.sub(v, 1, last - 1) .. literal .. string.sub(v, last)
+  end
+  return string.sub(v, 1, last - 1) .. ',' .. literal .. string.sub(v, last)
+end
+
+-- The decoded top-level envelope, or nil when the value exceeds the
+-- byte ceiling or is not a JSON object.
+local function kiwiDecodeEnvelope(v)
+  if #v > KIWI_ENVELOPE_MAX_BYTES then return nil end
+  local ok, decoded = pcall(cjson.decode, v)
+  if not ok or type(decoded) ~= 'table' then return nil end
+  return decoded
+end
+"#;
+
 struct StoreScripts {
     consume: redis::Script,
     delete_if_pending: redis::Script,
@@ -322,13 +555,21 @@ struct StoreScripts {
 impl StoreScripts {
     fn new() -> StoreScripts {
         StoreScripts {
-            consume: redis::Script::new(CONSUME_TRANSITION_LUA),
-            delete_if_pending: redis::Script::new(DELETE_IF_PENDING_LUA),
-            cancel: redis::Script::new(CANCEL_TRANSITION_LUA),
-            commit_result: redis::Script::new(COMMIT_RESULT_LUA),
-            claim_resume: redis::Script::new(CLAIM_RESUME_LUA),
-            release_resume: redis::Script::new(RELEASE_RESUME_LUA),
-            commit_clearing_claim: redis::Script::new(COMMIT_RESULT_CLEARING_CLAIM_LUA),
+            consume: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CONSUME_TRANSITION_LUA}")),
+            delete_if_pending: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{DELETE_IF_PENDING_LUA}"
+            )),
+            cancel: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CANCEL_TRANSITION_LUA}")),
+            commit_result: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{COMMIT_RESULT_LUA}"
+            )),
+            claim_resume: redis::Script::new(&format!("{ENVELOPE_LUA_PRELUDE}{CLAIM_RESUME_LUA}")),
+            release_resume: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{RELEASE_RESUME_LUA}"
+            )),
+            commit_clearing_claim: redis::Script::new(&format!(
+                "{ENVELOPE_LUA_PRELUDE}{COMMIT_RESULT_CLEARING_CLAIM_LUA}"
+            )),
         }
     }
 }
@@ -381,18 +622,33 @@ impl StoreScripts {
 const CLAIM_TTL_SECS: u64 = 60;
 
 const CONSUME_TRANSITION_LUA: &str = r#"
--- The state marker is replaced IN PLACE (the record's JSON bytes are
+-- kiwicaptcha consume transition
+--
+-- The state marker is replaced in place (the record's JSON bytes are
 -- never re-encoded — large integers would switch to scientific
--- notation). Byte-compatible with the PHP consume script: both write
--- the same runtime envelope from issuance onward, so either
--- implementation can transition records written by the other.
+-- notation). The runtime state is classified from the decoded
+-- top-level envelope and the splice targets the top-level state field
+-- span, so neither a nested state marker nor a nested
+-- `"state":"pending"` string can drive or redirect the transition.
+-- Byte-compatible with the PHP consume script: both write the same
+-- runtime envelope from issuance onward, so either implementation can
+-- transition records written by the other.
 local v = redis.call('GET', KEYS[1])
 if not v then return false end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then return false end
+local state = decoded['state']
+if state == 'consumed' then
     return {v, 0}
 end
+if state ~= 'pending' then
+    -- A cancelled record (or any other state) is never consumable: the
+    -- transition reports the record as missing (false) and the verifier
+    -- fails the token closed instead of ever redeeming it.
+    return false
+end
 -- The pending-envelope guard: a genuinely issued pending record
--- carries ONLY the null markers ("consumed_result":null and
+-- carries only the null markers ("consumed_result":null and
 -- "operation_identity":null) and no claim lease fields. A pending
 -- envelope that ALSO carries a terminal or claim field (a non-null
 -- consumed_result, a non-null operation_identity, or any
@@ -404,23 +660,19 @@ end
 -- the consume transition itself may introduce these fields, and only
 -- into the envelope it just flipped. Mirrors the PHP consume script
 -- byte for byte.
-if (string.find(v, '"consumed_result":', 1, true) and not string.find(v, '"consumed_result":null', 1, true))
-    or (string.find(v, '"operation_identity":', 1, true) and not string.find(v, '"operation_identity":null', 1, true))
-    or string.find(v, '"resume_owner":"', 1, true)
-    or string.find(v, '"resume_until":', 1, true) then
+if not kiwiNullish(decoded['consumed_result'])
+    or not kiwiNullish(decoded['operation_identity'])
+    or not kiwiNullish(decoded['resume_owner'])
+    or not kiwiNullish(decoded['resume_until']) then
     return false
 end
-local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
-if n ~= 1 then
-    -- A cancelled record (or any other non-pending state) is never
-    -- consumable: the gsub finds no pending marker, so the transition
-    -- reports the record as missing (nil) and the verifier fails the
-    -- token closed instead of ever redeeming it.
+local updated = kiwiReplaceTopLevel(v, 'state', '"consumed"')
+if updated == nil then
     return false
 end
 if ARGV[1] ~= '' then
-    local withIdentity, m = string.gsub(updated, '"operation_identity":null', '"operation_identity":' .. ARGV[1], 1)
-    if m == 1 then
+    local withIdentity = kiwiReplaceTopLevel(updated, 'operation_identity', ARGV[1])
+    if withIdentity ~= nil then
         updated = withIdentity
     end
 end
@@ -455,17 +707,38 @@ return {updated, 1}
 /// replica that never saw the delete.
 const DELETE_IF_PENDING_LUA: &str = r#"
 -- kiwicaptcha delete-if-pending (atomic cleanup)
+--
+-- The runtime state is classified from the decoded top-level envelope,
+-- never from a whole-document byte search: a value whose top-level
+-- state is unknown (or undecodable) is corrupt, reported without
+-- mutating the record, and a nested "state":"pending" string inside a
+-- corrupt value can never trigger the delete. A consumed record is
+-- returned verbatim and kept. A cancelled record is returned verbatim
+-- and kept too: the cancelled challenge is dead but retained until its
+-- TTL, never eagerly deleted. Only the exact pending state is deleted.
+--
+-- The DEL is a durability-critical write: the caller applies the same
+-- verified WAIT barrier as the other transitions, so a burned challenge
+-- that only vanished from the primary is substantially less likely to
+-- be resurrected as pending by a promoted stale replica (WAIT is
+-- durability hardening, not a consensus guarantee: Redis replication
+-- remains eventually consistent across every failover pattern).
 local v = redis.call("GET", KEYS[1])
 if not v then
   return {'missing'}
 end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return {'corrupt'}
+end
+local state = decoded['state']
+if state == 'consumed' then
   return {'consumed', v}
 end
-if string.find(v, '"state":"cancelled"', 1, true) then
+if state == 'cancelled' then
   return {'cancelled', v}
 end
-if string.find(v, '"state":"pending"', 1, true) then
+if state == 'pending' then
   redis.call("DEL", KEYS[1])
   return {'deleted-pending'}
 end
@@ -495,36 +768,43 @@ return {'corrupt'}
 /// replica), so [`RedisChallengeStore::cancel`] applies the same verified
 /// replica wait as the other transitions after it.
 const CANCEL_TRANSITION_LUA: &str = r#"
--- kiwicaptcha cancel transition (atomic pending -> cancelled)
+-- kiwicaptcha cancel transition
 --
--- CRITICAL: the record is NEVER re-encoded through cjson — re-encoding
+-- CRITICAL: the record is never re-encoded through cjson — re-encoding
 -- rewrites large integers (issued_at_ns ~ 1.7e15) in scientific notation
--- and breaks both strict parsers. The state field is spliced into the
--- RAW stored JSON string (store() always writes the exact
--- `"state":"pending"` marker), mirroring the consume transition. A
--- consumed record is terminal and never cancellable; a cancelled record
--- is idempotent. The flip preserves the key TTL.
+-- and breaks both strict parsers. The runtime state is classified from
+-- the decoded top-level envelope and the flip targets the top-level
+-- state field span, mirroring the consume transition. A consumed record
+-- is terminal and never cancellable; a cancelled record is idempotent;
+-- any other state is refused. The flip preserves the key's remaining
+-- lifetime in milliseconds; a key without an expiry (PTTL < 0) is
+-- refused untouched, never rewritten with a synthesized lifetime.
 local v = redis.call("GET", KEYS[1])
 if not v then
-  return false
+  return nil
 end
-if string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return nil
+end
+local state = decoded['state']
+if state == 'consumed' then
   return {'consumed'}
 end
-if string.find(v, '"state":"cancelled"', 1, true) then
+if state == 'cancelled' then
   return {'cancelled'}
 end
--- The flip preserves the key's exact remaining TTL in milliseconds; a
--- persistent (foreign) key is refused untouched (a negative `PTTL`
--- means no expiry — the transition never destroys foreign state).
+if state ~= 'pending' then
+  return nil
+end
 local pttl = redis.call("PTTL", KEYS[1])
 if pttl < 0 then
   return false
 end
 if pttl < 1000 then pttl = 1000 end
-local updated, n = string.gsub(v, '"state":"pending"', '"state":"cancelled"', 1)
-if n ~= 1 then
-  return false
+local updated = kiwiReplaceTopLevel(v, 'state', '"cancelled"')
+if updated == nil then
+  return nil
 end
 redis.call("SET", KEYS[1], updated, "PX", pttl)
 return {'cancelled-now'}
@@ -536,22 +816,29 @@ return {'cancelled-now'}
 /// are kept untouched — only the small result object is freshly encoded
 /// (bools + a short string, immune to the cjson large-integer issue).
 const COMMIT_RESULT_LUA: &str = r#"
--- The `"consumed_result":null` marker written by store() is replaced
--- IN PLACE, byte-compatible with the PHP commit script (both languages
--- splice the same runtime envelope; the small result object is freshly
--- encoded — valid is a REAL JSON boolean, binding a string or null).
+-- kiwicaptcha commit result
+--
+-- The `"consumed_result":null` field is replaced in place through its
+-- top-level span, byte-compatible with the PHP commit script (both
+-- languages splice the same runtime envelope; the small result object
+-- is freshly encoded — valid is a REAL JSON boolean, binding a string
+-- or null). The state and the result field are read from the decoded
+-- top-level envelope, so a nested marker can never fake a committed or
+-- resultless record.
 local v = redis.call('GET', KEYS[1])
 if not v then return 0 end
-if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
-if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then return 0 end
+if decoded['state'] ~= 'consumed' then return 0 end
+if not kiwiNullish(decoded['consumed_result']) then return 0 end
 local result
 if ARGV[2] ~= '' then
     result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
 else
     result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
-local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-if n ~= 1 then return 0 end
+local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
+if updated == nil then return 0 end
 -- The re-SET preserves the key's exact remaining TTL in milliseconds; a
 -- persistent (foreign) key is refused with no write (a negative `PTTL`
 -- means no expiry — the commit never destroys foreign state).
@@ -587,59 +874,67 @@ const CLAIM_RESUME_LUA: &str = r#"
 -- outcome. KEYS[1] = the record key only. ARGV[1] = the random owner
 -- token, ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the
 -- record envelope: `"resume_owner":"<hex token>","resume_until":<epoch
--- useconds>` is spliced before the envelope's closing brace (the record
+-- useconds>` is appended before the envelope's closing brace (the record
 -- key TTL is preserved in exact milliseconds), so this script touches
 -- exactly one key and is single-slot on a Redis Cluster. A crash leaves
 -- only the short lease: once resume_until (epoch useconds) passes, a
--- later retry may claim again. The record checks use the RAW markers
--- (the same strategy as the rest of this storage layer, which never
--- re-encodes the record's JSON bytes): the envelope stores
--- `"consumed_result":null`, and a cjson decode would map a JSON null to
--- cjson.null, never Lua nil, refusing every resultless record.
+-- later retry may claim again. The state, the result field and the claim
+-- fields are read from the decoded top-level envelope, so a nested
+-- marker can never fake a consumed record, a resultless record or a
+-- live claim.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
 end
-if not string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
   return nil
 end
-if not string.find(v, '"consumed_result":null', 1, true) then
+if decoded['state'] ~= 'consumed' then
+  return nil
+end
+if not kiwiNullish(decoded['consumed_result']) then
   return nil
 end
 -- Live-claim check: refuse while a live claim is held. An owner marker
 -- without a parseable expiry is treated as live (fail safe: never a
 -- second unsynchronized derivation). The lease clock is epoch
 -- useconds.
-local untilStr = string.match(v, '"resume_until":(%d+)')
-if string.find(v, '"resume_owner":"', 1, true) then
+if not kiwiNullish(decoded['resume_owner']) then
+  local untilVal = tonumber(decoded['resume_until'])
   local t = redis.call("TIME")
   local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
-  if untilStr == nil or tonumber(untilStr) > now_us then
+  if untilVal == nil or untilVal > now_us then
     return nil
   end
   -- Expired claim: strip the stale fields before appending the fresh
-  -- ones. The fields always sit at the envelope's end (only this script
-  -- family writes them); a shape that cannot be stripped is refused as
-  -- still-claimed rather than duplicated.
-  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
-  if n ~= 1 then
+  -- ones. A shape that cannot be stripped is refused as still-claimed
+  -- rather than duplicated.
+  local stripped = kiwiRemoveTopLevel(v, 'resume_until')
+  if stripped == nil then
+    return nil
+  end
+  stripped = kiwiRemoveTopLevel(stripped, 'resume_owner')
+  if stripped == nil then
     return nil
   end
   v = stripped
 end
-local t = redis.call("TIME")
-local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
--- Plain decimal rendering: a usecond value would switch to scientific
--- notation through Lua's default number formatting, so the splice keeps
--- the bare JSON integer shape (~1.79e15 fits exactly) both language
--- cores parse digit for digit.
-local untilVal = string.format('%d', now_us + tonumber(ARGV[2]) * 1000000)
 local pttl = redis.call("PTTL", KEYS[1])
 if pttl < 0 then
   return nil
 end
 if pttl < 1000 then pttl = 1000 end
-local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
+local t = redis.call("TIME")
+local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local untilVal = string.format('%d', now_us + tonumber(ARGV[2]) * 1000000)
+local updated = kiwiAppendTopLevel(
+  v,
+  '"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal
+)
+if updated == nil then
+  return nil
+end
 redis.call("SET", KEYS[1], updated, "PX", pttl)
 return ARGV[1]
 "#;
@@ -659,14 +954,32 @@ const RELEASE_RESUME_LUA: &str = r#"
 -- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
 -- owner token. The claim fields are cleared from the envelope only when
 -- they still hold exactly this owner: a stale owner after a crash and
--- TTL expiry can never delete a newer recovery's claim. The record key
--- TTL is preserved in exact milliseconds.
+-- TTL expiry can never delete a newer recovery's claim. The owner and
+-- the state come from the decoded top-level envelope, so a nested
+-- marker can never fake an ownership match. The record key's remaining
+-- lifetime in milliseconds is preserved; a key without an expiry
+-- (PTTL < 0) is refused untouched, never rewritten with a synthesized
+-- lifetime.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
 end
-local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
-if n ~= 1 then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
+  return 0
+end
+if decoded['state'] ~= 'consumed' then
+  return 0
+end
+if decoded['resume_owner'] ~= ARGV[1] then
+  return 0
+end
+local updated = kiwiRemoveTopLevel(v, 'resume_until')
+if updated == nil then
+  return 0
+end
+updated = kiwiRemoveTopLevel(updated, 'resume_owner')
+if updated == nil then
   return 0
 end
 local pttl = redis.call("PTTL", KEYS[1])
@@ -696,28 +1009,36 @@ const COMMIT_RESULT_CLEARING_CLAIM_LUA: &str = r#"
 -- and the successful write clears the claim fields in the same atomic
 -- transition. The claim is embedded in the record envelope, so this
 -- script touches exactly one key (single-slot on a Redis Cluster).
--- The `"consumed_result":null` marker is replaced in place; only the
--- small result object is encoded (valid a real JSON boolean, binding
--- a string or null), never the record's own JSON bytes. The lease
+-- The `"consumed_result":null` field is replaced in place through its
+-- top-level span; only the small result object is encoded (valid a real
+-- JSON boolean, binding a string or null), never the record's own JSON
+-- bytes. The state, the result field and the claim fields are read from
+-- the decoded top-level envelope, so a nested marker can never fake a
+-- committed record, a resultless record or a live claim. The lease
 -- clock is epoch useconds.
-local v = redis.call("GET", KEYS[1])
+local v = redis.call('GET', KEYS[1])
 if not v then
   return 0
 end
-if not string.find(v, '"state":"consumed"', 1, true) then
+local decoded = kiwiDecodeEnvelope(v)
+if decoded == nil then
   return 0
 end
-if not string.find(v, '"consumed_result":null', 1, true) then
+if decoded['state'] ~= 'consumed' then
   return 0
 end
--- Fencing: a live claim owned by this exact token. The owner token is
--- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim must
--- be live: an expired claim no longer fences (the stale owner may not
--- commit). An unparseable expiry refuses too (fail safe).
-local untilStr = string.match(v, '"resume_owner":"' .. ARGV[3] .. '","resume_until":(%d+)')
+if not kiwiNullish(decoded['consumed_result']) then
+  return 0
+end
+-- Fencing: a live claim owned by this exact token. An expired or
+-- unparseable claim refuses too (fail safe).
+if decoded['resume_owner'] ~= ARGV[3] then
+  return 2
+end
+local untilVal = tonumber(decoded['resume_until'])
 local t = redis.call("TIME")
 local now_us = tonumber(t[1]) * 1000000 + tonumber(t[2])
-if untilStr == nil or tonumber(untilStr) <= now_us then
+if untilVal == nil or untilVal <= now_us then
   return 2
 end
 local result
@@ -726,10 +1047,12 @@ if ARGV[2] ~= '' then
 else
     result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
-local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-if n ~= 1 then return 0 end
-local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[3] .. '","resume_until":%d+}$', '}')
-if m ~= 1 then return 0 end
+local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
+if updated == nil then return 0 end
+local cleared = kiwiRemoveTopLevel(updated, 'resume_until')
+if cleared == nil then return 0 end
+cleared = kiwiRemoveTopLevel(cleared, 'resume_owner')
+if cleared == nil then return 0 end
 local pttl = redis.call('PTTL', KEYS[1])
 if pttl < 0 then
   return 0
@@ -854,6 +1177,7 @@ pub enum RuntimeState {
 /// without re-deriving. This is storage-level runtime state — it is never
 /// part of the [`ChallengeRecord`] wire schema.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoredConsumedResult {
     /// Whether the proof met the difficulty target.
     pub valid: bool,
@@ -1486,7 +1810,7 @@ impl RedisChallengeStore {
         // same atomic transition — both cores validate identities
         // against the narrow `[A-Za-z0-9_-]` 1..128-byte alphabet and
         // reject malformed ones before the transition) are spliced into
-        // the RAW JSON (never re-encoded — large integers must stay
+        // the raw JSON (never re-encoded — large integers must stay
         // decimal), exactly as PHP writes them, so the atomic
         // pending->consumed transition works across the two
         // implementations. The canonical record fields are untouched.
@@ -1742,26 +2066,24 @@ impl RedisChallengeStore {
         let Some(raw) = raw else {
             return Ok(RuntimeState::Missing);
         };
-        if raw.contains("\"state\":\"cancelled\"") {
-            return Ok(match decode_stored(&raw) {
-                Some(stored) => RuntimeState::Cancelled(Box::new(stored.record)),
-                None => RuntimeState::Missing,
-            });
+        // The runtime state comes from the decoded top-level envelope,
+        // never from a whole-document byte search: a nested
+        // `"state":"consumed"` string inside a corrupt or foreign value
+        // can never classify the record. An unknown or undecodable state
+        // fails closed as missing, never as pending.
+        let Some(stored) = decode_stored(&raw) else {
+            return Ok(RuntimeState::Missing);
+        };
+        match stored.state.as_deref() {
+            Some("consumed") => Ok(RuntimeState::Consumed(Box::new(ConsumedState {
+                record: stored.record,
+                stored_result: stored.consumed_result,
+                operation_identity: stored.operation_identity,
+            }))),
+            Some("cancelled") => Ok(RuntimeState::Cancelled(Box::new(stored.record))),
+            Some("pending") | None => Ok(RuntimeState::Pending(Box::new(stored.record))),
+            Some(_) => Ok(RuntimeState::Missing),
         }
-        if raw.contains("\"state\":\"consumed\"") {
-            return match decode_stored(&raw) {
-                Some(stored) => Ok(RuntimeState::Consumed(Box::new(ConsumedState {
-                    record: stored.record,
-                    stored_result: stored.consumed_result,
-                    operation_identity: stored.operation_identity,
-                }))),
-                None => Ok(RuntimeState::Missing),
-            };
-        }
-        Ok(match decode_stored(&raw) {
-            Some(stored) => RuntimeState::Pending(Box::new(stored.record)),
-            None => RuntimeState::Missing,
-        })
     }
 
     /// Atomically claim the re-derivation ownership of a resultless
@@ -5073,6 +5395,226 @@ mod tests {
         assert_eq!(decoded.record.nonce, issued.record.nonce);
         assert_eq!(decoded.state.as_deref(), Some("consumed"));
         assert_eq!(decoded.operation_identity.as_deref(), Some(identity));
+    }
+
+    #[test]
+    fn nested_state_markers_never_alter_the_top_level_transition() {
+        // The whole-document byte search is gone: a nested
+        // `"state":"pending"` (or consumed) string can never drive,
+        // redirect or block a transition.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nested-marker:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+
+        // 1. A top-level unknown state carrying a nested pending marker:
+        //    corrupt, never deleted, never classified pending.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let corrupt = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"unknown\",\"consumed_result\":{\"valid\":true,\"binding\":null,\"state\":\"pending\"}",
+        );
+        assert_ne!(raw, corrupt);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&corrupt)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::Corrupt
+        ));
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, corrupt, "the unknown-state value is never mutated");
+        assert!(matches!(
+            store.runtime_state(&issued.record.nonce).unwrap(),
+            RuntimeState::Missing
+        ));
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+                .unwrap()
+                .is_none(),
+            "an unknown top-level state is never consumable"
+        );
+
+        // 2. A top-level pending state carrying a nested consumed marker
+        //    in consumed_result: the delete follows the top-level state,
+        //    and the consume refuses the forged carried result.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let tampered = raw.replace(
+            "\"consumed_result\":null",
+            "\"consumed_result\":{\"valid\":true,\"binding\":null,\"state\":\"consumed\"}",
+        );
+        assert_ne!(raw, tampered);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, None)
+                .unwrap()
+                .is_none(),
+            "a pending envelope carrying a result is refused, never installed"
+        );
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
+
+        // 3. A top-level pending record with a nested consumed marker in
+        //    an unknown field: the consume flips the top-level state and
+        //    leaves the nested bytes untouched.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let tampered = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"pending\",\"extra\":{\"state\":\"consumed\"}",
+        );
+        assert_ne!(raw, tampered);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        // The strict storage decoder refuses to surface a record carrying
+        // an unknown field, so the API result is not asserted here: the
+        // Redis transition itself must still target the top-level state.
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let head = &after[..after.find("\"extra\"").expect("the nested field survives")];
+        assert!(
+            head.contains("\"state\":\"consumed\""),
+            "the top-level state is the one that was flipped: {after}"
+        );
+        assert!(
+            after.contains("\"extra\":{\"state\":\"consumed\"}"),
+            "the nested marker is untouched: {after}"
+        );
+
+        // 4. A duplicated top-level state key: the decoded already-consumed
+        //    state is reported and never flipped again, and the cleanup
+        //    never deletes the ambiguous value as pending.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let duplicated = raw.replace(
+            "\"state\":\"pending\"",
+            "\"state\":\"pending\",\"state\":\"consumed\"",
+        );
+        assert_ne!(raw, duplicated);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&duplicated)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        // The strict Rust decoder rejects the ambiguous duplicate-key
+        // value outright, and the transition must not write anything
+        // either way: the record is never consumed twice.
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, duplicated, "no second consumption writes anything");
+        assert!(!matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
+
+        // 5. Marker text inside a string field is JSON-escaped, so no raw
+        //    marker exists and the pending delete still runs.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let escaped = raw.replace(
+            "\"hostname\":null",
+            r#""hostname":"x\"state\":\"pending\"x""#,
+        );
+        assert_ne!(raw, escaped);
+        assert_eq!(
+            escaped.matches("\"state\":\"pending\"").count(),
+            1,
+            "the escaped marker text adds no raw marker"
+        );
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&escaped)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(matches!(
+            store.delete_if_pending(&issued.record.nonce).unwrap(),
+            DeleteIfPending::DeletedPending
+        ));
     }
 
     #[test]

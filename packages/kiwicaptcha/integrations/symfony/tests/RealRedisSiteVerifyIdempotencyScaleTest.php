@@ -235,7 +235,7 @@ final class RealRedisSiteVerifyIdempotencyScaleTest extends TestCase
         $store = new RedisSiteVerifyIdempotencyStore($check);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         try {
-            $keys = $check->keys('kiwicaptcha:*');
+            $keys = $check->keys('{kiwi:kiwicaptcha}:*');
             self::assertCount(self::CHALLENGES, $keys, 'the store must hold exactly the raced population');
             foreach ($keys as $key) {
                 if (str_contains($key, ':siteverify-idem:')) {

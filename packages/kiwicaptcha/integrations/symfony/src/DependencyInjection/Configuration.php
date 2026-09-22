@@ -199,16 +199,16 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue('%kernel.project_dir%')
                 ->end()
                 ->integerNode('namespace_key_version')
-                    ->info('The key-version contract of every derived deployment namespace (risk.namespace, argon2_semaphore_namespace, the security-policy readers and the authority pins): 1 = the legacy sanitized shape ([A-Za-z0-9_.-] kept, every other byte `_`), 2 = the digest shape (n_ + the first 128 bits of SHA-256 over the complete raw bytes). Version 1 is the default: an existing deployment keeps its key space — pins, policy state, chain state, risk aggregates, limiter windows — instead of silently starting from an empty one. Version 2 changes every key family at once and therefore requires namespace_migration: drained, the explicit acknowledgment that the pre-cutover state has been quiesced and drained. Switching versions is never inferred from the namespace string.')
-                    ->defaultValue(RedisNamespace::VERSION_LEGACY)
+                    ->info('The key-version contract of every derived deployment namespace (risk.namespace, argon2_semaphore_namespace, the security-policy readers, the Siteverify stores and the authority pins): 1 = the legacy sanitized shape ([A-Za-z0-9_.-] kept, every other byte `_`), 2 = the digest shape (n_ + the first 128 bits of SHA-256 over the complete raw bytes). When omitted, an existing deployment keeps the legacy shape so its key space survives the upgrade (the extension emits a configuration advisory); namespace_migration: fresh selects the digest shape for a new install. Version 2 changes every key family at once and therefore requires the namespace_migration acknowledgment (drained or fresh). Switching versions is never inferred from the namespace string.')
+                    ->defaultNull()
                     ->validate()
-                        ->ifTrue(static fn ($v): bool => !\in_array($v, [RedisNamespace::VERSION_LEGACY, RedisNamespace::VERSION_DIGEST], true))
+                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, [RedisNamespace::VERSION_LEGACY, RedisNamespace::VERSION_DIGEST], true))
                         ->thenInvalid('namespace_key_version must be 1 (legacy sanitized) or 2 (digest-derived)')
                     ->end()
                 ->end()
                 ->enumNode('namespace_migration')
-                    ->info('The explicit namespace-migration acknowledgment: none (default) = the deployment stays on its configured namespace_key_version without a cutover; drained = the operator has quiesced the deployment and drained every pre-cutover state family (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows) before switching namespace_key_version to 2. The bundle refuses the digest version without this acknowledgment; the security-policy and chain readers still consult the legacy namespace as a safety net, so a revocation or an open obligation can never be silently abandoned.')
-                    ->values(['none', 'drained'])
+                    ->info('The explicit namespace-migration acknowledgment: none (default) = the deployment keeps the legacy sanitized derivation without a cutover; drained = the operator has quiesced the deployment and drained every pre-cutover state family (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows) before switching to the digest derivation; fresh = a new install with no pre-cutover state at all, which selects the digest derivation without the drained acknowledgment. The bundle refuses the digest version without one of these acknowledgments; the security-policy and chain readers still consult the legacy namespace as a safety net, so a revocation or an open obligation can never be silently abandoned.')
+                    ->values(['none', 'drained', 'fresh'])
                     ->defaultValue('none')
                 ->end()
                 ->booleanNode('enforce_telemetry')
@@ -1169,9 +1169,20 @@ final class Configuration implements ConfigurationInterface
              // are not dual-read, so an unacknowledged switch would
              // silently abandon them.
              ->validate()
-                 ->ifTrue(static fn (array $v): bool => ($v['namespace_key_version'] ?? RedisNamespace::VERSION_LEGACY) !== RedisNamespace::VERSION_LEGACY
-                     && ($v['namespace_migration'] ?? 'none') !== 'drained')
-                 ->thenInvalid('kiwi_captcha.namespace_key_version 2 changes every derived Redis key family at once: set kiwi_captcha.namespace_migration to "drained" only after quiescing the deployment and draining the pre-cutover state (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows). The security-policy and chain readers consult the legacy namespace as a safety net, but the remaining families are not dual-read')
+                 ->ifTrue(static function (array $v): bool {
+                     $migration = $v['namespace_migration'] ?? 'none';
+                     $version = $v['namespace_key_version'] ?? ($migration === 'fresh' ? RedisNamespace::VERSION_DIGEST : RedisNamespace::VERSION_LEGACY);
+
+                     return $version === RedisNamespace::VERSION_DIGEST && $migration === 'none';
+                 })
+                 ->thenInvalid('kiwi_captcha.namespace_key_version 2 changes every derived Redis key family at once: set kiwi_captcha.namespace_migration to "drained" only after quiescing the deployment and draining the pre-cutover state (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows), or to "fresh" for a brand-new install with no pre-cutover state. The security-policy and chain readers consult the legacy namespace as a safety net, but the remaining families are not dual-read')
+             ->end()
+             // A "fresh" install selects the digest derivation: an
+             // explicit legacy version contradicts the acknowledgment.
+             ->validate()
+                 ->ifTrue(static fn (array $v): bool => ($v['namespace_migration'] ?? 'none') === 'fresh'
+                     && ($v['namespace_key_version'] ?? null) === RedisNamespace::VERSION_LEGACY)
+                 ->thenInvalid('kiwi_captcha.namespace_migration: fresh selects the digest namespace derivation for a new install; namespace_key_version 1 (the legacy sanitized shape) contradicts it. Leave namespace_key_version unset (or set 2), or use namespace_migration: none/drained for an existing deployment')
              ->end();
 
         return $treeBuilder;

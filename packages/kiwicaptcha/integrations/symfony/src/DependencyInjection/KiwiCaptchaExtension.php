@@ -375,7 +375,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // from identical bytes. Every risk key family shares this
         // namespace; the legacy segment is consulted by the
         // security-policy and chain readers on the digest key version.
-        $namespaceKeyVersion = $config['namespace_key_version'];
+        $namespaceMigration = $config['namespace_migration'];
+        $namespaceKeyVersion = $config['namespace_key_version']
+            ?? ($namespaceMigration === 'fresh' ? RedisNamespace::VERSION_DIGEST : RedisNamespace::VERSION_LEGACY);
+        if ($config['namespace_key_version'] === null && $namespaceMigration !== 'fresh') {
+            // Conspicuous advisory: an omitted version silently keeps the
+            // collision-prone legacy derivation (two raw discriminators
+            // that differ only in separator bytes fold onto one key
+            // segment). A new install should select the digest derivation
+            // with namespace_migration: fresh.
+            $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.namespace_key_version is not configured, so every derived Redis key family keeps the legacy sanitized derivation: raw namespaces that differ only in separator bytes (tenant/a versus tenant:a, /a/b_c versus /a_b/c) fold onto one key segment and share every key family. Set namespace_key_version explicitly (1 = legacy sanitized, 2 = digest-derived) or set namespace_migration: fresh on a brand-new install to select the digest derivation.');
+        }
         $rawNamespace = $this->resolveNamespaceValue((string) $config['risk']['namespace'], $container);
         $namespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', $namespaceKeyVersion);
 
@@ -1570,12 +1580,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $metadataStoreRef = null;
         $idempotencyStoreRef = null;
         if ($redisRef !== null) {
-            $redisNamespace = $riskConfig['redis']['namespace'] ?? 'kiwicaptcha';
+            // The Siteverify stores derive from the same deployment
+            // namespace authority as every other key family: the raw
+            // risk discriminator plus the configured key version. A
+            // namespace rotation therefore moves the idempotency and
+            // metadata entries with the deployment, and two deployments
+            // sharing one Redis instance can never share a completed
+            // Siteverify result (the backend id carries no namespace).
             $container->setDefinition(RedisSiteVerifyMetadataStore::class, new Definition(RedisSiteVerifyMetadataStore::class, [
                 $redisRef,
-                $redisNamespace,
+                $rawNamespace,
                 $riskConfig['redis']['wait_replicas'] ?? 0,
                 $riskConfig['redis']['wait_timeout_ms'] ?? 100,
+                $namespaceKeyVersion,
             ]));
             // The verified-WAIT durability knobs flow into the idempotency
             // store like every other durability-critical Redis component
@@ -1583,10 +1600,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // do).
             $container->setDefinition(RedisSiteVerifyIdempotencyStore::class, new Definition(RedisSiteVerifyIdempotencyStore::class, [
                 $redisRef,
-                $redisNamespace,
+                $rawNamespace,
                 RedisSiteVerifyIdempotencyStore::LEASE_SECONDS,
                 $riskConfig['redis']['wait_replicas'] ?? 0,
                 $riskConfig['redis']['wait_timeout_ms'] ?? 100,
+                $namespaceKeyVersion,
             ]));
             $metadataStoreRef = new Reference(RedisSiteVerifyMetadataStore::class);
             $idempotencyStoreRef = new Reference(RedisSiteVerifyIdempotencyStore::class);
@@ -1830,6 +1848,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // risk evidence as the native path (SolveSuccess repays the
             // issuance debt only; failure classes enrich the model).
             ->setArgument('$riskGateway', $riskConfig['enabled'] ? $riskGatewayRef : null)
+            // The invalid-secret log gate lives under the deployment
+            // namespace like every other key family.
+            ->setArgument('$logGateNamespace', $rawNamespace)
+            ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
             // The logical-operation identity of the redemption rides in
             // the consumed runtime state (written atomically with the
             // pending->consumed transition). The recovery gate on the

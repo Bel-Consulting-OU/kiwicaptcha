@@ -117,7 +117,7 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
 
     private function idemKey(string $backendId, string $uuid): string
     {
-        return sprintf('{%s}:siteverify-idem:%s:%s', self::NAMESPACE, $backendId, $uuid);
+        return sprintf('{kiwi:%s}:siteverify-idem:%s:%s', self::NAMESPACE, $backendId, $uuid);
     }
 
     private function backendId(string $secret, int $epoch = 0, ?string $digest = null): string

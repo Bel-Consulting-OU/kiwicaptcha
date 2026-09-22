@@ -373,7 +373,7 @@ final class FakePredisClient extends \Predis\Client
         // without an expiry (the fake's expirations registry has no row,
         // the real PTTL < 0) is refused untouched, mirroring the
         // persistent-key refusal.
-        if (str_starts_with($script, '-- kiwicaptcha consume transition')) {
+        if (str_contains($script, '-- kiwicaptcha consume transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
@@ -435,7 +435,7 @@ final class FakePredisClient extends \Predis\Client
         // record is returned verbatim and kept too (dead but retained
         // until its TTL); only a pending record is deleted — mirroring
         // the real Lua.
-        if (str_starts_with($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
+        if (str_contains($script, '-- kiwicaptcha delete-if-pending (atomic cleanup)')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return ['missing'];
@@ -472,7 +472,7 @@ final class FakePredisClient extends \Predis\Client
         // untouched, and a pending record is flipped to the terminal
         // cancelled marker and kept ('cancelled-now') — mirroring the
         // real Lua splice.
-        if (str_starts_with($script, '-- kiwicaptcha cancel transition')) {
+        if (str_contains($script, '-- kiwicaptcha cancel transition')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return null;
@@ -510,7 +510,7 @@ final class FakePredisClient extends \Predis\Client
         // successful write clears the claim fields in the same
         // transition. A key without an expiry is refused with 0
         // untouched, mirroring the persistent-key refusal.
-        if (str_starts_with($script, '-- kiwicaptcha commit result')) {
+        if (str_contains($script, '-- kiwicaptcha commit result')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
                 return 0;
@@ -555,8 +555,8 @@ final class FakePredisClient extends \Predis\Client
         // `resume_owner` / `resume_until` (now + ttl, epoch MICROseconds)
         // are spliced into the envelope, mirroring the real single-key
         // Lua's true-seconds lease.
-        if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim')) {
-            if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim release')) {
+        if (str_contains($script, '-- kiwicaptcha resume-derivation claim')) {
+            if (str_contains($script, '-- kiwicaptcha resume-derivation claim release')) {
                 // Compare-and-delete release: the embedded claim fields
                 // are cleared only when they still hold exactly this
                 // owner. A key without an expiry is refused with 0

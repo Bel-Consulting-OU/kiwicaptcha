@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
 use KiwiCaptcha\Storage\StorageInterface;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 
 /**
  * Redis-backed metadata sidecar. Namespace:
@@ -16,12 +17,23 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
 {
     private const PREFIX = 'siteverify-meta:';
 
+    /**
+     * The encoded deployment namespace inside the `{kiwi:<ns>}` hash
+     * tag, derived from the raw configured discriminator.
+     */
+    private readonly string $namespace;
+
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
-        private readonly string $namespace = 'kiwicaptcha',
+        string $namespace = 'kiwicaptcha',
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
+        // The RAW discriminator is derived here, so the metadata lives
+        // under the deployment namespace exactly like the idempotency
+        // entries.
+        $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwicaptcha', $namespaceKeyVersion);
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 
@@ -62,7 +74,7 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
 
     private function key(string $nonce): string
     {
-        return sprintf('{%s}:%s%s', $this->namespace, self::PREFIX, $nonce);
+        return sprintf('{kiwi:%s}:%s%s', $this->namespace, self::PREFIX, $nonce);
     }
 
     private function waitAndVerify(string $what): void

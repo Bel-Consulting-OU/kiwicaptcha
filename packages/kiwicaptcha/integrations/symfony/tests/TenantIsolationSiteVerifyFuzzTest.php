@@ -158,7 +158,7 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
 
     private function idempotencyKeys(string $idempotencyKey): array
     {
-        return $this->client->keys('{'.self::NS.'}:siteverify-idem:*:'.$idempotencyKey);
+        return $this->client->keys('{kiwi:'.self::NS.'}:siteverify-idem:*:'.$idempotencyKey);
     }
 
     public function testCrossSecretSameKeyNeverSharesIdempotencyState(): void

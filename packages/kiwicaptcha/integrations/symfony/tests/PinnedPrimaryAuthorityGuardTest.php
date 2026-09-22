@@ -58,6 +58,38 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
         return \count(array_filter($fake->calls, static fn (array $call): bool => $call[0] === 'INFO'));
     }
 
+    public function testTheLegacyPinMigrationReturnsTheNxWinner(): void
+    {
+        // The migration's check-then-write window: another actor installs
+        // a primary pin between the legacy read and the SET NX. The NX
+        // write loses, and readPin() must return the winning primary pin
+        // — never the legacy value it read before the race.
+        $fake = $this->fake();
+        $legacyKey = '{kiwi:'.RedisNamespace::derive(self::NS, RedisNamespace::VERSION_LEGACY).'}:authority:pin';
+        $digestKey = '{kiwi:'.RedisNamespace::derive(self::NS, RedisNamespace::VERSION_DIGEST).'}:authority:pin';
+        $fake->strings[$legacyKey] = 'master|'.self::RUN_ID_A;
+        $fake->beforeSet = static function (string $key, string $value) use ($fake, $digestKey): void {
+            if ($key === $digestKey) {
+                // The competing writer wins the NX race first.
+                $fake->strings[$digestKey] = 'master|'.self::RUN_ID_B;
+            }
+        };
+
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 0, '', null, RedisNamespace::VERSION_DIGEST);
+        $state = $guard->state();
+
+        self::assertSame(
+            'master|'.self::RUN_ID_B,
+            $state['pinned'],
+            'the NX winner is authoritative: the loser never reports its stale legacy value',
+        );
+        self::assertSame(
+            'master|'.self::RUN_ID_B,
+            $fake->strings[$digestKey],
+            'the competing primary pin is left untouched by the losing NX write',
+        );
+    }
+
     public function testInitializeRecordsThePinAndVerifiesPass(): void
     {
         $fake = $this->fake();

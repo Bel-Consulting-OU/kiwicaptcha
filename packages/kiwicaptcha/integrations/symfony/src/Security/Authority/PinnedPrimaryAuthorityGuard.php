@@ -455,11 +455,24 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
             }
             // Explicit migration: adopt the legacy pin under the
             // configured key version. SET NX makes concurrent adopters
-            // converge on one value; the primary read above already
-            // established that no primary pin exists at this instant.
-            $this->setNx($this->pinKey, $legacy);
+            // converge on one value. The winner is authoritative: when
+            // the NX write loses, another actor installed a primary pin
+            // between the reads above, and that pin is returned — the
+            // method never reports a value it did not observe as the
+            // primary pin.
+            if ($this->setNx($this->pinKey, $legacy)) {
+                return $legacy;
+            }
+            $winner = $this->client->get($this->pinKey);
+            if (!\is_string($winner) || $winner === '') {
+                // The NX write lost but no primary pin is readable: the
+                // store is inconsistent, so the pin state is unreadable
+                // and the caller refuses (an unreadable store is a
+                // refusal, never a pass).
+                return null;
+            }
 
-            return $legacy;
+            return $winner;
         } catch (\Throwable) {
             return null;
         }
