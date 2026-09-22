@@ -154,7 +154,7 @@ Two gate backends:
   Fencing keeps correctness on expiry: a dead lease can never be misused by its former owner.
   The concurrency cap itself can still be exceeded during the expiry window on such hosts, so size the bound and the margin accordingly and monitor hash times.
   Example: PHP `request_terminate_timeout = 30s` with the default 45 s lease (plus a safety margin).
-  Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).
+  Key: `kiwicaptcha:argon2:leases:<namespace>` (the namespace defaults to `kernel.project_dir` and is derived into the key segment through the versioned derivation; see `namespace_key_version`).
 - **In-process gate (per-process).** Without a Redis client the cap is enforced per PHP process (`src/Security/InProcessArgonGate.php`, token-set based).
   Honest caveat: php-fpm workers share no memory, so this bounds concurrency per worker, not per deployment.
   Multi-worker deployments without Redis should also limit worker counts and rely on the rate limit to bound the inflow.

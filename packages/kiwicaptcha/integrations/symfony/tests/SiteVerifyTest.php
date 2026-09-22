@@ -673,7 +673,7 @@ final class SiteVerifyTest extends TestCase
         $args = $last[1];
         $numKeys = (int) $args[1];
         $keys = array_slice($args, 2, $numKeys);
-        self::assertSame('{kiwicaptcha:argon2:leases:n_b3f6b1af419fe8f0b2fb82fda6346715}:scope:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
+        self::assertSame('{kiwicaptcha:argon2:leases:siteverify-argon}:scope:'.hash('sha256', 'login'), $keys[2], 'the Siteverify endpoint stamps the expected scope for the Argon per-scope budget');
         self::assertNull($request->attributes->get(RequestScopeAdmissionGate::SCOPE_ATTRIBUTE), 'the scope attribute is restored after the verification');
     }
 
@@ -3830,7 +3830,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
     private function monitorFixture(Verifier $verifier, int $configuredEpoch, int $centralEpoch, \Closure $clockMs): array
     {
         $redis = new FakePredisClient();
-        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, (string) $centralEpoch);
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, (string) $centralEpoch);
 
         return [$redis, new SecurityEpochMonitor($verifier, $redis, 'test-ns', $configuredEpoch, 1, $clockMs, 60)];
     }

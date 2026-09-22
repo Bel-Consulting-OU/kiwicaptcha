@@ -73,7 +73,7 @@ final class SecurityEpochPartitionRealRedisTest extends TestCase
 
     private const PREFIX = 'ci:epoch-partition:';
 
-    private const POLICY_KEY = '{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy';
+    private const POLICY_KEY = '{kiwi:test-ns}:security-policy';
 
     private const MAX_STALE_SECS = 60;
 

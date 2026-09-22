@@ -63,8 +63,8 @@ final class RiskV2IntegrationTest extends TestCase
         // security Redis below reports floor 3, so this stack exercises
         // the armed-issuance surface (protocol v3 + authenticated decoy).
         $redis = new FakePredisClient();
-        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_PROTOCOL_VERSION_FIELD, '3');
-        $redis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_PROTOCOL_VERSION_FIELD, '3');
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
         $monitor = new SecurityEpochMonitor(new Verifier(new ArrayStorage()), $redis, 'test-ns', 1, 1);
         $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie(), epochMonitor: $monitor, decoyV3Enabled: true);
 

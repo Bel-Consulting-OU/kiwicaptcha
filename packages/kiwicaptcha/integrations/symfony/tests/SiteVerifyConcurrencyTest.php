@@ -321,7 +321,7 @@ final class SiteVerifyConcurrencyTest extends TestCase
         // parent: every forked worker inherits the copy and its monitor
         // observes the same effective epoch.
         $policyRedis = new FakePredisClient();
-        $policyRedis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
 
         $outFile = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-');
         $startBarrier = tempnam(sys_get_temp_dir(), 'kiwi-idem-epoch-start-');

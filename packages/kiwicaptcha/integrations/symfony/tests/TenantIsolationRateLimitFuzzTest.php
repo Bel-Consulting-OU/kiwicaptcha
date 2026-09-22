@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\Issuer;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -136,7 +137,7 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
                 self::assertFalse($limiter->allow($ipA), 'the first window must now be full');
                 self::assertFalse($limiter->allow($ipB), 'the second window must now be full');
 
-                $clientKeys = $this->client->keys('{kiwi:rl:n_'.substr(hash('sha256', $namespace), 0, 32).'}:client:*');
+                $clientKeys = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive($namespace).'}:client:*');
                 self::assertCount(2, $clientKeys, 'each client must own exactly one pseudonym key');
                 self::assertNotSame(
                     $clientKeys[0],
@@ -162,8 +163,8 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
             self::assertTrue($b->allow($ip), 'namespace B must have an independent window for the same IP');
             self::assertFalse($b->allow($ip), 'namespace B window must now be full');
 
-            $keysA = $this->client->keys('{kiwi:rl:n_'.substr(hash('sha256', 'iso-rl-ns-a'), 0, 32).'}:client:*');
-            $keysB = $this->client->keys('{kiwi:rl:n_'.substr(hash('sha256', 'iso-rl-ns-b'), 0, 32).'}:client:*');
+            $keysA = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-ns-a').'}:client:*');
+            $keysB = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-ns-b').'}:client:*');
             self::assertCount(1, $keysA, 'namespace A owns its client key');
             self::assertCount(1, $keysB, 'namespace B owns its client key');
             self::assertSame([], array_intersect($keysA, $keysB), 'the namespace key sets must be disjoint');
@@ -193,8 +194,8 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
         $b = $this->limiter('iso-rl-global-b', 'pepper', maxPerClient: 0, globalMax: 1);
         self::assertTrue($b->allow('198.51.100.7'), 'namespace B must have its own global budget');
 
-        $globalKeysA = $this->client->keys('{kiwi:rl:n_'.substr(hash('sha256', 'iso-rl-global-a'), 0, 32).'}:global');
-        $globalKeysB = $this->client->keys('{kiwi:rl:n_'.substr(hash('sha256', 'iso-rl-global-b'), 0, 32).'}:global');
+        $globalKeysA = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-global-a').'}:global');
+        $globalKeysB = $this->client->keys('{kiwi:rl:'.RedisNamespace::derive('iso-rl-global-b').'}:global');
         self::assertCount(1, $globalKeysA, 'namespace A owns its global key');
         self::assertCount(1, $globalKeysB, 'namespace B owns its global key');
         self::assertSame([], array_intersect($globalKeysA, $globalKeysB), 'the global keys must be disjoint');

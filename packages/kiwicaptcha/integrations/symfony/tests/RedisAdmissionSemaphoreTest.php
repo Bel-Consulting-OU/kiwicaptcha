@@ -13,6 +13,7 @@ use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -34,7 +35,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     private function leases(FakePredisClient $client, string $namespace = 'default'): int
     {
-        return $client->zcard('{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:global');
+        return $client->zcard('{kiwicaptcha:argon2:leases:'.RedisNamespace::derive($namespace).'}:global');
     }
 
     private function requirePredis(): FakePredisClient
@@ -120,7 +121,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         // never remove B's live lease.
         $semaphore->release($tokenA);
         self::assertSame(1, $this->leases($client), 'stale release must not remove the new lease (B)');
-        self::assertContains($tokenB, $client->zmembers('{kiwicaptcha:argon2:leases:n_37a8eec1ce19687d132fe29051dca629}:global'));
+        self::assertContains($tokenB, $client->zmembers('{kiwicaptcha:argon2:leases:default}:global'));
     }
 
     public function testWrongTokenReleaseIsANoOp(): void
@@ -326,7 +327,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The waiters counter key of a namespace (mirrors the semaphore's own derivation). */
     private function waitersKey(string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:sem:waiters';
+        return '{kiwicaptcha:argon2:leases:'.RedisNamespace::derive($namespace).'}:sem:waiters';
     }
 
     public function testSaturatedAcquiresAreCountedAsWaitersWithTheLeaseTtl(): void
@@ -463,7 +464,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     /** The per-scope lease set key of a namespace + scope (mirrors the semaphore's derivation). */
     private function scopeKey(string $scope, string $namespace = 'default'): string
     {
-        return '{kiwicaptcha:argon2:leases:n_'.substr(hash('sha256', $namespace), 0, 32).'}:scope:'.hash('sha256', $scope);
+        return '{kiwicaptcha:argon2:leases:'.RedisNamespace::derive($namespace).'}:scope:'.hash('sha256', $scope);
     }
 
     public function testOneScopeFillsItsBudgetAndAnotherScopeStillAcquires(): void

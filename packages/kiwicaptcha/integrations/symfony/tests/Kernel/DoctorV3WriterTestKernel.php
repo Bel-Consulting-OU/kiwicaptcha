@@ -24,7 +24,7 @@ abstract class DoctorV3WriterTestKernel extends TestKernel
     public const FAKE_REDIS_ID = 'doctor.v3writer.fake.redis';
 
     /** The fixed risk namespace, so the policy key is deterministic. */
-    public const POLICY_KEY = '{kiwi:n_45f6b2ebd43ca3e9ee7a381ca7975afa}:security-policy';
+    public const POLICY_KEY = '{kiwi:doctor-v3}:security-policy';
 
     protected function build(ContainerBuilder $container): void
     {

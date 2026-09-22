@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskV2Weights;
@@ -194,8 +195,21 @@ final class Configuration implements ConfigurationInterface
                     ->max(300000)
                 ->end()
                 ->scalarNode('argon2_semaphore_namespace')
-                    ->info("Per-deployment discriminator for the Redis-backed Argon2 admission leases and the Redis global rate-limit key (defaults to kernel.project_dir). Two deployments sharing one Redis instance must use different namespaces so their lease sets and global windows do not compete. Sanitized to [A-Za-z0-9_.-] before being embedded in a key.")
+                    ->info("Per-deployment discriminator for the Redis-backed Argon2 admission leases and the Redis global rate-limit key (defaults to kernel.project_dir). Two deployments sharing one Redis instance must use different namespaces so their lease sets and global windows do not compete. The raw value is derived into the key segment through the one versioned namespace derivation (namespace_key_version); it is never embedded raw.")
                     ->defaultValue('%kernel.project_dir%')
+                ->end()
+                ->integerNode('namespace_key_version')
+                    ->info('The key-version contract of every derived deployment namespace (risk.namespace, argon2_semaphore_namespace, the security-policy readers and the authority pins): 1 = the legacy sanitized shape ([A-Za-z0-9_.-] kept, every other byte `_`), 2 = the digest shape (n_ + the first 128 bits of SHA-256 over the complete raw bytes). Version 1 is the default: an existing deployment keeps its key space — pins, policy state, chain state, risk aggregates, limiter windows — instead of silently starting from an empty one. Version 2 changes every key family at once and therefore requires namespace_migration: drained, the explicit acknowledgment that the pre-cutover state has been quiesced and drained. Switching versions is never inferred from the namespace string.')
+                    ->defaultValue(RedisNamespace::VERSION_LEGACY)
+                    ->validate()
+                        ->ifTrue(static fn ($v): bool => !\in_array($v, [RedisNamespace::VERSION_LEGACY, RedisNamespace::VERSION_DIGEST], true))
+                        ->thenInvalid('namespace_key_version must be 1 (legacy sanitized) or 2 (digest-derived)')
+                    ->end()
+                ->end()
+                ->enumNode('namespace_migration')
+                    ->info('The explicit namespace-migration acknowledgment: none (default) = the deployment stays on its configured namespace_key_version without a cutover; drained = the operator has quiesced the deployment and drained every pre-cutover state family (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows) before switching namespace_key_version to 2. The bundle refuses the digest version without this acknowledgment; the security-policy and chain readers still consult the legacy namespace as a safety net, so a revocation or an open obligation can never be silently abandoned.')
+                    ->values(['none', 'drained'])
+                    ->defaultValue('none')
                 ->end()
                 ->booleanNode('enforce_telemetry')
                     ->info('When true, the validator rejects tokens whose client-reported telemetry scores as bot-like. LEGACY opt-in hard gate kept only for explicit compatibility — new automation signals must become bounded risk factors instead; telemetry is client-controlled, so this is never the security boundary.')
@@ -1144,7 +1158,21 @@ final class Configuration implements ConfigurationInterface
                     && $v['execution_required_version'] < $v['execution_version']
                     && !($v['execution_allow_downgrade'] ?? false))
                 ->thenInvalid('kiwi_captcha.execution_required_version must not be below kiwi_captcha.execution_version under the high_abuse protection profile with risk.execution_challenge on: the profile arms the execution dimension by default, and a required tier below the node cap would let the strongest abuse profile silently hand the weaker grammar to any client that cannot solve the stronger one. Raise the required tier to the node cap (the hardened posture), or accept the deliberate downgrade window with an explicit kiwi_captcha.execution_allow_downgrade: true (see operations.md "Execution versioning")')
-            ->end();
+             ->end()
+             // Namespace-migration invariant: the digest key version
+             // changes every Redis key family at once, so it is only
+             // accepted with the explicit drained-migration
+             // acknowledgment. The security-policy and chain readers
+             // still consult the legacy namespace as a safety net, but
+             // the remaining state families (outstanding caps, decision
+             // handles, dispositions, risk aggregates, limiter windows)
+             // are not dual-read, so an unacknowledged switch would
+             // silently abandon them.
+             ->validate()
+                 ->ifTrue(static fn (array $v): bool => ($v['namespace_key_version'] ?? RedisNamespace::VERSION_LEGACY) !== RedisNamespace::VERSION_LEGACY
+                     && ($v['namespace_migration'] ?? 'none') !== 'drained')
+                 ->thenInvalid('kiwi_captcha.namespace_key_version 2 changes every derived Redis key family at once: set kiwi_captcha.namespace_migration to "drained" only after quiescing the deployment and draining the pre-cutover state (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows). The security-policy and chain readers consult the legacy namespace as a safety net, but the remaining families are not dual-read')
+             ->end();
 
         return $treeBuilder;
     }

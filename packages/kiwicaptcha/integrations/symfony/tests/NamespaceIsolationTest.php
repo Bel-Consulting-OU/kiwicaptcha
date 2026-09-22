@@ -13,16 +13,18 @@ use Symfony\Component\Cache\Adapter\ArrayAdapter;
 
 /**
  * Cross-component deployment-namespace isolation: the raw configured
- * namespace is an identity discriminator, and every key family derives
- * its Redis-safe segment from the complete original bytes. Both
- * collision classes a replacement-sanitized derivation could never
- * distinguish must keep independent budgets and disjoint key families
- * in the rate limiter (the PSR-6 and the Redis path alike) and the
- * Argon admission semaphore. The classes: namespaces differing only
- * in a separator versus an underscore (tenant/a versus tenant:a), and
- * project directories differing only in where the separator sits
- * (/a/b_c versus /a_b/c, the shape the kernel.project_dir default
- * produces).
+ * namespace is an identity discriminator, and the digest key version
+ * derives every key family's Redis-safe segment from the complete
+ * original bytes. Both collision classes a replacement-sanitized
+ * derivation cannot distinguish must keep independent budgets and
+ * disjoint key families in the rate limiter (the PSR-6 and the Redis
+ * path alike) and the Argon admission semaphore. The classes:
+ * namespaces differing only in a separator versus an underscore
+ * (tenant/a versus tenant:a), and project directories differing only
+ * in where the separator sits (/a/b_c versus /a_b/c, the shape the
+ * kernel.project_dir default produces). The legacy key version keeps
+ * the historical sanitized shape and is asserted to fold, the
+ * documented default for an existing deployment.
  */
 final class NamespaceIsolationTest extends TestCase
 {
@@ -38,9 +40,50 @@ final class NamespaceIsolationTest extends TestCase
     /**
      * @dataProvider provideCollidingPairs
      */
-    public function testTheDerivationDistinguishesEveryCollidingPair(string $a, string $b): void
+    public function testTheDigestDerivationDistinguishesEveryCollidingPair(string $a, string $b): void
     {
-        self::assertNotSame(RedisNamespace::derive($a), RedisNamespace::derive($b));
+        self::assertNotSame(
+            RedisNamespace::derive($a, RedisNamespace::VERSION_DIGEST),
+            RedisNamespace::derive($b, RedisNamespace::VERSION_DIGEST),
+        );
+    }
+
+    /**
+     * @dataProvider provideCollidingPairs
+     */
+    public function testTheLegacyDerivationKeepsTheHistoricalSanitizedShape(string $a, string $b): void
+    {
+        // The legacy key version is the pre-digest sanitized shape: it
+        // is the default so an existing deployment keeps its key space,
+        // and the colliding pair folds by design (the documented reason
+        // a new deployment chooses the digest version).
+        self::assertSame(RedisNamespace::derive($a), RedisNamespace::derive($b));
+        self::assertSame(
+            preg_replace('/[^A-Za-z0-9_.-]/', '_', $a),
+            RedisNamespace::derive($a),
+        );
+    }
+
+    public function testTheDefaultKeyVersionIsTheLegacyShape(): void
+    {
+        self::assertSame(RedisNamespace::VERSION_LEGACY, RedisNamespace::DEFAULT_VERSION);
+        self::assertSame(RedisNamespace::derive('prod'), RedisNamespace::derive('prod', RedisNamespace::VERSION_LEGACY));
+        self::assertNotSame(RedisNamespace::derive('prod'), RedisNamespace::derive('prod', RedisNamespace::VERSION_DIGEST));
+    }
+
+    public function testTheReadNamespacesConsultTheLegacySegmentOnlyOnTheDigestVersion(): void
+    {
+        self::assertSame(
+            [RedisNamespace::derive('prod', RedisNamespace::VERSION_LEGACY)],
+            RedisNamespace::readNamespaces('prod', 'kiwi', RedisNamespace::VERSION_LEGACY),
+        );
+        self::assertSame(
+            [
+                RedisNamespace::derive('prod', RedisNamespace::VERSION_DIGEST),
+                RedisNamespace::derive('prod', RedisNamespace::VERSION_LEGACY),
+            ],
+            RedisNamespace::readNamespaces('prod', 'kiwi', RedisNamespace::VERSION_DIGEST),
+        );
     }
 
     public function testTheDerivationRefusesTheEmptyNamespace(): void
@@ -65,8 +108,8 @@ final class NamespaceIsolationTest extends TestCase
         $now = static function () use (&$clock): float {
             return $clock;
         };
-        $la = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $a);
-        $lb = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $b);
+        $la = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $a, 0, RedisNamespace::VERSION_DIGEST);
+        $lb = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, $b, 0, RedisNamespace::VERSION_DIGEST);
 
         self::assertSame(1, $la->check('198.51.100.1'));
         self::assertSame(1, $la->check('198.51.100.2'));
@@ -96,7 +139,7 @@ final class NamespaceIsolationTest extends TestCase
     private function acquiredKeys(string $namespace): array
     {
         $client = new FakePredisClient();
-        $semaphore = new RedisAdmissionSemaphore($client, 4, $namespace);
+        $semaphore = new RedisAdmissionSemaphore($client, 4, $namespace, namespaceKeyVersion: RedisNamespace::VERSION_DIGEST);
         $lease = $semaphore->acquire('login');
         self::assertNotNull($lease);
         $keys = [];

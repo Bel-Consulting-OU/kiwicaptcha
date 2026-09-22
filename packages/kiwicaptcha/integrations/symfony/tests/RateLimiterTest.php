@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Storage\ArrayStorage;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -24,10 +25,14 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class RateLimiterTest extends TestCase
 {
-    /** The derived Redis tag of a raw namespace (mirrors RedisNamespace::derive). */
+    /**
+     * The derived Redis tag of a raw namespace (mirrors
+     * RedisNamespace::derive under the default legacy key version, the
+     * version these limiter instances are built with).
+     */
     private static function tag(string $ns): string
     {
-        return 'n_'.substr(hash('sha256', $ns), 0, 32);
+        return RedisNamespace::derive($ns);
     }
 
     private const SECRET = '0123456789abcdef0123456789abcdef';

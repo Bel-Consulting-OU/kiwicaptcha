@@ -367,6 +367,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // pass is a pure int-key projection.
         $config['secrets_by_kid'] = self::canonicalHistoricalSecrets($config['secrets_by_kid']);
 
+        // The one deployment-namespace computation for the whole load: the
+        // configured key version plus the raw risk discriminator, with
+        // parameter placeholders resolved here (the default is
+        // %kernel.project_dir%) so the extension-derived prefixes and the
+        // runtime-deriving components that receive the raw value derive
+        // from identical bytes. Every risk key family shares this
+        // namespace; the legacy segment is consulted by the
+        // security-policy and chain readers on the digest key version.
+        $namespaceKeyVersion = $config['namespace_key_version'];
+        $rawNamespace = $this->resolveNamespaceValue((string) $config['risk']['namespace'], $container);
+        $namespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', $namespaceKeyVersion);
+
         // Advisory build notes (never throw): signing-key rotation
         // (kid > 1 or a non-empty historical map) is the documented
         // deployment model, and a routine rotation must not silently
@@ -905,7 +917,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         // resolved above): the semaphore checks the scope's
                         // own lease set in addition to the global cap.
                         $perTenantCap,
-                    ]))->setPublic(true),
+                    ]))->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)->setPublic(true),
                 );
                 // The verifier consumes the gate through the
                 // request-scope-aware wrapper: the validator stamps the
@@ -1016,6 +1028,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $config['rate_limit_global'],
                 $config['argon2_semaphore_namespace'],
                 $config['rate_limit_rotation_secs'],
+                $namespaceKeyVersion,
             ]))->setPublic(true));
             $rateLimiterRef = new Reference('kiwi_captcha.rate_limiter');
         }
@@ -1073,8 +1086,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // runs the runtime guard on the actual client.
             $riskRedisRaw = $this->resolveRiskRedisClient($riskConfig, $rawRedisRef, $container);
             $riskRedis = $this->checkedRedisClientRef($riskRedisRaw, 'risk', $container);
-            $namespace = RedisNamespace::deriveOr((string) $riskConfig['namespace'], 'kiwi');
-
             $riskMaster = $riskConfig['master_secret'] ?? $config['secret_key'];
             $container->setDefinition('kiwi_captcha.risk.keys', (new Definition(RiskKeys::class))
                 ->setFactory([RiskKeys::class, 'fromMaster'])
@@ -1104,9 +1115,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // session TTL comes from the continuity-cookie lifetime: a
             // session signal must never outlive the cookie that carries
             // it.
+            // The store receives the RAW namespace and the configured key
+            // version: the package derives the encoded {kiwi:<ns>} tag
+            // internally through the one shared deployment derivation, so
+            // the PHP and Rust risk stores built from the same raw
+            // namespace produce identical keys.
             $container->setDefinition('kiwi_captcha.risk.store', (new Definition(RedisRiskStateStore::class, [
                 $riskRedis,
-                $namespace,
+                $rawNamespace,
                 $riskConfig['source_epoch_secs'],
                 $riskConfig['subnet_epoch_secs'],
                 $riskConfig['state_ttl_secs'],
@@ -1116,7 +1132,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
                 ->setArgument('$hysteresisMs', $riskConfig['hysteresis_ms'])
                 ->setArgument('$saturations', $riskConfig['saturations'])
-                ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs']));
+                ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs'])
+                ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion));
             $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
 
             // In-process emergency limiter (cheap admission before the
@@ -1147,7 +1164,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             if ($riskConfig['calibration']['enabled']) {
                 $container->setDefinition('kiwi_captcha.risk.calibration', (new Definition(AggregateCalibrator::class, [
                     $riskRedis,
-                    $namespace,
+                    $rawNamespace,
                     $riskConfig['calibration']['min_samples'],
                     $riskConfig['calibration']['max_adjustment'],
                     $riskConfig['calibration']['max_change_per_minute'],
@@ -1159,7 +1176,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$falsePositiveCost', $riskConfig['calibration']['false_positive_cost'])
                     ->setArgument('$falseNegativeCost', $riskConfig['calibration']['false_negative_cost'])
                     ->setArgument('$outcomeTtlSecs', $riskConfig['calibration']['outcome_receipt_ttl_secs'])
-                    ->setArgument('$scopeHmacKey', AggregateCalibrator::deriveScopeHmacKey($riskMaster)));
+                    ->setArgument('$scopeHmacKey', AggregateCalibrator::deriveScopeHmacKey($riskMaster))
+                    ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion));
                 $calibrationRef = new Reference('kiwi_captcha.risk.calibration');
             }
 
@@ -1376,11 +1394,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     // transition WAITs for the configured replica count
                     // before the caller learns success (a returned
                     // Deny/StepUp must survive a promotion).
+                    // The RAW namespace + configured key version: the
+                    // store derives the {kiwi:<ns>} tag internally and,
+                    // on the digest version, falls back to the legacy
+                    // segment for obligation/chain reads, so a cutover
+                    // can never hide an open obligation.
                     $container->setDefinition(RedisChainedChallengeStateStore::class, new Definition(RedisChainedChallengeStateStore::class, [
                         $chainStoreRedis,
-                        $namespace,
+                        $rawNamespace,
                         $riskConfig['redis']['wait_replicas'],
                         $riskConfig['redis']['wait_timeout_ms'],
+                        $namespaceKeyVersion,
                     ]));
                     $chainStoreRef = new Reference(RedisChainedChallengeStateStore::class);
                 } else {
@@ -1445,7 +1469,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // guard and pin.
         $authorityGuardRefs = [];
         if ($config['ha_authority'] === 'pinned_primary') {
-            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $container);
+            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $rawNamespace, $namespaceKeyVersion, $container);
         }
         // Trusted client-IP policy, wired unconditionally (not gated on
         // risk.enabled): the canonical client IP feeds the challenge
@@ -1477,13 +1501,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // bump revokes outstanding challenges within one cache window.
         // Without a Redis client the monitor serves the configured
         // risk.policy_version (no central state to read).
-        $namespace = RedisNamespace::deriveOr((string) $riskConfig['namespace'], 'kiwi');
         $container->setDefinition(SecurityEpochMonitor::class, (new Definition(SecurityEpochMonitor::class, [
             new Reference('kiwi_captcha.verifier'),
             $redisRef,
             // The raw configured namespace: the monitor derives its key
-            // segment through the one shared derivation internally.
-            (string) $riskConfig['namespace'],
+            // segment through the one shared derivation internally, and
+            // on the digest key version also reads the legacy segment.
+            $rawNamespace,
             $config['risk']['policy_version'],
             $riskConfig['security_epoch_cache_secs'],
         ]))
@@ -1492,6 +1516,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // (temporary_unavailable) and the controller refuses
             // issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$maxStaleSecs', $riskConfig['security_epoch_max_stale_secs'])
+            ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
             ->setPublic(true));
 
         // Optional Ed25519 result-receipt signer. The result verification
@@ -1619,7 +1644,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $redisRef,
                 OutstandingChallenges::CANCELLATION_GLOBAL_CAP,
                 ($config['argon2_semaphore_namespace'] !== '' ? $config['argon2_semaphore_namespace'].'-' : '').'cancel',
-            ]))->setPublic(true));
+            ]))->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)->setPublic(true));
             $cancellationLimiterRef = new Reference('kiwi_captcha.cancellation_limiter');
         }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
@@ -1856,7 +1881,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             );
         }
 
-        $healthNamespace = (string) $riskConfig['namespace'];
+        $healthNamespace = $rawNamespace;
         $container->setDefinition(KiwiHealthController::class, (new Definition(KiwiHealthController::class, [
             $config['secret_key'],
             $redisRef,
@@ -1890,6 +1915,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
             ->setArgument('$executionVersionCap', $config['execution_version'])
             ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
+            ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Form type (renders the widget through the form theme). The
@@ -2298,14 +2324,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * @return array<string, Reference> the guard services keyed by
      *         authority label ("storage", "risk")
      */
-    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, ContainerBuilder $container): array
+    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, string $rawNamespace, int $namespaceKeyVersion, ContainerBuilder $container): array
     {
         if ($redisRef === null) {
             throw new \LogicException(
                 'kiwi_captcha.ha_authority is "pinned_primary", but no storage/limiter Redis client is wired — the pinned-primary guard pins the serving authority of the security Redis, and without a client there is no authority to pin and nothing to enforce. Configure redis_dsn / redis_service / a RedisStorage storage (a direct single-node Predis client), or set ha_authority: none (see docs/ha-authority.md).'
             );
         }
-        $namespace = RedisNamespace::deriveOr((string) ($config['risk']['namespace'] ?? 'kiwicaptcha'), 'kiwi');
+        // The pin keys derive from the same risk namespace (the extension
+        // computed it once at the top of load()).
         $expectedConfig = $config['ha_authority_expected'] ?? null;
         if (\is_string($expectedConfig) && $expectedConfig !== '') {
             // The scalar shorthand: ONE expected identity applies to
@@ -2333,10 +2360,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $storageGuardId = 'kiwi_captcha.ha_authority_guard.storage';
         $container->setDefinition($storageGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
             new Reference($redisId.'.inner'),
-            $namespace,
+            // The RAW namespace: the guard is the single derivation
+            // boundary for its pin key (never pass a derived value —
+            // that would derive twice).
+            $rawNamespace,
             $config['ha_authority_reverify_secs'],
             'storage',
             $expectedByAuthority['storage'] ?? $expectedShorthand,
+            $namespaceKeyVersion,
         ]))
             ->setPublic(true));
         $guardRefs = ['storage' => new Reference($storageGuardId)];
@@ -2375,10 +2406,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $riskGuardId = 'kiwi_captcha.ha_authority_guard.risk';
             $container->setDefinition($riskGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
                 new Reference($riskId.'.inner'),
-                $namespace,
+                // The RAW namespace: the guard is the single derivation
+                // boundary for its pin key.
+                $rawNamespace,
                 $config['ha_authority_reverify_secs'],
                 'risk',
                 $expectedByAuthority['risk'] ?? $expectedShorthand,
+                $namespaceKeyVersion,
             ]))
                 ->setPublic(true));
             $guardRefs['risk'] = new Reference($riskGuardId);
@@ -2896,6 +2930,29 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             'Set risk.redis_service to a Predis\Client service id (or configure redis_service / RedisStorage '.
             'with a Predis\Client so the extension can reuse it).'
         );
+    }
+
+    /**
+     * Resolve the %%parameter%% placeholders inside a namespace value (the
+     * default risk.namespace and argon2_semaphore_namespace are
+     * `%kernel.project_dir%`), so the extension-time derivation and the
+     * runtime-deriving components that receive the raw value both operate
+     * on the identical bytes. An unresolvable placeholder is returned
+     * unchanged: the container's own argument resolution then reports it
+     * with its normal error, exactly like any other unresolved argument.
+     */
+    private function resolveNamespaceValue(string $raw, ContainerBuilder $container): string
+    {
+        if (!str_contains($raw, '%')) {
+            return $raw;
+        }
+        try {
+            $resolved = $container->getParameterBag()->resolveValue($raw);
+        } catch (\Throwable) {
+            return $raw;
+        }
+
+        return \is_string($resolved) ? $resolved : $raw;
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Storage\ReplicaWaitException;
@@ -64,6 +65,19 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
     private const PREFIX = 'chain:';
 
     private const OBLIGATION_PREFIX = 'chain-obligation:';
+
+    /**
+     * The encoded primary namespace inside every key this store writes.
+     */
+    private readonly string $namespace;
+
+    /**
+     * The legacy encoded namespace on the digest key version: reads fall
+     * back to it (never writes), so the cutover cannot hide an open
+     * obligation or chain record. Null on the legacy key version, where
+     * the primary namespace already is the legacy segment.
+     */
+    private readonly ?string $legacyNamespace;
 
     private readonly RedisSecurityCommandExecutor $lua;
 
@@ -824,10 +838,21 @@ LUA;
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
-        private readonly string $namespace = 'kiwi',
+        string $namespace = 'kiwi',
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
+        // The store receives the RAW configured discriminator and derives
+        // the encoded {kiwi:<ns>} tag through the one shared derivation.
+        // On the digest key version it also holds the legacy segment: the
+        // obligation and chain reads fall back to it, so an open
+        // obligation written before the cutover is never invisible and a
+        // ticketless request can never downgrade to a fresh stage 1.
+        $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwi', $namespaceKeyVersion);
+        $this->legacyNamespace = $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+            ? RedisNamespace::deriveOr($namespace, 'kiwi', RedisNamespace::VERSION_LEGACY)
+            : null;
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
         $this->lua = new RedisSecurityCommandExecutor($redis);
     }
@@ -977,11 +1002,20 @@ LUA;
     public function obligationChainId(string $obligationId): ?string
     {
         $chainId = $this->redis->get($this->obligationKey($obligationId));
-        if (!\is_string($chainId) || $chainId === '') {
+        if (\is_string($chainId) && $chainId !== '') {
+            return $chainId;
+        }
+        if ($this->legacyNamespace === null) {
             return null;
         }
+        // Migration read: the obligation mapping written before the
+        // namespace cutover. Reads never migrate the mapping — a
+        // transition on the legacy record fails closed in the caller
+        // (the primary-namespace scripts answer missing), which never
+        // restarts the transaction at stage 1.
+        $legacy = $this->redis->get($this->legacyObligationKey($obligationId));
 
-        return $chainId;
+        return \is_string($legacy) && $legacy !== '' ? $legacy : null;
     }
 
     /**
@@ -997,7 +1031,18 @@ LUA;
     {
         $raw = $this->lua->executeRead(self::READ_LUA, [$this->key($chainId)], []);
         if ($raw === false || $raw === null) {
-            return null;
+            if ($this->legacyNamespace === null) {
+                return null;
+            }
+            // Migration read: a chain record written before the namespace
+            // cutover. The strict decode below still applies, so a
+            // corrupt legacy record fails closed exactly like a primary
+            // one. Writes stay on the primary namespace; a transition on
+            // a legacy-only record fails closed in the caller.
+            $raw = $this->lua->executeRead(self::READ_LUA, [$this->legacyKey($chainId)], []);
+            if ($raw === false || $raw === null) {
+                return null;
+            }
         }
         if ($raw === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the read boundary');
@@ -1439,6 +1484,16 @@ LUA;
     private function obligationKey(string $obligationId): string
     {
         return sprintf('{kiwi:%s}:%s%s', $this->namespace, self::OBLIGATION_PREFIX, $obligationId);
+    }
+
+    private function legacyKey(string $chainId): string
+    {
+        return sprintf('{kiwi:%s}:%s%s', $this->legacyNamespace, self::PREFIX, $chainId);
+    }
+
+    private function legacyObligationKey(string $obligationId): string
+    {
+        return sprintf('{kiwi:%s}:%s%s', $this->legacyNamespace, self::OBLIGATION_PREFIX, $obligationId);
     }
 
     /**

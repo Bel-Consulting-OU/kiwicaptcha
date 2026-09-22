@@ -133,10 +133,18 @@ final class KiwiHealthController
      *                                                   external security
      *                                                   state, so the Redis
      *                                                   legs are vacuous.
-     * @param string                     $namespace     the risk namespace
-     *                                                   (sanitized) used for
-     *                                                   the central policy
-     *                                                   key.
+     * @param string                     $namespace     the raw configured
+     *                                                   risk namespace: the
+     *                                                   readiness probe
+     *                                                   derives the central
+     *                                                   policy key through
+     *                                                   the one shared
+     *                                                   derivation, and on
+     *                                                   the digest key
+     *                                                   version also reads
+     *                                                   the legacy segment
+     *                                                   (the migration
+     *                                                   safety net).
      * @param int                        $policyVersion the configured
      *                                                   risk.policy_version.
      * @param callable(): float|null     $nowMs         clock override
@@ -209,6 +217,7 @@ final class KiwiHealthController
         private readonly bool $executionGate = false,
         private readonly int $executionVersionCap = 1,
         private readonly int $executionRequiredVersion = 1,
+        private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
     }
 
@@ -451,9 +460,15 @@ final class KiwiHealthController
         $ok = true;
         $reason = null;
         $parsed = [];
+        $minProtocol = null;
+        $minEpoch = null;
+        $minExecution = null;
         try {
-            $policy = $this->redis->hgetall('{kiwi:'.RedisNamespace::deriveOr($this->namespace, 'kiwi').'}:security-policy');
-            if (\is_array($policy) && $policy !== []) {
+            foreach (RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion) as $policyNamespace) {
+                $policy = $this->redis->hgetall('{kiwi:'.$policyNamespace.'}:security-policy');
+                if (!\is_array($policy) || $policy === []) {
+                    continue;
+                }
                 // Corrupt present policy state must fail closed: a
                 // malformed min_protocol_version / min_policy_epoch /
                 // min_execution_version (abc, -1, 1.5, 1e3, overflow)
@@ -474,21 +489,29 @@ final class KiwiHealthController
                         }
                     }
                 }
-                if ($ok) {
-                    $minProtocol = (int) ($policy['min_protocol_version'] ?? 0);
-                    $minEpoch = (int) ($policy['min_policy_epoch'] ?? 0);
-                    $minExecution = (int) ($policy['min_execution_version'] ?? 0);
-                    $parsed['min_execution_version'] = $minExecution;
-                    if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
-                        $ok = false;
-                        $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
-                    } elseif ($minEpoch > $this->policyVersion) {
-                        $ok = false;
-                        $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
-                    } elseif ($minExecution > self::MAX_EXECUTION_VERSION) {
-                        $ok = false;
-                        $reason = 'security_policy_incompatible:min_execution_version_'.$minExecution;
-                    }
+                if (!$ok) {
+                    break;
+                }
+                // Conservative merge across the consulted namespaces (the
+                // configured derivation plus the legacy one on the digest
+                // key version): the strongest declared floor wins, so a
+                // legacy revocation stays effective after the namespace
+                // cutover.
+                $minProtocol = max($minProtocol ?? 0, (int) ($policy['min_protocol_version'] ?? 0));
+                $minEpoch = max($minEpoch ?? 0, (int) ($policy['min_policy_epoch'] ?? 0));
+                $minExecution = max($minExecution ?? 0, (int) ($policy['min_execution_version'] ?? 0));
+            }
+            if ($ok && $minEpoch !== null) {
+                $parsed['min_execution_version'] = $minExecution;
+                if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
+                    $ok = false;
+                    $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
+                } elseif ($minEpoch > $this->policyVersion) {
+                    $ok = false;
+                    $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
+                } elseif ($minExecution > self::MAX_EXECUTION_VERSION) {
+                    $ok = false;
+                    $reason = 'security_policy_incompatible:min_execution_version_'.$minExecution;
                 }
             }
         } catch (\Throwable) {

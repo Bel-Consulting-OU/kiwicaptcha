@@ -227,6 +227,7 @@ LUA;
         private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
         private readonly int $saturationPressureCap = 64,
         private readonly int $maxPerScope = 8,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         if ($leaseMs < 1_000) {
             throw new \InvalidArgumentException('leaseMs must be >= 1000');
@@ -242,7 +243,7 @@ LUA;
         // (tenant/a and tenant:a, two project directories differing in
         // a separator byte) onto one lease family. An unset namespace
         // shares the named default's deployment scope by choice.
-        $tag = RedisNamespace::deriveOr($namespace, 'default');
+        $tag = RedisNamespace::deriveOr($namespace, 'default', $namespaceKeyVersion);
         // One hash-tagged root names the whole key family: every key any
         // script touches (the global lease set, the saturation counter,
         // each per-scope set) is derived from it with a plain suffix, so

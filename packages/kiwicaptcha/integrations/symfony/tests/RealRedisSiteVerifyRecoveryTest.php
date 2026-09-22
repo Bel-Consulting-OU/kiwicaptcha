@@ -264,7 +264,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // monitor; the static configured epoch stays 0, so any claim
         // under the static key would prove the monitor is NOT wired.
         $policyRedis = new FakePredisClient();
-        $policyRedis->hset('{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $policyRedis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
 
         try {
             $ownerVerifier = new Verifier($lost);

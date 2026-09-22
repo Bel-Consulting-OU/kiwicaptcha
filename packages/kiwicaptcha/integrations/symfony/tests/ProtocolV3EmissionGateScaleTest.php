@@ -46,7 +46,7 @@ final class ProtocolV3EmissionGateScaleTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
-    private const POLICY_KEY = '{kiwi:n_0298d4e37c65855e36be1d7da0d170ba}:security-policy';
+    private const POLICY_KEY = '{kiwi:test-ns}:security-policy';
 
     private const BATCH = 30;
 

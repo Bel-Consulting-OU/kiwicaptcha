@@ -475,5 +475,33 @@ final class RiskPolicyTest extends TestCase
                 self::assertStringContainsString('literal boolean', $e->getMessage());
             }
         }
+        // The shared malformed global-floor sets: the level keys are
+        // exactly the five canonical spellings 0..4, each declared
+        // exactly once. PHP's array key rules already reject non-integer
+        // spellings, and the Rust parser must reject the identical
+        // vectors through its literal level grammar — one shared asset,
+        // one acceptance set.
+        foreach ($vectors['malformed_global_floor_sets'] as $vector) {
+            $config = $base;
+            $config['global_floors'] = $vector['floors'];
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed global_floors %s must be rejected (%s)', json_encode($vector['floors']), $vector['why']));
+            } catch (\InvalidArgumentException $e) {
+                // Every malformed set fails one of the canonical-level
+                // rules: a non-canonical spelling fails the integer-key
+                // message, a missing level fails the exact-count
+                // message, and an out-of-range level fails the range
+                // message.
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('global_floors'),
+                        self::stringContains('Global floor level'),
+                    ),
+                    $vector['why'],
+                );
+            }
+        }
     }
 }

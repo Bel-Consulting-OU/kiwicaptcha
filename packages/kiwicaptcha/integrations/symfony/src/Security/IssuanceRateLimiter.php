@@ -158,22 +158,28 @@ final class IssuanceRateLimiter
      * identity hex.
      */
     /**
-     * The Redis key-family tag: the digest of the raw namespace, or
-     * the legacy literal when no namespace is configured (the shared
-     * no-namespace family an operator opts into by leaving the
-     * discriminator empty).
+     * The Redis key-family tag: the encoded namespace of the configured
+     * key version, or the legacy literal when no namespace is configured
+     * (the shared no-namespace family an operator opts into by leaving
+     * the discriminator empty).
      */
     private function rlTag(): string
     {
-        return $this->namespace !== '' ? RedisNamespace::derive($this->namespace) : '';
+        return $this->namespace !== '' ? RedisNamespace::derive($this->namespace, $this->namespaceKeyVersion) : '';
     }
 
-    private static function namespaceKeySegment(string $namespace): string
+    private function namespaceKeySegment(string $namespace): string
     {
-        // The PSR-6 segment mirrors the Redis tag derivation (the
-        // digest of the raw namespace) so the two families agree on
-        // the deployment identity.
-        return substr(RedisNamespace::derive($namespace), 2, 24);
+        // The PSR-6 segment is derived from the same encoded namespace
+        // as the Redis tag, so the two families agree on the deployment
+        // identity. The legacy key version keeps its historical shape:
+        // the first 24 hex chars of the SHA-256 of the sanitized
+        // namespace. The digest version strips the `n_` prefix.
+        $derived = RedisNamespace::derive($namespace, $this->namespaceKeyVersion);
+
+        return $this->namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+            ? substr($derived, 2, 24)
+            : substr(hash('sha256', $derived), 0, 24);
     }
 
     /**
@@ -189,12 +195,12 @@ final class IssuanceRateLimiter
      * namespaced key vs a legacy 'kr_global'/'kr_'-hex key) can ever
      * collide.
      */
-    private static function cacheKey(string $identity, string $namespace): string
+    private function cacheKey(string $identity, string $namespace): string
     {
         if ($namespace === '') {
             return self::CACHE_KEY_PREFIX.substr($identity, 0, 60);
         }
-        $ns = self::namespaceKeySegment($namespace);
+        $ns = $this->namespaceKeySegment($namespace);
 
         // 64 - 'kr_' - ns - '_' hex chars, floored at a still-safe 160
         // bits of the keyed HMAC (the identity is 256-bit; truncation
@@ -342,6 +348,7 @@ LUA;
         private readonly int $globalMax = 0,
         string $namespace = '',
         private readonly int $rateLimitRotationSecs = 0,
+        int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
     ) {
         // A sliding window can cross at most ONE rotation boundary, so the
         // two-epoch (current + previous) accounting is only exact when the
@@ -359,10 +366,14 @@ LUA;
         // replacement-sanitized value that would fold distinct
         // namespaces onto one key family.
         $this->namespace = $namespace;
+        $this->namespaceKeyVersion = $namespaceKeyVersion;
     }
 
     /** @var string raw deployment namespace (digested per key family, never sanitized) */
     private readonly string $namespace;
+
+    /** The key-version contract of the namespace derivation. */
+    private readonly int $namespaceKeyVersion;
 
     /**
      * @return bool true when the request may proceed
@@ -656,7 +667,7 @@ LUA;
     {
         $now = $this->now();
 
-        $item = $this->pool->getItem(self::cacheKey($key, $this->namespace));
+        $item = $this->pool->getItem($this->cacheKey($key, $this->namespace));
         $state = $item->isHit() ? $item->get() : null;
         $hits = $this->prune(\is_array($state) ? $this->timestamps($state) : [], $now);
 
@@ -715,8 +726,8 @@ LUA;
     {
         $now = $this->now();
 
-        $itemPrev = $this->pool->getItem(self::cacheKey($identityPrev, $this->namespace));
-        $itemCur = $this->pool->getItem(self::cacheKey($identityCur, $this->namespace));
+        $itemPrev = $this->pool->getItem($this->cacheKey($identityPrev, $this->namespace));
+        $itemCur = $this->pool->getItem($this->cacheKey($identityCur, $this->namespace));
         $prevState = $itemPrev->isHit() ? $itemPrev->get() : null;
         $curState = $itemCur->isHit() ? $itemCur->get() : null;
         $prevHits = $this->prune(\is_array($prevState) ? $this->timestamps($prevState) : [], $now);

@@ -720,8 +720,9 @@ final class FakePredisClient extends \Predis\Client
             // The core RedisStorage delete-if-pending script: missing
             // reports missing; a consumed record is returned verbatim and
             // kept; a cancelled record is returned verbatim and kept too
-            // (dead but retained until its TTL); only a pending record is
-            // deleted.
+            // (dead but retained until its TTL); only a record carrying
+            // the exact pending marker is deleted, and any other runtime
+            // state is corrupt (reported without mutating the record).
             $key = (string) $keys[0];
             if (!isset($this->strings[$key])) {
                 return ['missing'];
@@ -729,13 +730,17 @@ final class FakePredisClient extends \Predis\Client
             $raw = $this->strings[$key];
             $obj = json_decode($raw, true);
             if (!\is_array($obj)) {
-                return ['missing'];
+                return ['corrupt'];
             }
-            if (($obj['state'] ?? 'pending') === 'consumed') {
+            $state = $obj['state'] ?? 'pending';
+            if ($state === 'consumed') {
                 return ['consumed', $raw];
             }
-            if (($obj['state'] ?? 'pending') === 'cancelled') {
+            if ($state === 'cancelled') {
                 return ['cancelled', $raw];
+            }
+            if ($state !== 'pending') {
+                return ['corrupt'];
             }
             unset($this->strings[$key]);
 
