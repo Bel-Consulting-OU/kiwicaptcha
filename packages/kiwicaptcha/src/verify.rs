@@ -2744,9 +2744,18 @@ mod tests {
     #[test]
     fn wrong_counter_is_rejected() {
         let mut record = make_record(8);
-        // Find a valid counter, then use a different one.
+        // Find a valid counter, then a counter that provably does not
+        // meet the target (the alternate small counter can also solve it,
+        // which made the earlier `if valid == 0 { 1 } else { 0 }` guess
+        // flaky).
         let valid = solve_for_test(&record).unwrap();
-        let bad = if valid == 0 { 1 } else { 0 };
+        let bad = (0u64..)
+            .find(|counter| {
+                *counter != valid
+                    && derive_hash(&record, *counter)
+                        .is_ok_and(|hash| leading_zero_bits(&hash) < record.target_bits)
+            })
+            .expect("a non-solving counter exists");
         assert_eq!(
             verify(&mut record, bad, 5000),
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)

@@ -352,6 +352,36 @@ fn verifier_for(url: &str, prefix: &str) -> ProductionVerifier {
     ProductionVerifier::new(store_for(url, prefix), SECRET)
 }
 
+/// A counter that provably does NOT meet the record's target: the
+/// deterministic replacement for the small-counter guess
+/// (`if valid == 0 { 1 } else { 0 }`) that was flaky whenever the
+/// alternate counter also solved the target.
+fn insufficient_counter(record: &ChallengeRecord) -> u64 {
+    use sha2::{Digest, Sha256};
+    let salt = B64.decode(&record.salt).expect("the salt decodes");
+    let mut counter = 0u64;
+    loop {
+        let input = format!("{}{}", record.prefix, counter);
+        let mut hasher = Sha256::new();
+        hasher.update(input.as_bytes());
+        hasher.update(&salt);
+        let digest = hasher.finalize();
+        let mut bits = 0u32;
+        for byte in digest.iter() {
+            if *byte == 0 {
+                bits += 8;
+            } else {
+                bits += byte.leading_zeros();
+                break;
+            }
+        }
+        if bits < record.target_bits {
+            return counter;
+        }
+        counter += 1;
+    }
+}
+
 fn encode_token(nonce: &str, counter: u64) -> String {
     SolutionToken {
         nonce: nonce.into(),
@@ -1094,7 +1124,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
     )
     .unwrap();
     let valid_counter = solve_for_test(&issued_wrong.record).expect("4-bit sha solves");
-    let wrong_counter = if valid_counter == 0 { 1 } else { 0 };
+    let wrong_counter = insufficient_counter(&issued_wrong.record);
     verifier.store().store(&issued_wrong.record).unwrap();
     assert_eq!(
         verify_with(
@@ -1360,7 +1390,7 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
     )
     .unwrap();
     let valid = solve_for_test(&issued.record).expect("4-bit sha solves");
-    let wrong = if valid == 0 { 1 } else { 0 };
+    let wrong = insufficient_counter(&issued.record);
     let issued_at_ns = issued.record.issued_at_ns;
 
     let verifier = verifier_for(&url, &prefix);
