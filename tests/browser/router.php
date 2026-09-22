@@ -177,6 +177,8 @@ final class ChainFileStore implements \BelConsulting\KiwiCaptchaBundle\Risk\Tran
             'stage2Nonce' => null,
             'requestBinding' => $requestBinding,
             'expiresAt' => $expiresAt,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
     }
 

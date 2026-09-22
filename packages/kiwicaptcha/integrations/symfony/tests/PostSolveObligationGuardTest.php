@@ -48,6 +48,8 @@ final class PostSolveObligationGuardTest extends TestCase
             'stage2Nonce' => $stage2Nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ], JSON_THROW_ON_ERROR);
     }
 

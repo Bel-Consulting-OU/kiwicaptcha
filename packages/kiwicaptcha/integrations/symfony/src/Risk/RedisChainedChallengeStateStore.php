@@ -299,6 +299,9 @@ if rec['state'] == 'reserved' then
   rec['state'] = 'reserved'
   rec['owner'] = ARGV[1]
   rec['leaseUntil'] = now + lease
+  if rec['requirementGeneration'] == nil or rec['requirementGeneration'] == cjson.null then
+    rec['requirementGeneration'] = 1
+  end
   rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'taken_over'
@@ -310,6 +313,9 @@ end
 rec['state'] = 'reserved'
 rec['owner'] = ARGV[1]
 rec['leaseUntil'] = now + lease
+if rec['requirementGeneration'] == nil or rec['requirementGeneration'] == cjson.null then
+  rec['requirementGeneration'] = 1
+end
 rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'available'
@@ -356,7 +362,9 @@ if rec['state'] == 'reserved' then
   -- between bumped the chain's generation, so the weaker challenge must
   -- never be installed: the caller discards it and retries against the
   -- current requirement.
-  if rec['reservedRequirementGeneration'] ~= rec['requirementGeneration'] then
+  if rec['reservedRequirementGeneration'] ~= nil
+    and rec['reservedRequirementGeneration'] ~= cjson.null
+    and rec['reservedRequirementGeneration'] ~= rec['requirementGeneration'] then
     return 'stale_requirement'
   end
   rec['state'] = 'issued'
@@ -1541,7 +1549,10 @@ LUA;
         }
         // The monotonic requirement generation: every raise increments it,
         // and a reservation records the generation it was taken against.
-        $requirementGeneration = $rec['requirementGeneration'] ?? null;
+        // A record written before the generation field existed is the
+        // legacy shape: it decodes as generation 1 and heals on its first
+        // transition, so an in-flight chain survives the upgrade.
+        $requirementGeneration = $rec['requirementGeneration'] ?? 1;
         if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
             throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
         }
@@ -1556,8 +1567,8 @@ LUA;
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
-            if (!\is_int($reservedGeneration) || $reservedGeneration < 1) {
-                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration is required in the reserved state');
+            if ($reservedGeneration !== null && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
             }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
@@ -1620,8 +1631,8 @@ LUA;
             'stage2Nonce' => $rec['stage2Nonce'],
             'obligationId' => $rec['obligationId'],
             'expiresAt' => $rec['expiresAt'],
-            'requirementGeneration' => $rec['requirementGeneration'],
-            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration'],
+            'requirementGeneration' => $rec['requirementGeneration'] ?? 1,
+            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration'] ?? null,
         ];
     }
 

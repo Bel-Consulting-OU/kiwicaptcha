@@ -118,6 +118,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
             'stage2Nonce' => $stage2Nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ], JSON_THROW_ON_ERROR), 'EX', 300);
     }
 
@@ -592,6 +594,8 @@ final class RealRedisPostSolveDispositionTest extends TestCase
             'stage2Nonce' => $nonce,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
         $this->client->set($this->obligationKey(), self::GUARD_CHAIN, 'EX', 300);
         $this->client->set($this->chainKey(), (string) json_encode($corrupt), 'EX', 300);

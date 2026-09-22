@@ -673,7 +673,7 @@ final class ChainedChallengeTicketService
             owner: $record['owner'],
             leaseUntil: $record['leaseUntil'],
             expiresAt: $record['expiresAt'],
-            requirementGeneration: $record['requirementGeneration'],
+            requirementGeneration: $record['requirementGeneration'] ?? 1,
         );
     }
 

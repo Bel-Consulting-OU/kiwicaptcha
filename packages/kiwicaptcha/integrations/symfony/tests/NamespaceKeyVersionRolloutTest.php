@@ -441,6 +441,31 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         self::assertSame($beforeKeys, array_keys($fake->strings), 'no key is created or deleted by the refused create-or-get');
     }
 
+    public function testALegacyChainRecordWithoutTheGenerationFieldsKeepsWorking(): void
+    {
+        // A chain record written before the generation fields existed is
+        // the legacy shape: it decodes as generation 1, the read serves
+        // it, and the first transition heals it (the write carries the
+        // fields), so an in-flight chain survives the upgrade.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        [$chainId, $obligationId] = $this->buildChainInState($store, $fake, 'available');
+        $chainKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$chainId;
+        $legacy = json_decode((string) $fake->strings[$chainKey], true, flags: JSON_THROW_ON_ERROR);
+        unset($legacy['requirementGeneration'], $legacy['reservedRequirementGeneration']);
+        $fake->strings[$chainKey] = (string) json_encode($legacy, JSON_THROW_ON_ERROR);
+
+        $read = $store->read($chainId);
+        self::assertSame(1, $read['requirementGeneration'], 'the legacy record decodes as generation 1');
+
+        $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        self::assertSame(ChainReservationResult::Available, $service->reserveStage2($chainId, 'owner-a'));
+        $healed = json_decode((string) $fake->strings[$chainKey], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(1, $healed['requirementGeneration'], 'the first transition writes the generation');
+        self::assertSame(1, $healed['reservedRequirementGeneration']);
+        self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainId, 'owner-a', base64_encode(random_bytes(32))));
+    }
+
     public function testAMissingOrExpiredChainStillHeals(): void
     {
         // The counterpart of the corruption rule: a genuinely missing or

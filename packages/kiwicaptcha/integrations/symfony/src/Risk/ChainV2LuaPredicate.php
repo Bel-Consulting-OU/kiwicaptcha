@@ -117,7 +117,12 @@ local function isValidChainRecord(rec)
   -- taken against, so an issuance can never install a challenge minted
   -- for a weaker requirement.
   local requirementGeneration = rec['requirementGeneration']
-  if not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
+  if requirementGeneration == nil or requirementGeneration == cjson.null then
+    -- A record written before the generation field existed is the
+    -- legacy shape: it decodes as generation 1 and heals on its first
+    -- transition, so an in-flight chain survives the upgrade.
+    requirementGeneration = 1
+  elseif not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
     return false
   end
   local state = rec['state']
@@ -136,7 +141,8 @@ local function isValidChainRecord(rec)
     if not isKiwiInteger(leaseUntil) then
       return false
     end
-    if not isKiwiInteger(reservedGeneration) or reservedGeneration < 1 then
+    if reservedGeneration ~= nil and reservedGeneration ~= cjson.null
+      and (not isKiwiInteger(reservedGeneration) or reservedGeneration < 1) then
       return false
     end
   else

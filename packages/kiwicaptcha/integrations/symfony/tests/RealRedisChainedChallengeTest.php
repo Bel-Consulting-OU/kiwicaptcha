@@ -765,6 +765,8 @@ final class RealRedisChainedChallengeTest extends TestCase
             'stage2Nonce' => null,
             'requestBinding' => 'auth',
             'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
 
         // An unexpected state must never be transitioned by the reserve.

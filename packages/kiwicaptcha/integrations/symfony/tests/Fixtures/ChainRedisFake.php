@@ -345,6 +345,7 @@ final class ChainRedisFake extends \Predis\Client
             $rec['state'] = 'reserved';
             $rec['owner'] = (string) $args[0];
             $rec['leaseUntil'] = $nowSecs + $lease;
+            $rec['requirementGeneration'] = $rec['requirementGeneration'] ?? 1;
             $rec['reservedRequirementGeneration'] = $rec['requirementGeneration'];
             $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
@@ -354,7 +355,8 @@ final class ChainRedisFake extends \Predis\Client
         $rec['state'] = 'reserved';
         $rec['owner'] = (string) $args[0];
         $rec['leaseUntil'] = $nowSecs + $lease;
-        $rec['reservedRequirementGeneration'] = $rec['requirementGeneration'];
+        $rec['requirementGeneration'] = $rec['requirementGeneration'] ?? 1;
+            $rec['reservedRequirementGeneration'] = $rec['requirementGeneration'];
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return 'available';

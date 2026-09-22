@@ -271,14 +271,16 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             // signed ticket anyway — the lease can never outlive it).
             $this->records[$chainId]['owner'] = $ownerToken;
             $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
-            $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'];
+            $this->records[$chainId]['requirementGeneration'] = $record['requirementGeneration'] ?? 1;
+            $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'] ?? 1;
 
             return 'taken_over';
         }
         $this->records[$chainId]['state'] = 'reserved';
         $this->records[$chainId]['owner'] = $ownerToken;
         $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
-        $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'];
+        $this->records[$chainId]['requirementGeneration'] = $record['requirementGeneration'] ?? 1;
+        $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'] ?? 1;
 
         return 'available';
     }
@@ -319,7 +321,9 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             // The reservation CAS: a raise between the reservation and
             // the issuance bumped the generation, so the challenge minted
             // for the weaker requirement must never be installed.
-            if ($record['reservedRequirementGeneration'] !== $record['requirementGeneration']) {
+            if (($record['reservedRequirementGeneration'] ?? null) !== null
+                && $record['reservedRequirementGeneration'] !== $record['requirementGeneration']
+            ) {
                 return 'stale_requirement';
             }
             $this->records[$chainId]['state'] = 'issued';
@@ -671,7 +675,9 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if (($rec['chainDepth'] ?? null) !== 2) {
             throw new MalformedChainedChallengeStateException('chain record chainDepth must be exactly 2');
         }
-        $requirementGeneration = $rec['requirementGeneration'] ?? null;
+        // A legacy record without the generation field decodes as
+        // generation 1 and heals on its first transition.
+        $requirementGeneration = $rec['requirementGeneration'] ?? 1;
         if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
             throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
         }
@@ -686,8 +692,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
-            if (!\is_int($reservedGeneration) || $reservedGeneration < 1) {
-                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration is required in the reserved state');
+            if ($reservedGeneration !== null && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
             }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
@@ -749,8 +755,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'stage2Nonce' => $record['stage2Nonce'],
             'obligationId' => $record['obligationId'],
             'expiresAt' => (int) $record['expiresAt'],
-            'requirementGeneration' => $record['requirementGeneration'],
-            'reservedRequirementGeneration' => $record['reservedRequirementGeneration'],
+            'requirementGeneration' => $record['requirementGeneration'] ?? 1,
+            'reservedRequirementGeneration' => $record['reservedRequirementGeneration'] ?? null,
         ];
     }
 }
