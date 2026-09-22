@@ -53,6 +53,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     private const WIRE_KEYS = [
         'v', 'stage1Nonce', 'scope', 'obligationId', 'requiredAction', 'requiredRank', 'policyVersion',
         'chainDepth', 'state', 'owner', 'leaseUntil', 'stage2Nonce', 'requestBinding', 'expiresAt',
+        'requirementGeneration', 'reservedRequirementGeneration',
     ];
 
     /**
@@ -94,6 +95,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'stage2Nonce' => null,
             'requestBinding' => $requestBinding,
             'expiresAt' => (int) ($this->clock() + max(1, $ttlSecs)),
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
     }
 
@@ -121,6 +124,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'stage2Nonce' => null,
             'requestBinding' => $requestBinding,
             'expiresAt' => (int) ($this->clock() + max(1, $ttlSecs)),
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
         $this->obligations[$obligationId] = $chainId;
     }
@@ -133,42 +138,42 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $existing = $this->obligations[$obligationId] ?? null;
         if ($existing !== null) {
             $record = $this->records[$existing] ?? null;
-            $live = false;
             if ($record !== null) {
-                try {
-                    // The strict v2 decode, mirroring the Redis Lua
-                    // predicate's isValidChainRecord(): a corrupt
-                    // pointed-at record is never returned as the existing
-                    // chain (the Redis heal), and the record's own expiry
-                    // is the TTL equivalent (a Redis key is gone when its
-                    // TTL lapses; here the expiresAt field is checked).
-                    self::validateState($record);
-                    $live = $record['expiresAt'] > $this->clock();
-                } catch (MalformedChainedChallengeStateException $e) {
-                    // Corrupt record: the strict v2 decode fails, exactly
-                    // like the Redis Lua predicate's rejection — healed
-                    // below with the compare-delete + fresh create.
-                }
-                if (!$live) {
-                    // Unlike Redis there is no TTL sweep reaping the stale
-                    // record: it is removed with the mapping so the
-                    // corrupt/expired record never lingers unreferenced.
-                    unset($this->records[$existing]);
-                }
-            }
-            if ($live) {
-                // The obligation exists and its pointed-at record is valid:
-                // return the existing chain id, raising the required
-                // rank/action when the new reassessment is stronger (never
-                // lower).
-                if ($requiredRank > $record['requiredRank']) {
-                    $this->records[$existing]['requiredRank'] = $requiredRank;
-                    $this->records[$existing]['requiredAction'] = $requiredAction;
-                }
+                // The strict v2 decode, mirroring the Redis Lua
+                // predicate's isValidChainRecord(): the record's own
+                // expiry is the TTL equivalent (a Redis key is gone when
+                // its TTL lapses; here the expiresAt field is checked).
+                // Corruption propagates: only a genuinely missing or
+                // expired record is stale; a corrupt retained denial or
+                // step-up must never be healed into a fresh chain.
+                self::validateState($record);
+                if ($record['expiresAt'] > $this->clock()) {
+                    // The obligation exists and its pointed-at record is
+                    // valid: return the existing chain id, raising the
+                    // required rank/action when the new reassessment is
+                    // stronger (never lower). A raise bumps the monotonic
+                    // generation; an already-issued chain fails closed to
+                    // the terminal step-up state (the stale nonce can never
+                    // be upgraded in place).
+                    if ($requiredRank > $record['requiredRank']) {
+                        $this->records[$existing]['requiredRank'] = $requiredRank;
+                        $this->records[$existing]['requiredAction'] = $requiredAction;
+                        ++$this->records[$existing]['requirementGeneration'];
+                        if (\in_array($record['state'], ['issued', 'completed', 'verified'], true)) {
+                            $this->records[$existing]['state'] = 'step_up_required';
+                            $this->records[$existing]['owner'] = null;
+                            $this->records[$existing]['leaseUntil'] = null;
+            $this->records[$existing]['reservedRequirementGeneration'] = null;
+                        }
+                    }
 
-                return $existing;
+                    return $existing;
+                }
+                // Expired: unlike Redis there is no TTL sweep reaping the
+                // stale record, so it is removed with the mapping.
+                unset($this->records[$existing]);
             }
-            // The obligation points at a missing/expired/corrupt chain:
+            // The obligation points at a missing/expired chain:
             // compare-delete the stale mapping and create fresh (the
             // atomic retry of the Redis script).
             if (($this->obligations[$obligationId] ?? null) === $existing) {
@@ -190,6 +195,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'stage2Nonce' => null,
             'requestBinding' => $requestBinding !== '' ? $requestBinding : null,
             'expiresAt' => (int) $expiresAt,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
         $this->obligations[$obligationId] = $chainId;
 
@@ -203,7 +210,17 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             return null;
         }
         $record = $this->records[$chainId] ?? null;
-        if ($record === null || $record['expiresAt'] <= $this->clock()) {
+        if ($record === null) {
+            // Genuinely missing: a stale mapping, cleared like Redis.
+            unset($this->obligations[$obligationId]);
+
+            return null;
+        }
+        // Corrupt pointed-at state fails closed (the strict decode
+        // throws): the mapping is NOT dropped and the read never returns
+        // a chain whose record violates the contract.
+        self::validateState($record);
+        if ($record['expiresAt'] <= $this->clock()) {
             unset($this->obligations[$obligationId]);
 
             return null;
@@ -254,12 +271,14 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             // signed ticket anyway — the lease can never outlive it).
             $this->records[$chainId]['owner'] = $ownerToken;
             $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
+            $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'];
 
             return 'taken_over';
         }
         $this->records[$chainId]['state'] = 'reserved';
         $this->records[$chainId]['owner'] = $ownerToken;
         $this->records[$chainId]['leaseUntil'] = $this->leaseDeadline($record, $leaseSecs);
+        $this->records[$chainId]['reservedRequirementGeneration'] = $record['requirementGeneration'];
 
         return 'available';
     }
@@ -276,6 +295,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $this->records[$chainId]['state'] = 'available';
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
     }
 
     public function markIssued(string $chainId, string $ownerToken, string $stage2Nonce): string
@@ -296,10 +316,18 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             if ($record['owner'] !== $ownerToken) {
                 return 'not_owner';
             }
+            // The reservation CAS: a raise between the reservation and
+            // the issuance bumped the generation, so the challenge minted
+            // for the weaker requirement must never be installed.
+            if ($record['reservedRequirementGeneration'] !== $record['requirementGeneration']) {
+                return 'stale_requirement';
+            }
             $this->records[$chainId]['state'] = 'issued';
             $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
             $this->records[$chainId]['owner'] = null;
             $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
 
             return 'issued_new';
         }
@@ -426,6 +454,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         // owner/leaseUntil null).
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
         // The stage2Nonce field is preserved: the exact stage-2 nonce
         // when one exists (issued/completed), null otherwise
         // (available/reserved); the terminal state carries an optional
@@ -483,6 +512,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         // owner/leaseUntil null).
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
         // The stage2Nonce field is preserved: the exact stage-2 nonce
         // when one exists (issued/completed), null otherwise
         // (available/reserved); the terminal state carries an optional
@@ -507,6 +537,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $this->records[$chainId]['state'] = 'available';
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
         $this->records[$chainId]['stage2Nonce'] = null;
 
         return true;
@@ -538,6 +569,7 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
         $this->records[$chainId]['owner'] = null;
         $this->records[$chainId]['leaseUntil'] = null;
+            $this->records[$chainId]['reservedRequirementGeneration'] = null;
 
         return self::wire($this->records[$chainId]);
     }
@@ -639,18 +671,28 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if (($rec['chainDepth'] ?? null) !== 2) {
             throw new MalformedChainedChallengeStateException('chain record chainDepth must be exactly 2');
         }
+        $requirementGeneration = $rec['requirementGeneration'] ?? null;
+        if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
+            throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+        }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
             throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified|step_up_required|denied');
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
+        $reservedGeneration = $rec['reservedRequirementGeneration'] ?? null;
         if ($state === 'reserved') {
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
+            if (!\is_int($reservedGeneration) || $reservedGeneration < 1) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration is required in the reserved state');
+            }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
+        } elseif ($reservedGeneration !== null) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
         if ($state === 'issued' || $state === 'verified' || $state === 'completed') {
@@ -707,6 +749,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'stage2Nonce' => $record['stage2Nonce'],
             'obligationId' => $record['obligationId'],
             'expiresAt' => (int) $record['expiresAt'],
+            'requirementGeneration' => $record['requirementGeneration'],
+            'reservedRequirementGeneration' => $record['reservedRequirementGeneration'],
         ];
     }
 }

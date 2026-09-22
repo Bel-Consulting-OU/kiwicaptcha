@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ChallengeRecord;
+use KiwiCaptcha\ChallengeRuntimeStateKind;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -572,6 +573,95 @@ final class RedisStorageTest extends TestCase
 
         self::assertNotNull($state);
         self::assertSame($before + 1, $storage->envelopeDecodeCount(), 'consumedState() must json_decode the stored envelope exactly once');
+    }
+
+    public function testAbsentOrNonStringRuntimeStateFailsClosedAsMissing(): void
+    {
+        // Under the current envelope contract every stored record carries
+        // a string runtime state. An absent marker or a wrong-typed one is
+        // corrupt state: it fails closed as Missing in both languages,
+        // never as Pending.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $base = $this->makeRecord('state-shape')->toArray();
+
+        $client->store['kiwicaptcha:state-shape'] = json_encode($base, JSON_THROW_ON_ERROR);
+        self::assertSame(
+            ChallengeRuntimeStateKind::Missing,
+            $storage->runtimeState('state-shape')->kind,
+            'an absent state marker is corrupt state, never pending',
+        );
+        self::assertNull($storage->consumedState('state-shape'));
+
+        foreach ([1, true, ['pending'], ['state' => 'pending'], null] as $state) {
+            $client->store['kiwicaptcha:state-shape'] = json_encode(
+                [...$base, 'state' => $state],
+                JSON_THROW_ON_ERROR,
+            );
+            self::assertSame(
+                ChallengeRuntimeStateKind::Missing,
+                $storage->runtimeState('state-shape')->kind,
+                'a non-string state marker is corrupt state, never pending',
+            );
+            self::assertNull($storage->consumedState('state-shape'));
+        }
+
+        $client->store['kiwicaptcha:state-shape'] = json_encode(
+            [...$base, 'state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState('state-shape')->kind);
+    }
+
+    public function testTheRacePathNeverNormalizesAMalformedConsumedResult(): void
+    {
+        // The consume racing another winner returns the consumed-before
+        // envelope to doConsume(). A malformed committed result must
+        // surface as absent (indeterminate), never normalized into an
+        // authorization-bearing success: only a real boolean valid and a
+        // string/null binding pass the strict authority.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $malformed = [
+            '"valid":"1"' => '{"valid":"1","binding":null}',
+            '"valid":1.9' => '{"valid":1.9,"binding":null}',
+            '"valid":2' => '{"valid":2,"binding":null}',
+            '"valid":true with unknown key' => '{"valid":true,"binding":null,"extra":1}',
+            '"valid":true with malformed binding' => '{"valid":true,"binding":{"a":1}}',
+            '"valid":true with array result' => '[true,null]',
+            '"valid":null' => '{"valid":null,"binding":null}',
+        ];
+        foreach ($malformed as $label => $resultJson) {
+            $nonce = 'race-result-'.md5($label);
+            $record = $this->makeRecord($nonce);
+            $client->store['kiwicaptcha:'.$nonce] = json_encode([
+                ...$record->toArray(),
+                'state' => 'consumed',
+                'consumed_result' => json_decode($resultJson, true),
+                'operation_identity' => null,
+            ], JSON_THROW_ON_ERROR);
+
+            $consumed = $storage->consumeWithOperationIdentity($nonce, bin2hex(random_bytes(8)));
+            self::assertNotNull($consumed, $label.': the consumed state is reported');
+            self::assertTrue($consumed->consumedBefore, $label.': the race path was taken');
+            self::assertNull($consumed->consumedResult, $label.': a malformed result is absent, never normalized');
+        }
+
+        // The legacy integer 0/1 form is a supported shape and stays
+        // readable (the same rule Rust applies at its boundary).
+        $nonce = 'race-result-legacy-int';
+        $record = $this->makeRecord($nonce);
+        $client->store['kiwicaptcha:'.$nonce] = json_encode([
+            ...$record->toArray(),
+            'state' => 'consumed',
+            'consumed_result' => ['valid' => 1, 'binding' => null],
+            'operation_identity' => null,
+        ], JSON_THROW_ON_ERROR);
+        $consumed = $storage->consumeWithOperationIdentity($nonce, bin2hex(random_bytes(8)));
+        self::assertNotNull($consumed);
+        self::assertNotNull($consumed->consumedResult, 'the legacy integer valid form is a supported shape');
+        self::assertTrue($consumed->consumedResult->valid);
+        self::assertNull($consumed->consumedResult->binding);
     }
 
     public function testRuntimeStateDecodesTheConsumedEnvelopeExactlyOnce(): void

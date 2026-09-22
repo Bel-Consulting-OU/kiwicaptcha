@@ -198,6 +198,14 @@ final class SecurityEpochMonitor
         private $nowMs = null,
         private readonly int $maxStaleSecs = 60,
         private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout also consults the legacy segment.
+         * A drained migration does (the safety net); a fresh install
+         * does NOT: it has no pre-cutover state, so an unrelated
+         * deployment's colliding legacy keys must never be read as its
+         * own policy.
+         */
+        private readonly bool $readLegacyFallback = true,
     ) {
         if ($cacheSecs < 1) {
             throw new \InvalidArgumentException('security-epoch cache window must be >= 1 s');
@@ -311,7 +319,7 @@ final class SecurityEpochMonitor
     {
         return array_map(
             static fn (string $namespace): string => sprintf(self::POLICY_KEY, $namespace),
-            RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion),
+            RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion, $this->readLegacyFallback),
         );
     }
 

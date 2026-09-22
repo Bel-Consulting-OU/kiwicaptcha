@@ -154,14 +154,24 @@ final class RiskProfileResolver
      */
     public function recordSatisfies(ChallengeRecord $record, RiskAction $action): bool
     {
+        return $this->strengthSatisfies($record->algorithm, $record->targetBits, $action);
+    }
+
+    /**
+     * Whether a minted challenge's strength satisfies an action: the same
+     * rules as {@see recordSatisfies()}, usable before a stored record
+     * exists (the controller's issuance-time requirement check).
+     */
+    public function strengthSatisfies(PoWAlgorithm $algorithm, int $targetBits, RiskAction $action): bool
+    {
         return match ($action) {
             RiskAction::Allow => true,
-            RiskAction::Sha16 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha16),
-            RiskAction::Sha18 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha18),
-            RiskAction::Sha20 => $record->algorithm === PoWAlgorithm::Sha256 && $record->targetBits >= $this->shaRung(RiskAction::Sha20),
-            RiskAction::Argon16 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[0],
-            RiskAction::Argon32 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[1],
-            RiskAction::Argon64 => $record->algorithm === PoWAlgorithm::Argon2id && $record->targetBits >= $this->argonTargetBits[2],
+            RiskAction::Sha16 => $algorithm === PoWAlgorithm::Sha256 && $targetBits >= $this->shaRung(RiskAction::Sha16),
+            RiskAction::Sha18 => $algorithm === PoWAlgorithm::Sha256 && $targetBits >= $this->shaRung(RiskAction::Sha18),
+            RiskAction::Sha20 => $algorithm === PoWAlgorithm::Sha256 && $targetBits >= $this->shaRung(RiskAction::Sha20),
+            RiskAction::Argon16 => $algorithm === PoWAlgorithm::Argon2id && $targetBits >= $this->argonTargetBits[0],
+            RiskAction::Argon32 => $algorithm === PoWAlgorithm::Argon2id && $targetBits >= $this->argonTargetBits[1],
+            RiskAction::Argon64 => $algorithm === PoWAlgorithm::Argon2id && $targetBits >= $this->argonTargetBits[2],
             RiskAction::StepUp,
             RiskAction::Deny => false,
         };

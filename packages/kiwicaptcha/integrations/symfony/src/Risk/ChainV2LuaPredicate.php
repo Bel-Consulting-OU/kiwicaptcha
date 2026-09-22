@@ -72,7 +72,7 @@ local function isValidChainRecord(rec)
   -- deny-unknown-fields rule: a renamed or extra key (e.g. a
   -- requestBinding spelled differently) is a corrupt or foreign record
   -- and fails closed, exactly like the PHP decoder.
-  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true }
+  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true, requirementGeneration = true, reservedRequirementGeneration = true }
   for k in pairs(rec) do
     if not knownKeys[k] then
       return false
@@ -112,6 +112,14 @@ local function isValidChainRecord(rec)
   if rec['chainDepth'] ~= 2 then
     return false
   end
+  -- The monotonic requirement generation: every requirement raise
+  -- increments it, and a reservation records the generation it was
+  -- taken against, so an issuance can never install a challenge minted
+  -- for a weaker requirement.
+  local requirementGeneration = rec['requirementGeneration']
+  if not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
+    return false
+  end
   local state = rec['state']
   if state ~= 'available' and state ~= 'reserved' and state ~= 'issued'
     and state ~= 'verified' and state ~= 'completed'
@@ -120,6 +128,7 @@ local function isValidChainRecord(rec)
   end
   local owner = rec['owner']
   local leaseUntil = rec['leaseUntil']
+  local reservedGeneration = rec['reservedRequirementGeneration']
   if state == 'reserved' then
     if type(owner) ~= 'string' or owner == '' then
       return false
@@ -127,11 +136,17 @@ local function isValidChainRecord(rec)
     if not isKiwiInteger(leaseUntil) then
       return false
     end
+    if not isKiwiInteger(reservedGeneration) or reservedGeneration < 1 then
+      return false
+    end
   else
     if owner ~= nil and owner ~= cjson.null then
       return false
     end
     if leaseUntil ~= nil and leaseUntil ~= cjson.null then
+      return false
+    end
+    if reservedGeneration ~= nil and reservedGeneration ~= cjson.null then
       return false
     end
   end

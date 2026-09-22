@@ -84,14 +84,18 @@ final class RedisNamespace
      * revoke or block something, such as the central security policy or
      * an open chain obligation. A digest key that is absent while
      * legacy state exists is never read as "no state configured". On
-     * the legacy version the list holds one namespace.
+     * the legacy version the list holds one namespace, and a fresh
+     * install (namespace_migration: fresh) passes
+     * `$readLegacyFallback = false`: a brand-new deployment has no
+     * pre-cutover state and must never adopt an unrelated deployment's
+     * colliding legacy keys.
      *
      * @return list<string>
      */
-    public static function readNamespaces(string $raw, string $fallback, int $version): array
+    public static function readNamespaces(string $raw, string $fallback, int $version, bool $readLegacyFallback = true): array
     {
         $primary = self::deriveOr($raw, $fallback, $version);
-        if ($version === self::VERSION_DIGEST) {
+        if ($version === self::VERSION_DIGEST && $readLegacyFallback) {
             return [$primary, self::deriveOr($raw, $fallback, self::VERSION_LEGACY)];
         }
 

@@ -24,7 +24,7 @@ use kiwicaptcha::challenge::{
 use kiwicaptcha::execution;
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
-    ProductionVerifier, RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
+    ProductionVerifier, RedisChallengeStore, RuntimeState, StoredConsumedResult, DEFAULT_POOL_SIZE,
 };
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, RequestBindingExpectation, VerifyError, VerifyOutcome};
@@ -1421,6 +1421,81 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
 }
 
 #[test]
+fn absent_or_non_string_runtime_state_fails_closed_as_missing() {
+    // Under the current envelope contract every stored record carries a
+    // string runtime state. An absent marker or a wrong-typed one is
+    // corrupt state: it fails closed as Missing in both languages, never
+    // as Pending.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:state-shape:{}:", std::process::id());
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+
+    let rows = [
+        serde_json::json!({}),
+        serde_json::json!({"state": 1}),
+        serde_json::json!({"state": true}),
+        serde_json::json!({"state": ["pending"]}),
+        serde_json::json!({"state": {"value": "pending"}}),
+        serde_json::json!({"state": null}),
+    ];
+    for row in rows {
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        if let Some(object) = value.as_object_mut() {
+            object.remove("state");
+        }
+        for (name, entry) in row.as_object().expect("object row") {
+            value[name] = entry.clone();
+        }
+        let tampered = serde_json::to_string(&value).unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            matches!(
+                store.runtime_state(&issued.record.nonce).unwrap(),
+                RuntimeState::Missing
+            ),
+            "a corrupt state shape must fail closed as Missing: {tampered}"
+        );
+    }
+
+    // The canonical pending shape still classifies as Pending.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    assert!(matches!(
+        store.runtime_state(&issued.record.nonce).unwrap(),
+        RuntimeState::Pending(_)
+    ));
+}
+
+#[test]
 fn expired_record_returns_expired() {
     let Some(url) = redis_url() else { return };
     // Issue with a past wall-clock via the issuer's now_unix knob:
@@ -2648,7 +2723,14 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
     )
     .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
-    let record_json = serde_json::to_string(&issued.record).unwrap();
+    // The stored value always carries the runtime envelope the store
+    // writes; a bare record with no state marker is corrupt state and
+    // fails closed before the consume.
+    let mut stored = serde_json::to_value(&issued.record).unwrap();
+    stored["state"] = serde_json::json!("pending");
+    stored["consumed_result"] = serde_json::Value::Null;
+    stored["operation_identity"] = serde_json::Value::Null;
+    let record_json = serde_json::to_string(&stored).unwrap();
     let nonce = issued.record.nonce.clone();
     let issued_at_ns = issued.record.issued_at_ns;
 

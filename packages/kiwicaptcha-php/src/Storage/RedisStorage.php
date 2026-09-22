@@ -209,26 +209,30 @@ local function kiwiValueEnd(v, s, n)
   return i - 1
 end
 
--- The spans of the top-level field `key` in the JSON object v:
--- {key_start, value_start, value_end}, or nil when v is not a JSON
--- object, the key is absent or duplicated, the document exceeds the
--- byte ceiling, or the document is malformed. Depth-, string- and
--- escape-aware, so a nested field with the same name can never be
--- mistaken for the envelope's own.
-local function kiwiTopLevelField(v, key)
+-- The spans of every TOP-LEVEL field of the JSON object v, indexed by
+-- the field's DECODED (semantic) name as {key_start, value_start,
+-- value_end}. Returns nil when v is not a JSON object, the document
+-- exceeds the byte ceiling, the document is malformed, or two members
+-- decode to the same name: JSON keys may carry escapes ("st\u0061te"
+-- is the key `state`), and cjson.decode() resolves them, so the
+-- spelling the classifier sees must also be the spelling the scanner
+-- keys on. An envelope with a semantic duplicate is ambiguous
+-- corruption and is never classified or mutated by a transition —
+-- exactly like the HTTP layer's duplicate-key scanner.
+local function kiwiTopLevelFields(v)
   local n = #v
   if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
   local i = 1
   i = kiwiSkipSpace(v, i, n)
   if string.sub(v, i, i) ~= '{' then return nil end
   i = i + 1
-  local span = nil
+  local fields = {}
   while i <= n do
     local c = string.sub(v, i, i)
     if string.find(' \t\r\n,', c, 1, true) then
       i = i + 1
     elseif c == '}' then
-      return span
+      return fields
     elseif c == '"' then
       local j = i + 1
       local esc = false
@@ -241,6 +245,9 @@ local function kiwiTopLevelField(v, key)
       end
       if j > n then return nil end
       local name = string.sub(v, i + 1, j - 1)
+      local nameOk, decodedName = pcall(cjson.decode, '"' .. name .. '"')
+      if not nameOk or type(decodedName) ~= 'string' then return nil end
+      if fields[decodedName] ~= nil then return nil end
       local p = j + 1
       p = kiwiSkipSpace(v, p, n)
       if string.sub(v, p, p) ~= ':' then return nil end
@@ -248,10 +255,7 @@ local function kiwiTopLevelField(v, key)
       s = kiwiSkipSpace(v, s, n)
       local e = kiwiValueEnd(v, s, n)
       if e == nil then return nil end
-      if name == key then
-        if span ~= nil then return nil end
-        span = {i, s, e}
-      end
+      fields[decodedName] = {i, s, e}
       i = e + 1
     else
       return nil
@@ -260,6 +264,15 @@ local function kiwiTopLevelField(v, key)
   return nil
 end
 
+-- The spans of the top-level field `key`, or nil when it is absent,
+-- duplicated, or the document is malformed or oversized. Depth-,
+-- string- and escape-aware, so a nested field with the same name can
+-- never be mistaken for the envelope's own.
+local function kiwiTopLevelField(v, key)
+  local fields = kiwiTopLevelFields(v)
+  if fields == nil then return nil end
+  return fields[key]
+end
 -- Replace the value of the top-level field `key` with the raw literal,
 -- or nil when the field is absent, duplicated or the document is
 -- malformed.
@@ -373,7 +386,7 @@ LUA;
 -- field span, so neither a nested state marker nor a nested
 -- `"state":"pending"` string can drive or redirect the transition. The
 -- logical-operation identity is spliced into the top-level
--- `operation_identity` field in the SAME script when a non-empty
+-- `operation_identity` field in the same script when a non-empty
 -- identity argument is given; the splice is reported back (reply
 -- element 5): a non-empty identity that finds no top-level field leaves
 -- the flip in place but tells the caller, which refuses the transition
@@ -389,6 +402,13 @@ if not v then
 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
+  return nil
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
   return nil
 end
 local state = decoded['state']
@@ -509,6 +529,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return {'corrupt'}
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return {'corrupt'}
+end
 local state = decoded['state']
 if state == 'consumed' then
   return {'consumed', v}
@@ -555,6 +582,13 @@ if not v then
 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
+  return nil
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
   return nil
 end
 local state = decoded['state']
@@ -630,6 +664,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return nil
+end
 if decoded['state'] ~= 'consumed' then
   return nil
 end
@@ -699,6 +740,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return 0
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
 if decoded['state'] ~= 'consumed' then
   return 0
 end
@@ -756,6 +804,13 @@ if not v then
 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
+  return 0
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then
@@ -1056,7 +1111,7 @@ LUA;
         if (\count($parts) < 4) {
             return null;
         }
-        [$json, $consumedNow, $consumedBefore, $resultBinding] = $parts;
+        [$json, $consumedNow, $consumedBefore] = $parts;
         $identitySpliced = (int) ($parts[4] ?? 0);
 
         // Durability barrier: the verified WAIT runs only when the
@@ -1091,18 +1146,12 @@ LUA;
         if ($envelope === null) {
             return null;
         }
-        $result = null;
-        if ((string) $resultBinding !== 'null' && (string) $resultBinding !== '') {
-            $obj = json_decode((string) $resultBinding, true);
-            if (\is_array($obj)) {
-                $result = new ConsumedResult(
-                    (int) ($obj['valid'] ?? 0) === 1,
-                    \is_string($obj['binding'] ?? null) ? $obj['binding'] : null,
-                );
-            }
-        }
 
-        return new ConsumedRecord($envelope['record'], (bool) $consumedNow, (bool) $consumedBefore, $result, $envelope['identity']);
+        // The committed result rides on the same decoded envelope: the
+        // Lua's raw result element is redundant bridge data and is
+        // deliberately ignored, so the strict ConsumedResult::fromArray()
+        // is the single structural authority for every consumed path.
+        return new ConsumedRecord($envelope['record'], (bool) $consumedNow, (bool) $consumedBefore, $envelope['result'], $envelope['identity']);
     }
 
     public function consumedState(string $nonce): ?ConsumedRecord
@@ -1153,56 +1202,10 @@ LUA;
         if ($envelope === null) {
             return null;
         }
-        $result = null;
-        $resultJson = self::extractConsumedResultJson($raw);
-        if ($resultJson !== null) {
-            $result = $this->decodeResult($resultJson);
-        }
 
-        return new ConsumedRecord($envelope['record'], false, true, $result, $envelope['identity']);
+        return new ConsumedRecord($envelope['record'], false, true, $envelope['result'], $envelope['identity']);
     }
 
-    /**
-     * Extract the `"consumed_result": {...}` JSON object from a stored
-     * envelope with a brace-depth scanner, the same matching the consume
-     * Lua performs (CONSUME_SCRIPT). From the object's opening brace,
-     * nesting counts up on '{' and down on '}', and the object ends only
-     * at the balancing '}'. A non-greedy regex would truncate at the
-     * first '}' — e.g. a binding string containing braces (a foreign
-     * writer; the PHP issuer's identifier alphabet excludes them today,
-     * but the parser must not silently degrade a committed result to
-     * resultless on one).
-     *
-     * Returns the matched object text (starting at '{'), or null when no
-     * consumed_result marker is present.
-     */
-    private static function extractConsumedResultJson(string $raw): ?string
-    {
-        $marker = '"consumed_result":';
-        $pos = strpos($raw, $marker);
-        if ($pos === false) {
-            return null;
-        }
-        $start = strpos($raw, '{', $pos + \strlen($marker));
-        if ($start === false) {
-            return null;
-        }
-        $depth = 0;
-        $len = \strlen($raw);
-        for ($i = $start; $i < $len; $i++) {
-            $c = $raw[$i];
-            if ($c === '{') {
-                $depth++;
-            } elseif ($c === '}') {
-                $depth--;
-                if ($depth === 0) {
-                    return substr($raw, $start, $i - $start + 1);
-                }
-            }
-        }
-
-        return null;
-    }
 
     /**
      * The atomic cleanup transition: ONE script decides missing /
@@ -1276,13 +1279,7 @@ LUA;
         if ($envelope === null) {
             throw new \RuntimeException('delete-if-pending: undecodable consumed envelope');
         }
-        $result = null;
-        $resultJson = self::extractConsumedResultJson($json);
-        if ($resultJson !== null) {
-            $result = $this->decodeResult($resultJson);
-        }
-
-        return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($envelope['record'], false, true, $result, $envelope['identity']));
+        return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($envelope['record'], false, true, $envelope['result'], $envelope['identity']));
     }
 
     /**
@@ -1827,6 +1824,22 @@ LUA;
         $identity = \is_string($data['operation_identity'] ?? null)
             ? $data['operation_identity']
             : null;
+        // The committed result is parsed from the same decoded envelope
+        // the record and the identity come from. ConsumedResult::fromArray()
+        // is the single structural authority: a malformed result (a
+        // string/number where an object belongs, an unknown key, a
+        // non-boolean valid) is absent — an indeterminate consumed state
+        // that fails closed — and is never normalized into a
+        // success-bearing result.
+        $result = null;
+        $rawResult = $data['consumed_result'] ?? null;
+        if (\is_array($rawResult)) {
+            try {
+                $result = ConsumedResult::fromArray($rawResult);
+            } catch (\Throwable) {
+                $result = null;
+            }
+        }
         unset($data['state'], $data['consumed_result'], $data['operation_identity'], $data['resume_owner'], $data['resume_until']);
 
         try {
@@ -1835,36 +1848,17 @@ LUA;
             return null;
         }
 
-        return ['record' => $record, 'identity' => $identity];
+        return ['record' => $record, 'identity' => $identity, 'result' => $result];
     }
 
     /**
-     * @internal Test seam: how many times the stored envelope bytes were
-     * json_decode'd through {@see self::decodeEnvelope()} on this
-     * storage instance. The single-parse contract of the consume and
-     * retained-state paths asserts on it; production code never reads
-     * it.
+     * Test seam: the number of times this store decoded a stored
+     * envelope. The production paths must not re-decode the same
+     * envelope (no double JSON parse per operation), so the tests pin
+     * the exact decode count of every read path.
      */
     public function envelopeDecodeCount(): int
     {
         return $this->envelopeDecodes;
-    }
-
-    private function decodeResult(string $raw): ?ConsumedResult
-    {
-        try {
-            $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return null;
-        }
-        if (!\is_array($data)) {
-            return null;
-        }
-
-        try {
-            return ConsumedResult::fromArray($data);
-        } catch (\Throwable) {
-            return null;
-        }
     }
 }

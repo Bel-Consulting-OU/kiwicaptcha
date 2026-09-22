@@ -104,6 +104,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
     private const WIRE_KEYS = [
         'v', 'stage1Nonce', 'scope', 'obligationId', 'requiredAction', 'requiredRank', 'policyVersion',
         'chainDepth', 'state', 'owner', 'leaseUntil', 'stage2Nonce', 'requestBinding', 'expiresAt',
+        'requirementGeneration', 'reservedRequirementGeneration',
     ];
 
     /**
@@ -157,22 +158,51 @@ if mapped then
   end
   local chained = redis.call('GET', KEYS[3])
   if chained then
+    -- The pointed-chain predicate is the SAME authority as READ_LUA:
+    -- a key without a lifetime is corrupted state, a non-decodable or
+    -- structurally invalid record is corrupted state. Corrupt state is
+    -- never healed (zero writes here) — only a genuinely missing or
+    -- signed-expired record is a stale mapping eligible for repair. The
+    -- caller turns 'corrupt' into the retryable fail-closed 503.
+    if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[3]))) then
+      return {'', 0, 'corrupt'}
+    end
     local ok, rec = pcall(cjson.decode, chained)
-    -- A past-expiry pointed-at record is stale exactly like a missing
-    -- or corrupt one: the create-or-get heals the mapping with a fresh
-    -- chain, the mirror of the Array store's expiresAt-vs-clock check.
-    if ok and isValidChainRecord(rec) and not chainRecordExpired(rec, now) then
+    if not ok or not isValidChainRecord(rec) then
+      return {'', 0, 'corrupt'}
+    end
+    -- A past-expiry pointed-at record is stale like a missing one: the
+    -- create-or-get heals the mapping with a fresh chain, the mirror of
+    -- the Array store's expiresAt-vs-clock check.
+    if not chainRecordExpired(rec, now) then
       local newRank = tonumber(ARGV[6])
       if newRank > tonumber(rec['requiredRank']) then
+        -- A requirement raise is monotonic and bumps the generation.
         rec['requiredRank'] = newRank
         rec['requiredAction'] = ARGV[5]
+        rec['requirementGeneration'] = tonumber(rec['requirementGeneration']) + 1
+        if rec['state'] == 'issued' or rec['state'] == 'completed' or rec['state'] == 'verified' then
+          -- The chain already carries an issued stage-2 challenge. The
+          -- old nonce can never be upgraded in place (a weaker challenge
+          -- would stay redeemable while the record claims a stronger
+          -- requirement), so the chain fails closed to the terminal
+          -- step-up state: MARK_VERIFIED accepts only `issued`, the
+          -- controller refuses to recover the stale nonce, and the
+          -- validator refuses to Pass a stage-2 record that does not
+          -- satisfy the current requirement.
+          rec['state'] = 'step_up_required'
+          rec['owner'] = cjson.null
+          rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
+        end
         redis.call('SET', KEYS[3], cjson.encode(rec), 'KEEPTTL')
         return {ARGV[11], 1, ''}
       end
       return {ARGV[11], 0, ''}
     end
   end
-  -- stale mapping: compare-delete + create fresh in the SAME script.
+  -- stale mapping (missing or expired pointed chain): compare-delete +
+  -- create fresh in the SAME script.
   if redis.call('GET', KEYS[2]) == ARGV[11] then
     redis.call('DEL', KEYS[2])
   end
@@ -191,7 +221,9 @@ local rec = {
   leaseUntil = cjson.null,
   stage2Nonce = cjson.null,
   requestBinding = ARGV[8],
-  expiresAt = tonumber(ARGV[9])
+  expiresAt = tonumber(ARGV[9]),
+  requirementGeneration = 1,
+  reservedRequirementGeneration = cjson.null
 }
 if rec['requestBinding'] == '' then
   rec['requestBinding'] = cjson.null
@@ -267,6 +299,7 @@ if rec['state'] == 'reserved' then
   rec['state'] = 'reserved'
   rec['owner'] = ARGV[1]
   rec['leaseUntil'] = now + lease
+  rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'taken_over'
 end
@@ -277,6 +310,7 @@ end
 rec['state'] = 'reserved'
 rec['owner'] = ARGV[1]
 rec['leaseUntil'] = now + lease
+rec['reservedRequirementGeneration'] = tonumber(rec['requirementGeneration'])
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'available'
 LUA;
@@ -317,10 +351,20 @@ if rec['state'] == 'reserved' then
   if rec['owner'] ~= ARGV[1] then
     return 'not_owner'
   end
+  -- The reservation CAS: the minted challenge was issued against the
+  -- requirement generation captured at reservation time. A raise in
+  -- between bumped the chain's generation, so the weaker challenge must
+  -- never be installed: the caller discards it and retries against the
+  -- current requirement.
+  if rec['reservedRequirementGeneration'] ~= rec['requirementGeneration'] then
+    return 'stale_requirement'
+  end
   rec['state'] = 'issued'
   rec['stage2Nonce'] = ARGV[2]
   rec['owner'] = cjson.null
   rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'issued_new'
 end
@@ -554,6 +598,7 @@ end
 rec['state'] = 'denied'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'denied_new'
 LUA;
@@ -635,6 +680,7 @@ end
 rec['state'] = 'step_up_required'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'step_up_required_new'
 LUA;
@@ -672,6 +718,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
 rec['stage2Nonce'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
@@ -715,6 +762,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
 LUA;
@@ -758,6 +806,7 @@ rec['state'] = 'completed'
 rec['stage2Nonce'] = ARGV[2]
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
+  rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return cjson.encode(rec)
 LUA;
@@ -857,6 +906,14 @@ LUA;
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
         int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout also consults the legacy segment
+         * for obligations and chain records (the drained migration's
+         * safety net). A fresh install passes false: it has no
+         * pre-cutover state, so an unrelated deployment's colliding
+         * legacy keys must never surface as its own obligations.
+         */
+        private readonly bool $readLegacyFallback = true,
     ) {
         // The store receives the RAW configured discriminator and derives
         // the encoded {kiwi:<ns>} tag through the one shared derivation.
@@ -865,7 +922,7 @@ LUA;
         // obligation written before the cutover is never invisible and a
         // ticketless request can never downgrade to a fresh stage 1.
         $this->namespace = RedisNamespace::deriveOr($namespace, 'kiwi', $namespaceKeyVersion);
-        $this->legacyNamespace = $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+        $this->legacyNamespace = $readLegacyFallback && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
             ? RedisNamespace::deriveOr($namespace, 'kiwi', RedisNamespace::VERSION_LEGACY)
             : null;
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
@@ -900,6 +957,8 @@ LUA;
                 'stage2Nonce' => null,
                 'requestBinding' => $requestBinding,
                 'expiresAt' => $this->serverTime() + max(1, $ttlSecs),
+                'requirementGeneration' => 1,
+                'reservedRequirementGeneration' => null,
             ], JSON_THROW_ON_ERROR),
             max(1, $ttlSecs),
         );
@@ -940,6 +999,8 @@ LUA;
                 'stage2Nonce' => null,
                 'requestBinding' => $requestBinding,
                 'expiresAt' => $now + $ttl,
+                'requirementGeneration' => 1,
+                'reservedRequirementGeneration' => null,
             ], JSON_THROW_ON_ERROR),
             $ttl,
         );
@@ -1015,6 +1076,15 @@ LUA;
             // script. Lua tables are 1-indexed; normalize before
             // destructuring.
             $parts = \is_array($reply) ? array_values($reply) : [];
+            if ((string) ($parts[2] ?? '') === 'corrupt') {
+                // The pointed-at chain is corrupt state (a non-decodable
+                // record, a structural violation, or a stripped key
+                // lifetime). Corrupt state is never healed and the
+                // mapping is never touched: the caller turns this into
+                // the retryable fail-closed path. Only a missing or
+                // genuinely expired record repairs the mapping.
+                throw new MalformedChainedChallengeStateException('the pointed-at chain record is malformed at the obligation boundary');
+            }
             if ((string) ($parts[2] ?? '') !== 'moved') {
                 $resolved = \is_string($parts[0] ?? null) ? $parts[0] : $chainId;
                 $mutated = (int) ($parts[1] ?? 0) === 1;
@@ -1112,20 +1182,18 @@ LUA;
 
     /**
      * The live legacy chain record for the migration branch, or null when
-     * the pointed-at record is missing, expired or corrupt — a stale
-     * mapping the create-or-get may heal. The record goes through the
-     * same strict decode as every other read, so a corrupt legacy record
-     * can never surface as a requirement.
+     * the pointed-at record is genuinely missing or expired — states a
+     * stale mapping may heal. Corruption is NOT converted to null: the
+     * strict decode's MalformedChainedChallengeStateException propagates,
+     * the legacy obligation mapping is left untouched, and the caller
+     * fails closed. A retained legacy denial whose record was corrupted
+     * can therefore never be erased and replaced by a fresh chain.
      *
      * @return array<string, mixed>|null
      */
     private function legacyRequirementOrNull(string $chainId): ?array
     {
-        try {
-            return $this->read($chainId);
-        } catch (MalformedChainedChallengeStateException) {
-            return null;
-        }
+        return $this->read($chainId);
     }
 
     /**
@@ -1185,7 +1253,7 @@ LUA;
         if ($result === 'corrupt') {
             throw new MalformedChainedChallengeStateException('the chain record is malformed at the issuance boundary');
         }
-        $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing'], true)
+        $status = \is_string($result) && \in_array($result, ['issued_new', 'issued_same', 'verified_same', 'conflict', 'not_owner', 'missing', 'stale_requirement'], true)
             ? $result
             : 'missing';
 
@@ -1471,18 +1539,30 @@ LUA;
         if (($rec['chainDepth'] ?? null) !== 2) {
             throw new MalformedChainedChallengeStateException('chain record chainDepth must be exactly 2');
         }
+        // The monotonic requirement generation: every raise increments it,
+        // and a reservation records the generation it was taken against.
+        $requirementGeneration = $rec['requirementGeneration'] ?? null;
+        if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
+            throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+        }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
             throw new MalformedChainedChallengeStateException('chain record state must be one of available|reserved|issued|verified|step_up_required|denied');
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
+        $reservedGeneration = $rec['reservedRequirementGeneration'] ?? null;
         if ($state === 'reserved') {
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
+            if (!\is_int($reservedGeneration) || $reservedGeneration < 1) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration is required in the reserved state');
+            }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
+        } elseif ($reservedGeneration !== null) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be null outside the reserved state');
         }
         $stage2Nonce = $rec['stage2Nonce'] ?? null;
         if ($state === 'issued' || $state === 'verified' || $state === 'completed') {
@@ -1540,6 +1620,8 @@ LUA;
             'stage2Nonce' => $rec['stage2Nonce'],
             'obligationId' => $rec['obligationId'],
             'expiresAt' => $rec['expiresAt'],
+            'requirementGeneration' => $rec['requirementGeneration'],
+            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration'],
         ];
     }
 

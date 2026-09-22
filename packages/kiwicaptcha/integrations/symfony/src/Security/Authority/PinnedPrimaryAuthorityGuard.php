@@ -156,13 +156,20 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
         string $pinKeySuffix = '',
         private readonly ?string $expectedIdentity = null,
         int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        /**
+         * Whether the digest rollout may adopt a legacy pin (the drained
+         * migration's explicit re-initialization path). A fresh install
+         * passes false: it has no pre-cutover pin, so an unrelated
+         * deployment's colliding legacy pin must never be adopted.
+         */
+        bool $readLegacyFallback = true,
     ) {
         if ($reverifySecs < 0) {
             throw new \InvalidArgumentException(sprintf('reverifySecs must be >= 0, got %d', $reverifySecs));
         }
         $tag = RedisNamespace::deriveOr($namespace, 'kiwi', $namespaceKeyVersion);
         $this->pinKey = sprintf('{kiwi:%s}:authority:pin%s', $tag, $pinKeySuffix !== '' ? ':'.$pinKeySuffix : '');
-        $this->legacyPinKey = $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
+        $this->legacyPinKey = $readLegacyFallback && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST
             ? sprintf(
                 '{kiwi:%s}:authority:pin%s',
                 RedisNamespace::deriveOr($namespace, 'kiwi', RedisNamespace::VERSION_LEGACY),

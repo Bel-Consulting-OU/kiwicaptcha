@@ -236,14 +236,41 @@ final class ChainRedisFake extends \Predis\Client
             }
             $chained = $this->strings[$pointedKey] ?? null;
             if ($chained !== null) {
-                $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
-                // The live-check mirrors the Lua: a past-expiry pointed-at
-                // record is stale and the mapping heals with a fresh chain.
-                if (isset($rec['requiredRank']) && \is_int($rec['requiredRank']) && (int) $rec['expiresAt'] > (int) floor($this->clockMs / 1000)) {
+                // Corrupt state is never healed: a stripped key lifetime
+                // or a structurally invalid record answers 'corrupt' with
+                // zero writes, exactly like the Lua.
+                if ($this->fakeTtl($pointedKey) <= 0) {
+                    return ['', 0, 'corrupt'];
+                }
+                try {
+                    $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
+                } catch (\JsonException) {
+                    return ['', 0, 'corrupt'];
+                }
+                if (!\is_array($rec)
+                    || !isset($rec['requiredRank'], $rec['requiredAction'], $rec['expiresAt'], $rec['requirementGeneration'], $rec['state'])
+                    || !\is_int($rec['requiredRank'])
+                    || !\is_int($rec['requirementGeneration'])
+                    || $rec['requirementGeneration'] < 1
+                    || !\in_array($rec['state'], ['available', 'reserved', 'issued', 'verified', 'completed', 'step_up_required', 'denied'], true)
+                ) {
+                    return ['', 0, 'corrupt'];
+                }
+                // The live-check mirrors the Lua: only a genuinely
+                // missing or signed-expired pointed-at record heals.
+                if ((int) $rec['expiresAt'] > (int) floor($this->clockMs / 1000)) {
                     $newRank = (int) $args[5];
                     if ($newRank > $rec['requiredRank']) {
                         $rec['requiredRank'] = $newRank;
                         $rec['requiredAction'] = (string) $args[4];
+                        ++$rec['requirementGeneration'];
+                        if (\in_array($rec['state'], ['issued', 'completed', 'verified'], true)) {
+                            $rec['state'] = 'step_up_required';
+                            $rec['owner'] = null;
+                            $rec['reservedRequirementGeneration'] = null;
+                            $rec['leaseUntil'] = null;
+                            $rec['reservedRequirementGeneration'] = null;
+                        }
                         $this->strings[$pointedKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
                         return [$pointedChainId, 1, ''];
@@ -271,6 +298,8 @@ final class ChainRedisFake extends \Predis\Client
             'stage2Nonce' => null,
             'requestBinding' => (string) $args[7] !== '' ? (string) $args[7] : null,
             'expiresAt' => (int) $args[8],
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
         ];
         $ttl = (int) $args[9];
         $this->strings[$chainKey] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
@@ -316,6 +345,7 @@ final class ChainRedisFake extends \Predis\Client
             $rec['state'] = 'reserved';
             $rec['owner'] = (string) $args[0];
             $rec['leaseUntil'] = $nowSecs + $lease;
+            $rec['reservedRequirementGeneration'] = $rec['requirementGeneration'];
             $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
             return 'taken_over';
@@ -324,6 +354,7 @@ final class ChainRedisFake extends \Predis\Client
         $rec['state'] = 'reserved';
         $rec['owner'] = (string) $args[0];
         $rec['leaseUntil'] = $nowSecs + $lease;
+        $rec['reservedRequirementGeneration'] = $rec['requirementGeneration'];
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return 'available';
@@ -346,10 +377,15 @@ final class ChainRedisFake extends \Predis\Client
             if ($rec['owner'] !== $args[0]) {
                 return 'not_owner';
             }
+            if (($rec['reservedRequirementGeneration'] ?? null) !== ($rec['requirementGeneration'] ?? null)) {
+                return 'stale_requirement';
+            }
             $rec['state'] = 'issued';
             $rec['stage2Nonce'] = (string) $args[1];
             $rec['owner'] = null;
+            $rec['reservedRequirementGeneration'] = null;
             $rec['leaseUntil'] = null;
+            $rec['reservedRequirementGeneration'] = null;
             $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
             return 'issued_new';
@@ -483,6 +519,7 @@ final class ChainRedisFake extends \Predis\Client
         }
         $rec['state'] = 'denied';
         $rec['owner'] = null;
+        $rec['reservedRequirementGeneration'] = null;
         $rec['leaseUntil'] = null;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
@@ -528,6 +565,7 @@ final class ChainRedisFake extends \Predis\Client
         }
         $rec['state'] = 'step_up_required';
         $rec['owner'] = null;
+        $rec['reservedRequirementGeneration'] = null;
         $rec['leaseUntil'] = null;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
@@ -553,6 +591,7 @@ final class ChainRedisFake extends \Predis\Client
         $rec['state'] = 'available';
         $rec['stage2Nonce'] = null;
         $rec['owner'] = null;
+        $rec['reservedRequirementGeneration'] = null;
         $rec['leaseUntil'] = null;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
@@ -577,6 +616,7 @@ final class ChainRedisFake extends \Predis\Client
         }
         $rec['state'] = 'available';
         $rec['owner'] = null;
+        $rec['reservedRequirementGeneration'] = null;
         $rec['leaseUntil'] = null;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 

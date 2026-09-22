@@ -1023,6 +1023,28 @@ final class RiskGateway
     }
 
     /**
+     * Whether a stored challenge record satisfies an action's strength.
+     * This is the same authority the validator uses for its post-solve
+     * gate, so the controller can refuse to recover or install a
+     * stage-2 nonce whose actual record is weaker than the chain's
+     * current requirement.
+     */
+    public function recordSatisfies(\KiwiCaptcha\ChallengeRecord $record, RiskAction $action): bool
+    {
+        return $this->resolver->recordSatisfies($record, $action);
+    }
+
+    /**
+     * Whether a minted-but-not-yet-stored challenge satisfies an action:
+     * the issuance-time requirement check, backed by the same resolver
+     * rules as {@see recordSatisfies()}.
+     */
+    public function challengeSatisfies(\KiwiCaptcha\PoWAlgorithm $algorithm, int $targetBits, RiskAction $action): bool
+    {
+        return $this->resolver->strengthSatisfies($algorithm, $targetBits, $action);
+    }
+
+    /**
      * The degraded decision for a scope: the policy's degraded action,
      * clamped to the scope minimum, with the global floor at the idle
      * level 0 = Allow since a no-signal fallback consults no store state.

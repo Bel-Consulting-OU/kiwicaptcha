@@ -218,6 +218,7 @@ final class KiwiHealthController
         private readonly int $executionVersionCap = 1,
         private readonly int $executionRequiredVersion = 1,
         private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
+        private readonly bool $readLegacyFallback = true,
     ) {
     }
 
@@ -464,7 +465,7 @@ final class KiwiHealthController
         $minEpoch = null;
         $minExecution = null;
         try {
-            foreach (RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion) as $policyNamespace) {
+            foreach (RedisNamespace::readNamespaces($this->namespace, 'kiwi', $this->namespaceKeyVersion, $this->readLegacyFallback) as $policyNamespace) {
                 $policy = $this->redis->hgetall('{kiwi:'.$policyNamespace.'}:security-policy');
                 if (!\is_array($policy) || $policy === []) {
                     continue;

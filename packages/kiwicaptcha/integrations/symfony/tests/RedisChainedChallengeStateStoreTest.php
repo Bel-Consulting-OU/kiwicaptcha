@@ -438,8 +438,12 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
             'chainDepth' => 2, 'state' => 'available', 'owner' => null,
             'leaseUntil' => null, 'stage2Nonce' => null,
             'requestBinding' => null, 'expiresAt' => $expires,
+            'requirementGeneration' => 1, 'reservedRequirementGeneration' => null,
         ];
         $this->fake->strings[$movedKey] = (string) json_encode($movedRec, JSON_THROW_ON_ERROR);
+        // The pointed chain carries a key lifetime, the same authority
+        // the read authority enforces; a TTL-less key is corrupt state.
+        $this->fake->expirations[$movedKey] = (int) ($expires * 1000);
         $this->fake->onCreateOrGet = function () use ($obligationKey, $movedChainId): void {
             $this->fake->onCreateOrGet = null;
             $this->fake->strings[$obligationKey] = $movedChainId;

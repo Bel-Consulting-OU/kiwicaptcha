@@ -378,6 +378,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $namespaceMigration = $config['namespace_migration'];
         $namespaceKeyVersion = $config['namespace_key_version']
             ?? ($namespaceMigration === 'fresh' ? RedisNamespace::VERSION_DIGEST : RedisNamespace::VERSION_LEGACY);
+        // A drained migration keeps the legacy dual-read safety net; a
+        // fresh install has no pre-cutover state and must never consult
+        // the colliding legacy namespace.
+        $readLegacyFallback = $namespaceMigration !== 'fresh'
+            && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST;
         if ($config['namespace_key_version'] === null && $namespaceMigration !== 'fresh') {
             // Conspicuous advisory: an omitted version silently keeps the
             // collision-prone legacy derivation (two raw discriminators
@@ -1415,6 +1420,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $riskConfig['redis']['wait_replicas'],
                         $riskConfig['redis']['wait_timeout_ms'],
                         $namespaceKeyVersion,
+                        $readLegacyFallback,
                     ]));
                     $chainStoreRef = new Reference(RedisChainedChallengeStateStore::class);
                 } else {
@@ -1479,7 +1485,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // guard and pin.
         $authorityGuardRefs = [];
         if ($config['ha_authority'] === 'pinned_primary') {
-            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $rawNamespace, $namespaceKeyVersion, $container);
+            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $rawNamespace, $namespaceKeyVersion, $readLegacyFallback, $container);
         }
         // Trusted client-IP policy, wired unconditionally (not gated on
         // risk.enabled): the canonical client IP feeds the challenge
@@ -1527,6 +1533,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // issuance with 503 `SERVICE_UNAVAILABLE`.
             ->setArgument('$maxStaleSecs', $riskConfig['security_epoch_max_stale_secs'])
             ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
+            ->setArgument('$readLegacyFallback', $readLegacyFallback)
             ->setPublic(true));
 
         // Optional Ed25519 result-receipt signer. The result verification
@@ -1938,6 +1945,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$executionVersionCap', $config['execution_version'])
             ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
             ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
+            ->setArgument('$readLegacyFallback', $readLegacyFallback)
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Form type (renders the widget through the form theme). The
@@ -2346,7 +2354,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * @return array<string, Reference> the guard services keyed by
      *         authority label ("storage", "risk")
      */
-    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, string $rawNamespace, int $namespaceKeyVersion, ContainerBuilder $container): array
+    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, string $rawNamespace, int $namespaceKeyVersion, bool $readLegacyFallback, ContainerBuilder $container): array
     {
         if ($redisRef === null) {
             throw new \LogicException(
@@ -2390,6 +2398,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             'storage',
             $expectedByAuthority['storage'] ?? $expectedShorthand,
             $namespaceKeyVersion,
+            $readLegacyFallback,
         ]))
             ->setPublic(true));
         $guardRefs = ['storage' => new Reference($storageGuardId)];
@@ -2435,6 +2444,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'risk',
                 $expectedByAuthority['risk'] ?? $expectedShorthand,
                 $namespaceKeyVersion,
+                $readLegacyFallback,
             ]))
                 ->setPublic(true));
             $guardRefs['risk'] = new Reference($riskGuardId);

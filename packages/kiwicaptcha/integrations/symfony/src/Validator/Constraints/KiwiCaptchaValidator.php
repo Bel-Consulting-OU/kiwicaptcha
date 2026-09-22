@@ -1552,6 +1552,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         //     never pass.
         $isStage2 = $requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce);
 
+        // Defense in depth for a solved stage-2 token: the accepted
+        // challenge's actual strength must satisfy the chain's current
+        // requirement. A requirement raise can never be satisfied by a
+        // weaker already-issued nonce, so a stage-2 token whose record
+        // does not meet the chain's floor never Passes — it resolves to
+        // the terminal step-up instead. This closes the window where a
+        // neutral/weaker fresh assessment would otherwise let the stale
+        // challenge through (the obligation-floor branch below is
+        // stage-1 only).
+        if ($isStage2 && $requirement !== null
+            && !$this->recordSatisfiesRequiredAction($token, $requirement->requiredAction)
+        ) {
+            return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $postSolve?->decisionId);
+        }
+
         if ($requirement !== null && !$isStage2 && $requirement->state !== 'verified') {
             // The submitted nonce is not the requirement's exact
             // stage-2 nonce: the requirement state is the authoritative
@@ -2132,15 +2147,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         if ($action === RiskAction::Allow) {
             return true;
         }
-        if ($this->riskResolver === null) {
-            return false;
-        }
         $record = $this->findVerifiedRecord($token);
         if ($record === null) {
             return false;
         }
+        // The strength authority: the dedicated resolver when wired,
+        // otherwise the risk gateway's resolver (the same rules). With
+        // neither, the check fails closed.
+        if ($this->riskResolver !== null) {
+            return $this->riskResolver->recordSatisfies($record, $action);
+        }
+        if ($this->risk !== null) {
+            return $this->risk->recordSatisfies($record, $action);
+        }
 
-        return $this->riskResolver->recordSatisfies($record, $action);
+        return false;
     }
 
     /**

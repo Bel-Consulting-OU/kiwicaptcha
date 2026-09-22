@@ -2505,7 +2505,7 @@ final class ChallengeController
                 );
             }
             if ($state === 'issued') {
-                $inspection = $this->inspectIssuedStage2($chainId, (string) $requirement?->stage2Nonce, $request, $riskSession, $mintedCookie);
+                $inspection = $this->inspectIssuedStage2($chainId, (string) $requirement?->stage2Nonce, $requirement?->requiredAction, $request, $riskSession, $mintedCookie);
                 if ($inspection !== null) {
                     return $inspection;
                 }
@@ -2643,7 +2643,7 @@ final class ChallengeController
      * Returns null when the chain was rearmed and the pipeline proceeds to
      * the reservation and mint.
      */
-    private function inspectIssuedStage2(string $chainId, string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
+    private function inspectIssuedStage2(string $chainId, string $stage2Nonce, ?\KiwiCaptcha\Risk\RiskAction $requiredAction, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
         if ($this->storage === null) {
             // No challenge storage to inspect: the issued challenge's state
@@ -2691,6 +2691,36 @@ final class ChallengeController
             if ($runtime->kind === \KiwiCaptcha\ChallengeRuntimeStateKind::Pending) {
                 $record = $runtime->record;
                 if ($record !== null && $this->now() < $record->expiresAt) {
+                    // Defense in depth: a requirement raise transitions an
+                    // issued chain to the terminal step-up state, but a
+                    // legacy or raced record must still never be recovered
+                    // when its actual strength cannot satisfy the chain's
+                    // current requirement. The stale nonce is retired
+                    // (pending -> cancelled) and the chain rearmed so the
+                    // pipeline mints at the current floor — never handed
+                    // out at the weaker strength.
+                    if ($requiredAction !== null
+                        && $this->risk !== null
+                        && !$this->risk->recordSatisfies($record, $requiredAction)
+                    ) {
+                        $this->logGate('kiwicaptcha: issued stage-2 record does not satisfy the chain requirement; retiring and rearming');
+                        $cancelled = $this->storage instanceof \KiwiCaptcha\CancellableStorageInterface ? $this->storage->cancel($stage2Nonce) : null;
+                        if ($cancelled !== null && ($cancelled->state === 'cancelled-now' || $cancelled->state === 'cancelled')) {
+                            $this->outstanding?->abortedBeforeHandoff($stage2Nonce);
+
+                            return $this->rearmIssuedStage2($chainId, $stage2Nonce, $request, $riskSession, $mintedCookie);
+                        }
+                        // The retirement lost the race (the record was
+                        // consumed or is no longer cancellable): fail
+                        // closed rather than recover a weak record.
+                        return $this->privateJson(
+                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                            Response::HTTP_SERVICE_UNAVAILABLE,
+                            $request,
+                            $riskSession,
+                            $mintedCookie,
+                        );
+                    }
                     // Pending and still valid: recover the exact issuance
                     // response (no re-mint, no re-admission). Exactly one
                     // fence per store before the hand-out.
@@ -2908,6 +2938,34 @@ final class ChallengeController
      */
     private function markStage2Issued(\KiwiCaptcha\Challenge $challenge, string $chainId, string $chainOwner, string $clientIp, bool $outstandingAdmissionHeld): ?JsonResponse
     {
+        // The issuance-time requirement check: a concurrent stage-1 solve
+        // for the same transaction may have raised the chain's requirement
+        // while this challenge was minting from an older snapshot. The
+        // minted challenge must satisfy the chain's current requirement
+        // before it is installed; a weaker one is discarded and the
+        // client retries, which mints at the current floor. The store's
+        // reservation-generation CAS still guards the write itself, and a
+        // raise after the write transitions the chain to the terminal
+        // step-up state, so no window leaves a weak challenge redeemable.
+        try {
+            $current = $this->chainTickets->requirementFor($chainId);
+        } catch (\Throwable) {
+            $current = null;
+        }
+        if ($current !== null
+            && \in_array($current->state, ['available', 'reserved'], true)
+            && $this->risk !== null
+            && !$this->risk->challengeSatisfies($challenge->algorithm, $challenge->targetBits, $current->requiredAction)
+        ) {
+            $this->logGate('kiwicaptcha: the chain requirement rose while the stage-2 challenge was minting; discarding the weaker challenge');
+            $this->discardChallenge($challenge);
+            $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+            );
+        }
         try {
             $result = $this->chainTickets->markIssued($chainId, $chainOwner, $challenge->nonce);
         } catch (\Throwable $e) {
@@ -3005,6 +3063,7 @@ final class ChallengeController
 
                 return null;
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Conflict:
+            case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::StaleRequirement:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::NotOwner:
             case \BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult::Missing:
                 // Positively not issued with this nonce (the chain holds a

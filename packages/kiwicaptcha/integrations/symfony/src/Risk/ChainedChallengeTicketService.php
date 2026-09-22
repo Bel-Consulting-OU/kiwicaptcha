@@ -372,6 +372,7 @@ final class ChainedChallengeTicketService
             'verified_same' => ChainIssuedResult::VerifiedSame,
             'conflict' => ChainIssuedResult::Conflict,
             'not_owner' => ChainIssuedResult::NotOwner,
+            'stale_requirement' => ChainIssuedResult::StaleRequirement,
             default => ChainIssuedResult::Missing,
         };
     }
@@ -672,6 +673,7 @@ final class ChainedChallengeTicketService
             owner: $record['owner'],
             leaseUntil: $record['leaseUntil'],
             expiresAt: $record['expiresAt'],
+            requirementGeneration: $record['requirementGeneration'],
         );
     }
 

@@ -412,26 +412,30 @@ local function kiwiValueEnd(v, s, n)
   return i - 1
 end
 
--- The spans of the top-level field `key` in the JSON object v:
--- {key_start, value_start, value_end}, or nil when v is not a JSON
--- object, the key is absent or duplicated, the document exceeds the
--- byte ceiling, or the document is malformed. Depth-, string- and
--- escape-aware, so a nested field with the same name can never be
--- mistaken for the envelope's own.
-local function kiwiTopLevelField(v, key)
+-- The spans of every TOP-LEVEL field of the JSON object v, indexed by
+-- the field's DECODED (semantic) name as {key_start, value_start,
+-- value_end}. Returns nil when v is not a JSON object, the document
+-- exceeds the byte ceiling, the document is malformed, or two members
+-- decode to the same name: JSON keys may carry escapes ("st\u0061te"
+-- is the key `state`), and cjson.decode() resolves them, so the
+-- spelling the classifier sees must also be the spelling the scanner
+-- keys on. An envelope with a semantic duplicate is ambiguous
+-- corruption and is never classified or mutated by a transition —
+-- exactly like the HTTP layer's duplicate-key scanner.
+local function kiwiTopLevelFields(v)
   local n = #v
   if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
   local i = 1
   i = kiwiSkipSpace(v, i, n)
   if string.sub(v, i, i) ~= '{' then return nil end
   i = i + 1
-  local span = nil
+  local fields = {}
   while i <= n do
     local c = string.sub(v, i, i)
     if string.find(' \t\r\n,', c, 1, true) then
       i = i + 1
     elseif c == '}' then
-      return span
+      return fields
     elseif c == '"' then
       local j = i + 1
       local esc = false
@@ -444,6 +448,9 @@ local function kiwiTopLevelField(v, key)
       end
       if j > n then return nil end
       local name = string.sub(v, i + 1, j - 1)
+      local nameOk, decodedName = pcall(cjson.decode, '"' .. name .. '"')
+      if not nameOk or type(decodedName) ~= 'string' then return nil end
+      if fields[decodedName] ~= nil then return nil end
       local p = j + 1
       p = kiwiSkipSpace(v, p, n)
       if string.sub(v, p, p) ~= ':' then return nil end
@@ -451,10 +458,7 @@ local function kiwiTopLevelField(v, key)
       s = kiwiSkipSpace(v, s, n)
       local e = kiwiValueEnd(v, s, n)
       if e == nil then return nil end
-      if name == key then
-        if span ~= nil then return nil end
-        span = {i, s, e}
-      end
+      fields[decodedName] = {i, s, e}
       i = e + 1
     else
       return nil
@@ -463,6 +467,15 @@ local function kiwiTopLevelField(v, key)
   return nil
 end
 
+-- The spans of the top-level field `key`, or nil when it is absent,
+-- duplicated, or the document is malformed or oversized. Depth-,
+-- string- and escape-aware, so a nested field with the same name can
+-- never be mistaken for the envelope's own.
+local function kiwiTopLevelField(v, key)
+  local fields = kiwiTopLevelFields(v)
+  if fields == nil then return nil end
+  return fields[key]
+end
 -- Replace the value of the top-level field `key` with the raw literal,
 -- or nil when the field is absent, duplicated or the document is
 -- malformed.
@@ -637,6 +650,13 @@ local v = redis.call('GET', KEYS[1])
 if not v then return false end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then return false end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return false
+end
 local state = decoded['state']
 if state == 'consumed' then
     return {v, 0}
@@ -731,6 +751,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return {'corrupt'}
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return {'corrupt'}
+end
 local state = decoded['state']
 if state == 'consumed' then
   return {'consumed', v}
@@ -787,6 +814,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return nil
+end
 local state = decoded['state']
 if state == 'consumed' then
   return {'consumed'}
@@ -829,6 +863,13 @@ local v = redis.call('GET', KEYS[1])
 if not v then return 0 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then return 0 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
 if decoded['state'] ~= 'consumed' then return 0 end
 if not kiwiNullish(decoded['consumed_result']) then return 0 end
 local result
@@ -888,6 +929,13 @@ if not v then
 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
+  return nil
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
   return nil
 end
 if decoded['state'] ~= 'consumed' then
@@ -968,6 +1016,13 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return 0
 end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
+  return 0
+end
 if decoded['state'] ~= 'consumed' then
   return 0
 end
@@ -1022,6 +1077,13 @@ if not v then
 end
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
+  return 0
+end
+-- A semantically duplicated top-level field (an escaped alias such as
+-- "st\u0061te") makes the envelope ambiguous corruption: no transition
+-- may classify or mutate it. kiwiTopLevelFields() rejects it, and the
+-- states below are still read from the decoded view when it is unique.
+if kiwiTopLevelFields(v) == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then
@@ -1176,13 +1238,69 @@ pub enum RuntimeState {
 /// concurrent or retried consumer returns the same outcome
 /// without re-deriving. This is storage-level runtime state — it is never
 /// part of the [`ChallengeRecord`] wire schema.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StoredConsumedResult {
-    /// Whether the proof met the difficulty target.
+    /// Whether the proof met the difficulty target. The canonical form is
+    /// a real JSON boolean; the legacy integer form (1/0) written by
+    /// earlier commits is accepted here exactly like the PHP
+    /// `ConsumedResult::fromArray()` accepts it, so a mixed-language or
+    /// rolling deployment reads the same committed outcome on both sides.
+    /// Anything else (`"1"`, 1.9, 2, null) is malformed.
     pub valid: bool,
     /// The record's application-supplied transaction binding at commit time.
     pub binding: Option<String>,
+}
+
+/// The storage boundary for a committed result: exactly the object form,
+/// exactly the two keys, and exactly true/false/1/0 for `valid`. Serde's
+/// derived struct deserializer also accepts a positional sequence
+/// (`[true, null]`), which the PHP `ConsumedResult::fromArray()` boundary
+/// rejects, so the object form is enforced explicitly.
+impl<'de> serde::Deserialize<'de> for StoredConsumedResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(deserialize_with = "deserialize_consumed_valid")]
+            valid: bool,
+            binding: Option<String>,
+        }
+        let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let wire: Wire = serde_json::from_value(serde_json::Value::Object(object))
+            .map_err(serde::de::Error::custom)?;
+
+        Ok(StoredConsumedResult {
+            valid: wire.valid,
+            binding: wire.binding,
+        })
+    }
+}
+
+/// Deserialize the committed `valid` flag from a real JSON boolean or the
+/// legacy integer 1/0. Every other representation is rejected, so a
+/// malformed persisted result stays indeterminate (resultless) on both
+/// sides of the language boundary.
+fn deserialize_consumed_valid<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum RawValid {
+        Bool(bool),
+        Int(i64),
+    }
+    match serde::Deserialize::deserialize(deserializer)? {
+        RawValid::Bool(value) => Ok(value),
+        RawValid::Int(1) => Ok(true),
+        RawValid::Int(0) => Ok(false),
+        RawValid::Int(other) => Err(serde::de::Error::custom(format!(
+            "consumed result valid must be a boolean or 0/1, got {other}"
+        ))),
+    }
 }
 
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
@@ -2025,8 +2143,9 @@ impl RedisChallengeStore {
     /// every non-missing variant carries the [`ChallengeRecord`] parsed
     /// from the same bytes the state transition wrote — never from two
     /// separate reads that could race. The state marker is parsed from
-    /// the raw stored JSON, exactly like the PHP single-snapshot read; a
-    /// value with no state marker reads as Pending (with its record), a
+    /// the decoded top-level envelope, exactly like the PHP
+    /// single-snapshot read; a value with no state marker (or a
+    /// non-string one) fails closed as Missing, a
     /// cancelled value reads as Cancelled (with its record), and an
     /// undecodable envelope — pending, cancelled or consumed — reads as
     /// Missing (the lenient corrupt-key rule of
@@ -2081,8 +2200,13 @@ impl RedisChallengeStore {
                 operation_identity: stored.operation_identity,
             }))),
             Some("cancelled") => Ok(RuntimeState::Cancelled(Box::new(stored.record))),
-            Some("pending") | None => Ok(RuntimeState::Pending(Box::new(stored.record))),
-            Some(_) => Ok(RuntimeState::Missing),
+            Some("pending") => Ok(RuntimeState::Pending(Box::new(stored.record))),
+            // An absent state marker is NOT pending: under the current
+            // envelope contract every stored record carries one, and the
+            // PHP classifier fails the same state closed as missing. An
+            // absent or non-string state is corrupt state, never a
+            // redeemable pending record.
+            _ => Ok(RuntimeState::Missing),
         }
     }
 
@@ -5615,6 +5739,219 @@ mod tests {
             store.delete_if_pending(&issued.record.nonce).unwrap(),
             DeleteIfPending::DeletedPending
         ));
+    }
+
+    #[test]
+    fn shared_consumed_result_vectors_match_the_contract() {
+        // The shared vectors: exactly the boolean form and the legacy
+        // integer 1/0 are accepted, and the identical set is rejected by
+        // the PHP ConsumedResult::fromArray() boundary.
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let vectors = fixtures["consumed_result_vectors"]
+            .as_array()
+            .expect("consumed result vectors");
+        assert!(!vectors.is_empty());
+        for vector in vectors {
+            let parsed: Result<StoredConsumedResult, _> =
+                serde_json::from_value(vector["result"].clone());
+            let why = vector["why"].as_str().unwrap_or("");
+            if vector["accepted"].as_bool().expect("accepted") {
+                assert!(parsed.is_ok(), "the result must be accepted: {why}");
+            } else {
+                assert!(parsed.is_err(), "the result must be rejected: {why}");
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_key_aliases_are_semantically_the_same_field() {
+        // JSON keys may carry escapes: "st\u0061te" IS the key `state` to
+        // every JSON decoder. An envelope carrying both a literal and an
+        // escaped spelling for one of the runtime fields is ambiguous and
+        // must never drive or be mutated by a transition.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:alias-marker:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+
+        // 1. A literal `state` plus an escaped alias in both orders and
+        //    with equal or conflicting values: no fresh consumption, no
+        //    delete, no mutation.
+        let aliases = [
+            (
+                r#""state":"pending","st\u0061te":"consumed""#,
+                r#""state":"pending""#,
+            ),
+            (
+                r#""st\u0061te":"consumed","state":"pending""#,
+                r#""state":"pending""#,
+            ),
+            (
+                r#""state":"pending","st\u0061te":"pending""#,
+                r#""state":"pending""#,
+            ),
+        ];
+        for (replacement, needle) in aliases {
+            let issued = issue_challenge(
+                &sha_config(4),
+                "login",
+                IP,
+                now_unix(),
+                now_micros(),
+                0,
+                None,
+            )
+            .unwrap();
+            store.store(&issued.record).unwrap();
+            let key = format!("{prefix}{}", issued.record.nonce);
+            let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            let ambiguous = raw.replace(needle, replacement);
+            assert_ne!(raw, ambiguous);
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(&ambiguous)
+                .arg("EX")
+                .arg(300)
+                .query(&mut conn)
+                .unwrap();
+
+            let consumed = store
+                .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+                .unwrap();
+            assert!(
+                consumed.is_none(),
+                "a semantically duplicated state field is never consumable: {ambiguous}"
+            );
+            let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            assert_eq!(after, ambiguous, "the ambiguous value is never mutated");
+            assert!(!matches!(
+                store.delete_if_pending(&issued.record.nonce).unwrap(),
+                DeleteIfPending::DeletedPending
+            ));
+            let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+            assert_eq!(
+                after, ambiguous,
+                "the cleanup never mutates the ambiguous value"
+            );
+        }
+
+        // 2. An escaped alias for `operation_identity` (the consume splice
+        //    target): the transition refuses rather than rewriting one
+        //    spelling while the decoder reads the other.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let ambiguous = raw.replace(
+            r#""operation_identity":null"#,
+            r#""operation_identity":"op-1","op\u0065ration_identity":null"#,
+        );
+        assert_ne!(raw, ambiguous);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&ambiguous)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(store
+            .consume_with_operation_identity(&issued.record.nonce, Some("op"))
+            .unwrap()
+            .is_none());
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, ambiguous);
+
+        // 3. An escaped alias for `consumed_result` on the commit path:
+        //    the commit refuses and writes nothing.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let _ = store
+            .consume_with_operation_identity(&issued.record.nonce, None)
+            .unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let ambiguous = raw.replace(
+            r#""consumed_result":null"#,
+            r#""consumed_result":null,"consumed\u005fresult":null"#,
+        );
+        assert_ne!(raw, ambiguous);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&ambiguous)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(!store
+            .commit_result(&issued.record.nonce, true, None)
+            .unwrap());
+        let after: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert_eq!(after, ambiguous, "the refused commit writes nothing");
+
+        // 4. A NON-ambiguous escaped-only spelling still works: the
+        //    scanner decodes the key token, finds the semantic field and
+        //    splices its value in place.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let escaped_only = raw.replace(r#""state":"pending""#, r#""st\u0061te":"pending""#);
+        assert_ne!(raw, escaped_only);
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&escaped_only)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, None)
+                .unwrap()
+                .is_some(),
+            "an unambiguous escaped spelling is a supported envelope"
+        );
+        let stored = decode_stored(
+            &redis::cmd("GET")
+                .arg(&key)
+                .query::<String>(&mut conn)
+                .unwrap(),
+        )
+        .expect("the escaped spelling decodes");
+        assert_eq!(stored.state.as_deref(), Some("consumed"));
     }
 
     #[test]

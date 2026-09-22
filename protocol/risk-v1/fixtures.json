@@ -935,6 +935,112 @@
     "expected_reasons": []
   }
 ],
+  "consumed_result_vectors": [
+  {
+    "result": {
+      "valid": true,
+      "binding": null
+    },
+    "accepted": true,
+    "why": "canonical boolean form"
+  },
+  {
+    "result": {
+      "valid": false,
+      "binding": "txn-1"
+    },
+    "accepted": true,
+    "why": "canonical boolean form with a binding"
+  },
+  {
+    "result": {
+      "valid": true
+    },
+    "accepted": true,
+    "why": "binding absent, which decodes as null in both languages"
+  },
+  {
+    "result": {
+      "valid": 1,
+      "binding": null
+    },
+    "accepted": true,
+    "why": "legacy integer true"
+  },
+  {
+    "result": {
+      "valid": 0,
+      "binding": "txn-1"
+    },
+    "accepted": true,
+    "why": "legacy integer false"
+  },
+  {
+    "result": {
+      "valid": "1",
+      "binding": null
+    },
+    "accepted": false,
+    "why": "string truthiness is never a boolean"
+  },
+  {
+    "result": {
+      "valid": 1.9,
+      "binding": null
+    },
+    "accepted": false,
+    "why": "non-integral number"
+  },
+  {
+    "result": {
+      "valid": 2,
+      "binding": null
+    },
+    "accepted": false,
+    "why": "out-of-range integer"
+  },
+  {
+    "result": {
+      "valid": -1,
+      "binding": null
+    },
+    "accepted": false,
+    "why": "negative integer"
+  },
+  {
+    "result": {
+      "valid": null,
+      "binding": null
+    },
+    "accepted": false,
+    "why": "null valid"
+  },
+  {
+    "result": {
+      "valid": true,
+      "binding": null,
+      "extra": 1
+    },
+    "accepted": false,
+    "why": "unknown key"
+  },
+  {
+    "result": {
+      "valid": true,
+      "binding": 7
+    },
+    "accepted": false,
+    "why": "non-string binding"
+  },
+  {
+    "result": [
+      true,
+      null
+    ],
+    "accepted": false,
+    "why": "array result, never an object"
+  }
+],
   "namespace_vectors": [
   {
     "raw": "prod",

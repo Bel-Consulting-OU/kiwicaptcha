@@ -10,6 +10,9 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
@@ -372,6 +375,310 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
             array_filter($messages, static fn (string $message): bool => str_contains($message, 'namespace_key_version is not configured')),
             'the omitted version is called out with a configuration advisory',
         );
+    }
+
+    /**
+     * @return iterable<string, array{0: string, 1: string}>
+     */
+    public static function provideCorruptChainStates(): iterable
+    {
+        foreach (['available', 'reserved', 'issued', 'denied', 'step_up_required'] as $state) {
+            yield $state.' (primary)' => [$state, 'primary'];
+            yield $state.' (legacy)' => [$state, 'legacy'];
+        }
+    }
+
+    /**
+     * @dataProvider provideCorruptChainStates
+     */
+    public function testACorruptChainIsNeverHealedIntoAFreshChain(string $state, string $namespace): void
+    {
+        // Corrupt retained state must fail closed exactly like every other
+        // persisted security boundary: the pointed-at record is preserved
+        // byte for byte, the obligation mapping survives, and no fresh
+        // chain is ever created in its place. Only a genuinely missing or
+        // signed-expired record is stale state that may be repaired.
+        $fake = new ChainRedisFake();
+        $storeNamespace = $namespace === 'legacy'
+            ? RedisNamespace::VERSION_LEGACY
+            : RedisNamespace::VERSION_DIGEST;
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, $storeNamespace);
+        [$chainId, $obligationId] = $this->buildChainInState($store, $fake, $state);
+
+        $tag = $namespace === 'legacy' ? self::legacyNamespace() : self::digestNamespace();
+        $chainKey = '{kiwi:'.$tag.'}:chain:'.$chainId;
+        $obligationKey = '{kiwi:'.$tag.'}:chain-obligation:'.$obligationId;
+        $record = json_decode((string) $fake->strings[$chainKey], true, flags: JSON_THROW_ON_ERROR);
+        // Corrupt a persisted field: the state is no longer one of the
+        // contract's states.
+        $record['state'] = 'quantum';
+        $corrupt = (string) json_encode($record, JSON_THROW_ON_ERROR);
+        $fake->strings[$chainKey] = $corrupt;
+        $beforeKeys = array_keys($fake->strings);
+
+        $digestStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+
+        try {
+            $digestStore->createOrGetObligation(
+                $obligationId,
+                str_pad('f', 64, '0'),
+                base64_encode(random_bytes(32)),
+                'login',
+                '',
+                'sha20',
+                RiskAction::Sha20->rank(),
+                self::CONFIGURED_EPOCH,
+                $fake->clockSecs() + 300,
+                300,
+            );
+            self::fail(sprintf('a corrupt %s chain in the %s namespace must fail closed, never heal', $state, $namespace));
+        } catch (MalformedChainedChallengeStateException) {
+            // expected: the retryable/fail-closed 503 path
+        }
+
+        self::assertSame($corrupt, $fake->strings[$chainKey], 'the corrupt bytes are preserved');
+        self::assertSame($chainId, $fake->strings[$obligationKey] ?? null, 'the obligation mapping is preserved');
+        self::assertSame($beforeKeys, array_keys($fake->strings), 'no key is created or deleted by the refused create-or-get');
+    }
+
+    public function testAMissingOrExpiredChainStillHeals(): void
+    {
+        // The counterpart of the corruption rule: a genuinely missing or
+        // signed-expired pointed-at record is stale, so the mapping is
+        // compare-deleted and a fresh chain is created.
+        foreach (['missing', 'expired'] as $kind) {
+            $fake = new ChainRedisFake();
+            $legacyStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_LEGACY);
+            [$chainId, $obligationId] = $this->buildChainInState($legacyStore, $fake, 'available');
+            $legacyChainKey = '{kiwi:'.self::legacyNamespace().'}:chain:'.$chainId;
+            if ($kind === 'missing') {
+                unset($fake->strings[$legacyChainKey]);
+            } else {
+                $record = json_decode((string) $fake->strings[$legacyChainKey], true, flags: JSON_THROW_ON_ERROR);
+                $record['expiresAt'] = $fake->clockSecs() - 1;
+                $fake->strings[$legacyChainKey] = (string) json_encode($record, JSON_THROW_ON_ERROR);
+            }
+
+            $digestStore = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+            $service = new ChainedChallengeTicketService($digestStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+            $requirement = $service->requireStage2(
+                base64_encode(random_bytes(32)),
+                'login',
+                'txn-rollout',
+                self::CONFIGURED_EPOCH,
+                RiskAction::Sha20,
+                $fake->clockSecs() + 300,
+            );
+
+            self::assertNotSame($chainId, $requirement->chainId, $kind.': the stale pointer is replaced');
+            self::assertArrayNotHasKey(
+                '{kiwi:'.self::legacyNamespace().'}:chain-obligation:'.$obligationId,
+                $fake->strings,
+                $kind.': the stale legacy mapping is cleared',
+            );
+            self::assertSame($requirement->chainId, $digestStore->obligationChainId($obligationId));
+        }
+    }
+
+    public function testARaisedRequirementMakesTheOldStage2NonceUnredeemable(): void
+    {
+        // Stage 2 was minted for sha18; a second stage-1 solve raises the
+        // same chain to Argon32. The stale nonce can never be upgraded in
+        // place, so the chain fails closed to the terminal step-up state:
+        // the stored nonce is no longer redeemable (markVerified only
+        // accepts `issued`) and the controller refuses to recover it.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        [$chainId, $obligationId] = $this->buildChainInState($store, $fake, 'issued');
+
+        $raised = $store->createOrGetObligation(
+            $obligationId,
+            str_pad('e', 64, '0'),
+            base64_encode(random_bytes(32)),
+            'login',
+            '',
+            'argon32',
+            RiskAction::Argon32->rank(),
+            self::CONFIGURED_EPOCH,
+            $fake->clockSecs() + 300,
+            300,
+        );
+        self::assertSame($chainId, $raised, 'the raise resolves the same chain');
+
+        $requirement = $store->read($chainId);
+        self::assertSame('step_up_required', $requirement['state'], 'the issued chain fails closed to step_up_required');
+        self::assertSame('argon32', $requirement['requiredAction'], 'the strengthened floor is recorded');
+        self::assertSame(2, (int) $requirement['requirementGeneration'], 'the raise bumped the generation');
+
+        self::assertSame(
+            'conflict',
+            $store->markVerified($chainId, (string) $this->storedNonce($fake, $chainId)),
+            'the weaker issued nonce is no longer redeemable',
+        );
+    }
+
+    public function testAMintedChallengeCannotBeInstalledAfterTheRequirementRose(): void
+    {
+        // The reservation race: a challenge is reserved for sha18, a
+        // concurrent solve raises the chain to Argon32, and the first
+        // mint tries to install its sha18 challenge. The reservation CAS
+        // refuses it, so the stale-strength challenge is never installed.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        [$chainId, $obligationId] = $this->buildChainInState($store, $fake, 'available');
+
+        self::assertSame('available', $store->reserve($chainId, 'owner-a', 15));
+        $raised = $store->createOrGetObligation(
+            $obligationId,
+            str_pad('d', 64, '0'),
+            base64_encode(random_bytes(32)),
+            'login',
+            '',
+            'argon32',
+            RiskAction::Argon32->rank(),
+            self::CONFIGURED_EPOCH,
+            $fake->clockSecs() + 300,
+            300,
+        );
+        self::assertSame($chainId, $raised);
+        self::assertSame('reserved', $store->read($chainId)['state'], 'the raise keeps the in-flight reservation');
+
+        self::assertSame(
+            'stale_requirement',
+            $store->markIssued($chainId, 'owner-a', base64_encode(random_bytes(32))),
+            'the sha18 challenge minted for the earlier generation is refused',
+        );
+        self::assertSame('reserved', $store->read($chainId)['state'], 'the refused issuance installs nothing');
+        self::assertSame('argon32', $store->read($chainId)['requiredAction'], 'the raised floor is untouched');
+    }
+
+    public function testAFreshDeploymentNeverAdoptsAnUnrelatedLegacyNamespace(): void
+    {
+        // A fresh install (namespace_migration: fresh) with raw namespace
+        // `tenant/a` derives the digest keys and reads NO legacy segment.
+        // An unrelated drained deployment with the colliding legacy
+        // namespace (`tenant:a` -> tenant_a) pre-populates a policy, a
+        // pin and a chain obligation there; none of it may surface in the
+        // fresh deployment.
+        $freshRaw = 'tenant/a';
+        $unrelatedRaw = 'tenant:a';
+        $legacyNamespace = RedisNamespace::derive($unrelatedRaw, RedisNamespace::VERSION_LEGACY);
+        $digestNamespace = RedisNamespace::derive($freshRaw, RedisNamespace::VERSION_DIGEST);
+        self::assertSame('tenant_a', $legacyNamespace, 'the unrelated raw namespace folds onto tenant_a in v1');
+        self::assertNotSame($legacyNamespace, $digestNamespace);
+
+        // Unrelated legacy state: a revocation policy, an authority pin
+        // and a chain obligation.
+        $client = new FakePredisClient();
+        $client->hashes['{kiwi:'.$legacyNamespace.'}:security-policy'] = [
+            SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD => (string) self::CENTRAL_EPOCH,
+        ];
+        $client->strings['{kiwi:'.$legacyNamespace.'}:authority:pin'] = 'master|unrelated-run';
+
+        $fake = new ChainRedisFake();
+        $legacyStore = new RedisChainedChallengeStateStore($fake, $unrelatedRaw, 0, 100, RedisNamespace::VERSION_LEGACY);
+        $legacyService = new ChainedChallengeTicketService($legacyStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        $legacyRequirement = $legacyService->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-unrelated',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Argon32,
+            $fake->clockSecs() + 300,
+        );
+        $legacyObligationKey = '{kiwi:'.$legacyNamespace.'}:chain-obligation:'.$legacyService->obligationIdFor('login', 'txn-unrelated', self::CONFIGURED_EPOCH);
+        self::assertArrayHasKey($legacyObligationKey, $fake->strings, 'the unrelated deployment owns a legacy obligation');
+
+        // The fresh deployment: no legacy fallback anywhere.
+        $monitor = new SecurityEpochMonitor(
+            new Verifier(new ArrayStorage()),
+            $client,
+            $freshRaw,
+            1,
+            1,
+            null,
+            60,
+            RedisNamespace::VERSION_DIGEST,
+            false,
+        );
+        self::assertSame(['{kiwi:'.$digestNamespace.'}:security-policy'], $monitor->policyKeys(), 'the fresh reader consults only its own digest key');
+        self::assertSame(1, $monitor->currentEpoch(), 'the unrelated revocation is invisible');
+
+        $controller = new KiwiHealthController(
+            self::SECRET,
+            $client,
+            $freshRaw,
+            1,
+            null,
+            0,
+            null,
+            16384,
+            [],
+            null,
+            false,
+            1,
+            1,
+            RedisNamespace::VERSION_DIGEST,
+            false,
+        );
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'the unrelated policy never blocks the fresh deployment');
+
+        $guard = new PinnedPrimaryAuthorityGuard($client, $freshRaw, 0, '', null, RedisNamespace::VERSION_DIGEST, false);
+        self::assertNull($guard->state()['pinned'], 'the unrelated legacy pin is never adopted');
+        self::assertArrayNotHasKey('{kiwi:'.$digestNamespace.'}:authority:pin', $client->strings, 'no pin is migrated into the fresh deployment');
+
+        $freshStore = new RedisChainedChallengeStateStore($fake, $freshRaw, 0, 100, RedisNamespace::VERSION_DIGEST, false);
+        $freshService = new ChainedChallengeTicketService($freshStore, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        $freshRequirement = $freshService->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-unrelated',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Argon32,
+            $fake->clockSecs() + 300,
+        );
+        self::assertNotSame($legacyRequirement->chainId, $freshRequirement->chainId, 'the unrelated obligation is invisible');
+        self::assertSame($legacyRequirement->chainId, $fake->strings[$legacyObligationKey], 'the unrelated mapping is untouched');
+    }
+
+    /**
+     * Build a live chain in the requested state; returns [chainId, obligationId].
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function buildChainInState(RedisChainedChallengeStateStore $store, ChainRedisFake $fake, string $state): array
+    {
+        $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+        $requirement = $service->requireStage2(
+            base64_encode(random_bytes(32)),
+            'login',
+            'txn-rollout',
+            self::CONFIGURED_EPOCH,
+            RiskAction::Sha18,
+            $fake->clockSecs() + 300,
+        );
+        $obligationId = $service->obligationIdFor('login', 'txn-rollout', self::CONFIGURED_EPOCH);
+        if ($state !== 'available') {
+            self::assertSame(ChainReservationResult::Available, $service->reserveStage2($requirement->chainId, 'owner-a'));
+            if ($state !== 'reserved') {
+                $nonce = base64_encode(random_bytes(32));
+                self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($requirement->chainId, 'owner-a', $nonce));
+                if ($state === 'denied') {
+                    self::assertSame(ChainVerifiedResult::DeniedNew, $service->markDenied($requirement->chainId, $nonce));
+                } elseif ($state === 'step_up_required') {
+                    self::assertSame(ChainVerifiedResult::StepUpRequiredNew, $service->markStepUpRequired($requirement->chainId, $nonce));
+                }
+            }
+        }
+
+        return [$requirement->chainId, $obligationId];
+    }
+
+    private function storedNonce(ChainRedisFake $fake, string $chainId): ?string
+    {
+        $record = json_decode((string) $fake->strings['{kiwi:'.self::digestNamespace().'}:chain:'.$chainId], true, flags: JSON_THROW_ON_ERROR);
+
+        return \is_string($record['stage2Nonce'] ?? null) ? $record['stage2Nonce'] : null;
     }
 
     /**

@@ -381,11 +381,11 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             'a duplicated top-level state key is never deleted as pending',
         );
         self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'the ambiguous value is never mutated');
-        self::assertNotNull(
+        self::assertNull(
             $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
-            'the decoded already-consumed state is reported, never flipped again',
+            'a duplicated top-level state key is ambiguous corruption: the consume refuses outright',
         );
-        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'no second consumption writes anything');
+        self::assertSame($duplicated, $this->client->get($this->prefix.$nonce), 'no consumption writes anything');
 
         // Marker text inside a string field is JSON-escaped, so no raw
         // marker exists: the cleanup still deletes the pending record.
@@ -399,6 +399,95 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
             'the escaped marker text adds no raw marker: only the top-level state field exists',
         );
         self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'an escaped marker in a string field never blocks the pending delete');
+    }
+
+    public function testEscapedKeyAliasesAreSemanticallyTheSameField(): void
+    {
+        // JSON object keys may carry escapes: "st\u0061te" IS the key
+        // `state` to every JSON decoder. An envelope carrying both a
+        // literal and an escaped spelling for one of the runtime fields
+        // is ambiguous (two semantic members for one field) and must
+        // never drive or be mutated by a transition.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        // 1. A literal `state` plus an escaped alias, in both orders and
+        //    with equal or conflicting values: the consume must refuse,
+        //    the cleanup must never delete, and the bytes must survive.
+        $aliases = [
+            ['"state":"pending"', '"st\\u0061te":"consumed"'],
+            ['"st\\u0061te":"consumed"', '"state":"pending"'],
+            ['"state":"pending"', '"st\\u0061te":"pending"'],
+        ];
+        foreach ($aliases as [$literal, $escaped]) {
+            $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+            $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+            $ambiguous = str_replace('"state":"pending"', $literal.','.$escaped, $raw);
+            self::assertNotSame($raw, $ambiguous);
+            $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+
+            $result = $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+            self::assertTrue(
+                $result === null || !$result->consumedNow,
+                'a semantically duplicated state field is never freshly consumed',
+            );
+            self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the ambiguous value is never mutated');
+            self::assertContains(
+                $storage->deleteIfPending($nonce)->state,
+                ['corrupt', 'consumed', 'cancelled'],
+                'the cleanup never reports a pending delete for an ambiguous envelope',
+            );
+            self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the cleanup never mutates the ambiguous value');
+        }
+
+        // 2. An escaped alias for `operation_identity` (the consume splice
+        //    target): the transition must refuse rather than rewrite one
+        //    spelling while the decoder reads the other.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $ambiguous = str_replace(
+            '"operation_identity":null',
+            '"operation_identity":"op-1","op\\u0065ration_identity":null',
+            $raw,
+        );
+        self::assertNotSame($raw, $ambiguous);
+        $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+        self::assertNull(
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY),
+            'a semantically duplicated operation_identity is never consumable',
+        );
+        self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce));
+
+        // 3. An escaped alias for `consumed_result` on the commit path:
+        //    the commit must land on the semantic field or refuse, never
+        //    write a second semantic member.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        $raw = (string) $this->client->get($this->prefix.$nonce);
+        $ambiguous = str_replace(
+            '"consumed_result":null',
+            '"consumed_result":null,"consumed\\u005fresult":null',
+            $raw,
+        );
+        self::assertNotSame($raw, $ambiguous);
+        $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+        self::assertFalse($storage->commitResult($nonce, true, null), 'a semantically duplicated consumed_result refuses the commit');
+        self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the refused commit writes nothing');
+
+        // 4. A NON-ambiguous escaped-only spelling still works: the
+        //    scanner decodes the key token, so the semantic field is
+        //    found and spliced exactly.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $escapedOnly = str_replace('"state":"pending"', '"st\\u0061te":"pending"', $raw);
+        self::assertNotSame($raw, $escapedOnly);
+        $this->client->set($this->prefix.$nonce, $escapedOnly, 'EX', 300);
+        $consumed = $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        self::assertNotNull($consumed, 'an unambiguous escaped spelling is a supported envelope');
+        $after = (string) $this->client->get($this->prefix.$nonce);
+        self::assertSame('consumed', json_decode($after, true)['state'] ?? null, 'the semantic field was spliced');
+        self::assertStringContainsString('"st\\u0061te":"consumed"', $after, 'the splice preserves the escaped spelling in place');
+        self::assertStringNotContainsString('"state":"pending"', $after);
     }
 
     /** Drive a record to one of the six base states. */
