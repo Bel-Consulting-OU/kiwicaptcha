@@ -1494,6 +1494,8 @@ struct StoredEnvelope {
     execution_version: Option<u8>,
     #[serde(default)]
     execution_commitment: Option<String>,
+    #[serde(default)]
+    rsw_modulus_sha256: Option<String>,
     #[serde(default = "crate::challenge::default_kid")]
     kid: u32,
     #[serde(default)]
@@ -1749,7 +1751,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
             execution_version: envelope.execution_version,
             execution_commitment: envelope.execution_commitment.clone(),
             kid: envelope.kid,
-            rsw_modulus_sha256: None,
+            rsw_modulus_sha256: envelope.rsw_modulus_sha256.clone(),
         };
         if !crate::challenge::record_is_structurally_valid(&probe) {
             return None;
@@ -1783,7 +1785,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
         execution_version: envelope.execution_version,
         execution_commitment: envelope.execution_commitment,
         kid: envelope.kid,
-        rsw_modulus_sha256: None,
+        rsw_modulus_sha256: envelope.rsw_modulus_sha256,
     };
     Some(StoredChallenge {
         record,
