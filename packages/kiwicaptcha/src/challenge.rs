@@ -979,6 +979,15 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         canonical.push('|');
         canonical.push_str(record.execution_commitment.as_deref().unwrap_or(""));
     }
+    // The rsw trapdoor identity is appended only when the record carries
+    // it: a legacy rsw record (bound before the identity existed) signs
+    // the canonical it always signed, and a post-binding record
+    // authenticates its modulus. Byte-exact with the PHP
+    // Issuer::canonicalPayload().
+    if let Some(identity) = record.rsw_modulus_sha256.as_deref() {
+        canonical.push('|');
+        canonical.push_str(identity);
+    }
     canonical
 }
 
