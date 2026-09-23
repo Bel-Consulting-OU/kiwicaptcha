@@ -32,12 +32,14 @@ use KiwiCaptcha\Risk\DeploymentNamespace;
  *    empty key space.
  *  - Version 2, the digest shape, for a deployment that performs the
  *    namespace migration deliberately. The switch changes every key
- *    family at once, so the bundle requires the explicit
- *    drained-migration acknowledgment
- *    (`kiwi_captcha.namespace_migration: drained`). The
- *    security-policy and chain readers additionally consult the legacy
- *    namespace, so an emergency revocation or an open chain obligation
- *    can never be silently abandoned by the cutover.
+ *    family at once, so the bundle requires an explicit migration phase
+ *    (`kiwi_captcha.namespace_migration`). While the transitional
+ *    `migrating_v2` phase is in effect the security-policy, chain and
+ *    authority-pin readers additionally consult the legacy namespace, so
+ *    an emergency revocation, an open chain obligation or a
+ *    pre-cutover pin can never be silently abandoned by the cutover.
+ *    `drained` marks the migration complete: digest-only, no legacy
+ *    reads, the isolation the digest derivation exists for.
  */
 final class RedisNamespace
 {

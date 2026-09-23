@@ -141,6 +141,15 @@ final class Issuer
         'form',
     ];
 
+    /**
+     * The authenticated rsw trapdoor identity: the hex SHA-256 of the
+     * canonical base64 modulus string.
+     */
+    public static function rswModulusSha256(string $modulusNBase64): string
+    {
+        return hash('sha256', $modulusNBase64);
+    }
+
     public function __construct(
         private readonly Config $config,
         private readonly StorageInterface $storage,
@@ -155,13 +164,49 @@ final class Issuer
          * identifier alphabet, at most 64 bytes of [A-Za-z0-9._:-].
          */
         private readonly ?string $region = null,
+        /**
+         * The optional rsw trapdoor rotation keyring: a map of the
+         * modulus SHA-256 (the authenticated rsw_modulus_sha256 riding
+         * each issued record) to that trapdoor's {modulus_n, lambda}
+         * pair. Reconstruction (responseFromRecord) resolves a record's
+         * authenticated identity here, so a rotated or mixed-node
+         * deployment still re-emits the modulus the challenge was
+         * issued under instead of the newly active one.
+         *
+         * @var array<string, array{modulus_n: string, lambda: string}>
+         */
+        private readonly array $rswVerificationKeys = [],
     ) {
         if ($region !== null && !Config::isValidIdentifier($region, 64)) {
             throw new \InvalidArgumentException(
                 'region must be 1-64 characters of [A-Za-z0-9._:-] when set'
             );
         }
+        foreach ($rswVerificationKeys as $hash => $pair) {
+            if (!\is_string($hash) || preg_match('/^[0-9a-f]{64}$/D', $hash) !== 1
+                || !\is_array($pair)
+                || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
+            ) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
+                );
+            }
+            if (!hash_equals($hash, hash('sha256', $pair['modulus_n']))) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys keys must be the SHA-256 of the paired modulus_n'
+                );
+            }
+            $this->rswModuliByHash[$hash] = $pair['modulus_n'];
+        }
     }
+
+    /**
+     * The rsw trapdoor rotation keyring (modulus identity -> modulus),
+     * see the constructor parameter.
+     *
+     * @var array<string, string>
+     */
+    private array $rswModuliByHash = [];
 
     public function config(): Config
     {
@@ -606,6 +651,10 @@ final class Issuer
             // segment.
             $executionProgram !== null ? $executionVersion : null,
             $executionCommitment,
+            // The rsw trapdoor identity: only an rsw issuance carries it.
+            $algorithm === PoWAlgorithm::Rsw && $this->config->rswModulusN !== null
+                ? self::rswModulusSha256($this->config->rswModulusN)
+                : null,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey, $this->config->tenantId);
 
@@ -656,6 +705,9 @@ final class Issuer
             // byte-for-byte through storage round-trips.
             executionVersion: $executionProgram !== null ? $executionVersion : null,
             executionCommitment: $executionCommitment,
+            rswModulusSha256: $algorithm === PoWAlgorithm::Rsw && $this->config->rswModulusN !== null
+                ? self::rswModulusSha256($this->config->rswModulusN)
+                : null,
         );
         $this->storage->store($record);
 
@@ -696,13 +748,29 @@ final class Issuer
      */
     public function responseFromRecord(\KiwiCaptcha\ChallengeRecord $record): ?Challenge
     {
+        $rswModulus = null;
         if ($record->algorithm === PoWAlgorithm::Rsw) {
-            // Only an rsw deployment owns the modulus; lambda never
-            // leaves the server. SHA and Argon records are self-contained
+            // Only the trapdoor owner can reconstruct an rsw challenge;
+            // lambda never leaves the server. The modulus is selected by
+            // the record's authenticated identity, never by whatever pair
+            // is currently active: the keyring (a rotation or mixed-node
+            // record) first, then the active pair, including a legacy
+            // record that predates the identity. An identity in neither
+            // fails closed. SHA and Argon records are self-contained
             // (Argon carries its full parameter set on the record), so a
             // risk-escalated Argon challenge issued by a SHA-configured
             // deployment reconstructs without the rsw material.
-            if ($this->config->algorithm !== PoWAlgorithm::Rsw || $this->config->rswModulusN === null) {
+            if ($record->rswModulusSha256 !== null) {
+                $rswModulus = $this->rswModuliByHash[$record->rswModulusSha256] ?? null;
+                if ($rswModulus === null && $this->config->rswModulusN !== null
+                    && hash_equals($record->rswModulusSha256, self::rswModulusSha256($this->config->rswModulusN))
+                ) {
+                    $rswModulus = $this->config->rswModulusN;
+                }
+            } elseif ($this->config->algorithm === PoWAlgorithm::Rsw) {
+                $rswModulus = $this->config->rswModulusN;
+            }
+            if ($rswModulus === null) {
                 return null;
             }
         }
@@ -721,7 +789,7 @@ final class Issuer
             prefix: $record->prefix,
             decoyField: $record->decoyField,
             executionProgram: $record->executionProgram,
-            rswModulus: $record->algorithm === PoWAlgorithm::Rsw ? $this->config->rswModulusN : null,
+            rswModulus: $rswModulus,
         );
     }
 
@@ -1002,6 +1070,7 @@ final class Issuer
         ?string $decoyField = null,
         ?int $executionVersion = null,
         ?string $executionCommitment = null,
+        ?string $rswModulusSha256 = null,
     ): string {
         $base = sprintf(
             'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
@@ -1042,6 +1111,13 @@ final class Issuer
                 );
             }
             $base .= '|'.$executionVersion.'|'.$executionCommitment;
+        }
+        // The rsw trapdoor identity is appended only when the record
+        // carries it: a legacy rsw record (bound before the identity
+        // existed) signs the canonical it always signed, and a
+        // post-binding record authenticates its modulus.
+        if ($rswModulusSha256 !== null) {
+            $base .= '|'.$rswModulusSha256;
         }
 
         return $base;

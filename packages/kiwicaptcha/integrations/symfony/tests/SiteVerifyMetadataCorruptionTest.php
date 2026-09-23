@@ -185,6 +185,33 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
             } catch (SiteVerifyIdempotencyCorruptException) {
             }
         }
+
+        // Unique-key structural corruption: JSON-clean records no
+        // conforming writer could produce (a complete record that still
+        // owns a lease, a pending record carrying a result, an unknown
+        // authority field, a non-boolean success). Both the read and the
+        // claim refuse them with the typed fail-closed exception — never
+        // a cached success, never a client conflict.
+        $structural = [
+            ['response_hash' => $hash, 'state' => 'complete', 'owner' => 'stale-owner', 'lease_expires_at' => 123, 'result' => ['success' => true, 'challenge_ts' => null, 'hostname' => null]],
+            ['response_hash' => $hash, 'state' => 'pending', 'owner' => 'owner-a', 'lease_expires_at' => 123, 'result' => ['success' => true, 'challenge_ts' => null, 'hostname' => null]],
+            ['response_hash' => $hash, 'state' => 'complete', 'owner' => null, 'lease_expires_at' => null, 'result' => ['success' => true, 'challenge_ts' => null, 'hostname' => null], 'unexpected_authority_field' => 'x'],
+            ['response_hash' => $hash, 'state' => 'complete', 'owner' => null, 'lease_expires_at' => null, 'result' => ['success' => 'true', 'challenge_ts' => null, 'hostname' => null]],
+            ['response_hash' => $hash, 'state' => 'quantum', 'owner' => null, 'lease_expires_at' => null, 'result' => ['success' => true, 'challenge_ts' => null, 'hostname' => null]],
+        ];
+        foreach ($structural as $index => $bad) {
+            $client->set($key, json_encode($bad, JSON_THROW_ON_ERROR), 'EX', 300);
+            try {
+                $store->stored($backendId, $uuid);
+                self::fail('structural #'.$index.': the read must fail closed');
+            } catch (SiteVerifyIdempotencyCorruptException) {
+            }
+            try {
+                $store->claim($backendId, $uuid, $hash, 300, 'ip-fingerprint');
+                self::fail('structural #'.$index.': the claim must answer the typed 503, never a client conflict');
+            } catch (SiteVerifyIdempotencyCorruptException) {
+            }
+        }
         $client->del([$key]);
     }
 

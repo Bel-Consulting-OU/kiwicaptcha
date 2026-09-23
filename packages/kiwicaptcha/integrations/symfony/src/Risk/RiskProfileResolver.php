@@ -260,18 +260,37 @@ final class RiskProfileResolver
 
     private function argonRequirement(ChallengeStrength $baseline, int $bits): ChallengeStrength
     {
-        // The adaptive Argon requirement: the configured Argon envelope
-        // (or the deployment baseline when it is higher) at t >= 3, p >= 1
-        // and the rung's target bits, never below the baseline.
-        $isArgon = $baseline->algorithm === PoWAlgorithm::Argon2id;
-        $memory = $isArgon
-            ? max($baseline->mKib, $this->argonEnvelopeMemoryKib)
-            : max($this->argonMKib, $this->argonEnvelopeMemoryKib);
-        $t = $isArgon ? max($baseline->t, 3) : max($this->argonT, 3);
-        $p = $isArgon ? max($baseline->p, 1) : max($this->argonP, 1);
-        $targetBits = $isArgon ? max($baseline->targetBits, $bits) : $bits;
+        if ($baseline->algorithm === PoWAlgorithm::Argon2id) {
+            // The application IS an Argon deployment: the adaptive rung
+            // preserves its complete configured baseline (memory,
+            // iterations, parallelism, target) and raises only what the
+            // rung demands.
+            return new ChallengeStrength(
+                PoWAlgorithm::Argon2id,
+                max($baseline->mKib, $this->argonEnvelopeMemoryKib),
+                max($baseline->t, 3),
+                max($baseline->p, 1),
+                max($baseline->targetBits, $bits),
+            );
+        }
 
-        return new ChallengeStrength(PoWAlgorithm::Argon2id, $memory, $t, $p, $targetBits);
+        // A SHA baseline escalates into the adaptive Argon envelope
+        // alone: the core argon_m_kib/argon_t/argon_p/argon2_difficulty_bits
+        // knobs are inert in a sha256 deployment, and borrowing them
+        // would let a dormant setting (for example argon_p: 2, which the
+        // core only validates for argon2id) build an invalid or
+        // unexpectedly expensive profile the moment risk escalates. The
+        // adaptive profile is exactly the configured envelope at t=3,
+        // p=1 with the rung's target bits, the documented guarantee that
+        // risk raises the nonce search space and never the server
+        // verification cost.
+        return new ChallengeStrength(
+            PoWAlgorithm::Argon2id,
+            $this->argonEnvelopeMemoryKib,
+            3,
+            1,
+            $bits,
+        );
     }
 
     /** The fixed SHA rung of a SHA action (16/18/20, not configurable). */

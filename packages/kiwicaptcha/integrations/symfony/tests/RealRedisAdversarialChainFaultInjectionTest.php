@@ -666,19 +666,31 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         self::assertSame(-1, (int) $this->client->ttl($key), 'the tampered key carries no lifetime');
         $before = $this->client->get($key);
 
-        // Every mutating transition fails closed like the reservation
-        // does: a lifetime can never be manufactured for a TTL-less
-        // chain, deterministic, zero mutation.
-        self::assertSame('missing', $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15), 'the reservation refuses the lifetime-less key');
-        self::assertSame('missing', $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]), 'the issuance refuses the lifetime-less key');
-        self::assertSame('missing', $store->markVerified($chainId, ChainStateWalk::NONCES[0]), 'the verification refuses the lifetime-less key');
-        self::assertSame('missing', $store->markStepUpRequired($chainId, ChainStateWalk::NONCES[0]), 'the step-up refuses the lifetime-less key');
-        self::assertSame('missing', $store->markDenied($chainId, ChainStateWalk::NONCES[0]), 'the denial refuses the lifetime-less key');
-        self::assertSame('missing', $store->markTransactionDenied($chainId, $obligationId), 'the transaction denial refuses the lifetime-less key');
-        self::assertSame('missing', $store->markTransactionStepUpRequired($chainId, $obligationId), 'the transaction step-up refuses the lifetime-less key');
-        self::assertFalse($store->rearmIssued($chainId, ChainStateWalk::NONCES[0]), 'the rearm refuses the lifetime-less key');
-        self::assertNull($store->complete($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]), 'the completion refuses the lifetime-less key');
-        self::assertNull($store->read($chainId), 'the read refuses the lifetime-less record as corrupted state');
+        // Every boundary classifies the TTL-less retained record as
+        // corrupt (never the absence sentinel): the read and every
+        // transition fail closed with the typed exception, so a lifetime
+        // is never manufactured and a migrating_v2 dual-read can never
+        // hide the corrupt primary behind a legacy record.
+        $boundaries = [
+            'reserve' => fn () => $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15),
+            'markIssued' => fn () => $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
+            'markVerified' => fn () => $store->markVerified($chainId, ChainStateWalk::NONCES[0]),
+            'markStepUpRequired' => fn () => $store->markStepUpRequired($chainId, ChainStateWalk::NONCES[0]),
+            'markDenied' => fn () => $store->markDenied($chainId, ChainStateWalk::NONCES[0]),
+            'markTransactionDenied' => fn () => $store->markTransactionDenied($chainId, $obligationId),
+            'markTransactionStepUpRequired' => fn () => $store->markTransactionStepUpRequired($chainId, $obligationId),
+            'rearmIssued' => fn () => $store->rearmIssued($chainId, ChainStateWalk::NONCES[0]),
+            'complete' => fn () => $store->complete($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
+            'read' => fn () => $store->read($chainId),
+        ];
+        foreach ($boundaries as $name => $boundary) {
+            try {
+                $boundary();
+                self::fail($name.': the lifetime-less record must fail closed as corrupt');
+            } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+                // expected
+            }
+        }
         self::assertSame($before, $this->client->get($key), 'the refusals left the lifetime-less record byte-identical');
         self::assertSame($chainId, $store->obligationChainId($obligationId), 'the obligation mapping stays untouched');
 

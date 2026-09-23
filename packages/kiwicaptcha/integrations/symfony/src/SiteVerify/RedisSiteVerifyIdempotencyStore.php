@@ -49,7 +49,54 @@ final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
 
     private readonly RedisSecurityCommandExecutor $lua;
 
-    private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    /**
+     * The exact-record predicate of the SiteVerify idempotency state
+     * machine, mirrored in Lua. The record carries exactly the keys a
+     * conforming writer emits, and the state invariants hold: pending
+     * owns a canonical owner token plus an integer lease and a null
+     * result, while complete owns a null owner/lease and the canonical
+     * result shape. Every transition and every read gates on it, so a
+     * JSON-clean but structurally impossible record can never be
+     * classified complete or re-encoded into an authorization-bearing
+     * state.
+     */
+    private const VALID_IDEMPOTENCY_LUA = <<<'LUA'
+local function validIdempotencyRecord(rec)
+  if type(rec) ~= 'table' then return false end
+  for k in pairs(rec) do
+    if k ~= 'state' and k ~= 'response_hash' and k ~= 'remoteip_fingerprint'
+      and k ~= 'binding' and k ~= 'owner' and k ~= 'lease_expires_at' and k ~= 'result' then
+      return false
+    end
+  end
+  if type(rec['response_hash']) ~= 'string' then return false end
+  local state = rec['state']
+  local owner = rec['owner']
+  local lease = rec['lease_expires_at']
+  local result = rec['result']
+  if state == 'pending' then
+    if type(owner) ~= 'string' or owner == '' then return false end
+    if type(lease) ~= 'number' or lease % 1 ~= 0 then return false end
+    if result ~= nil and result ~= cjson.null then return false end
+    return true
+  end
+  if state ~= 'complete' then return false end
+  if owner ~= nil and owner ~= cjson.null then return false end
+  if lease ~= nil and lease ~= cjson.null then return false end
+  if type(result) ~= 'table' then return false end
+  for k in pairs(result) do
+    if k ~= 'success' and k ~= 'challenge_ts' and k ~= 'hostname' and k ~= 'error-codes'
+      and k ~= 'action' and k ~= 'cdata' then
+      return false
+    end
+  end
+  if type(result['success']) ~= 'boolean' then return false end
+  return true
+end
+
+LUA;
+
+    private const CLAIM_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local response_hash = ARGV[1]
 local owner = ARGV[2]
@@ -65,7 +112,7 @@ if not existing then
   return 'claimed'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validIdempotencyRecord(rec) then
   return 'corrupt'
 end
 if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint or rec.binding ~= binding then
@@ -77,7 +124,7 @@ end
 return 'pending_same'
 LUA;
 
-    private const TAKEOVER_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const TAKEOVER_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
@@ -91,7 +138,7 @@ if not existing then
   return 'still_pending'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validIdempotencyRecord(rec) then
   return 'corrupt'
 end
 if rec.state ~= 'pending' then
@@ -125,7 +172,7 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 'took_over'
 LUA;
 
-    private const RENEW_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const RENEW_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local lease_seconds = tonumber(ARGV[2])
@@ -136,7 +183,7 @@ if not existing then
   return 0
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validIdempotencyRecord(rec) then
   return 0
 end
 if rec.state ~= 'pending' or rec.owner ~= owner then
@@ -147,7 +194,7 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 1
 LUA;
 
-    private const FINALIZE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
@@ -158,7 +205,7 @@ if not existing then
   return 0
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validIdempotencyRecord(rec) then
   return false
 end
 -- The finalize must authorize the state, the current owner token AND
@@ -212,6 +259,12 @@ LUA;
         $lease = $leaseSeconds ?? $this->leaseSeconds;
         $result = $this->lua->executeMutation(self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint, $binding ?? '']);
 
+        if ((string) $result === 'corrupt') {
+            // Corrupted security state is a server fault, never a client
+            // conflict: the typed fail-closed exception (the controller
+            // answers the 503) instead of a 400 blaming the caller.
+            throw new SiteVerifyIdempotencyCorruptException('the siteverify idempotency record is structurally corrupt');
+        }
         $claim = match ((string) $result) {
             'claimed' => IdempotencyClaim::Claimed,
             'pending_same' => IdempotencyClaim::PendingSame,
@@ -241,6 +294,7 @@ LUA;
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,
+            'corrupt' => throw new SiteVerifyIdempotencyCorruptException('the siteverify idempotency record is structurally corrupt'),
             default => IdempotencyClaim::StillPending,
         };
 
@@ -312,6 +366,7 @@ LUA;
         if (!\is_array($rec)) {
             throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not an object');
         }
+        self::validateIdempotencyRecord($rec);
         if (($rec['state'] ?? '') === 'complete') {
             if (!\is_array($rec['result'] ?? null)) {
                 throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
@@ -336,6 +391,52 @@ LUA;
         }
 
         return null;
+    }
+
+    /**
+     * The PHP half of the idempotency-record predicate: exact key set and
+     * state invariants, identical to the Lua validIdempotencyRecord().
+     *
+     * @param array<string, mixed> $rec
+     *
+     * @throws SiteVerifyIdempotencyCorruptException on any violation
+     */
+    private static function validateIdempotencyRecord(array $rec): void
+    {
+        $allowed = ['state', 'response_hash', 'remoteip_fingerprint', 'binding', 'owner', 'lease_expires_at', 'result'];
+        $unknown = array_diff(array_keys($rec), $allowed);
+        if ($unknown !== []) {
+            throw new SiteVerifyIdempotencyCorruptException('the idempotency record carries unsupported keys: '.implode(',', $unknown));
+        }
+        if (!\is_string($rec['response_hash'] ?? null)) {
+            throw new SiteVerifyIdempotencyCorruptException('the idempotency record response_hash must be a string');
+        }
+        $state = $rec['state'] ?? null;
+        if ($state === 'pending') {
+            if (!\is_string($rec['owner'] ?? null) || $rec['owner'] === '') {
+                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record owner must be a non-empty string');
+            }
+            if (!\is_int($rec['lease_expires_at'] ?? null)) {
+                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record lease_expires_at must be an integer');
+            }
+            if (($rec['result'] ?? null) !== null) {
+                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record must not carry a result');
+            }
+
+            return;
+        }
+        if ($state === 'complete') {
+            if (($rec['owner'] ?? null) !== null || ($rec['lease_expires_at'] ?? null) !== null) {
+                throw new SiteVerifyIdempotencyCorruptException('the complete idempotency record owner/lease_expires_at must be null');
+            }
+            if (!\is_array($rec['result'] ?? null)) {
+                throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
+            }
+            SiteVerifyResult::validate($rec['result']);
+
+            return;
+        }
+        throw new SiteVerifyIdempotencyCorruptException('the idempotency record state must be pending|complete');
     }
 
     private function retentionTtl(string $idempotencyKey): int

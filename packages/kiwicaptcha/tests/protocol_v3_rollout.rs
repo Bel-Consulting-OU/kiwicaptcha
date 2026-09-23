@@ -326,6 +326,7 @@ fn acceptance_predicate_pins_the_set_boundaries() {
         execution_version: None,
         execution_commitment: None,
         kid: 1,
+        rsw_modulus_sha256: None,
     };
     for version in [0u8, 4u8] {
         record.protocol_version = version;

@@ -141,7 +141,71 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * record's disposition shape is validated by the store's strict
      * decoder on the read-only response.
      */
-    private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
+    /**
+     * The exact-record predicate of the post-solve disposition state
+     * machine, mirrored from the PHP validateDecoded(): the record and
+     * its nested disposition carry exactly the keys the writer emits, and
+     * the state invariants hold. Every mutation boundary and every
+     * complete-replay path calls it before touching or trusting the
+     * record, so corruption arriving between claim and finalize can never
+     * be re-encoded into an authorization-bearing complete state.
+     */
+    private const VALID_POST_SOLVE_LUA = <<<'LUA'
+local function validPostSolveRecord(rec)
+  if type(rec) ~= 'table' then return false end
+  for k in pairs(rec) do
+    if k ~= 'v' and k ~= 'state' and k ~= 'owner' and k ~= 'lease_until'
+      and k ~= 'disposition' and k ~= 'decision_id' then
+      return false
+    end
+  end
+  local v = rec['v']
+  if v ~= 1 and v ~= 2 then return false end
+  local state = rec['state']
+  local owner = rec['owner']
+  local lease = rec['lease_until']
+  local disp = rec['disposition']
+  local decision = rec['decision_id']
+  if decision ~= nil and decision ~= cjson.null then
+    if type(decision) ~= 'string' or decision == '' then return false end
+  end
+  if state == 'pending' then
+    if type(owner) ~= 'string' or owner == '' then return false end
+    if type(lease) ~= 'number' or lease % 1 ~= 0 then return false end
+    if disp ~= nil and disp ~= cjson.null then return false end
+    return true
+  end
+  if state ~= 'complete' then return false end
+  if owner ~= nil and owner ~= cjson.null then return false end
+  if lease ~= nil and lease ~= cjson.null then return false end
+  if type(disp) ~= 'table' then return false end
+  for k in pairs(disp) do
+    if k ~= 'kind' and k ~= 'decision_id' and k ~= 'chain_id' and k ~= 'chain_expires_at' then
+      return false
+    end
+  end
+  local kind = disp['kind']
+  if kind ~= 'pass' and kind ~= 'deny' and kind ~= 'step_up' and kind ~= 'chain_required' then
+    return false
+  end
+  local nestedDecision = disp['decision_id']
+  if nestedDecision ~= nil and nestedDecision ~= cjson.null then
+    if type(nestedDecision) ~= 'string' or nestedDecision == '' then return false end
+  end
+  local chainId = disp['chain_id']
+  if chainId ~= nil and chainId ~= cjson.null then
+    if type(chainId) ~= 'string' or chainId == '' then return false end
+  end
+  local chainExpiresAt = disp['chain_expires_at']
+  if chainExpiresAt ~= nil and chainExpiresAt ~= cjson.null then
+    if type(chainExpiresAt) ~= 'number' or chainExpiresAt % 1 ~= 0 then return false end
+  end
+  return true
+end
+
+LUA;
+
+    private const CLAIM_LUA = self::VALID_POST_SOLVE_LUA . PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
 -- the nonce -> decision mapping; ONLY the missing path consumes it
@@ -168,8 +232,8 @@ if not existing then
   if tonumber(ARGV[4]) == 1 then
     local d = redis.call('GETDEL', KEYS[2])
     if d then
-      local ok, decoded = pcall(cjson.decode, d)
-      if ok and type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
+      local decoded = decodeUniqueObject(d)
+      if type(decoded) == 'table' and type(decoded['decision_id']) == 'string' and decoded['decision_id'] ~= '' then
         decisionId = decoded['decision_id']
       end
     end
@@ -185,7 +249,7 @@ if not existing then
   return cjson.encode({ status = 'claimed', record = rec })
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validPostSolveRecord(rec) then
   return cjson.encode({ status = 'corrupt' })
 end
 -- Strict existing-record validation (fail closed, never healed): an
@@ -282,7 +346,7 @@ LUA;
      *   keys[1] = the record key
      *   argv[1] = owner token, argv[2] = disposition json
      */
-    private const FINALIZE_GUARDED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_GUARDED_LUA = self::VALID_POST_SOLVE_LUA . PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition guarded finalize: pending(owner) -> complete,
 -- with the transaction acceptance guard verified atomically with the
 -- write (the CAS ordering across the chain machine and the disposition
@@ -303,7 +367,7 @@ if not existing then
   return 'missing'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validPostSolveRecord(rec) then
   return 'corrupt'
 end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
@@ -364,14 +428,14 @@ redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'finalized'
 LUA;
 
-    private const FINALIZE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_LUA = self::VALID_POST_SOLVE_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition finalize: pending(owner) -> complete.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil then
+if rec == nil or not validPostSolveRecord(rec) then
   return false
 end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
@@ -790,6 +854,13 @@ LUA;
      */
     private static function validateDecoded(array $rec): array
     {
+        // The exact record key set: a foreign or renamed field is
+        // corruption, exactly like the chain/ChallengeRecord schemas.
+        $allowedRecordKeys = ['v', 'state', 'owner', 'lease_until', 'disposition', 'decision_id'];
+        $unknown = array_diff(array_keys($rec), $allowedRecordKeys);
+        if ($unknown !== []) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record carries unsupported keys: '.implode(',', $unknown));
+        }
         $version = $rec['v'] ?? null;
         if ($version !== 1 && $version !== 2) {
             throw new MalformedPostSolveDispositionException('post-solve disposition record schema version must be 1 or 2');
@@ -817,6 +888,13 @@ LUA;
             }
             if (!\is_array($disposition)) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record disposition is required in the complete state');
+            }
+            // The exact nested disposition key set, the same rule as the
+            // record itself.
+            $allowedDispositionKeys = ['kind', 'decision_id', 'chain_id', 'chain_expires_at'];
+            $unknownNested = array_diff(array_keys($disposition), $allowedDispositionKeys);
+            if ($unknownNested !== []) {
+                throw new MalformedPostSolveDispositionException('post-solve disposition carries unsupported keys: '.implode(',', $unknownNested));
             }
             $kind = $disposition['kind'] ?? null;
             if (!\is_string($kind) || PostSolveDispositionKind::tryFrom($kind) === null) {

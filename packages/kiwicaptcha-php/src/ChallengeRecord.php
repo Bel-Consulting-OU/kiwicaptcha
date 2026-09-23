@@ -184,7 +184,7 @@ final class ChallengeRecord
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
         'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
-        'execution_version', 'execution_commitment',
+        'execution_version', 'execution_commitment', 'rsw_modulus_sha256',
     ];
 
     /**
@@ -277,6 +277,13 @@ final class ChallengeRecord
         // segment. Present iff the record carries an execution program;
         // the JSON key is omitted when null.
         public readonly ?string $executionCommitment = null,
+        // The authenticated rsw trapdoor identity: hex SHA-256 of the
+        // modulus (base64) this record was issued under, the
+        // `|rsw_modulus_sha256` canonical segment. Present iff the
+        // record is an rsw record issued after the binding existed; a
+        // legacy rsw record carries none and resolves through the active
+        // pair. The JSON key is omitted when null.
+        public readonly ?string $rswModulusSha256 = null,
     ) {
     }
 
@@ -398,6 +405,9 @@ final class ChallengeRecord
         }
         if ($this->executionCommitment !== null) {
             $data['execution_commitment'] = $this->executionCommitment;
+        }
+        if ($this->rswModulusSha256 !== null) {
+            $data['rsw_modulus_sha256'] = $this->rswModulusSha256;
         }
 
         return $data;
@@ -716,7 +726,33 @@ final class ChallengeRecord
             // equivalence).
             executionVersion: $hasExecutionVersion ? $data['execution_version'] : null,
             executionCommitment: $hasExecutionCommitment ? $data['execution_commitment'] : null,
+            // The authenticated rsw trapdoor identity (absent on legacy
+            // rsw records and on every non-rsw record).
+            rswModulusSha256: self::parseRswModulusSha256($data),
         );
+    }
+
+    /**
+     * The optional authenticated rsw modulus hash: absent/null on every
+     * record except an rsw record issued with the binding. A present
+     * value must be 64 lowercase hex and the record must be rsw.
+     *
+     * @param array<string, mixed> $data
+     */
+    private static function parseRswModulusSha256(array $data): ?string
+    {
+        $value = $data['rsw_modulus_sha256'] ?? null;
+        if ($value === null) {
+            return null;
+        }
+        if (!\is_string($value) || preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
+            throw MalformedRecordException::for('rsw_modulus_sha256 must be 64 lowercase hex characters');
+        }
+        if (($data['algorithm'] ?? null) !== PoWAlgorithm::Rsw->value) {
+            throw MalformedRecordException::for('rsw_modulus_sha256 may only ride an rsw record');
+        }
+
+        return $value;
     }
 
     private static function requireString(mixed $value, string $field): void

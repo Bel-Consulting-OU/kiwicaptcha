@@ -274,6 +274,18 @@ final class ChainRedisFake extends \Predis\Client
                 ) {
                     return ['', 0, 'corrupt'];
                 }
+                // The binding invariant mirrors the Lua: the pointed
+                // record must BE this transaction's chain (a corrupted
+                // mapping could point at another transaction's perfectly
+                // valid chain).
+                $recBinding = $rec['requestBinding'] ?? '';
+                if (($rec['obligationId'] ?? null) !== (string) $args[0]
+                    || ($rec['scope'] ?? null) !== (string) $args[3]
+                    || (string) ($rec['policyVersion'] ?? '') !== (string) $args[6]
+                    || (string) $recBinding !== (string) $args[7]
+                ) {
+                    return ['', 0, 'corrupt'];
+                }
                 // The live-check mirrors the Lua: only a genuinely
                 // missing or signed-expired pointed-at record heals.
                 if ((int) $rec['expiresAt'] > (int) floor($this->clockMs / 1000)) {
@@ -390,7 +402,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -435,7 +447,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -466,7 +478,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -494,7 +506,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -524,7 +536,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -573,7 +585,7 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         if ($this->fakeTtl($key) <= 0) {
-            return 'missing';
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -620,7 +632,7 @@ final class ChainRedisFake extends \Predis\Client
             return false;
         }
         if ($this->fakeTtl($key) <= 0) {
-            return false;
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -649,7 +661,7 @@ final class ChainRedisFake extends \Predis\Client
             return false;
         }
         if ($this->fakeTtl($key) <= 0) {
-            return false;
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -677,7 +689,7 @@ final class ChainRedisFake extends \Predis\Client
             return false;
         }
         if ($this->fakeTtl($key) <= 0) {
-            return false;
+            return 'corrupt';
         }
         $rec = $this->decodeStrict($existing);
         if ($rec === null) {
@@ -724,13 +736,15 @@ final class ChainRedisFake extends \Predis\Client
             return null;
         }
         if ($this->fakeTtl($key) <= 0) {
-            return null;
+            // A present key with TTL <= 0 is corrupt, never absent: the
+            // dual-read may fall back to legacy only on true absence.
+            return 'corrupt';
         }
         try {
             $rec = $this->decodeStrict($existing);
-        if ($rec === null) {
-            return false;
-        }
+            if ($rec === null) {
+                return 'corrupt';
+            }
         } catch (\JsonException) {
             return 'corrupt';
         }

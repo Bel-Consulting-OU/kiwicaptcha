@@ -138,7 +138,7 @@ kiwi_captcha:
 | Knob | balanced | privacy_strict | high_abuse | compatibility | ha_safe |
 |------|----------|----------------|------------|---------------|---------|
 | `algorithm` | sha256 | sha256 | sha256 | sha256 | sha256 |
-| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
+| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 4 | 18 / 4 | 18 / 4 | 18 / 4 | 18 / 4 |
 | `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
 | `challenge_ttl_secs` | 120 | 120 | 120 | 300 | 120 |
 | `rate_limit` | 10 | 10 | 5 | 10 | 10 |
@@ -1208,8 +1208,9 @@ kiwi_captcha:
         #                                   # DIFFICULTY, never the memory
         #     argon_escalation_target_bits: [1, 2, 4] # EXACTLY 3
         #                                   # entries (Argon16/32/64), each
-        #                                   # 1..20 — the expected nonce
-        #                                   # search space escalation
+        #                                   # 1..Config::MAX_ARGON2_TARGET_BITS
+        #                                   # (currently 10) — the expected
+        #                                   # nonce search space escalation
         #     security_epoch_cache_secs: 1  # cache of the central
         #                                   # security-policy read (1..30) —
         #                                   # revocation latency is one window

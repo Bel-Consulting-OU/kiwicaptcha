@@ -6160,6 +6160,7 @@ mod tests {
             execution_commitment: None,
             hostname: None,
             decoy_field: None,
+            rsw_modulus_sha256: None,
         }
     }
 

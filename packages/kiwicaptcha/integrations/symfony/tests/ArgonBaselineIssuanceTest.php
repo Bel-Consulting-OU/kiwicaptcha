@@ -189,6 +189,103 @@ final class ArgonBaselineIssuanceTest extends TestCase
         );
     }
 
+    public function testDormantCoreArgonKnobsNeverLeakIntoAdaptiveProfiles(): void
+    {
+        // A sha256 deployment may carry inert argon_m_kib/argon_t/argon_p
+        // values (the core validates them only for argon2id): the adaptive
+        // profile must come entirely from risk.argon_verification_memory_kib
+        // at t=3, p=1. Borrowing the dormant knobs would either build an
+        // invalid profile (argon_p: 2, which ChallengeProfile::validate
+        // rejects with p === 1) or silently raise the server verification
+        // cost the adaptive envelope explicitly bounds.
+        $matrices = [
+            ['mKib' => 65536],
+            ['t' => 6],
+            ['p' => 2],
+            ['mKib' => 65536, 't' => 6, 'p' => 2],
+        ];
+        $actions = [
+            [\KiwiCaptcha\Risk\RiskAction::Argon16, 1],
+            [\KiwiCaptcha\Risk\RiskAction::Argon32, 2],
+            [\KiwiCaptcha\Risk\RiskAction::Argon64, 4],
+        ];
+        foreach ($matrices as $dormant) {
+            $resolver = new RiskProfileResolver(
+                PoWAlgorithm::Sha256,
+                difficultyBits: 8,
+                argonMKib: $dormant['mKib'] ?? 16384,
+                argonT: $dormant['t'] ?? 3,
+                argonP: $dormant['p'] ?? 1,
+                argon2DifficultyBits: 9,
+                argonEnvelopeMemoryKib: 16384,
+                argonTargetBits: [1, 2, 4],
+            );
+            foreach ($actions as [$action, $rung]) {
+                $profile = $resolver->profileFor($action);
+                self::assertInstanceOf(ChallengeProfile::class, $profile, $action->value.' must map to a profile');
+                $profile->validate();
+                self::assertSame(PoWAlgorithm::Argon2id, $profile->algorithm);
+                self::assertSame(16384, $profile->mKib, $action->value.': the adaptive envelope, never the dormant core knob');
+                self::assertSame(3, $profile->t, $action->value.': the adaptive iteration count');
+                self::assertSame(1, $profile->p, $action->value.': p === 1, the only interoperable profile');
+                self::assertSame($rung, $profile->targetBits);
+                $required = $resolver->requiredStrength($action);
+                self::assertSame(16384, $required?->mKib);
+                self::assertSame(3, $required?->t);
+                self::assertSame(1, $required?->p);
+            }
+        }
+    }
+
+    public function testAShaDeploymentWithADormantArgonPStillIssuesAValidAdaptiveChallenge(): void
+    {
+        // The reachable production failure: algorithm sha256 with
+        // argon_p: 2 (accepted by the config tree because p is validated
+        // only for argon2id) used to mint an invalid Argon profile on the
+        // first high-risk decision, surfacing as a 422 invalid-scope (the wire code spelling) for
+        // a perfectly valid scope. The issued challenge is the adaptive
+        // envelope with p === 1.
+        $resolver = new RiskProfileResolver(
+            PoWAlgorithm::Sha256,
+            difficultyBits: 8,
+            argonMKib: 65536,
+            argonT: 6,
+            argonP: 2,
+            argon2DifficultyBits: 9,
+            argonEnvelopeMemoryKib: 16384,
+            argonTargetBits: [1, 2, 4],
+        );
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120), $storage);
+        $risk = $this->gatewayForMinimum('argon16', $resolver);
+        $controller = new ChallengeController(
+            $issuer,
+            null,
+            false,
+            $risk['gateway'],
+            null,
+            storage: $storage,
+            policyVersion: 1,
+        );
+
+        $response = $controller->challenge(JsonRequest::create(
+            '/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7'],
+            '{"scope":"login"}',
+        ));
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $data = json_decode((string) $response->getContent(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('argon2id', $data['algorithm'], 'the high-risk decision escalates into the adaptive Argon envelope');
+        self::assertSame(16384, $data['mKib'], 'the dormant argon_m_kib never leaks into the profile');
+        self::assertSame(3, $data['t'], 'the dormant argon_t never leaks into the profile');
+        self::assertSame(1, $data['p'], 'p === 1, the only interoperable profile');
+        self::assertSame(1, $data['targetBits'], 'the adaptive rung');
+    }
+
     public function testRswCannotBeCombinedWithAdaptiveRisk(): void
     {
         // Finding 8: RSW has no adaptive-risk ordering. The bundle refuses

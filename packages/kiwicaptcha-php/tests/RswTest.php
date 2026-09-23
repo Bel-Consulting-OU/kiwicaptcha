@@ -505,7 +505,16 @@ final class RswTest extends TestCase
         $payload = base64_decode(explode('.', $challenge->challenge)[0], true);
         self::assertStringStartsWith('v2|', $payload);
         self::assertStringContainsString('|rsw|0|30000|1|1|', $payload);
-        self::assertStringEndsWith('|1', $payload, 'the pin renders as the final canonical field only after kid');
+        self::assertStringEndsWith(
+            '|'.hash('sha256', RswFixture::MODULUS_N_B64),
+            $payload,
+            'the authenticated rsw trapdoor identity is the final canonical segment',
+        );
+        self::assertSame(
+            hash('sha256', RswFixture::MODULUS_N_B64),
+            $record->rswModulusSha256,
+            'the record carries the authenticated modulus identity',
+        );
 
         // The stored record JSON carries no rsw-specific key: every
         // authenticated parameter rides the existing v2 slots, and the
@@ -552,6 +561,74 @@ final class RswTest extends TestCase
 
         self::assertTrue($outcome->isOk(), 'the client-style sequential solve must verify: '.$outcome->code());
         self::assertSame($record->nonce, $outcome->nonce());
+    }
+
+    public function testTheTrapdoorIdentityDrivesRotationSelection(): void
+    {
+        $this->requireGmp();
+        $config = $this->rswConfig(Config::MIN_RSW_T);
+        [$challenge, $record, $storage] = $this->issue($config);
+        $identity = hash('sha256', RswFixture::MODULUS_N_B64);
+        self::assertSame($identity, $record->rswModulusSha256, 'the issued record carries the authenticated identity');
+        $token = $this->solveToken($challenge->nonce, $challenge->prefix, $challenge->t);
+        $keyring = [$identity => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]];
+        $freshChallenge = function () use ($config): array {
+            [$challenge, $record, $storage] = $this->issue($config);
+
+            return [$challenge, $record, $storage];
+        };
+
+        // A rotated deployment (the active pair is no longer the one the
+        // record was issued under) resolves the trapdoor through the
+        // keyring by the record's authenticated identity: reconstruction
+        // still emits the original modulus and verification still passes.
+        $rotatedIssuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8),
+            $storage,
+            rswVerificationKeys: $keyring,
+        );
+        $reconstructed = $rotatedIssuer->responseFromRecord($record);
+        self::assertNotNull($reconstructed, 'the keyring resolves a rotated record');
+        self::assertSame(RswFixture::MODULUS_N_B64, $reconstructed->rswModulus, 'the ORIGINAL modulus, never the newly active one');
+        self::assertSame($challenge->toArray(), $reconstructed->toArray(), 'the rotated reconstruction is byte-identical');
+
+        [$rotatedChallenge, , $rotatedStorage] = $freshChallenge();
+        $rotatedToken = $this->solveToken($rotatedChallenge->nonce, $rotatedChallenge->prefix, $rotatedChallenge->t);
+        $rotatedVerifier = new Verifier($rotatedStorage, rswVerificationKeys: $keyring);
+        $outcome = $rotatedVerifier->verify($rotatedToken, Vectors::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), 'the keyring verifies the rotated record: '.$outcome->code());
+
+        // Without the keyring and without the active pair the record is
+        // unreachable: the reconstruction refuses and verification fails
+        // closed (a rotation must drain, or carry the keyring).
+        [$bareChallenge, $bareRecord, $bareStorage] = $freshChallenge();
+        $bareToken = $this->solveToken($bareChallenge->nonce, $bareChallenge->prefix, $bareChallenge->t);
+        $bareIssuer = new Issuer(new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8), $bareStorage);
+        self::assertNull($bareIssuer->responseFromRecord($bareRecord), 'an unknown identity never reconstructs');
+        $bare = (new Verifier($bareStorage))->verify($bareToken, Vectors::SECRET, 'login', '198.51.100.7');
+        self::assertFalse($bare->isOk(), 'a verifier without the trapdoor fails closed');
+        self::assertSame('unsupported_rsw_params', $bare->code());
+
+        // A legacy rsw record without the identity resolves through the
+        // active pair (the pre-binding shape).
+        $legacy = ChallengeRecord::fromArray(\array_diff_key(
+            $record->toArray(),
+            ['rsw_modulus_sha256' => true],
+        ));
+        self::assertNull($legacy->rswModulusSha256);
+        $legacyIssuer = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Rsw,
+            targetBits: 8,
+            rswModulusN: RswFixture::MODULUS_N_B64,
+            rswLambda: RswFixture::LAMBDA_B64,
+            rswT: Config::MIN_RSW_T,
+        ), $storage);
+        self::assertSame(
+            RswFixture::MODULUS_N_B64,
+            $legacyIssuer->responseFromRecord($legacy)?->rswModulus,
+            'a legacy record resolves through the active pair',
+        );
     }
 
     public function testTrapdoorExpectationEqualsSequentialSquaring(): void

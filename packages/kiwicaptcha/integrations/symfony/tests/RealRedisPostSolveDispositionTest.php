@@ -790,6 +790,42 @@ final class RealRedisPostSolveDispositionTest extends TestCase
      *
      * @param array<string, mixed> $raw the corrupt wire record
      */
+    public function testCorruptionBetweenClaimAndFinalizeIsNeverReencoded(): void
+    {
+        // The mutation boundaries apply the exact-record predicate: a
+        // record that was valid at claim and is corrupted afterwards
+        // (an unknown authority field, or an ambiguous duplicate
+        // spelling) is refused by the guarded finalize with the typed
+        // corrupt outcome, and the bytes are never re-encoded into an
+        // authorization-bearing complete state.
+        $store = $this->store();
+        $nonce = bin2hex(random_bytes(16));
+        $this->attachDecision($nonce, 'decision-between');
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 305, $this->decisionKey($nonce))[0]);
+        $recordKey = $this->key($nonce);
+        $raw = (string) $this->client->get($recordKey);
+        self::assertIsString($raw);
+
+        $tampers = [
+            'unknown authority field' => str_replace('"disposition":null', '"disposition":null,"unexpected_authority_field":1', $raw),
+            'semantic duplicate state' => str_replace('"state":"pending"', '"state":"pending","st\\u0061te":"complete"', $raw),
+        ];
+        foreach ($tampers as $label => $tampered) {
+            self::assertNotSame($raw, $tampered, $label.': the tamper applies');
+            $this->client->set($recordKey, $tampered, 'EX', 300);
+            $outcome = $store->finalizeGuarded(
+                $nonce,
+                'owner-a',
+                new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-between'),
+                null,
+                null,
+                null,
+            );
+            self::assertSame(PostSolveFinalizeOutcome::Corrupt, $outcome, $label.': the guarded finalize answers corrupt');
+            self::assertSame($tampered, $this->client->get($recordKey), $label.': the corrupt record is never re-encoded');
+        }
+    }
+
     private function corruptRecordOutcome(array $raw): string
     {
         return $this->corruptRawOutcome((string) json_encode($raw));

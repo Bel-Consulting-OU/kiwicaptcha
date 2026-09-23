@@ -295,10 +295,18 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame(ChainReservationResult::TakenOver, $service->reserveStage2($requirement->chainId, 'owner-b'), 'an expired lease is taken over');
 
         // A chain record without an expiry is corrupted state: fail
-        // closed ('missing'), never manufacture a lifetime.
+        // closed with the typed exception, never manufacture a lifetime
+        // and never answer the absence sentinel.
         $recordKey = sprintf('{kiwi:%s}:chain:%s', self::NAMESPACE, $requirement->chainId);
         $this->client->persist($recordKey);
-        self::assertSame(ChainReservationResult::Missing, $service->reserveStage2($requirement->chainId, 'owner-c'), 'a record without an expiry fails closed');
+        $before = (string) $this->client->get($recordKey);
+        try {
+            $service->reserveStage2($requirement->chainId, 'owner-c');
+            self::fail('a record without an expiry must fail closed');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($before, $this->client->get($recordKey), 'the corrupt record is never rewritten');
     }
 
     public function testMarkIssuedLostReplyIsDurableAcrossAReconnect(): void

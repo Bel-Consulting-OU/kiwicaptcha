@@ -157,6 +157,53 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         self::assertSame($ambiguous, $this->client->get($recordKey), 'the refused reservation writes nothing');
     }
 
+    public function testACrossTransactionObligationMappingFailsClosedOnRealRedis(): void
+    {
+        // The Lua binding invariant, proven on the real script: a
+        // corrupted mapping pointing transaction A's obligation at
+        // transaction B's valid chain fails closed with zero writes, and
+        // a stronger reassessment never raises the foreign chain.
+        $store = $this->store();
+        $service = $this->service();
+        $a = $service->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-a', 1, \KiwiCaptcha\Risk\RiskAction::Sha16, time() + 300);
+        $b = $service->requireStage2(ChainStateWalk::S1_NONCE, 'login', 'txn-b', 1, \KiwiCaptcha\Risk\RiskAction::Sha16, time() + 300);
+        $obligationA = $service->obligationIdFor('login', 'txn-a', 1);
+        $chainAKey = $this->chainKey($a->chainId);
+        $chainBKey = $this->chainKey($b->chainId);
+        $beforeA = (string) $this->client->get($chainAKey);
+        $beforeB = (string) $this->client->get($chainBKey);
+
+        $this->client->set($this->obligationKey($obligationA), $b->chainId, 'EX', 300);
+        try {
+            $store->createOrGetObligation(
+                $obligationA,
+                bin2hex(random_bytes(16)),
+                ChainStateWalk::S1_NONCE,
+                'login',
+                'txn-a',
+                'argon64',
+                \KiwiCaptcha\Risk\RiskAction::Argon64->rank(),
+                1,
+                time() + 300,
+                300,
+            );
+            self::fail('the real Lua must refuse a cross-transaction mapping');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($beforeA, $this->client->get($chainAKey), 'chain A is untouched');
+        self::assertSame($beforeB, $this->client->get($chainBKey), 'chain B is untouched');
+        $bRecord = json_decode($beforeB, true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(1, $bRecord['requirementGeneration'], 'the foreign chain was never raised');
+        self::assertSame('sha16', $bRecord['requiredAction']);
+        try {
+            $service->findOpenRequirement('login', 'txn-a', 1);
+            self::fail('the service must refuse to resume a foreign chain');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private function store(): RedisChainedChallengeStateStore
@@ -438,7 +485,19 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
             // The flipped record stayed strictly valid: the create-or-get
             // keeps the live obligation on its existing chain, and the
             // record keeps the schema invariants.
-            $returned = $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, time() + 300, 300);
+            try {
+                $returned = $store->createOrGetObligation($obligationId, $fresh, ChainStateWalk::S1_NONCE, 'login', 'txn-alpha', 'sha16', 1, 1, time() + 300, 300);
+            } catch (MalformedChainedChallengeStateException) {
+                // A flip inside the transaction identity (scope, binding,
+                // policy epoch) makes the record foreign to this
+                // obligation: the binding invariant classifies it as
+                // corrupt with zero writes. That is a valid fail-closed
+                // outcome for a decodable flip.
+                self::assertNull($store->read($fresh), $context.': no fresh chain was created');
+                self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping is preserved');
+
+                return;
+            }
             // The boundary sweep itself may have legitimately terminalized
             // the chain and cleared the obligation (markVerified deletes
             // the mapping), so the create-or-get either keeps the existing

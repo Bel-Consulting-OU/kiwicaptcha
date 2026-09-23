@@ -171,6 +171,23 @@ if mapped then
     if rec == nil or not isValidChainRecord(rec) then
       return {'', 0, 'corrupt'}
     end
+    -- The binding invariant: the mapping is not authenticated, so a
+    -- corrupted mapping could point this transaction at ANOTHER
+    -- transaction's perfectly valid chain. The pointed record must BE
+    -- this transaction's chain (obligation id, scope, request binding
+    -- and policy epoch all equal), or the state is corrupt with zero
+    -- writes — a stronger reassessment must never raise a foreign
+    -- chain's requirement.
+    local recBinding = rec['requestBinding']
+    if recBinding == nil or recBinding == cjson.null then
+      recBinding = ''
+    end
+    if rec['obligationId'] ~= ARGV[1]
+      or rec['scope'] ~= ARGV[4]
+      or tostring(rec['policyVersion']) ~= ARGV[7]
+      or recBinding ~= ARGV[8] then
+      return {'', 0, 'corrupt'}
+    end
     -- A past-expiry pointed-at record is stale like a missing one: the
     -- create-or-get heals the mapping with a fresh chain, the mirror of
     -- the Array store's expiresAt-vs-clock check.
@@ -345,7 +362,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -423,7 +440,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -471,7 +488,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -516,7 +533,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -583,7 +600,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or rec['obligationId'] ~= ARGV[2] then
@@ -665,7 +682,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return 'missing'
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or rec['obligationId'] ~= ARGV[2] then
@@ -719,7 +736,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -760,7 +777,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -803,7 +820,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -882,7 +899,7 @@ end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and fails
 -- closed at the read like everywhere else.
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
-  return false
+  return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
@@ -1066,6 +1083,17 @@ LUA;
         if ($lookup !== null && $lookup['namespace'] === 'legacy') {
             $legacyRequirement = $this->legacyRequirementOrNull($lookup['chainId']);
             if ($legacyRequirement !== null) {
+                // The same binding invariant on the migration branch: a
+                // corrupted legacy mapping must never make this
+                // transaction adopt (or raise) a foreign chain.
+                $legacyBinding = $legacyRequirement['requestBinding'] ?? '';
+                if (($legacyRequirement['obligationId'] ?? null) !== $obligationId
+                    || ($legacyRequirement['scope'] ?? null) !== $scope
+                    || (string) $legacyBinding !== $requestBinding
+                    || (int) ($legacyRequirement['policyVersion'] ?? 0) !== $policyVersion
+                ) {
+                    throw new MalformedChainedChallengeStateException('the legacy obligation mapping resolves a chain that belongs to a different transaction');
+                }
                 if ($requiredRank <= (int) $legacyRequirement['requiredRank']) {
                     return $lookup['chainId'];
                 }
@@ -1157,6 +1185,10 @@ LUA;
     {
         $chainId = $this->redis->get($this->obligationKey($obligationId));
         if (\is_string($chainId) && $chainId !== '') {
+            if (!ChainId::isValid($chainId)) {
+                throw new MalformedChainedChallengeStateException('the obligation mapping carries a malformed chain id');
+            }
+
             return ['chainId' => $chainId, 'namespace' => 'primary'];
         }
         if ($this->legacyNamespace === null) {
@@ -1168,10 +1200,15 @@ LUA;
         // (the primary-namespace scripts answer missing), which never
         // restarts the transaction at stage 1.
         $legacy = $this->redis->get($this->legacyObligationKey($obligationId));
+        if (\is_string($legacy) && $legacy !== '') {
+            if (!ChainId::isValid($legacy)) {
+                throw new MalformedChainedChallengeStateException('the legacy obligation mapping carries a malformed chain id');
+            }
 
-        return \is_string($legacy) && $legacy !== ''
-            ? ['chainId' => $legacy, 'namespace' => 'legacy']
-            : null;
+            return ['chainId' => $legacy, 'namespace' => 'legacy'];
+        }
+
+        return null;
     }
 
     /**
@@ -1441,6 +1478,9 @@ LUA;
     {
         $this->assertLiveRecord($chainId);
         $rearmed = $this->lua->executeSecurityFinal(self::REARM_LUA, [$this->key($chainId)], [$expectedStage2Nonce]);
+        if ($rearmed === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the rearm boundary');
+        }
         $success = $rearmed === true || $rearmed === 1;
 
         // Durability barrier: the fresh issued -> available rearm must
@@ -1483,6 +1523,9 @@ LUA;
             throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
         $raw = $this->lua->executeSecurityFinal(self::COMPLETE_LUA, [$this->key($chainId)], [$ownerToken, $stage2Nonce]);
+        if ($raw === 'corrupt') {
+            throw new MalformedChainedChallengeStateException('the chain record is malformed at the completion boundary');
+        }
         if (!\is_string($raw) || $raw === '') {
             return null;
         }

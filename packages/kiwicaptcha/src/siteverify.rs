@@ -239,6 +239,7 @@ mod tests {
             execution_program: None,
             execution_version: None,
             execution_commitment: None,
+            rsw_modulus_sha256: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(

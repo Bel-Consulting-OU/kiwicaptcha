@@ -375,7 +375,9 @@ final class RiskIntegrationTest extends TestCase
 
         // Escalation-only: a floor already at 20 never weakens or repeats,
         // but an argon action still maps to a real argon profile (a sha-only
-        // deployment can still issue argon work via the risk ladder).
+        // deployment can still issue argon work via the risk ladder). The
+        // adaptive Argon profile comes entirely from the adaptive envelope:
+        // dormant core argon knobs never leak into it.
         $maxed = new RiskProfileResolver(PoWAlgorithm::Sha256, 20);
         self::assertNull($maxed->profileFor(RiskAction::Sha20));
         self::assertSame(PoWAlgorithm::Argon2id, $maxed->profileFor(RiskAction::Argon64)?->algorithm);

@@ -419,9 +419,9 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         // retries — the resolution converges on the moved chain instead
         // of silently creating a second chain.
         $store = $this->store();
-        $chainId = 'chain-'.base64_encode(random_bytes(32));
+        $chainId = rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
         $obligationId = hash('sha256', 'txn-moved');
-        $movedChainId = 'chain-'.base64_encode(random_bytes(32));
+        $movedChainId = rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
         $nonce = $this->makeNonce();
         $ttl = 300;
         $expires = (int) $this->fake->clockSecs() + $ttl;

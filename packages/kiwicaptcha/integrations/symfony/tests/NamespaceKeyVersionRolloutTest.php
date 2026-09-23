@@ -489,7 +489,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
                 str_pad('c', 64, '0'),
                 base64_encode(random_bytes(32)),
                 'login',
-                '',
+                'txn-rollout',
                 'argon32',
                 RiskAction::Argon32->rank(),
                 self::CONFIGURED_EPOCH,
@@ -533,6 +533,118 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
 
         $this->expectException(MalformedChainedChallengeStateException::class);
         $store->read($chainId);
+    }
+
+    public function testACrossTransactionObligationMappingFailsClosedEverywhere(): void
+    {
+        // The obligation mapping is not authenticated: corruption can
+        // point transaction A's obligation at transaction B's perfectly
+        // valid chain. The binding invariant (mapping[oid] = chainId AND
+        // chain[chainId].obligationId = oid, with scope/binding/policy
+        // equal) must fail closed on every path, with zero writes to
+        // either chain.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        $service = new ChainedChallengeTicketService($store, self::SECRET, 300, 15, null, fn (): int => $fake->clockSecs());
+
+        $a = $service->requireStage2(base64_encode(random_bytes(32)), 'login', 'txn-a', self::CONFIGURED_EPOCH, RiskAction::Sha18, $fake->clockSecs() + 300);
+        $b = $service->requireStage2(base64_encode(random_bytes(32)), 'login', 'txn-b', self::CONFIGURED_EPOCH, RiskAction::Sha18, $fake->clockSecs() + 300);
+        self::assertNotSame($a->chainId, $b->chainId);
+        $obligationA = $service->obligationIdFor('login', 'txn-a', self::CONFIGURED_EPOCH);
+        $chainAKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$a->chainId;
+        $chainBKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$b->chainId;
+        $obligationAKey = '{kiwi:'.self::digestNamespace().'}:chain-obligation:'.$obligationA;
+        $beforeA = $fake->strings[$chainAKey];
+        $beforeB = $fake->strings[$chainBKey];
+
+        // Corrupt only A's mapping: point it at B's valid chain.
+        $fake->strings[$obligationAKey] = $b->chainId;
+        self::assertSame($b->chainId, $store->obligationChainId($obligationA), 'the plain mapping read resolves the corrupted pointer');
+
+        // Ticketless resumption: the resolved record belongs to another
+        // transaction, so no requirement is constructed.
+        try {
+            $service->findOpenRequirement('login', 'txn-a', self::CONFIGURED_EPOCH);
+            self::fail('the cross-transaction mapping must never resume another transaction\'s chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+
+        // Create-or-get (the Lua binding invariant) refuses for an equal
+        // requirement AND for a stronger reassessment (which must never
+        // raise a foreign chain).
+        $template = json_decode($beforeA, true, flags: JSON_THROW_ON_ERROR);
+        foreach ([RiskAction::Sha18, RiskAction::Argon32] as $action) {
+            try {
+                $store->createOrGetObligation(
+                    $obligationA,
+                    bin2hex(random_bytes(16)),
+                    base64_encode(random_bytes(32)),
+                    'login',
+                    'txn-a',
+                    $action->value,
+                    $action->rank(),
+                    self::CONFIGURED_EPOCH,
+                    $fake->clockSecs() + 300,
+                    300,
+                );
+                self::fail($action->value.': the cross-transaction mapping must fail closed');
+            } catch (MalformedChainedChallengeStateException) {
+                // expected
+            }
+        }
+
+        // Neither chain was touched, and the corrupted mapping is
+        // preserved byte for byte (zero writes).
+        self::assertSame($beforeA, $fake->strings[$chainAKey], 'chain A is untouched');
+        self::assertSame($beforeB, $fake->strings[$chainBKey], 'chain B is untouched');
+        self::assertSame($b->chainId, $fake->strings[$obligationAKey], 'the corrupted mapping is preserved');
+        self::assertSame(
+            1,
+            (int) (json_decode($beforeB, true, flags: JSON_THROW_ON_ERROR)['requirementGeneration'] ?? 0),
+            'a stronger reassessment never raised the foreign chain\'s generation',
+        );
+
+        // Transaction B's own mapping still resolves to B's chain.
+        self::assertSame(
+            $b->chainId,
+            $service->findOpenRequirement('login', 'txn-b', self::CONFIGURED_EPOCH)?->chainId,
+        );
+    }
+
+    public function testACorruptPrimaryChainNeverFallsBackToTheLegacyRecord(): void
+    {
+        // During migrating_v2 the dual-read falls back only on genuine
+        // primary absence. A primary record whose key lifetime was
+        // stripped is corrupt at the primary authority: read() must fail
+        // closed and must never serve a valid legacy record for the same
+        // chain id.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        [$chainId] = $this->buildChainInState($store, $fake, 'available');
+        $primaryKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$chainId;
+        $legacyKey = '{kiwi:'.self::legacyNamespace().'}:chain:'.$chainId;
+
+        // A valid legacy record for the same chain id, byte-for-byte.
+        $fake->strings[$legacyKey] = $fake->strings[$primaryKey];
+        $fake->expirations[$legacyKey] = $fake->expirations[$primaryKey] ?? ((int) $fake->clockSecs() + 300) * 1000;
+        // Strip the primary key's TTL: present but lifetime-less = corrupt.
+        unset($fake->expirations[$primaryKey]);
+
+        try {
+            $store->read($chainId);
+            self::fail('a lifetime-less primary chain must fail closed, never fall back to the legacy record');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            $store->obligationChainId('does-not-matter');
+            // no obligation: fine; the read path above is the regression
+        } catch (\Throwable) {
+            self::fail('the unrelated lookup must not throw');
+        }
+        self::assertArrayHasKey($primaryKey, $fake->strings, 'the corrupt primary record is preserved');
+        self::assertArrayHasKey($legacyKey, $fake->strings, 'the legacy record is never served as a fallback');
     }
 
     public function testAMissingOrExpiredChainStillHeals(): void
@@ -590,7 +702,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
             str_pad('e', 64, '0'),
             base64_encode(random_bytes(32)),
             'login',
-            '',
+            'txn-rollout',
             'argon32',
             RiskAction::Argon32->rank(),
             self::CONFIGURED_EPOCH,
@@ -627,7 +739,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
             str_pad('d', 64, '0'),
             base64_encode(random_bytes(32)),
             'login',
-            '',
+            'txn-rollout',
             'argon32',
             RiskAction::Argon32->rank(),
             self::CONFIGURED_EPOCH,

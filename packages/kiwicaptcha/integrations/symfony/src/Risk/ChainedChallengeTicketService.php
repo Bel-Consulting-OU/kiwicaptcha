@@ -102,12 +102,29 @@ final class ChainedChallengeTicketService
      */
     public function findOpenRequirement(string $scope, string $requestBinding, int $policyVersion): ?ChainRequirement
     {
-        $chainId = $this->store->obligationChainId($this->obligationIdFor($scope, $requestBinding, $policyVersion));
+        $obligationId = $this->obligationIdFor($scope, $requestBinding, $policyVersion);
+        $chainId = $this->store->obligationChainId($obligationId);
         if ($chainId === null) {
             return null;
         }
+        $requirement = $this->requirementFor($chainId);
+        if ($requirement === null) {
+            return null;
+        }
+        // The mapping is not itself authenticated: a corrupted mapping can
+        // point this transaction at another transaction's perfectly valid
+        // chain. The resolved record must BE this transaction's chain
+        // before a requirement is constructed from it; a mismatch is
+        // corrupt server state (the controller answers the retryable 503),
+        // never a stage-2 resumption of a foreign transaction.
+        if ($requirement->scope !== $scope
+            || ($requirement->requestBinding ?? '') !== $requestBinding
+            || $requirement->policyVersion !== $policyVersion
+        ) {
+            throw new MalformedChainedChallengeStateException('the obligation mapping resolves a chain that belongs to a different transaction');
+        }
 
-        return $this->requirementFor($chainId);
+        return $requirement;
     }
 
     /**

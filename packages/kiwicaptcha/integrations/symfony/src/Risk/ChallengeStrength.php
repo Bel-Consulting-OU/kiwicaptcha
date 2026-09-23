@@ -85,7 +85,13 @@ final class ChallengeStrength
         return $this->algorithm === $required->algorithm
             && $this->mKib >= $required->mKib
             && $this->t >= $required->t
-            && $this->p >= $required->p
+            // Parallelism is NOT an ordered "more is stronger" dimension:
+            // it changes resource scheduling and wall-clock behavior, not
+            // the amount of work. The interoperable Argon profile requires
+            // p === 1, so dominance demands exact equality; a future
+            // multi-lane profile must model a real cost relation instead
+            // of reading one off >=.
+            && $this->p === $required->p
             && $this->targetBits >= $required->targetBits;
     }
 }

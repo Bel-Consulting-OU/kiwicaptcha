@@ -233,6 +233,14 @@ final class Verifier
     private readonly ?Rsw $rsw;
 
     /**
+     * The rsw trapdoor rotation keyring, keyed by the authenticated
+     * modulus SHA-256 (see the constructor parameter).
+     *
+     * @var array<string, Rsw>
+     */
+    private array $rswByHash = [];
+
+    /**
      * @var bool whether the one-time non-atomic-storage warning already
      *            fired in this process (the misconfiguration is a
      *            deployment property, not a per-verification event)
@@ -360,6 +368,20 @@ final class Verifier
          * [A-Za-z0-9._:-].
          */
         private readonly ?string $tenantId = null,
+        /**
+         * The optional rsw trapdoor rotation keyring: a map of the
+         * modulus SHA-256 (the authenticated rsw_modulus_sha256 riding
+         * each issued record) to that trapdoor's {modulus_n, lambda}
+         * pair. A record whose authenticated identity is not the active
+         * pair resolves here, so a rotation (or a mixed-node window)
+         * keeps outstanding challenges verifiable; a record whose
+         * identity is in neither fails closed (UnsupportedRswParams).
+         * An empty keyring (the default) means a rotation requires
+         * draining all outstanding rsw challenges.
+         *
+         * @var array<string, array{modulus_n: string, lambda: string}>
+         */
+        private readonly array $rswVerificationKeys = [],
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -407,6 +429,23 @@ final class Verifier
         $this->rsw = $rswModulusN !== null && $rswLambda !== null
             ? new Rsw($rswModulusN, $rswLambda)
             : null;
+        foreach ($rswVerificationKeys as $hash => $pair) {
+            if (!\is_string($hash) || preg_match('/^[0-9a-f]{64}$/D', $hash) !== 1
+                || !\is_array($pair)
+                || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
+                || !\is_string($pair['lambda'] ?? null) || $pair['lambda'] === ''
+            ) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
+                );
+            }
+            if (!hash_equals($hash, hash('sha256', $pair['modulus_n']))) {
+                throw new \InvalidArgumentException(
+                    'rswVerificationKeys keys must be the SHA-256 of the paired modulus_n'
+                );
+            }
+            $this->rswByHash[$hash] = new Rsw($pair['modulus_n'], $pair['lambda']);
+        }
         // A non-atomic storage (the {@see NonAtomicStorageInterface}
         // capability marker, e.g. the PSR-6 backend) keeps best-effort
         // single-use only: two racing requests can both win the consume.
@@ -1066,7 +1105,23 @@ final class Verifier
     private function recomputeValidProof(ChallengeRecord $record, SolutionToken $token): ?bool
     {
         if ($record->algorithm === PoWAlgorithm::Rsw) {
-            if ($this->rsw === null) {
+            // The authenticated trapdoor identity selects the pair: the
+            // keyring first (a rotated/mixed-node record), then the
+            // active pair (including a legacy record that predates the
+            // identity). An identity in neither fails closed as
+            // unsupported.
+            $rsw = null;
+            if ($record->rswModulusSha256 !== null) {
+                $rsw = $this->rswByHash[$record->rswModulusSha256] ?? null;
+                if ($rsw === null && $this->rsw !== null && $this->rswModulusN !== null
+                    && hash_equals($record->rswModulusSha256, hash('sha256', $this->rswModulusN))
+                ) {
+                    $rsw = $this->rsw;
+                }
+            } else {
+                $rsw = $this->rsw;
+            }
+            if ($rsw === null) {
                 return null;
             }
             // The rsw composition invariant: an rsw record's solution
@@ -1078,7 +1133,7 @@ final class Verifier
             }
 
             return hash_equals(
-                $this->rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
+                $rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
                 $token->rswProof
             );
         }
@@ -2683,6 +2738,7 @@ final class Verifier
                 $record->decoyField,
                 $record->executionVersion,
                 $record->executionCommitment,
+                $record->rswModulusSha256,
             ), $secretKey, $this->tenantId);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));

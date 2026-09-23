@@ -330,6 +330,7 @@ const ENVELOPE_LUA_PRELUDE: &str = r#"
 -- below, so a nested occurrence can never be rewritten either. The
 -- byte ceiling bounds the JSON parse before it happens.
 local KIWI_ENVELOPE_MAX_BYTES = 131072
+local KIWI_ENVELOPE_MAX_DEPTH = 32
 
 local function kiwiNullish(x)
   return x == nil or x == cjson.null
@@ -412,6 +413,118 @@ local function kiwiValueEnd(v, s, n)
   return i - 1
 end
 
+-- The recursive semantic-duplicate scan of a whole stored document: a
+-- JSON object may not carry two members whose keys decode to the same
+-- name at ANY nesting level (an escaped alias such as "st\u0061te" is
+-- the same field as "state"). This is the same authority the Symfony
+-- persisted-state predicate (PersistedJsonLuaPredicate) applies, so the
+-- core envelope and the state machines share one cleanliness rule.
+local function kiwiSkipString(v, i, n)
+  i = i + 1
+  while i <= n do
+    local c = string.sub(v, i, i)
+    if c == '\\' then
+      i = i + 2
+    elseif c == '"' then
+      return i + 1
+    else
+      i = i + 1
+    end
+  end
+  return nil
+end
+
+local kiwiUniqueScanValue
+local kiwiUniqueScanObject
+local kiwiUniqueScanArray
+
+kiwiUniqueScanValue = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  if i > n then return nil end
+  local c = string.sub(v, i, i)
+  if c == '{' then
+    return kiwiUniqueScanObject(v, i + 1, n, depth)
+  end
+  if c == '[' then
+    return kiwiUniqueScanArray(v, i + 1, n, depth)
+  end
+  if c == '"' then
+    return kiwiSkipString(v, i, n)
+  end
+  local start = i
+  while i <= n do
+    local c2 = string.sub(v, i, i)
+    if c2 == ',' or c2 == '}' or c2 == ']' or kiwiIsSpace(c2) then break end
+    i = i + 1
+  end
+  if i == start then return nil end
+  return i
+end
+
+kiwiUniqueScanObject = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  local seen = {}
+  i = kiwiSkipSpace(v, i, n)
+  if i <= n and string.sub(v, i, i) == '}' then return i + 1 end
+  while true do
+    i = kiwiSkipSpace(v, i, n)
+    if i > n or string.sub(v, i, i) ~= '"' then return nil end
+    local keyEnd = kiwiSkipString(v, i, n)
+    if keyEnd == nil then return nil end
+    local token = string.sub(v, i, keyEnd - 1)
+    local ok, key = pcall(cjson.decode, token)
+    if not ok or type(key) ~= 'string' then return nil end
+    if seen[key] ~= nil then return nil end
+    seen[key] = true
+    i = kiwiSkipSpace(v, keyEnd, n)
+    if i > n or string.sub(v, i, i) ~= ':' then return nil end
+    i = kiwiUniqueScanValue(v, kiwiSkipSpace(v, i + 1, n), n, depth + 1)
+    if i == nil then return nil end
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local sep = string.sub(v, i, i)
+    if sep == ',' then
+      i = i + 1
+    elseif sep == '}' then
+      return i + 1
+    else
+      return nil
+    end
+  end
+end
+
+kiwiUniqueScanArray = function(v, i, n, depth)
+  if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
+  i = kiwiSkipSpace(v, i, n)
+  if i <= n and string.sub(v, i, i) == ']' then return i + 1 end
+  while true do
+    i = kiwiUniqueScanValue(v, i, n, depth + 1)
+    if i == nil then return nil end
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local sep = string.sub(v, i, i)
+    if sep == ',' then
+      i = i + 1
+    elseif sep == ']' then
+      return i + 1
+    else
+      return nil
+    end
+  end
+end
+
+-- True when the whole document is one well-formed JSON object with no
+-- semantic duplicate key at any nesting level and no trailing bytes.
+local function kiwiDocumentIsUnique(v)
+  local n = #v
+  if n == 0 or n > KIWI_ENVELOPE_MAX_BYTES then return false end
+  local i = kiwiSkipSpace(v, 1, n)
+  if i > n or string.sub(v, i, i) ~= '{' then return false end
+  local endIndex = kiwiUniqueScanObject(v, i + 1, n, 0)
+  if endIndex == nil then return false end
+  return kiwiSkipSpace(v, endIndex, n) > n
+end
+
 -- The spans of every TOP-LEVEL field of the JSON object v, indexed by
 -- the field's DECODED (semantic) name as {key_start, value_start,
 -- value_end}. Returns nil when v is not a JSON object, the document
@@ -425,6 +538,10 @@ end
 local function kiwiTopLevelFields(v)
   local n = #v
   if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
+  -- The WHOLE document must be semantically unique at every nesting
+  -- level before any top-level span is trusted (one cleanliness rule
+  -- across the core envelope and the persisted-state machines).
+  if not kiwiDocumentIsUnique(v) then return nil end
   local i = 1
   i = kiwiSkipSpace(v, i, n)
   if string.sub(v, i, i) ~= '{' then return nil end
@@ -1632,6 +1749,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
             execution_version: envelope.execution_version,
             execution_commitment: envelope.execution_commitment.clone(),
             kid: envelope.kid,
+            rsw_modulus_sha256: None,
         };
         if !crate::challenge::record_is_structurally_valid(&probe) {
             return None;
@@ -1665,6 +1783,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
         execution_version: envelope.execution_version,
         execution_commitment: envelope.execution_commitment,
         kid: envelope.kid,
+        rsw_modulus_sha256: None,
     };
     Some(StoredChallenge {
         record,

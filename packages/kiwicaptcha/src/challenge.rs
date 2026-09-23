@@ -318,6 +318,13 @@ pub struct ChallengeRecord {
     /// is absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_commitment: Option<String>,
+    /// The authenticated rsw trapdoor identity: hex SHA-256 of the
+    /// modulus (base64) the record was issued under. PHP-authenticated
+    /// and consumed by the PHP verifier/reconstruction; carried here for
+    /// schema parity (present iff the record is an rsw record issued
+    /// after the binding existed; omitted when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsw_modulus_sha256: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
     /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -379,6 +386,8 @@ struct RawChallengeRecord {
     execution_version: Option<u8>,
     #[serde(default)]
     execution_commitment: Option<String>,
+    #[serde(default)]
+    rsw_modulus_sha256: Option<String>,
     #[serde(default = "default_kid")]
     kid: u32,
 }
@@ -412,6 +421,7 @@ impl From<RawChallengeRecord> for ChallengeRecord {
             execution_program: raw.execution_program,
             execution_version: raw.execution_version,
             execution_commitment: raw.execution_commitment,
+            rsw_modulus_sha256: raw.rsw_modulus_sha256,
             kid: raw.kid,
         }
     }
@@ -2122,6 +2132,7 @@ fn issue_challenge_inner(
             .as_ref()
             .map(|_| execution_version.unwrap_or(1)),
         execution_commitment: execution_commitment.clone(),
+        rsw_modulus_sha256: None,
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
