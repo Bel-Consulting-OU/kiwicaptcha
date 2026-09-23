@@ -132,7 +132,7 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
      * mapping: one key, one namespace, so it can never span the two hash
      * slots in a single transaction.
      */
-    private const DELETE_LEGACY_OBLIGATION_LUA = <<<'LUA'
+    private const DELETE_LEGACY_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 -- kiwicaptcha legacy-obligation compare-delete (migration only)
 local mapped = redis.call('GET', KEYS[1])
 if mapped and mapped == ARGV[1] then
@@ -142,7 +142,7 @@ end
 return 0
 LUA;
 
-    private const CREATE_OR_GET_OBLIGATION_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const CREATE_OR_GET_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain obligation create-or-get (chain + obligation, one hash tag).
 -- EVERY key the script touches is a declared KEYS argument: KEYS[3] is the
 -- chain the obligation mapping points at, resolved by the caller from a
@@ -167,8 +167,8 @@ if mapped then
     if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[3]))) then
       return {'', 0, 'corrupt'}
     end
-    local ok, rec = pcall(cjson.decode, chained)
-    if not ok or not isValidChainRecord(rec) then
+    local rec = decodeUniqueObject(chained)
+    if rec == nil or not isValidChainRecord(rec) then
       return {'', 0, 'corrupt'}
     end
     -- A past-expiry pointed-at record is stale like a missing one: the
@@ -180,6 +180,9 @@ if mapped then
         -- A requirement raise is monotonic and bumps the generation.
         rec['requiredRank'] = newRank
         rec['requiredAction'] = ARGV[5]
+        if rec['requirementGeneration'] == nil then
+          rec['requirementGeneration'] = 1
+        end
         rec['requirementGeneration'] = tonumber(rec['requirementGeneration']) + 1
         if rec['state'] == 'issued' or rec['state'] == 'completed' or rec['state'] == 'verified' then
           -- The chain already carries an issued stage-2 challenge. The
@@ -248,7 +251,7 @@ LUA;
      * expiry is stale -> 'missing' (never manufacture a lifetime, never
      * reserve a past-expiry record).
      */
-    private const RESERVE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const RESERVE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
@@ -261,8 +264,8 @@ local ttl = tonumber(redis.call('TTL', KEYS[1]))
 if ttl <= 0 then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- A past-expiry but still-live record is stale: fail closed like the
@@ -333,7 +336,7 @@ LUA;
      * expiry is stale -> 'missing' (the same fail-closed guards as the
      * reservation).
      */
-    private const MARK_ISSUED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_ISSUED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain issuance: reserved(owner) -> issued(stage2Nonce), idempotent.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -344,8 +347,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -361,10 +364,17 @@ if rec['state'] == 'reserved' then
   -- requirement generation captured at reservation time. A raise in
   -- between bumped the chain's generation, so the weaker challenge must
   -- never be installed: the caller discards it and retries against the
-  -- current requirement.
-  if rec['reservedRequirementGeneration'] ~= nil
-    and rec['reservedRequirementGeneration'] ~= cjson.null
-    and rec['reservedRequirementGeneration'] ~= rec['requirementGeneration'] then
+  -- current requirement. A legacy reservation without the snapshot is
+  -- logically generation 1 (never "no fence").
+  local reservedGeneration = rec['reservedRequirementGeneration']
+  if reservedGeneration == nil or reservedGeneration == cjson.null then
+    reservedGeneration = 1
+  end
+  local currentGeneration = rec['requirementGeneration']
+  if currentGeneration == nil or currentGeneration == cjson.null then
+    currentGeneration = 1
+  end
+  if reservedGeneration ~= currentGeneration then
     return 'stale_requirement'
   end
   rec['state'] = 'issued'
@@ -403,7 +413,7 @@ LUA;
      * without a key lifetime or with a passed signed expiry is stale ->
      * 'missing' (a past-expiry chain can never verify).
      */
-    private const MARK_VERIFIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_VERIFIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain verification: issued(stage2Nonce) -> verified(stage2Nonce), TERMINAL,
 -- deleting the obligation mapping only while it still points at this chain.
 local existing = redis.call('GET', KEYS[1])
@@ -415,8 +425,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -451,7 +461,7 @@ LUA;
      * -> 'conflict'; absent -> 'missing'. A record without a key lifetime
      * or with a passed signed expiry is stale -> 'missing'.
      */
-    private const MARK_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_STEP_UP_REQUIRED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain step-up: issued(stage2Nonce) -> step_up_required(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the step-up).
 local existing = redis.call('GET', KEYS[1])
@@ -463,8 +473,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -496,7 +506,7 @@ LUA;
      * 'conflict'; absent -> 'missing'. A record without a key lifetime
      * or with a passed signed expiry is stale -> 'missing'.
      */
-    private const MARK_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_DENIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain denial: issued(stage2Nonce) -> denied(stage2Nonce), TERMINAL,
 -- keeping the obligation mapping (the transaction stays bound to the denial).
 local existing = redis.call('GET', KEYS[1])
@@ -508,8 +518,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -550,7 +560,7 @@ LUA;
      * gone), 'already_completed' (the mapping is gone, the transaction
      * already ended via Pass), absent -> 'missing'.
      */
-    private const MARK_TRANSACTION_DENIED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_TRANSACTION_DENIED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction denial: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> denied, KEEPTTL —
 -- the record keeps its OWN remaining TTL; the obligation mapping is KEPT, the
@@ -575,8 +585,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if rec['obligationId'] ~= ARGV[2] then
+local rec = decodeUniqueObject(existing)
+if rec == nil or rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -632,7 +642,7 @@ LUA;
      * mapping is gone, the transaction already ended via Pass), absent
      * -> 'missing'.
      */
-    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const MARK_TRANSACTION_STEP_UP_REQUIRED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Transaction step-up: OBLIGATION-BOUND NONCE-AGNOSTIC terminal transition of
 -- an OPEN obligation (available|reserved|issued|completed -> step_up_required,
 -- KEEPTTL — the record keeps its OWN remaining TTL; the obligation mapping is
@@ -657,8 +667,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return 'missing'
 end
-local rec = cjson.decode(existing)
-if rec['obligationId'] ~= ARGV[2] then
+local rec = decodeUniqueObject(existing)
+if rec == nil or rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -700,7 +710,7 @@ LUA;
      * without a key lifetime or with a passed signed expiry is stale
      * (false), the same fail-closed guards as every other mutation.
      */
-    private const REARM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const REARM_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain rearm: issued(expectedNonce) -> available (a fresh stage-2 mint).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -711,8 +721,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return false
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -741,7 +751,7 @@ LUA;
      * never released (false), the same fail-closed guards as every other
      * mutation. The chain TTL is preserved (KEEPTTL, Redis 6.0+).
      */
-    private const RELEASE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const RELEASE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain release: reserved(owner) -> available, owner-gated.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -752,8 +762,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return false
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -784,7 +794,7 @@ LUA;
      * lifetime or with a passed signed expiry is stale (false, the
      * fail-closed guards shared with every mutation).
      */
-    private const COMPLETE_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const COMPLETE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain completion (DEPRECATED legacy): reserved(owner) -> completed(stage2Nonce).
 local existing = redis.call('GET', KEYS[1])
 if not existing then
@@ -795,8 +805,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return false
 end
-local rec = cjson.decode(existing)
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return false
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -808,6 +818,21 @@ if rec['state'] ~= 'reserved' then
   return false
 end
 if rec['owner'] ~= ARGV[1] then
+  return false
+end
+-- The same reservation CAS as markIssued: a raise between the
+-- reservation and the completion bumped the generation, so a weaker
+-- challenge is never completed; a legacy reservation without the
+-- snapshot is logically generation 1.
+local reservedGeneration = rec['reservedRequirementGeneration']
+if reservedGeneration == nil or reservedGeneration == cjson.null then
+  reservedGeneration = 1
+end
+local currentGeneration = rec['requirementGeneration']
+if currentGeneration == nil or currentGeneration == cjson.null then
+  currentGeneration = 1
+end
+if reservedGeneration ~= currentGeneration then
   return false
 end
 rec['state'] = 'completed'
@@ -827,7 +852,7 @@ LUA;
      * the caller applies the verified WAIT durability barrier to the
      * deletion only.
      */
-    private const DELETE_OBLIGATION_LUA = <<<'LUA'
+    private const DELETE_OBLIGATION_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 -- Chain obligation compare-delete: only while it still points at this chain.
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('DEL', KEYS[1])
@@ -848,7 +873,7 @@ LUA;
      * assertLiveRecord() pre-guard of every transition never lets a
      * stale record reach a mutation.
      */
-    private const READ_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const READ_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain live read: existence + key lifetime + strict decode + signed expiry.
 local existing = redis.call('GET', KEYS[1])
 if not existing or existing == '' then
@@ -859,11 +884,8 @@ end
 if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
   return false
 end
-local ok, rec = pcall(cjson.decode, existing)
-if not ok then
-  return 'corrupt'
-end
-if not isValidChainRecord(rec) then
+local rec = decodeUniqueObject(existing)
+if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
 end
 -- The signed-expiry guard: an expired-but-live record reads as absent,
@@ -1549,12 +1571,15 @@ LUA;
         }
         // The monotonic requirement generation: every raise increments it,
         // and a reservation records the generation it was taken against.
-        // A record written before the generation field existed is the
-        // legacy shape: it decodes as generation 1 and heals on its first
-        // transition, so an in-flight chain survives the upgrade.
-        $requirementGeneration = $rec['requirementGeneration'] ?? 1;
-        if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
-            throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+        // The field absent is the legacy shape (logical generation 1); an
+        // explicit null is corrupt (the canonical writer never emits it).
+        if (!\array_key_exists('requirementGeneration', $rec)) {
+            $requirementGeneration = 1;
+        } else {
+            $requirementGeneration = $rec['requirementGeneration'];
+            if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
+                throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+            }
         }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
@@ -1562,13 +1587,18 @@ LUA;
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
+        $hasReservedGeneration = \array_key_exists('reservedRequirementGeneration', $rec);
         $reservedGeneration = $rec['reservedRequirementGeneration'] ?? null;
+        if ($hasReservedGeneration && $reservedGeneration !== null
+            && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
+        }
         if ($state === 'reserved') {
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
-            if ($reservedGeneration !== null && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
-                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
+            if ($hasReservedGeneration && $reservedGeneration === null) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must not be null in the reserved state');
             }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
@@ -1632,7 +1662,8 @@ LUA;
             'obligationId' => $rec['obligationId'],
             'expiresAt' => $rec['expiresAt'],
             'requirementGeneration' => $rec['requirementGeneration'] ?? 1,
-            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration'] ?? null,
+            'reservedRequirementGeneration' => $rec['reservedRequirementGeneration']
+                ?? ($rec['state'] === 'reserved' ? 1 : null),
         ];
     }
 

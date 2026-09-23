@@ -158,7 +158,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
                     if ($requiredRank > $record['requiredRank']) {
                         $this->records[$existing]['requiredRank'] = $requiredRank;
                         $this->records[$existing]['requiredAction'] = $requiredAction;
-                        ++$this->records[$existing]['requirementGeneration'];
+                        $currentGeneration = $this->records[$existing]['requirementGeneration'] ?? 1;
+                        $this->records[$existing]['requirementGeneration'] = $currentGeneration + 1;
                         if (\in_array($record['state'], ['issued', 'completed', 'verified'], true)) {
                             $this->records[$existing]['state'] = 'step_up_required';
                             $this->records[$existing]['owner'] = null;
@@ -321,9 +322,14 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             // The reservation CAS: a raise between the reservation and
             // the issuance bumped the generation, so the challenge minted
             // for the weaker requirement must never be installed.
-            if (($record['reservedRequirementGeneration'] ?? null) !== null
-                && $record['reservedRequirementGeneration'] !== $record['requirementGeneration']
-            ) {
+            $reservedGeneration = \array_key_exists('reservedRequirementGeneration', $record)
+                && $record['reservedRequirementGeneration'] !== null
+                ? $record['reservedRequirementGeneration']
+                : 1;
+            $currentGeneration = \array_key_exists('requirementGeneration', $record)
+                ? $record['requirementGeneration']
+                : 1;
+            if ($reservedGeneration !== $currentGeneration) {
                 return 'stale_requirement';
             }
             $this->records[$chainId]['state'] = 'issued';
@@ -563,6 +569,20 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
             return null;
         }
+        // The same reservation CAS as markIssued: a raise between the
+        // reservation and the completion bumped the generation, so a
+        // weaker challenge is never completed; a legacy reservation
+        // without the snapshot is logically generation 1.
+        $reservedGeneration = \array_key_exists('reservedRequirementGeneration', $record)
+            && $record['reservedRequirementGeneration'] !== null
+            ? $record['reservedRequirementGeneration']
+            : 1;
+        $currentGeneration = \array_key_exists('requirementGeneration', $record)
+            ? $record['requirementGeneration']
+            : 1;
+        if ($reservedGeneration !== $currentGeneration) {
+            return null;
+        }
         // The stage-2 nonce write boundary validates the canonical Kiwi
         // base64 shape like markIssued(): a malformed nonce is refused
         // deterministically instead of being pinned into the record.
@@ -677,9 +697,15 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         }
         // A legacy record without the generation field decodes as
         // generation 1 and heals on its first transition.
-        $requirementGeneration = $rec['requirementGeneration'] ?? 1;
-        if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
-            throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+        // The field absent is the legacy shape (logical generation 1); an
+        // explicit null is corrupt (the canonical writer never emits it).
+        if (!\array_key_exists('requirementGeneration', $rec)) {
+            $requirementGeneration = 1;
+        } else {
+            $requirementGeneration = $rec['requirementGeneration'];
+            if (!\is_int($requirementGeneration) || $requirementGeneration < 1) {
+                throw new MalformedChainedChallengeStateException('chain record requirementGeneration must be a positive integer');
+            }
         }
         $state = $rec['state'] ?? null;
         if (!\is_string($state) || !\in_array($state, self::STATES, true)) {
@@ -687,13 +713,21 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         }
         $owner = $rec['owner'] ?? null;
         $leaseUntil = $rec['leaseUntil'] ?? null;
+        $hasReservedGeneration = \array_key_exists('reservedRequirementGeneration', $rec);
         $reservedGeneration = $rec['reservedRequirementGeneration'] ?? null;
+        if ($hasReservedGeneration && $reservedGeneration !== null
+            && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
+            throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
+        }
         if ($state === 'reserved') {
             if (!\is_string($owner) || $owner === '' || !\is_int($leaseUntil)) {
                 throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil are required in the reserved state');
             }
-            if ($reservedGeneration !== null && (!\is_int($reservedGeneration) || $reservedGeneration < 1)) {
-                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must be a positive integer when present');
+            // An absent snapshot on a legacy reservation is logically
+            // generation 1; an explicit null in the reserved state is
+            // corrupt.
+            if ($hasReservedGeneration && $reservedGeneration === null) {
+                throw new MalformedChainedChallengeStateException('chain record reservedRequirementGeneration must not be null in the reserved state');
             }
         } elseif ($owner !== null || $leaseUntil !== null) {
             throw new MalformedChainedChallengeStateException('chain record owner/leaseUntil must be null outside the reserved state');
@@ -756,7 +790,8 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             'obligationId' => $record['obligationId'],
             'expiresAt' => (int) $record['expiresAt'],
             'requirementGeneration' => $record['requirementGeneration'] ?? 1,
-            'reservedRequirementGeneration' => $record['reservedRequirementGeneration'] ?? null,
+            'reservedRequirementGeneration' => $record['reservedRequirementGeneration']
+                ?? ($record['state'] === 'reserved' ? 1 : null),
         ];
     }
 }

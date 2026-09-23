@@ -134,6 +134,16 @@ final class ChainRedisFake extends \Predis\Client
         return 'OK';
     }
 
+    /**
+     * The strict persisted decode of the Lua authority: a malformed,
+     * oversized or semantically duplicated document decodes to null, and
+     * the caller fails closed exactly like a corrupt record.
+     */
+    private function decodeStrict(string $raw): ?array
+    {
+        return \KiwiCaptcha\Storage\StrictJson::decodeObject($raw);
+    }
+
     private function fakeTtl(string $key): int
     {
         if (!isset($this->strings[$key])) {
@@ -243,16 +253,24 @@ final class ChainRedisFake extends \Predis\Client
                     return ['', 0, 'corrupt'];
                 }
                 try {
-                    $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
+                    $rec = $this->decodeStrict($chained);
+                if ($rec === null) {
+                    return ['', 0, 'corrupt'];
+                }
                 } catch (\JsonException) {
                     return ['', 0, 'corrupt'];
                 }
                 if (!\is_array($rec)
-                    || !isset($rec['requiredRank'], $rec['requiredAction'], $rec['expiresAt'], $rec['requirementGeneration'], $rec['state'])
+                    || !isset($rec['requiredRank'], $rec['requiredAction'], $rec['expiresAt'], $rec['state'])
                     || !\is_int($rec['requiredRank'])
-                    || !\is_int($rec['requirementGeneration'])
-                    || $rec['requirementGeneration'] < 1
                     || !\in_array($rec['state'], ['available', 'reserved', 'issued', 'verified', 'completed', 'step_up_required', 'denied'], true)
+                ) {
+                    return ['', 0, 'corrupt'];
+                }
+                // absent generation = the legacy shape (logical 1);
+                // explicit null / non-integer = corrupt.
+                if (\array_key_exists('requirementGeneration', $rec)
+                    && (!\is_int($rec['requirementGeneration']) || $rec['requirementGeneration'] < 1)
                 ) {
                     return ['', 0, 'corrupt'];
                 }
@@ -263,7 +281,7 @@ final class ChainRedisFake extends \Predis\Client
                     if ($newRank > $rec['requiredRank']) {
                         $rec['requiredRank'] = $newRank;
                         $rec['requiredAction'] = (string) $args[4];
-                        ++$rec['requirementGeneration'];
+                        $rec['requirementGeneration'] = ($rec['requirementGeneration'] ?? 1) + 1;
                         if (\in_array($rec['state'], ['issued', 'completed', 'verified'], true)) {
                             $rec['state'] = 'step_up_required';
                             $rec['owner'] = null;
@@ -320,7 +338,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($ttl <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         $nowSecs = (int) floor($this->clockMs / 1000);
         if ($this->fakeRecordExpired($rec, $nowSecs)) {
             return 'missing';
@@ -371,7 +392,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return 'missing';
         }
@@ -413,7 +437,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return 'missing';
         }
@@ -441,7 +468,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return 'missing';
         }
@@ -466,7 +496,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return 'missing';
         }
@@ -493,7 +526,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if (($rec['obligationId'] ?? null) !== $args[1]) {
             return 'obligation_moved';
         }
@@ -539,7 +575,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return 'missing';
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if (($rec['obligationId'] ?? null) !== $args[1]) {
             return 'obligation_moved';
         }
@@ -583,7 +622,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return false;
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return false;
         }
@@ -609,7 +651,10 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return false;
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return false;
         }
@@ -634,15 +679,33 @@ final class ChainRedisFake extends \Predis\Client
         if ($this->fakeTtl($key) <= 0) {
             return false;
         }
-        $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
             return false;
         }
         if ($rec['state'] !== 'reserved' || $rec['owner'] !== $args[0]) {
             return false;
         }
+        // The same reservation CAS as markIssued: a legacy reservation
+        // without the snapshot is logically generation 1.
+        $reservedGeneration = (\array_key_exists('reservedRequirementGeneration', $rec)
+            && $rec['reservedRequirementGeneration'] !== null)
+            ? $rec['reservedRequirementGeneration']
+            : 1;
+        $currentGeneration = \array_key_exists('requirementGeneration', $rec)
+            ? $rec['requirementGeneration']
+            : 1;
+        if ($reservedGeneration !== $currentGeneration) {
+            return false;
+        }
         $rec['state'] = 'completed';
         $rec['stage2Nonce'] = (string) $args[1];
+        $rec['owner'] = null;
+        $rec['leaseUntil'] = null;
+        $rec['reservedRequirementGeneration'] = null;
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return (string) json_encode($rec, JSON_THROW_ON_ERROR);
@@ -664,7 +727,10 @@ final class ChainRedisFake extends \Predis\Client
             return null;
         }
         try {
-            $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+            $rec = $this->decodeStrict($existing);
+        if ($rec === null) {
+            return false;
+        }
         } catch (\JsonException) {
             return 'corrupt';
         }

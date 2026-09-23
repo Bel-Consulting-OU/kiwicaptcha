@@ -195,7 +195,11 @@ final class ValidatorTest extends TestCase
         ]);
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
-        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, $requestStack, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
+        // The default resolver carries the same Argon baseline the
+        // harness issues with (64 KiB, t=3, p=1): the strength authority
+        // compares the complete envelope, so the harness and the resolver
+        // must agree on the family's floor.
+        $gateway = new RiskGateway($engine, $classifier, $resolver ?? new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]), ['login' => $scopeId], null, null, ['login' => $postSolveCheck], 'reject', null, null, $requestStack, $decisionRedis, '{kiwi:validator-test}:decision:', 300, $policy, null, null, $v2Weights);
 
         return ['gateway' => $gateway, 'store' => $store];
     }
@@ -210,7 +214,10 @@ final class ValidatorTest extends TestCase
         // checked against the chain's current requirement, and a mismatch
         // resolves to the terminal step-up — never Pass, and the chain is
         // never verified.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        // The resolver's Argon baseline matches the harness's issued
+        // envelope (64 KiB, t=3, p=1) so the strength authority compares
+        // like with like.
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3701,7 +3708,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2StepUpDispositionMarksStepUpRequiredAndTheObligationSurvives(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3735,7 +3742,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2DenyDispositionMarksDeniedAndTheObligationSurvives(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3769,7 +3776,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2PassDispositionMarksVerifiedAndDeletesTheObligation(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -3866,7 +3873,7 @@ final class ValidatorTest extends TestCase
 
     public function testStage2TransitionFailureIsTemporaryUnavailableNeverPass(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4136,7 +4143,7 @@ final class ValidatorTest extends TestCase
         // stage-2 transition conflict (503) — and S's nonce disposition
         // is persisted AS THE terminal kind, so the replay of S
         // reproduces the same terminal result (never Pass, never 503).
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $rows = [
             'denied + no reassessment' => ['denied', 'none'],
             'denied + Allow' => ['denied', 'allow'],
@@ -4232,7 +4239,7 @@ final class ValidatorTest extends TestCase
         // conflict (503) — and S's nonce disposition is persisted AS THE
         // terminal kind, so the replay of S reproduces the same terminal
         // denial.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4303,7 +4310,7 @@ final class ValidatorTest extends TestCase
         // submission of S (with a fresh deny assessment — the opposite
         // terminal) still answers the terminal step-up — never the
         // conflicting stage-2 transition (503), never Pass.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();
@@ -4372,7 +4379,7 @@ final class ValidatorTest extends TestCase
         // superseded by the requirement's terminal state on every replay:
         // the terminal Deny answers — never the stored Pass, never the
         // stage-2 transition conflict.
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 64, 3, 1, 1, 64, [1, 2, 4]);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
         [$store] = $this->clockedDispositionStore();

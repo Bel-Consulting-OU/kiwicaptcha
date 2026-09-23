@@ -792,6 +792,16 @@ final class RealRedisPostSolveDispositionTest extends TestCase
      */
     private function corruptRecordOutcome(array $raw): string
     {
+        return $this->corruptRawOutcome((string) json_encode($raw));
+    }
+
+    /**
+     * The same end-to-end outcome for a corrupt record injected as RAW
+     * JSON bytes (duplicate spellings cannot be expressed as a PHP array:
+     * the decoder collapses them before any array exists).
+     */
+    private function corruptRawOutcome(string $rawJson): string
+    {
         $storage = new RedisStorage($this->client, 'ci-postsolve-corrupt:');
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
@@ -804,7 +814,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
         usleep(((int) $challenge->minDurationMs + 10) * 1000);
 
-        $this->client->set($this->key($challenge->nonce), (string) json_encode($raw), 'EX', 300);
+        $this->client->set($this->key($challenge->nonce), $rawJson, 'EX', 300);
 
         $verifier = new Verifier($storage);
         $stack = new RequestStack();
@@ -828,6 +838,54 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         self::assertCount(1, $violations);
 
         return $violations[0]->getCode();
+    }
+
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function provideDuplicateDispositionMembers(): iterable
+    {
+        $base = [
+            'v' => 2,
+            'state' => 'complete',
+            'owner' => null,
+            'lease_until' => null,
+            'disposition' => [
+                'kind' => 'pass',
+                'decision_id' => 'decision-dup',
+                'chain_id' => null,
+                'chain_expires_at' => null,
+            ],
+            'decision_id' => 'decision-dup',
+        ];
+        $raw = (string) json_encode($base, JSON_THROW_ON_ERROR);
+        yield 'kind literal-first' => [str_replace('"kind":"pass"', '"kind":"pass","k\\u0069nd":"deny"', $raw)];
+        yield 'kind alias-first' => [str_replace('"kind":"pass"', '"k\\u0069nd":"deny","kind":"pass"', $raw)];
+        yield 'state literal-first' => [str_replace('"state":"complete"', '"state":"complete","st\\u0061te":"pending"', $raw)];
+        yield 'state alias-first' => [str_replace('"state":"complete"', '"st\\u0061te":"pending","state":"complete"', $raw)];
+        yield 'decision_id literal-first' => [str_replace('"decision_id":"decision-dup"', '"decision_id":"decision-dup","decision\\u005fid":"decision-forged"', $raw)];
+        yield 'decision_id alias-first' => [str_replace('"decision_id":"decision-dup"', '"decision\\u005fid":"decision-forged","decision_id":"decision-dup"', $raw)];
+    }
+
+    /**
+     * @dataProvider provideDuplicateDispositionMembers
+     */
+    public function testSemanticallyDuplicatedDispositionMembersAreRefusedInBothOrders(string $ambiguous): void
+    {
+        // The raw JSON bytes carry a semantic duplicate (an escaped alias
+        // next to the literal spelling, in both member orders): the strict
+        // persisted-JSON authority refuses the document before json_decode
+        // collapses it, so a forged `deny` can never be read as the
+        // retained `pass` disposition. The outcome is the fail-closed
+        // temporary_unavailable, never a pass.
+        if (!str_contains($ambiguous, '\\u')) {
+            self::markTestSkipped('the duplicate spelling was not injected');
+        }
+        self::assertSame(
+            KiwiCaptcha::TEMPORARY_UNAVAILABLE_ERROR,
+            $this->corruptRawOutcome($ambiguous),
+            'an ambiguous disposition record fails closed',
+        );
     }
 
     public function testCorruptWireRecordWithUnknownSchemaVersionFailsClosed(): void

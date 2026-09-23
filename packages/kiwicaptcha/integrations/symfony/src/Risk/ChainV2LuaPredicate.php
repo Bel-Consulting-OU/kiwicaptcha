@@ -117,12 +117,16 @@ local function isValidChainRecord(rec)
   -- taken against, so an issuance can never install a challenge minted
   -- for a weaker requirement.
   local requirementGeneration = rec['requirementGeneration']
-  if requirementGeneration == nil or requirementGeneration == cjson.null then
-    -- A record written before the generation field existed is the
-    -- legacy shape: it decodes as generation 1 and heals on its first
-    -- transition, so an in-flight chain survives the upgrade.
+  if requirementGeneration == nil then
+    -- The field is ABSENT: the legacy shape written before the
+    -- generation existed. It decodes as logical generation 1 and heals
+    -- (materializes the canonical field) on its first transition, so an
+    -- in-flight chain survives the upgrade. An EXPLICIT null is NOT the
+    -- legacy shape: the canonical writer never emits a null generation,
+    -- so null is corrupt.
     requirementGeneration = 1
-  elseif not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
+  elseif requirementGeneration == cjson.null
+    or not isKiwiInteger(requirementGeneration) or requirementGeneration < 1 then
     return false
   end
   local state = rec['state']
@@ -134,6 +138,10 @@ local function isValidChainRecord(rec)
   local owner = rec['owner']
   local leaseUntil = rec['leaseUntil']
   local reservedGeneration = rec['reservedRequirementGeneration']
+  if reservedGeneration ~= nil and reservedGeneration ~= cjson.null
+    and (not isKiwiInteger(reservedGeneration) or reservedGeneration < 1) then
+    return false
+  end
   if state == 'reserved' then
     if type(owner) ~= 'string' or owner == '' then
       return false
@@ -141,8 +149,11 @@ local function isValidChainRecord(rec)
     if not isKiwiInteger(leaseUntil) then
       return false
     end
-    if reservedGeneration ~= nil and reservedGeneration ~= cjson.null
-      and (not isKiwiInteger(reservedGeneration) or reservedGeneration < 1) then
+    -- ABSENT on a legacy reservation means the reservation was taken
+    -- against logical generation 1; an explicit null in the reserved
+    -- state is corrupt (the canonical writer always materializes the
+    -- snapshot).
+    if reservedGeneration == cjson.null then
       return false
     end
   else

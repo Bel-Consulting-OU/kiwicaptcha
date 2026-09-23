@@ -1421,6 +1421,119 @@ fn wrong_counter_is_insufficient_work_and_burns_the_record() {
 }
 
 #[test]
+fn semantic_duplicate_runtime_fields_are_unusable_never_consumed() {
+    // The strict decoder refuses any stored document with two members
+    // decoding to the same semantic name (escaped aliases included)
+    // before serde_json's collapsed object is trusted: the runtime state
+    // is unusable/missing, never Consumed. The PHP StrictJson decoder
+    // applies the identical rule.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:dup-state:{}:", std::process::id());
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let consumed = raw
+        .replace("\"state\":\"pending\"", "\"state\":\"consumed\"")
+        .replace(
+            "\"consumed_result\":null",
+            "\"consumed_result\":{\"valid\":true,\"binding\":null}",
+        )
+        .replace(
+            "\"operation_identity\":null",
+            "\"operation_identity\":\"op-1\"",
+        );
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&consumed)
+        .arg("EX")
+        .arg(300)
+        .query(&mut conn)
+        .unwrap();
+    assert!(
+        matches!(
+            store.runtime_state(&issued.record.nonce).unwrap(),
+            RuntimeState::Consumed(_)
+        ),
+        "the clean control classifies as consumed",
+    );
+
+    let rows = [
+        (
+            "duplicate state",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"st\\u0061te\":\"pending\"",
+            ),
+        ),
+        (
+            "duplicate consumed_result",
+            consumed.replace(
+                "\"consumed_result\":{",
+                "\"consumed\\u005fresult\":null,\"consumed_result\":{",
+            ),
+        ),
+        (
+            "duplicate operation_identity",
+            consumed.replace(
+                "\"operation_identity\":\"op-1\"",
+                "\"operation_identity\":\"op-1\",\"op\\u0065ration_identity\":\"op-2\"",
+            ),
+        ),
+        (
+            "duplicate resume_owner",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"resume\\u005fowner\":\"a\",\"resume_owner\":\"b\"",
+            ),
+        ),
+        (
+            "duplicate resume_until",
+            consumed.replace(
+                "\"state\":\"consumed\"",
+                "\"state\":\"consumed\",\"resume\\u005funtil\":1,\"resume_until\":2",
+            ),
+        ),
+    ];
+    for (label, tampered) in rows {
+        assert_ne!(consumed, tampered, "{label}: the tamper applies");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(&tampered)
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .unwrap();
+        assert!(
+            matches!(
+                store.runtime_state(&issued.record.nonce).unwrap(),
+                RuntimeState::Missing
+            ),
+            "{label}: an ambiguous envelope is unusable, never consumed"
+        );
+        assert!(
+            store
+                .consumed_state(&issued.record.nonce)
+                .unwrap()
+                .is_none(),
+            "{label}: the strict consumed read refuses it too"
+        );
+    }
+}
+
+#[test]
 fn absent_or_non_string_runtime_state_fails_closed_as_missing() {
     // Under the current envelope contract every stored record carries a
     // string runtime state. An absent marker or a wrong-typed one is

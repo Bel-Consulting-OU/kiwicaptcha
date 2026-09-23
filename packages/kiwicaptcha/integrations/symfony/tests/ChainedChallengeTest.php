@@ -2654,7 +2654,7 @@ final class ChainedChallengeTest extends TestCase
         // The fixed-envelope Argon ladder is flattened to [1, 2, 3] so
         // the stage-2 Argon challenge solves fast in the test (the
         // strength ladder itself is covered elsewhere).
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 2, 3]);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 2, 3]);
         $risk = $this->riskStack(SignalVector::fromArray(self::ARGON32_VECTOR), $resolver);
 
         // Stage 1: solve + chain_required ticket (the reassessment

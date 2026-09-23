@@ -207,8 +207,8 @@ final class Configuration implements ConfigurationInterface
                     ->end()
                 ->end()
                 ->enumNode('namespace_migration')
-                    ->info('The explicit namespace-migration acknowledgment: none (default) = the deployment keeps the legacy sanitized derivation without a cutover; drained = the operator has quiesced the deployment and drained every pre-cutover state family (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows) before switching to the digest derivation; fresh = a new install with no pre-cutover state at all, which selects the digest derivation without the drained acknowledgment. The bundle refuses the digest version without one of these acknowledgments; the security-policy and chain readers still consult the legacy namespace as a safety net, so a revocation or an open obligation can never be silently abandoned.')
-                    ->values(['none', 'drained', 'fresh'])
+                    ->info('The explicit namespace-migration acknowledgment, and the phase of the migration: none (default) = the deployment keeps the legacy sanitized derivation without a cutover. migrating_v2 = the transitional digest phase: the deployment has been quiesced and its pre-cutover state families (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows) drained, and the security-policy, chain and authority-pin readers still consult the legacy namespace so a revocation, an open obligation or a pre-cutover pin can never be silently abandoned. drained = the migration is COMPLETE: the digest derivation is authoritative and NO legacy namespace is read any more, so an unrelated deployment whose raw namespace used to collide under v1 can never couple to this one. fresh = a brand-new install with no pre-cutover state at all: the digest derivation, no legacy reads. The bundle refuses the digest version without one of these acknowledgments.')
+                    ->values(['none', 'migrating_v2', 'drained', 'fresh'])
                     ->defaultValue('none')
                 ->end()
                 ->booleanNode('enforce_telemetry')
@@ -1175,14 +1175,15 @@ final class Configuration implements ConfigurationInterface
 
                      return $version === RedisNamespace::VERSION_DIGEST && $migration === 'none';
                  })
-                 ->thenInvalid('kiwi_captcha.namespace_key_version 2 changes every derived Redis key family at once: set kiwi_captcha.namespace_migration to "drained" only after quiescing the deployment and draining the pre-cutover state (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows), or to "fresh" for a brand-new install with no pre-cutover state. The security-policy and chain readers consult the legacy namespace as a safety net, but the remaining families are not dual-read')
+                 ->thenInvalid('kiwi_captcha.namespace_key_version 2 changes every derived Redis key family at once: set kiwi_captcha.namespace_migration to "migrating_v2" after quiescing the deployment and draining the pre-cutover state (outstanding challenges, nonce decision handles, post-solve dispositions, risk aggregates and calibration state, rate-limit and Argon admission windows), to "drained" once the migration is complete and the legacy namespace must no longer be read at all, or to "fresh" for a brand-new install with no pre-cutover state. The security-policy and chain readers consult the legacy namespace only while migrating_v2 is in effect, but the remaining families are not dual-read')
              ->end()
-             // A "fresh" install selects the digest derivation: an
-             // explicit legacy version contradicts the acknowledgment.
+             // The v2 destinations (migrating_v2/drained/fresh) all select
+             // the digest derivation: an explicit legacy version
+             // contradicts the acknowledgment.
              ->validate()
-                 ->ifTrue(static fn (array $v): bool => ($v['namespace_migration'] ?? 'none') === 'fresh'
+                 ->ifTrue(static fn (array $v): bool => \in_array($v['namespace_migration'] ?? 'none', ['migrating_v2', 'drained', 'fresh'], true)
                      && ($v['namespace_key_version'] ?? null) === RedisNamespace::VERSION_LEGACY)
-                 ->thenInvalid('kiwi_captcha.namespace_migration: fresh selects the digest namespace derivation for a new install; namespace_key_version 1 (the legacy sanitized shape) contradicts it. Leave namespace_key_version unset (or set 2), or use namespace_migration: none/drained for an existing deployment')
+                 ->thenInvalid('kiwi_captcha.namespace_migration: migrating_v2/drained/fresh select the digest namespace derivation; namespace_key_version 1 (the legacy sanitized shape) contradicts them. Leave namespace_key_version unset (or set 2), or use namespace_migration: none for a deployment that stays on the legacy derivation')
              ->end();
 
         return $treeBuilder;

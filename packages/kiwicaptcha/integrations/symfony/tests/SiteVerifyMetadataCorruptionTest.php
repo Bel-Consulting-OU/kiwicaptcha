@@ -159,6 +159,32 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
             } catch (SiteVerifyIdempotencyCorruptException) {
             }
         }
+
+        // Raw semantic duplicate spellings (escaped aliases), in both
+        // member orders: the strict decoder refuses the document before
+        // json_decode collapses it, so a forged success can never be read
+        // from an ambiguous record.
+        $clean = (string) json_encode([
+            'state' => 'complete',
+            'response_hash' => $hash,
+            'remoteip_fingerprint' => 'ip-fingerprint',
+            'result' => ['success' => true, 'challenge_ts' => null, 'hostname' => null],
+        ], JSON_THROW_ON_ERROR);
+        $ambiguousRows = [
+            'state literal-first' => str_replace('"state":"complete"', '"state":"complete","st\\u0061te":"pending"', $clean),
+            'state alias-first' => str_replace('"state":"complete"', '"st\\u0061te":"pending","state":"complete"', $clean),
+            'success literal-first' => str_replace('"success":true', '"success":true,"success":"forged"', $clean),
+            'success alias-first' => str_replace('"success":true', '"success\\u005ffalse":false,"success":true', $clean),
+        ];
+        foreach ($ambiguousRows as $label => $ambiguous) {
+            self::assertNotSame($clean, $ambiguous, $label.': the duplicate is injected');
+            $client->set($key, $ambiguous);
+            try {
+                $store->stored($backendId, $uuid);
+                self::fail($label.': an ambiguous idempotency record must fail closed');
+            } catch (SiteVerifyIdempotencyCorruptException) {
+            }
+        }
         $client->del([$key]);
     }
 
@@ -197,6 +223,19 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
                 self::fail('the corrupt persisted shape must surface as the corrupt exception');
             } catch (SiteVerifyMetadataCorruptException) {
             }
+        }
+
+        // A raw semantic duplicate (escaped alias) is ambiguous state:
+        // the strict decoder refuses the bytes before json_decode
+        // collapses them.
+        $cleanMeta = (string) json_encode(['v' => 1, 'action' => 'login-action', 'cdata' => null, 'sitekey' => null, 'scope' => 'login', 'chainId' => null, 'chainDepth' => null], JSON_THROW_ON_ERROR);
+        $ambiguousMeta = str_replace('"action":"login-action"', '"action":"login-action","act\\u0069on":"forged"', $cleanMeta);
+        self::assertNotSame($cleanMeta, $ambiguousMeta);
+        $client->set($key, $ambiguousMeta);
+        try {
+            $store->find($nonce);
+            self::fail('an ambiguous metadata record must surface as the corrupt exception');
+        } catch (SiteVerifyMetadataCorruptException) {
         }
         $client->del([$key]);
     }

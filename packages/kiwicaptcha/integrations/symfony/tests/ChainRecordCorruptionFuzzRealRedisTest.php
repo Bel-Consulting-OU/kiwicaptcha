@@ -76,6 +76,87 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         }
     }
 
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function provideRawDuplicateAliases(): iterable
+    {
+        // The literal spelling first, then the escaped alias — and the
+        // reverse. Every pair carries conflicting values so a collapsed
+        // decode would silently pick one semantic value.
+        yield 'state literal-first' => ['"state":"available","st\\u0061te":"denied"'];
+        yield 'state alias-first' => ['"st\\u0061te":"denied","state":"available"'];
+        yield 'requiredAction literal-first' => ['"requiredAction":"sha16","required\\u0041ction":"argon64"'];
+        yield 'requiredAction alias-first' => ['"required\\u0041ction":"argon64","requiredAction":"sha16"'];
+        yield 'requiredRank literal-first' => ['"requiredRank":1,"requiredR\\u0061nk":6'];
+        yield 'requiredRank alias-first' => ['"requiredR\\u0061nk":6,"requiredRank":1'];
+        yield 'stage2Nonce literal-first' => ['"stage2Nonce":null,"stage2N\\u006fnce":"forged"'];
+        yield 'stage2Nonce alias-first' => ['"stage2N\\u006fnce":"forged","stage2Nonce":null'];
+        yield 'requirementGeneration literal-first' => ['"requirementGeneration":1,"requirementGener\\u0061tion":9'];
+        yield 'requirementGeneration alias-first' => ['"requirementGener\\u0061tion":9,"requirementGeneration":1'];
+    }
+
+    /**
+     * @dataProvider provideRawDuplicateAliases
+     */
+    public function testSemanticDuplicateChainMembersAreRefusedBeforeCollapse(string $duplicate): void
+    {
+        // The strict persisted-JSON authority rejects the document before
+        // the JSON decoder's collapsed object is trusted: the create-or-get,
+        // the read and every transition fail closed with zero writes, and
+        // the ambiguous bytes and the obligation mapping are preserved. A
+        // terminal denial can never be represented to the state machine as
+        // available through an escaped alias.
+        $store = $this->store();
+        $service = $this->service();
+        $requirement = $service->requireStage2(
+            ChainStateWalk::S1_NONCE,
+            'login',
+            'txn-dup',
+            1,
+            \KiwiCaptcha\Risk\RiskAction::Sha16,
+            time() + 300,
+        );
+        $recordKey = $this->chainKey($requirement->chainId);
+        $raw = (string) $this->client->get($recordKey);
+        $ambiguous = match (true) {
+            str_contains($duplicate, '"stage2Nonce"'),
+            str_contains($duplicate, '"stage2N\\u006fnce"') => str_replace('"stage2Nonce":null', $duplicate, $raw),
+            str_contains($duplicate, '"requirementGeneration"'),
+            str_contains($duplicate, '"requirementGener\\u0061tion"') => str_replace('"requirementGeneration":1', $duplicate, $raw),
+            str_contains($duplicate, '"requiredAction"'),
+            str_contains($duplicate, '"required\\u0041ction"') => str_replace('"requiredAction":"sha16"', $duplicate, $raw),
+            str_contains($duplicate, '"requiredRank"'),
+            str_contains($duplicate, '"requiredR\\u0061nk"') => str_replace('"requiredRank":1', $duplicate, $raw),
+            default => str_replace('"state":"available"', $duplicate, $raw),
+        };
+        self::assertNotSame($raw, $ambiguous, 'the duplicate is injected');
+        $this->client->set($recordKey, $ambiguous, 'EX', 300);
+        $obligationId = $service->obligationIdFor('login', 'txn-dup', 1);
+
+        try {
+            $store->read($requirement->chainId);
+            self::fail('a semantically duplicated chain record must fail closed at the read');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        try {
+            $store->createOrGetObligation($obligationId, 'chain-fresh-dup', ChainStateWalk::S1_NONCE, 'login', 'txn-dup', 'sha16', 1, 1, time() + 300, 300);
+            self::fail('the create-or-get must refuse an ambiguous pointed-at chain, never heal');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected
+        }
+        self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the mapping is preserved');
+        self::assertSame($ambiguous, $this->client->get($recordKey), 'the ambiguous bytes are never mutated');
+        try {
+            $store->reserve($requirement->chainId, 'owner-a', 15);
+            self::fail('the reservation must refuse the ambiguous record');
+        } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
+            // expected: the strict read fails closed before the transition
+        }
+        self::assertSame($ambiguous, $this->client->get($recordKey), 'the refused reservation writes nothing');
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────
 
     private function store(): RedisChainedChallengeStateStore

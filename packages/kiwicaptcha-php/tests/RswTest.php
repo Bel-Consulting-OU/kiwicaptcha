@@ -67,6 +67,67 @@ final class RswTest extends TestCase
         return SolutionToken::create($nonce, $counter, 5000, [], null, null, $proof)->encode();
     }
 
+    public function testResponseFromRecordRoundTripsEveryAlgorithm(): void
+    {
+        // The canonical reconstruction: the stored-record handoff used by
+        // the Symfony controller re-emits exactly Challenge::toArray()
+        // for every algorithm, including the rsw modulus on an rsw
+        // deployment (dropped on that path before the reconstruction existed).
+        $storage = new ArrayStorage();
+        $rsw = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Rsw,
+            targetBits: 8,
+            ttlSecs: 300,
+            rswModulusN: RswFixture::MODULUS_N_B64,
+            rswLambda: RswFixture::LAMBDA_B64,
+            rswT: 10_000,
+        ), $storage);
+        $issued = $rsw->issue('login', '198.51.100.7');
+        $record = $storage->find($issued->nonce);
+        self::assertNotNull($record);
+        $reconstructed = $rsw->responseFromRecord($record);
+        self::assertNotNull($reconstructed, 'the rsw deployment reconstructs its own record');
+        self::assertSame(RswFixture::MODULUS_N_B64, $reconstructed->rswModulus, 'the exact configured modulus rides the reconstruction');
+        self::assertSame($issued->toArray(), $reconstructed->toArray(), 'the reconstruction is byte-identical to the issuance response');
+        self::assertArrayHasKey('rsw_modulus', $issued->toArray());
+
+        // SHA and Argon records reconstruct without the rsw field, from
+        // any deployment (an Argon record issued by a SHA-configured
+        // risk escalation included).
+        $sha = new Issuer(new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 300), $storage);
+        $shaIssued = $sha->issue('login', '198.51.100.7');
+        $shaRecord = $storage->find($shaIssued->nonce);
+        self::assertNotNull($shaRecord);
+        self::assertArrayNotHasKey('rsw_modulus', $sha->responseFromRecord($shaRecord)->toArray());
+        self::assertSame($shaIssued->toArray(), $sha->responseFromRecord($shaRecord)->toArray());
+
+        $argon = new Issuer(new Config(
+            secretKey: Vectors::SECRET,
+            algorithm: PoWAlgorithm::Argon2id,
+            mKib: 64,
+            t: 3,
+            p: 1,
+            argon2TargetBits: 2,
+            ttlSecs: 300,
+        ), $storage);
+        $argonIssued = $argon->issue('login', '198.51.100.7');
+        $argonRecord = $storage->find($argonIssued->nonce);
+        self::assertNotNull($argonRecord);
+        self::assertArrayNotHasKey('rsw_modulus', $argon->responseFromRecord($argonRecord)->toArray());
+        self::assertSame($argonIssued->toArray(), $argon->responseFromRecord($argonRecord)->toArray());
+        // A SHA deployment reconstructs the risk-escalated Argon record
+        // it stored (the record carries the full parameter set).
+        self::assertSame($argonIssued->toArray(), $sha->responseFromRecord($argonRecord)->toArray());
+
+        // A non-rsw deployment must never serve an rsw record: it has no
+        // modulus, and a challenge the client cannot solve must not be
+        // handed out.
+        $rswRecord = $storage->find($issued->nonce);
+        self::assertNotNull($rswRecord);
+        self::assertNull($sha->responseFromRecord($rswRecord), 'a deployment without the rsw trapdoor never reconstructs an rsw record');
+    }
+
     public function testDefaultConfigStaysRswFree(): void
     {
         // The default deployment never configures the rsw fields: the

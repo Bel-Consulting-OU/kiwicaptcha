@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\PersistedJsonLuaPredicate;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 
@@ -48,7 +49,7 @@ final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
 
     private readonly RedisSecurityCommandExecutor $lua;
 
-    private const CLAIM_LUA = <<<'LUA'
+    private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local response_hash = ARGV[1]
 local owner = ARGV[2]
@@ -63,7 +64,10 @@ if not existing then
   redis.call('SET', key, cjson.encode({ response_hash = response_hash, remoteip_fingerprint = fingerprint, binding = binding, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
   return 'claimed'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return 'corrupt'
+end
 if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint or rec.binding ~= binding then
   return 'conflict'
 end
@@ -73,7 +77,7 @@ end
 return 'pending_same'
 LUA;
 
-    private const TAKEOVER_LUA = <<<'LUA'
+    private const TAKEOVER_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
@@ -86,7 +90,10 @@ local existing = redis.call('GET', key)
 if not existing then
   return 'still_pending'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return 'corrupt'
+end
 if rec.state ~= 'pending' then
   return 'still_pending'
 end
@@ -118,7 +125,7 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 'took_over'
 LUA;
 
-    private const RENEW_LUA = <<<'LUA'
+    private const RENEW_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local lease_seconds = tonumber(ARGV[2])
@@ -128,7 +135,10 @@ local existing = redis.call('GET', key)
 if not existing then
   return 0
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return 0
+end
 if rec.state ~= 'pending' or rec.owner ~= owner then
   return 0
 end
@@ -137,7 +147,7 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 1
 LUA;
 
-    private const FINALIZE_LUA = <<<'LUA'
+    private const FINALIZE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
@@ -147,7 +157,10 @@ local existing = redis.call('GET', key)
 if not existing then
   return 0
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return false
+end
 -- The finalize must authorize the state, the current owner token AND
 -- the response hash bound in the record: only a PENDING claim owned by
 -- this exact request may become complete, so a refused finalize (a
@@ -286,7 +299,10 @@ LUA;
             return null;
         }
         try {
-            $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
+            $rec = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
+            if ($rec === null) {
+                throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
+            }
         } catch (\JsonException $e) {
             // Corrupt security state is never transformed into "nothing
             // here": a malformed idempotency record maps to the typed

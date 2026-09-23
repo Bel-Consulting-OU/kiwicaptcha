@@ -1036,12 +1036,13 @@ final class RiskGateway
 
     /**
      * Whether a minted-but-not-yet-stored challenge satisfies an action:
-     * the issuance-time requirement check, backed by the same resolver
-     * rules as {@see recordSatisfies()}.
+     * the issuance-time requirement check, backed by the same complete
+     * strength comparison as {@see recordSatisfies()} (algorithm plus
+     * the full memory/time/parallelism/target envelope).
      */
-    public function challengeSatisfies(\KiwiCaptcha\PoWAlgorithm $algorithm, int $targetBits, RiskAction $action): bool
+    public function challengeSatisfies(ChallengeStrength $strength, RiskAction $action): bool
     {
-        return $this->resolver->strengthSatisfies($algorithm, $targetBits, $action);
+        return $this->resolver->strengthSatisfies($strength, $action);
     }
 
     /**

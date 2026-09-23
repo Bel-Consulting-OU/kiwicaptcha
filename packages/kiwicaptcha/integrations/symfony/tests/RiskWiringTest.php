@@ -431,20 +431,31 @@ final class RiskWiringTest extends TestCase
         self::assertTrue(true);
     }
 
-    public function testResolverReceivesFixedEnvelopeAndEscalationLadder(): void
+    public function testResolverReceivesTheCompleteBaselineAndEscalationLadder(): void
     {
+        // The resolver carries the complete configured baseline (algorithm
+        // plus the SHA/Argon work parameters), so requiredStrength() can
+        // preserve the application floor while raising the adaptive
+        // requirement, and strengthSatisfies() can compare the full
+        // memory/time/parallelism/target envelope.
         $container = $this->load($this->riskDefaults());
         $resolver = $container->getDefinition('kiwi_captcha.risk.resolver');
         $args = $resolver->getArguments();
-        self::assertSame(16384, $args[2], 'arg 2 = risk.argon_verification_memory_kib (the FIXED envelope, default 16384)');
-        self::assertSame([1, 2, 4], $args[3], 'arg 3 = risk.argon_escalation_target_bits (default [1, 2, 4])');
+        self::assertSame('sha256', $args[0]->value, 'arg 0 = the configured algorithm');
+        self::assertSame(8, $args[1], 'arg 1 = difficulty_bits (the SHA floor)');
+        self::assertSame(0, $args[2], 'arg 2 = argon_m_kib (the configured Argon memory, 0 = unset)');
+        self::assertSame(3, $args[3], 'arg 3 = argon_t');
+        self::assertSame(1, $args[4], 'arg 4 = argon_p');
+        self::assertSame(4, $args[5], 'arg 5 = argon2_difficulty_bits');
+        self::assertSame(16384, $args[6], 'arg 6 = risk.argon_verification_memory_kib (the FIXED envelope, default 16384)');
+        self::assertSame([1, 2, 4], $args[7], 'arg 7 = risk.argon_escalation_target_bits (default [1, 2, 4])');
 
         $risk = $this->riskDefaults();
         $risk['argon_verification_memory_kib'] = 32768;
         $risk['argon_escalation_target_bits'] = [2, 6, 10];
         $args = $this->load($risk)->getDefinition('kiwi_captcha.risk.resolver')->getArguments();
-        self::assertSame(32768, $args[2], 'the configured envelope reaches the resolver');
-        self::assertSame([2, 6, 10], $args[3], 'the configured ladder reaches the resolver');
+        self::assertSame(32768, $args[6], 'the configured envelope reaches the resolver');
+        self::assertSame([2, 6, 10], $args[7], 'the configured ladder reaches the resolver');
     }
 
     public function testSecurityEpochMonitorWiredIntoVerifierAndValidator(): void

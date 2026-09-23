@@ -141,7 +141,7 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * record's disposition shape is validated by the store's strict
      * decoder on the read-only response.
      */
-    private const CLAIM_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
 -- the nonce -> decision mapping; ONLY the missing path consumes it
@@ -184,7 +184,10 @@ if not existing then
   redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', tonumber(ARGV[3]))
   return cjson.encode({ status = 'claimed', record = rec })
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return cjson.encode({ status = 'corrupt' })
+end
 -- Strict existing-record validation (fail closed, never healed): an
 -- unknown schema or state, or a pending record without a well-shaped
 -- owner/lease/deferred disposition/decision handle, is corrupt and
@@ -223,8 +226,8 @@ if rec['state'] == 'complete' then
         if not chained then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
-        local ok, crec = pcall(cjson.decode, chained)
-        if not (ok and isValidChainRecord(crec)) then
+        local crec = decodeUniqueObject(chained)
+        if crec == nil or not isValidChainRecord(crec) then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
         if crec['state'] == 'denied' then
@@ -279,7 +282,7 @@ LUA;
      *   keys[1] = the record key
      *   argv[1] = owner token, argv[2] = disposition json
      */
-    private const FINALIZE_GUARDED_LUA = ChainV2LuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_GUARDED_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition guarded finalize: pending(owner) -> complete,
 -- with the transaction acceptance guard verified atomically with the
 -- write (the CAS ordering across the chain machine and the disposition
@@ -299,7 +302,10 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return 'corrupt'
+end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return 'corrupt'
 end
@@ -335,8 +341,8 @@ if ARGV[6] == '1' and ARGV[3] == 'pass' then
     if not chained then
       return 'obligation-changed'
     end
-    local ok, crec = pcall(cjson.decode, chained)
-    if not (ok and isValidChainRecord(crec)) then
+    local crec = decodeUniqueObject(chained)
+    if crec == nil or not isValidChainRecord(crec) then
       return 'obligation-changed'
     end
     if crec['state'] == 'denied' then
@@ -358,13 +364,16 @@ redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'finalized'
 LUA;
 
-    private const FINALIZE_LUA = <<<'LUA'
+    private const FINALIZE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition finalize: pending(owner) -> complete.
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return false
 end
-local rec = cjson.decode(existing)
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return false
+end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return false
 end
@@ -745,13 +754,9 @@ LUA;
      */
     private static function decodeRecord(string $raw): array
     {
-        try {
-            $rec = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record is not valid JSON', 0, $e);
-        }
-        if (!\is_array($rec)) {
-            throw new MalformedPostSolveDispositionException('post-solve disposition record must be a JSON object');
+        $rec = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
+        if ($rec === null) {
+            throw new MalformedPostSolveDispositionException('post-solve disposition record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
         }
 
         return self::validateDecoded($rec);

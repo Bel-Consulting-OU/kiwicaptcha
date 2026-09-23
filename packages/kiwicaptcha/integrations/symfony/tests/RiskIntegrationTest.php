@@ -404,7 +404,7 @@ final class RiskIntegrationTest extends TestCase
      */
     public function testMaximumAdaptiveEscalationKeepsMemoryAtTheEnvelope(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 2, 4]);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 2, 4]);
         $max = $resolver->profileFor(RiskAction::Argon64);
         self::assertNotNull($max);
         self::assertSame(16384, $max->mKib, 'the server verification memory must stay at the envelope under maximum escalation');
@@ -415,7 +415,7 @@ final class RiskIntegrationTest extends TestCase
 
         // A custom envelope is honored across ALL rungs — the ceiling is the
         // configured envelope, never the action.
-        $custom = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 32768, [2, 6, 10]);
+        $custom = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 32768, argonTargetBits: [2, 6, 10]);
         foreach ([RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64] as $action) {
             $profile = $custom->profileFor($action);
             self::assertSame(32768, $profile?->mKib, sprintf('%s must stay on the custom envelope', $action->value));
@@ -424,13 +424,13 @@ final class RiskIntegrationTest extends TestCase
 
         // The ladder needs exactly 3 rungs.
         try {
-            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4]);
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 4]);
             self::fail('a 2-entry ladder must be refused');
         } catch (\InvalidArgumentException) {
             self::assertTrue(true);
         }
         try {
-            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4, 8, 12]);
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8, argonEnvelopeMemoryKib: 16384, argonTargetBits: [1, 4, 8, 12]);
             self::fail('a 4-entry ladder must be refused');
         } catch (\InvalidArgumentException) {
             self::assertTrue(true);

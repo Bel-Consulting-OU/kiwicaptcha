@@ -1408,12 +1408,166 @@ struct StoredEnvelope {
 /// any other runtime field — the canonical record never sees it.
 /// Returns `None` on any parse failure — a corrupt key must never blow
 /// up the verify path, mirroring the PHP `RedisStorage::decode()`.
+/// The recursive semantic-duplicate scan of a stored JSON document: a
+/// JSON object may not carry two members whose keys decode to the same
+/// name (an escaped alias such as `"st\u0061te"` is the same field as
+/// `"state"`). serde_json collapses such members before any derived
+/// struct sees them, exactly like `json_decode`/`cjson`, so the raw
+/// bytes are walked here first. Returns true when a duplicate exists or
+/// the document cannot be walked (fail closed).
+fn stored_json_has_duplicate_keys(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut cursor = 0usize;
+    if skip_ws(bytes, &mut cursor) >= bytes.len() || bytes[cursor] != b'{' {
+        // Not an object: hand it to the typed decoder, which rejects it.
+        return false;
+    }
+    cursor += 1;
+    scan_json_object(bytes, &mut cursor, 0).is_none()
+}
+
+fn scan_json_object(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    skip_ws(bytes, cursor);
+    if bytes.get(*cursor) == Some(&b'}') {
+        *cursor += 1;
+
+        return Some(());
+    }
+    loop {
+        skip_ws(bytes, cursor);
+        if bytes.get(*cursor) != Some(&b'"') {
+            return None;
+        }
+        let key = scan_json_string(bytes, cursor)?;
+        let decoded: String = serde_json::from_str(&key).ok()?;
+        if !seen.insert(decoded) {
+            return None;
+        }
+        skip_ws(bytes, cursor);
+        if bytes.get(*cursor) != Some(&b':') {
+            return None;
+        }
+        *cursor += 1;
+        scan_json_value(bytes, cursor, depth + 1)?;
+        skip_ws(bytes, cursor);
+        match bytes.get(*cursor) {
+            Some(&b',') => {
+                *cursor += 1;
+            }
+            Some(&b'}') => {
+                *cursor += 1;
+
+                return Some(());
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn scan_json_value(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
+    skip_ws(bytes, cursor);
+    match bytes.get(*cursor)? {
+        b'{' => {
+            *cursor += 1;
+            scan_json_object(bytes, cursor, depth)
+        }
+        b'[' => {
+            *cursor += 1;
+            skip_ws(bytes, cursor);
+            if bytes.get(*cursor) == Some(&b']') {
+                *cursor += 1;
+
+                return Some(());
+            }
+            loop {
+                scan_json_value(bytes, cursor, depth + 1)?;
+                skip_ws(bytes, cursor);
+                match bytes.get(*cursor) {
+                    Some(&b',') => {
+                        *cursor += 1;
+                    }
+                    Some(&b']') => {
+                        *cursor += 1;
+
+                        return Some(());
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        b'"' => {
+            scan_json_string(bytes, cursor)?;
+
+            Some(())
+        }
+        _ => {
+            let start = *cursor;
+            while let Some(c) = bytes.get(*cursor) {
+                if matches!(c, b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n') {
+                    break;
+                }
+                *cursor += 1;
+            }
+            if *cursor == start {
+                None
+            } else {
+                Some(())
+            }
+        }
+    }
+}
+
+/// Consume a JSON string token (including the quotes) and return it raw.
+fn scan_json_string(bytes: &[u8], cursor: &mut usize) -> Option<String> {
+    let start = *cursor;
+    if bytes.get(*cursor) != Some(&b'"') {
+        return None;
+    }
+    *cursor += 1;
+    while let Some(c) = bytes.get(*cursor) {
+        match c {
+            b'\\' => *cursor += 2,
+            b'"' => {
+                *cursor += 1;
+
+                return Some(String::from_utf8_lossy(&bytes[start..*cursor]).into_owned());
+            }
+            _ => *cursor += 1,
+        }
+    }
+    None
+}
+
+fn skip_ws(bytes: &[u8], cursor: &mut usize) -> usize {
+    while let Some(c) = bytes.get(*cursor) {
+        if !matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
+            break;
+        }
+        *cursor += 1;
+    }
+    *cursor
+}
+
 fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     // Bound before the parse: the canonical record JSON is a
     // few hundred bytes — a value at 128 KiB+ is a corrupt/attacker-written
     // key and is rejected without allocating for a parse it could never
     // survive.
     if raw.len() > MAX_STORED_RECORD_JSON_BYTES {
+        return None;
+    }
+    // The semantic-duplicate gate: serde_json keeps one member of an
+    // escaped alias pair, so the raw bytes are checked before the typed
+    // parse — the same authority the PHP StrictJson decoder and the Lua
+    // transition gate apply.
+    if stored_json_has_duplicate_keys(raw) {
         return None;
     }
     let envelope: StoredEnvelope = serde_json::from_str(raw).ok()?;
@@ -5739,6 +5893,24 @@ mod tests {
             store.delete_if_pending(&issued.record.nonce).unwrap(),
             DeleteIfPending::DeletedPending
         ));
+    }
+
+    #[test]
+    fn stored_json_duplicate_scanner_semantics() {
+        assert!(!stored_json_has_duplicate_keys(r#"{"a":1,"b":{"c":2}}"#));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":1,"a":2}"#));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":1,"\u0061":2}"#));
+        assert!(stored_json_has_duplicate_keys(
+            r#"{"x":{"a":1,"\u0061":2}}"#
+        ));
+        assert!(!stored_json_has_duplicate_keys(
+            r#"{"s":"}|,{}[]\"","n":1.5e10,"arr":[1,{"a":2}],"b":true,"z":null}"#
+        ));
+        // A non-object defers to the typed decoder.
+        assert!(!stored_json_has_duplicate_keys("[1,2]"));
+        // Unwalkable documents fail closed (flagged as duplicates).
+        assert!(stored_json_has_duplicate_keys("{"));
+        assert!(stored_json_has_duplicate_keys(r#"{"a":"unterminated}"#));
     }
 
     #[test]

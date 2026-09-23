@@ -58,12 +58,13 @@ final class RedisSiteVerifyMetadataStore implements SiteVerifyMetadataStore
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
-        try {
-            $data = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            // Corrupt security metadata is never "missing": the typed
-            // fail-closed exception (the controller answers the 503).
-            throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is malformed', 0, $e);
+        // The strict persisted-JSON authority: a malformed, oversized or
+        // semantically duplicated document is corrupt security metadata,
+        // never "missing" — the typed fail-closed exception (the
+        // controller answers the 503).
+        $data = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
+        if ($data === null) {
+            throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
         }
         if (!\is_array($data)) {
             throw new SiteVerifyMetadataCorruptException('the siteverify metadata record is not an object');

@@ -377,13 +377,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // security-policy and chain readers on the digest key version.
         $namespaceMigration = $config['namespace_migration'];
         $namespaceKeyVersion = $config['namespace_key_version']
-            ?? ($namespaceMigration === 'fresh' ? RedisNamespace::VERSION_DIGEST : RedisNamespace::VERSION_LEGACY);
-        // A drained migration keeps the legacy dual-read safety net; a
-        // fresh install has no pre-cutover state and must never consult
-        // the colliding legacy namespace.
-        $readLegacyFallback = $namespaceMigration !== 'fresh'
+            ?? (\in_array($namespaceMigration, ['migrating_v2', 'drained', 'fresh'], true)
+                ? RedisNamespace::VERSION_DIGEST
+                : RedisNamespace::VERSION_LEGACY);
+        // Only the transitional migrating_v2 phase keeps the legacy
+        // dual-read safety net. A completed drained migration and a fresh
+        // install both derive digest-only keys and never consult the
+        // legacy namespace, so an unrelated deployment whose raw
+        // namespace used to collide under v1 can never couple to them.
+        $readLegacyFallback = $namespaceMigration === 'migrating_v2'
             && $namespaceKeyVersion === RedisNamespace::VERSION_DIGEST;
-        if ($config['namespace_key_version'] === null && $namespaceMigration !== 'fresh') {
+        if ($config['namespace_key_version'] === null && $namespaceMigration === 'none') {
             // Conspicuous advisory: an omitted version silently keeps the
             // collision-prone legacy derivation (two raw discriminators
             // that differ only in separator bytes fold onto one key
@@ -1075,6 +1079,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $riskRedis = null;
         $riskRedisRaw = null;
         if ($riskConfig['enabled']) {
+            // RSW has no place in the adaptive-risk ordering: the
+            // adaptive ladder is defined over SHA/Argon strengths, and a
+            // profile escalation would either mint a non-RSW challenge
+            // into an RSW deployment or leave the RSW challenge
+            // perpetually unsatisfiable (chain loop). Refuse the
+            // combination instead of silently treating RSW as both
+            // "strong enough" and "not strong enough".
+            if ($config['algorithm'] === 'rsw') {
+                throw new \Symfony\Component\Config\Definition\Exception\InvalidConfigurationException(
+                    'kiwi_captcha.algorithm "rsw" cannot be combined with adaptive risk profiles (kiwi_captcha.risk): the adaptive ladder has no RSW strength ordering. Disable risk or use sha256/argon2id.',
+                );
+            }
             // Ladder validation (defense in depth; the config tree refuses
             // the same shape at compile time): the argon escalation ladder
             // must satisfy 1 <= rung1 < rung2 < rung3 <=
@@ -1231,13 +1247,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$enableGlobalPressure', $riskConfig['global_pressure']['enabled'])
                 ->setPublic(true));
+            // The resolver receives the complete configured baseline
+            // (algorithm plus the SHA/Argon work parameters) and the
+            // adaptive Argon envelope/ladder: its requiredStrength() is
+            // the one monotonic rule that preserves the application floor
+            // while raising the adaptive requirement, and its
+            // strengthSatisfies() compares the full envelope, never
+            // (algorithm, targetBits) alone.
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),
                 $config['difficulty_bits'],
-                // The fixed Argon2id verification-memory envelope
-                // (risk.argon_verification_memory_kib) and the target-bits
-                // escalation ladder: risk escalates the expected nonce
-                // search space, never the server verification cost.
+                $config['argon_m_kib'],
+                $config['argon_t'],
+                $config['argon_p'],
+                $config['argon2_difficulty_bits'],
                 $riskConfig['argon_verification_memory_kib'],
                 $riskConfig['argon_escalation_target_bits'],
             ]));

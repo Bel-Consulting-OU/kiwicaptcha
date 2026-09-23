@@ -101,7 +101,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
             'secret_key' => self::SECRET,
             'redis_service' => 'fake_redis',
             'namespace_key_version' => RedisNamespace::VERSION_DIGEST,
-            'namespace_migration' => 'drained',
+            'namespace_migration' => 'migrating_v2',
             'risk' => [
                 'namespace' => self::RAW,
                 'chaining' => ['enabled' => true],
@@ -342,7 +342,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         $container->setParameter('kernel.project_dir', self::RAW);
         $container->register('fake_redis', FakePredisClient::class);
         $this->expectException(InvalidConfigurationException::class);
-        $this->expectExceptionMessageMatches('/namespace_migration: fresh selects the digest/');
+        $this->expectExceptionMessageMatches('/migrating_v2\\/drained\\/fresh select the digest/');
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => self::SECRET,
             'redis_service' => 'fake_redis',
@@ -466,6 +466,75 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         self::assertSame(ChainIssuedResult::IssuedNew, $service->markIssued($chainId, 'owner-a', base64_encode(random_bytes(32))));
     }
 
+    public function testALegacyReservationCannotBeIssuedOrCompletedAfterAStrongerRaise(): void
+    {
+        // A pre-upgrade reservation has no generation snapshot (logically
+        // generation 1). A stronger reassessment raises the chain to
+        // generation 2; the legacy reservation must then fail both the
+        // issuance CAS and the deprecated complete() CAS, so the weaker
+        // challenge can never be installed.
+        foreach (['markIssued', 'complete'] as $transition) {
+            $fake = new ChainRedisFake();
+            $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+            [$chainId, $obligationId] = $this->buildChainInState($store, $fake, 'reserved');
+            $chainKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$chainId;
+            $legacy = json_decode((string) $fake->strings[$chainKey], true, flags: JSON_THROW_ON_ERROR);
+            unset($legacy['requirementGeneration'], $legacy['reservedRequirementGeneration']);
+            $fake->strings[$chainKey] = (string) json_encode($legacy, JSON_THROW_ON_ERROR);
+
+            // The raise materializes the canonical fields (it used to
+            // crash the Lua script on tonumber(nil) + 1).
+            $raised = $store->createOrGetObligation(
+                $obligationId,
+                str_pad('c', 64, '0'),
+                base64_encode(random_bytes(32)),
+                'login',
+                '',
+                'argon32',
+                RiskAction::Argon32->rank(),
+                self::CONFIGURED_EPOCH,
+                $fake->clockSecs() + 300,
+                300,
+            );
+            self::assertSame($chainId, $raised);
+            $record = $store->read($chainId);
+            self::assertSame(2, $record['requirementGeneration'], $transition.': the legacy record materialized and raised to generation 2');
+            self::assertSame('reserved', $record['state'], $transition.': the in-flight reservation survives the raise');
+
+            if ($transition === 'markIssued') {
+                self::assertSame(
+                    'stale_requirement',
+                    $store->markIssued($chainId, 'owner-a', base64_encode(random_bytes(32))),
+                    'the legacy reservation (logical generation 1) can never install after the raise',
+                );
+            } else {
+                self::assertNull(
+                    $store->complete($chainId, 'owner-a', base64_encode(random_bytes(32))),
+                    'the deprecated complete() applies the same reservation CAS',
+                );
+            }
+            $after = $store->read($chainId);
+            self::assertSame('reserved', $after['state'], $transition.': the refused transition installs nothing');
+        }
+    }
+
+    public function testAnExplicitNullGenerationIsCorruptNotLegacy(): void
+    {
+        // The field absent is the legacy shape; an explicit JSON null is
+        // not (the canonical writer never emits it): it fails closed
+        // instead of being read as generation 1.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, self::RAW, 0, 100, RedisNamespace::VERSION_DIGEST);
+        [$chainId] = $this->buildChainInState($store, $fake, 'available');
+        $chainKey = '{kiwi:'.self::digestNamespace().'}:chain:'.$chainId;
+        $record = json_decode((string) $fake->strings[$chainKey], true, flags: JSON_THROW_ON_ERROR);
+        $record['requirementGeneration'] = null;
+        $fake->strings[$chainKey] = (string) json_encode($record, JSON_THROW_ON_ERROR);
+
+        $this->expectException(MalformedChainedChallengeStateException::class);
+        $store->read($chainId);
+    }
+
     public function testAMissingOrExpiredChainStillHeals(): void
     {
         // The counterpart of the corruption rule: a genuinely missing or
@@ -575,6 +644,67 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         );
         self::assertSame('reserved', $store->read($chainId)['state'], 'the refused issuance installs nothing');
         self::assertSame('argon32', $store->read($chainId)['requiredAction'], 'the raised floor is untouched');
+    }
+
+    public function testADrainedDeploymentIsV2OnlyAndNeverReadsTheLegacyNamespace(): void
+    {
+        // A completed migration (namespace_migration: drained) derives
+        // digest keys and reads NO legacy segment: the transitional dual
+        // read exists only while migrating_v2 is in effect. This is the
+        // isolation the digest namespace exists for — a deployment whose
+        // raw namespace used to collide with this one under v1 can never
+        // couple to it again.
+        $raw = 'tenant/a';
+        $unrelatedRaw = 'tenant:a';
+        $legacyNamespace = RedisNamespace::derive($unrelatedRaw, RedisNamespace::VERSION_LEGACY);
+        $digestNamespace = RedisNamespace::derive($raw, RedisNamespace::VERSION_DIGEST);
+        self::assertSame('tenant_a', $legacyNamespace);
+
+        $container = $this->loadContainer([
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'namespace_key_version' => RedisNamespace::VERSION_DIGEST,
+            'namespace_migration' => 'drained',
+            'risk' => [
+                'namespace' => $raw,
+                'chaining' => ['enabled' => true],
+                'request_binding_authority' => 'binding.authority',
+            ],
+            'ha_authority' => 'pinned_primary',
+        ]);
+        $monitor = $container->getDefinition(SecurityEpochMonitor::class)->getArguments();
+        self::assertSame(RedisNamespace::VERSION_DIGEST, $monitor['$namespaceKeyVersion'] ?? null);
+        self::assertFalse($monitor['$readLegacyFallback'] ?? true, 'a drained migration is v2-only');
+        $health = $container->getDefinition(KiwiHealthController::class)->getArguments();
+        self::assertFalse($health['$readLegacyFallback'] ?? true, 'the readiness probe is v2-only');
+        $chain = $container->getDefinition(RedisChainedChallengeStateStore::class)->getArguments();
+        self::assertSame(RedisNamespace::VERSION_DIGEST, $chain[4] ?? null, 'the chain store derives digest keys');
+        self::assertFalse($chain[5] ?? true, 'the chain store is v2-only');
+        $guard = $container->getDefinition('kiwi_captcha.ha_authority_guard.storage')->getArguments();
+        self::assertFalse($guard[6] ?? true, 'the authority pin is v2-only');
+
+        // Functional: an unrelated legacy policy, pin and obligation are
+        // invisible to the drained deployment.
+        $client = new FakePredisClient();
+        $client->hashes['{kiwi:'.$legacyNamespace.'}:security-policy'] = [
+            SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD => (string) self::CENTRAL_EPOCH,
+        ];
+        $client->strings['{kiwi:'.$legacyNamespace.'}:authority:pin'] = 'master|unrelated-run';
+        $monitorReal = new SecurityEpochMonitor(
+            new Verifier(new ArrayStorage()),
+            $client,
+            $raw,
+            1,
+            1,
+            null,
+            60,
+            RedisNamespace::VERSION_DIGEST,
+            false,
+        );
+        self::assertSame(['{kiwi:'.$digestNamespace.'}:security-policy'], $monitorReal->policyKeys());
+        self::assertSame(1, $monitorReal->currentEpoch(), 'the legacy revocation is invisible after the migration completes');
+        $guardReal = new PinnedPrimaryAuthorityGuard($client, $raw, 0, '', null, RedisNamespace::VERSION_DIGEST, false);
+        self::assertNull($guardReal->state()['pinned'], 'the legacy pin is never adopted after the migration completes');
     }
 
     public function testAFreshDeploymentNeverAdoptsAnUnrelatedLegacyNamespace(): void

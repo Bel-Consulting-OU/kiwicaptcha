@@ -575,6 +575,46 @@ final class RedisStorageTest extends TestCase
         self::assertSame($before + 1, $storage->envelopeDecodeCount(), 'consumedState() must json_decode the stored envelope exactly once');
     }
 
+    public function testSemanticDuplicateRuntimeFieldsAreUnusableNeverConsumed(): void
+    {
+        // The strict decoder refuses any stored document with two members
+        // decoding to the same semantic name (escaped aliases included)
+        // before json_decode's collapsed object is trusted: the runtime
+        // state is unusable/missing, never Consumed, on every read path.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $base = $this->makeRecord('dup-state')->toArray();
+        $raw = (string) json_encode([
+            ...$base,
+            'state' => 'consumed',
+            'consumed_result' => ['valid' => true, 'binding' => null],
+            'operation_identity' => 'op-1',
+        ], JSON_THROW_ON_ERROR);
+
+        $rows = [
+            'duplicate state' => str_replace('"state":"consumed"', '"state":"consumed","st\\u0061te":"pending"', $raw),
+            'duplicate consumed_result' => str_replace('"consumed_result":', '"consumed_result":', str_replace('"consumed_result":{', '"consumed\\u005fresult":null,"consumed_result":{', $raw)),
+            'duplicate operation_identity' => str_replace('"operation_identity":"op-1"', '"operation_identity":"op-1","op\\u0065ration_identity":"op-2"', $raw),
+            'duplicate resume_owner' => str_replace('"state":"consumed"', '"state":"consumed","resume\\u005fowner":"a","resume_owner":"b"', $raw),
+            'duplicate resume_until' => str_replace('"state":"consumed"', '"state":"consumed","resume\\u005funtil":1,"resume_until":2', $raw),
+        ];
+        foreach ($rows as $label => $tampered) {
+            self::assertNotSame($raw, $tampered, $label.': the tamper applies');
+            $client->store['kiwicaptcha:dup-state'] = $tampered;
+            self::assertSame(
+                ChallengeRuntimeStateKind::Missing,
+                $storage->runtimeState('dup-state')->kind,
+                $label.': an ambiguous envelope is unusable, never consumed',
+            );
+            self::assertNull($storage->consumedState('dup-state'), $label.': the strict consumed read refuses it too');
+        }
+
+        // The clean control (same values, no alias) still classifies.
+        $client->store['kiwicaptcha:dup-state'] = $raw;
+        self::assertSame(ChallengeRuntimeStateKind::Consumed, $storage->runtimeState('dup-state')->kind);
+        self::assertNotNull($storage->consumedState('dup-state'));
+    }
+
     public function testAbsentOrNonStringRuntimeStateFailsClosedAsMissing(): void
     {
         // Under the current envelope contract every stored record carries

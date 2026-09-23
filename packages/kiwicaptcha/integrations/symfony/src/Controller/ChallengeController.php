@@ -1858,7 +1858,7 @@ final class ChallengeController
 
         // The handoff body is serialized from the stored record through
         // the single canonical issuance-response serializer,
-        // {@see self::issuanceResponseFromRecord()}: the record was
+        // issuanceResponseFromRecord(): the record was
         // durably stored by the issuer (the mint's storage write ran
         // before the commit point above), and the recovery paths
         // rebuild the response from that same stored record, so the
@@ -1904,7 +1904,7 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            $challengeData = self::issuanceResponseFromRecord($storedRecord);
+            $challengeData = $this->issuanceResponseFromRecord($storedRecord);
         }
 
         // Handoff: the challenge is durably issued and stored, the metadata
@@ -2726,7 +2726,7 @@ final class ChallengeController
                     // fence per store before the hand-out.
                     $this->confirmRecoveryBarriers();
 
-                    return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                    return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
                 // margin): the prior nonce must become provably
@@ -2832,7 +2832,7 @@ final class ChallengeController
             // fence before the hand-out.
             $this->confirmRecoveryBarriers();
 
-            return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+            return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
@@ -2888,7 +2888,7 @@ final class ChallengeController
      * metadata identity). The retry reads the issued challenge record
      * through the storage find by the state's stage2Nonce, then
      * serializes it through the single canonical issuance-response
-     * serializer, {@see self::issuanceResponseFromRecord()}, the same
+     * serializer, issuanceResponseFromRecord(), the same
      * function the fresh handoff uses. The recovered response is
      * byte-identical with the original request's, with no re-mint, no
      * re-admission and no re-consume. An issued or verified state never
@@ -2913,7 +2913,7 @@ final class ChallengeController
 
         $this->confirmRecoveryBarriers();
 
-        return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+        return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
@@ -2955,7 +2955,7 @@ final class ChallengeController
         if ($current !== null
             && \in_array($current->state, ['available', 'reserved'], true)
             && $this->risk !== null
-            && !$this->risk->challengeSatisfies($challenge->algorithm, $challenge->targetBits, $current->requiredAction)
+            && !$this->risk->challengeSatisfies(\BelConsulting\KiwiCaptchaBundle\Risk\ChallengeStrength::fromChallenge($challenge), $current->requiredAction)
         ) {
             $this->logGate('kiwicaptcha: the chain requirement rose while the stage-2 challenge was minting; discarding the weaker challenge');
             $this->discardChallenge($challenge);
@@ -3089,7 +3089,7 @@ final class ChallengeController
      * fresh stage-2 challenge. Recovery of a recoverable issued chain
      * instead serializes the stored record through the single canonical
      * issuance-response serializer,
-     * {@see self::issuanceResponseFromRecord()}, the same function the
+     * issuanceResponseFromRecord(), the same function the
      * fresh handoff uses — the recovery body is byte-identical with the
      * original response by construction.
      *
@@ -3223,7 +3223,7 @@ final class ChallengeController
 
                 $this->confirmRecoveryBarriers();
 
-                return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
             case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
                 // The final disposition is StepUp: transition to the
                 // terminal step_up_required (the obligation mapping is
@@ -3343,59 +3343,26 @@ final class ChallengeController
     }
 
     /**
-     * The ONE canonical issuance-response serializer of the controller.
-     * It emits the client-facing challenge response key set in the
-     * exact order Challenge::toArray() uses: nonce, challenge, salt,
-     * algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
-     * prefix. The authenticated decoy_field follows when the record
-     * carries one, then the execution_program when the record carries
-     * one. execution_version and execution_commitment are stored-record
-     * canonical fields and never appear on the client-facing surface.
-     *
-     * Both handoff paths serialize through this function. The fresh
-     * handoff of {@see self::challenge()} serializes the stored record
-     * after the issuance commit. Every stage-2 recovery path does too:
-     * {@see self::inspectIssuedStage2()},
-     * {@see self::recoverIssuedResponse()} and
-     * {@see self::resolveConsumedStage2Disposition()}. The handoff
-     * body and every later recovery body of the same challenge are
-     * therefore byte-identical by construction. The response can never
-     * carry an execution_program or decoy_field the stored record does
-     * not carry, and a recovery can never drop one the record carries.
-     * Each value comes from the record, never a nonce-derived
-     * reconstruction.
+     * The ONE canonical issuance-response serializer of the controller:
+     * the issuer reconstructs the client-facing Challenge from the stored
+     * record (including the algorithm-specific public material — the rsw
+     * modulus on an rsw deployment) and Challenge::toArray() owns the key
+     * set and order. The controller no longer duplicates that key set,
+     * so a future response field can never silently go missing on the
+     * stored-record handoff, the issued-stage-2 recovery or the
+     * lost-response reconstruction.
      */
-    private static function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
+    private function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
     {
-        $data = $record->toArray();
-        $response = [
-            'nonce' => $data['nonce'],
-            'challenge' => $data['challenge'],
-            'salt' => $data['salt'],
-            'algorithm' => $data['algorithm'],
-            'mKib' => $data['m_kib'],
-            't' => $data['t'],
-            'p' => $data['p'],
-            'targetBits' => $data['target_bits'],
-            'ttlSecs' => $data['expires_at'] - $data['issued_at'],
-            'minDurationMs' => $data['min_duration_ms'],
-            'prefix' => $data['prefix'],
-        ];
-        // The authenticated decoy name of the record: the original
-        // response carried exactly this value (the issuer's per-issuance
-        // pool pick, signed into the canonical payload).
-        if ($record->decoyField !== null) {
-            $response['decoy_field'] = $record->decoyField;
-        }
-        // The armed execution program of the record: the original
-        // response carried exactly these bytes, so a stage-2 recovery of
-        // an execution-armed challenge stays solvable (the stored record
-        // and the response can never diverge).
-        if ($record->executionProgram !== null) {
-            $response['execution_program'] = $record->executionProgram;
+        $challenge = $this->issuer?->responseFromRecord($record);
+        if ($challenge === null) {
+            // The configured algorithm cannot serve this record (a
+            // foreign family, an rsw record without the configured
+            // modulus): never hand out an unsolvable challenge.
+            throw new \RuntimeException('the stored challenge record cannot be reconstructed by the configured issuer');
         }
 
-        return $response;
+        return $challenge->toArray();
     }
 
     /**

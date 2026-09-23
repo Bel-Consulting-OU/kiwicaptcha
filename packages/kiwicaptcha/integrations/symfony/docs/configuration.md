@@ -986,15 +986,17 @@ is never forced) are the privacy contract; see
     #                                       # namespace_migration: drained or
     #                                       # fresh.
     # namespace_migration: none             # none (default) = keep the legacy
-    #                                       # derivation; drained = the
+    #                                       # derivation; migrating_v2 = the
+    #                                       # transitional digest phase: the
     #                                       # pre-cutover state was quiesced
-    #                                       # and drained before switching to
-    #                                       # the digest derivation; fresh = a
-    #                                       # new install with no pre-cutover
-    #                                       # state, which selects the digest
-    #                                       # derivation. The security-policy
-    #                                       # and chain readers additionally
-    #                                       # consult the legacy namespace.
+    #                                       # and drained, and the policy,
+    #                                       # chain and pin readers still
+    #                                       # consult the legacy namespace;
+    #                                       # drained = the migration is
+    #                                       # complete (digest-only, no legacy
+    #                                       # reads); fresh = a new install
+    #                                       # with no pre-cutover state
+    #                                       # (digest-only).
     # redis_service: null                   # optional Redis client service id
     #                                       # (\Redis or Predis\Client) for the
     #                                       # cross-worker Argon2 admission

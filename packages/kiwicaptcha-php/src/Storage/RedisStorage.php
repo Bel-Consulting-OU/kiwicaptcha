@@ -1157,33 +1157,15 @@ LUA;
     public function consumedState(string $nonce): ?ConsumedRecord
     {
         $raw = $this->client->get($this->prefix.$nonce);
-        if (!\is_string($raw) || $raw === '' || self::topLevelRuntimeState($raw) !== 'consumed') {
+        if (!\is_string($raw) || $raw === '') {
+            return null;
+        }
+        $envelope = $this->decodeEnvelope($raw);
+        if ($envelope === null || $envelope['state'] !== 'consumed') {
             return null;
         }
 
-        return $this->decodeConsumedEnvelope($raw);
-    }
-
-    /**
-     * The decoded top-level runtime state of a stored envelope, or null
-     * when the value is not a decodable JSON object. The state comes from
-     * the parsed object's own `state` key, never from a whole-document
-     * byte search: a nested `"state":"consumed"` string inside a corrupt
-     * or foreign value can never classify the record.
-     */
-    private static function topLevelRuntimeState(string $raw): ?string
-    {
-        try {
-            $data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return null;
-        }
-        if (!\is_array($data)) {
-            return null;
-        }
-        $state = $data['state'] ?? null;
-
-        return \is_string($state) ? $state : null;
+        return new ConsumedRecord($envelope['record'], false, true, $envelope['result'], $envelope['identity']);
     }
 
     /**
@@ -1310,29 +1292,25 @@ LUA;
         if (!\is_string($raw) || $raw === '') {
             return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing);
         }
-        $state = self::topLevelRuntimeState($raw);
+        // The strict single decode: the state, the record and the
+        // committed result all come from the same accepted snapshot (one
+        // JSON parse), and an oversized/malformed/ambiguous document
+        // fails closed as missing before any classification.
+        $envelope = $this->decodeEnvelope($raw);
+        if ($envelope === null) {
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing);
+        }
+        $state = $envelope['state'];
         if ($state === 'cancelled') {
-            $record = $this->decode($raw);
-
-            return $record === null
-                ? new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing)
-                : new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $record);
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Cancelled, $envelope['record']);
         }
         if ($state === 'consumed') {
-            // Decoded entirely from the same $raw this method already
-            // holds — never a second GET.
-            $consumed = $this->decodeConsumedEnvelope($raw);
+            $consumed = new ConsumedRecord($envelope['record'], false, true, $envelope['result'], $envelope['identity']);
 
-            return $consumed === null
-                ? new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing)
-                : new ChallengeRuntimeState(ChallengeRuntimeStateKind::Consumed, $consumed->record, $consumed);
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Consumed, $consumed->record, $consumed);
         }
         if ($state === 'pending') {
-            $record = $this->decode($raw);
-
-            return $record === null
-                ? new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing)
-                : new ChallengeRuntimeState(ChallengeRuntimeStateKind::Pending, $record);
+            return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Pending, $envelope['record']);
         }
 
         // An unknown or undecodable runtime state is never classified as
@@ -1813,14 +1791,19 @@ LUA;
     private function decodeEnvelope(string $raw): ?array
     {
         $this->envelopeDecodes++;
-        try {
-            $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
+        // The ONE strict decoder: the 128 KiB byte ceiling and the
+        // recursive semantic-duplicate scan run before the collapsed
+        // object is trusted, exactly like the Lua transition gate and the
+        // Rust StoredEnvelope decode. An oversized, malformed or
+        // ambiguous document decodes to null (an unusable/missing
+        // record), never to a partially-trusted one.
+        $data = StrictJson::decodeObject($raw);
+        if ($data === null) {
             return null;
         }
-        if (!\is_array($data)) {
-            return null;
-        }
+        $state = $data['state'] ?? null;
+        $state = \is_string($state) ? $state : null;
+        $hasState = \array_key_exists('state', $data);
         $identity = \is_string($data['operation_identity'] ?? null)
             ? $data['operation_identity']
             : null;
@@ -1848,7 +1831,15 @@ LUA;
             return null;
         }
 
-        return ['record' => $record, 'identity' => $identity, 'result' => $result];
+        return [
+            'record' => $record,
+            'identity' => $identity,
+            'result' => $result,
+            // The exact runtime state from the same accepted snapshot:
+            // callers never re-parse the raw bytes to classify.
+            'state' => $hasState ? $state : null,
+            'has_state' => $hasState,
+        ];
     }
 
     /**

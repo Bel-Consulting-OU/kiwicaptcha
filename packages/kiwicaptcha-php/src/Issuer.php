@@ -680,6 +680,52 @@ final class Issuer
     }
 
     /**
+     * Reconstruct the client-facing challenge response from a stored
+     * record: the canonical inverse of the issue path, used by
+     * integrations that hand the record back to the client (fresh
+     * issuance handoff, issued-stage-2 recovery, lost-response
+     * reconstruction).
+     *
+     * The record itself carries every algorithm-independent field; the
+     * algorithm-specific public material comes from this issuer's
+     * Config, so an rsw deployment re-emits the exact configured
+     * modulus. A record the configured algorithm cannot serve (a
+     * different algorithm family, a malformed rsw record) returns null:
+     * the caller must fail closed rather than hand out a challenge the
+     * client cannot solve.
+     */
+    public function responseFromRecord(\KiwiCaptcha\ChallengeRecord $record): ?Challenge
+    {
+        if ($record->algorithm === PoWAlgorithm::Rsw) {
+            // Only an rsw deployment owns the modulus; lambda never
+            // leaves the server. SHA and Argon records are self-contained
+            // (Argon carries its full parameter set on the record), so a
+            // risk-escalated Argon challenge issued by a SHA-configured
+            // deployment reconstructs without the rsw material.
+            if ($this->config->algorithm !== PoWAlgorithm::Rsw || $this->config->rswModulusN === null) {
+                return null;
+            }
+        }
+
+        return new Challenge(
+            nonce: $record->nonce,
+            challenge: $record->challenge,
+            salt: $record->salt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            ttlSecs: max(0, $record->expiresAt - $record->issuedAt),
+            minDurationMs: $record->minDurationMs,
+            prefix: $record->prefix,
+            decoyField: $record->decoyField,
+            executionProgram: $record->executionProgram,
+            rswModulus: $record->algorithm === PoWAlgorithm::Rsw ? $this->config->rswModulusN : null,
+        );
+    }
+
+    /**
      * Issue a challenge from an adaptive-risk difficulty profile.
      *
      * Builds a Config clone from the profile; the issuer's own Config is
