@@ -921,17 +921,17 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
-            [$claim, $owner] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$claim, $owner] = $store->claim($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
             self::assertNotNull($owner);
 
             // The correct owner with a wrong response hash: atomic no-op,
             // the entry stays pending.
-            $store->finalize($backendId, $uuid, 'hash-b', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            $store->finalize($backendId, $uuid, hash('sha256', 'hash-b'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
 
             // The correct owner with the correct hash completes the entry.
-            $store->finalize($backendId, $uuid, 'hash-a', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            $store->finalize($backendId, $uuid, hash('sha256', 'hash-a'), $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
         } finally {
             $probe->del($key);
@@ -956,17 +956,17 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $key = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del($key);
         try {
-            [$claim] = $store->claim($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$claim] = $store->claim($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claim);
 
             // Wait out the 1s lease (redis time is the lease clock; the
             // integer-second `>=` boundary keeps the lease held through
             // the second after expiry).
             usleep(2_500_000);
-            [$wrong] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:203.0.113.9');
+            [$wrong] = $store->takeover($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:203.0.113.9'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::StillPending, $wrong, 'a different remoteip fingerprint must never take over');
 
-            [$right] = $store->takeover($backendId, $uuid, 'hash-a', 300, 'ip:127.0.0.1');
+            [$right] = $store->takeover($backendId, $uuid, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::TookOver, $right);
         } finally {
             $probe->del($key);

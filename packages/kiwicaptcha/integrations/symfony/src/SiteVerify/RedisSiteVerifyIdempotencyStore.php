@@ -12,30 +12,41 @@ use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
  * Redis-backed atomic idempotency store.
  *
  * Key: `{kiwi:<namespace>}:siteverify-idem:<backend_id>:<uuid>`
- * Value: JSON {response_hash, remoteip_fingerprint, binding, state:
- * pending|complete, owner, result, lease_expires_at}
- * TTL: bounded (the caller passes the window).
+ * Value: JSON schema v2, exactly `{v, response_hash,
+ * remoteip_fingerprint, binding, state: pending|complete, owner, result,
+ * lease_expires_at}`. The exact predicate is
+ * {@see SiteVerifyIdempotencyRecordSchema}, mirrored in Lua by
+ * {@see SiteVerifyIdempotencyLuaPredicate}.
+ * TTL: bounded, the caller passes the window. Every read and transition
+ * requires the key to carry a lifetime. A present key without a TTL
+ * (`persist`, a bad restore, a foreign writer) is corrupt state. It
+ * fails closed with {@see SiteVerifyIdempotencyCorruptException} and
+ * zero mutations. A cached siteverify success is authorization-bearing
+ * recovery state, so a persistent key would convert a 300-second replay
+ * window into unbounded replay authority.
  *
- * The claim is a single Lua script — atomic even under concurrency.
+ * The claim is a single Lua script, atomic even under concurrency.
  * `owner` is a random per-request token so only the owning request can
- * finalize (a stale retry can never overwrite a completed outcome). The
+ * finalize; a stale retry can never overwrite a completed outcome. The
  * claim binds the canonicalized remoteip pseudonym and the canonical
  * transaction binding's keyed equality digest alongside the response
- * hash. The controller derives both with purpose-separated HMACs, so
- * the entry carries no raw address and no raw binding — Redis
- * persistence, AOF history or forensic snapshots can outlive the
- * logical TTL. A retry with the same key but a different pseudonym or
- * binding digest is a conflict: a changed remoteip or transaction
- * context can materially change the verification outcome, and no entry
- * may be joined or reused across them. Records written without a
- * fingerprint (created by an older release) carry none and therefore
- * conflict with every claim, fail-closed, and expire on TTL. The owner's lease
+ * hash. The controller derives both with purpose-separated HMACs. The
+ * entry carries no raw address and no raw binding: Redis persistence,
+ * AOF history or forensic snapshots can outlive the logical TTL. A
+ * retry with the same key but a different pseudonym or binding digest
+ * is a conflict. A changed remoteip or transaction context can
+ * materially change the verification outcome, and no entry may be
+ * joined or reused across them. A legacy record (the shape
+ * written before schema versioning, no `v` member) is recognized
+ * read-only: stored() can still serve its completed result for the
+ * record's bounded remaining TTL, but no transition ever claims,
+ * renews, takes over or finalizes it. The owner's lease
  * (`lease_expires_at`, set from the server clock via redis TIME at
  * claim creation) is configurable (`leaseSeconds`, default
  * {@see SiteVerifyIdempotencyStore::LEASE_SECONDS}) and bounds how long
  * a crashed owner blocks the key. After expiry an atomic takeover
- * transfers ownership to a waiter, and the lease length itself (not any
- * process-global timer) protects a live owner mid-verification.
+ * transfers ownership to a waiter. The lease length itself protects a
+ * live owner mid-verification; no process-global timer is involved.
  *
  * Every Lua transition executes through the guarded
  * {@see RedisSecurityCommandExecutor} seam (docs/ha-authority.md): the
@@ -50,53 +61,20 @@ final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     private readonly RedisSecurityCommandExecutor $lua;
 
     /**
-     * The exact-record predicate of the SiteVerify idempotency state
-     * machine, mirrored in Lua. The record carries exactly the keys a
-     * conforming writer emits, and the state invariants hold: pending
-     * owns a canonical owner token plus an integer lease and a null
-     * result, while complete owns a null owner/lease and the canonical
-     * result shape. Every transition and every read gates on it, so a
-     * JSON-clean but structurally impossible record can never be
-     * classified complete or re-encoded into an authorization-bearing
-     * state.
+     * The atomic live-record read used by stored(): existence and key
+     * lifetime are obtained in the same script, so only a lifetime-bearing
+     * record can ever be returned. Absent -> the Lua boolean false;
+     * present without a lifetime -> 'corrupt'; live -> the raw JSON.
      */
-    private const VALID_IDEMPOTENCY_LUA = <<<'LUA'
-local function validIdempotencyRecord(rec)
-  if type(rec) ~= 'table' then return false end
-  for k in pairs(rec) do
-    if k ~= 'state' and k ~= 'response_hash' and k ~= 'remoteip_fingerprint'
-      and k ~= 'binding' and k ~= 'owner' and k ~= 'lease_expires_at' and k ~= 'result' then
-      return false
-    end
-  end
-  if type(rec['response_hash']) ~= 'string' then return false end
-  local state = rec['state']
-  local owner = rec['owner']
-  local lease = rec['lease_expires_at']
-  local result = rec['result']
-  if state == 'pending' then
-    if type(owner) ~= 'string' or owner == '' then return false end
-    if type(lease) ~= 'number' or lease % 1 ~= 0 then return false end
-    if result ~= nil and result ~= cjson.null then return false end
-    return true
-  end
-  if state ~= 'complete' then return false end
-  if owner ~= nil and owner ~= cjson.null then return false end
-  if lease ~= nil and lease ~= cjson.null then return false end
-  if type(result) ~= 'table' then return false end
-  for k in pairs(result) do
-    if k ~= 'success' and k ~= 'challenge_ts' and k ~= 'hostname' and k ~= 'error-codes'
-      and k ~= 'action' and k ~= 'cdata' then
-      return false
-    end
-  end
-  if type(result['success']) ~= 'boolean' then return false end
-  return true
+    private const READ_LIVE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+local existing = readLivePersistedKey(KEYS[1])
+if existing == 'corrupt' then
+  return 'corrupt'
 end
-
+return existing
 LUA;
 
-    private const CLAIM_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local response_hash = ARGV[1]
 local owner = ARGV[2]
@@ -106,14 +84,27 @@ local fingerprint = ARGV[5]
 local binding = ARGV[6]
 -- redis TIME returns bulk strings; tonumber makes the arithmetic explicit.
 local now = tonumber(redis.call('TIME')[1])
-local existing = redis.call('GET', key)
-if not existing then
-  redis.call('SET', key, cjson.encode({ response_hash = response_hash, remoteip_fingerprint = fingerprint, binding = binding, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
+local existing = readLivePersistedKey(key)
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+if existing == false then
+  redis.call('SET', key, cjson.encode({ v = 2, response_hash = response_hash, remoteip_fingerprint = fingerprint, binding = binding, state = 'pending', owner = owner, result = cjson.null, lease_expires_at = now + lease_seconds }), 'EX', ttl)
   return 'claimed'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or not validIdempotencyRecord(rec) then
+if rec == nil then
   return 'corrupt'
+end
+local schema = classifyIdempotencyRecord(rec)
+if schema == nil then
+  return 'corrupt'
+end
+-- The legacy shape is read-only: a claim never joins, claims or renews
+-- it. Conflict is the fail-closed answer (never a cached success, never
+-- a join).
+if schema == 'legacy' then
+  return 'conflict'
 end
 if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint or rec.binding ~= binding then
   return 'conflict'
@@ -124,7 +115,7 @@ end
 return 'pending_same'
 LUA;
 
-    private const TAKEOVER_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const TAKEOVER_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
@@ -133,13 +124,25 @@ local lease_seconds = tonumber(ARGV[4])
 local ttl = tonumber(ARGV[5])
 local binding = ARGV[6]
 local now = tonumber(redis.call('TIME')[1])
-local existing = redis.call('GET', key)
-if not existing then
+local existing = readLivePersistedKey(key)
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+if existing == false then
   return 'still_pending'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or not validIdempotencyRecord(rec) then
+if rec == nil then
   return 'corrupt'
+end
+local schema = classifyIdempotencyRecord(rec)
+if schema == nil then
+  return 'corrupt'
+end
+-- The legacy shape is read-only: a takeover never takes ownership of a
+-- record no transition may finalize.
+if schema == 'legacy' then
+  return 'still_pending'
 end
 if rec.state ~= 'pending' then
   return 'still_pending'
@@ -150,8 +153,7 @@ end
 -- The remoteip fingerprint is bound in the record: a takeover with a
 -- DIFFERENT fingerprint is refused (defense-in-depth — the claim
 -- already enforces it, but the store enforces the complete identity
--- itself). A legacy record without a fingerprint matches nothing
--- (fail-closed), exactly like the claim.
+-- itself).
 if rec.remoteip_fingerprint ~= fingerprint then
   return 'still_pending'
 end
@@ -161,8 +163,7 @@ end
 if rec.binding ~= binding then
   return 'still_pending'
 end
--- A legacy record without a lease field is treated as already expired.
-local lease_expires_at = tonumber(rec.lease_expires_at) or 0
+local lease_expires_at = rec.lease_expires_at
 if lease_expires_at >= now then
   return 'still_pending'
 end
@@ -172,18 +173,24 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 'took_over'
 LUA;
 
-    private const RENEW_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const RENEW_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local lease_seconds = tonumber(ARGV[2])
 local ttl = tonumber(ARGV[3])
 local now = tonumber(redis.call('TIME')[1])
-local existing = redis.call('GET', key)
-if not existing then
+local existing = readLivePersistedKey(key)
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+if existing == false then
   return 0
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or not validIdempotencyRecord(rec) then
+if rec == nil then
+  return 'corrupt'
+end
+if classifyIdempotencyRecord(rec) ~= 'v2' then
   return 0
 end
 if rec.state ~= 'pending' or rec.owner ~= owner then
@@ -194,27 +201,33 @@ redis.call('SET', key, cjson.encode(rec), 'EX', ttl)
 return 1
 LUA;
 
-    private const FINALIZE_LUA = self::VALID_IDEMPOTENCY_LUA . PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const FINALIZE_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
 local key = KEYS[1]
 local owner = ARGV[1]
 local response_hash = ARGV[2]
 local result = ARGV[3]
 local ttl = tonumber(ARGV[4])
-local existing = redis.call('GET', key)
-if not existing then
+local existing = readLivePersistedKey(key)
+if existing == 'corrupt' then
+  return 'corrupt'
+end
+if existing == false then
   return 0
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or not validIdempotencyRecord(rec) then
-  return false
+if rec == nil then
+  return 'corrupt'
+end
+if classifyIdempotencyRecord(rec) ~= 'v2' then
+  return 0
 end
 -- The finalize must authorize the state, the current owner token AND
--- the response hash bound in the record: only a PENDING claim owned by
--- this exact request may become complete, so a refused finalize (a
+-- the response hash bound in the record: only a PENDING v2 claim owned
+-- by this exact request may become complete, so a refused finalize (a
 -- taken-over claim, a stale owner, a vanished key, a different
--- response) is a hard FALSE the caller treats exactly like an ownership
--- loss — a locally computed result is never returned as authoritative
--- after a refused finalize.
+-- response, a legacy record) is a hard FALSE the caller treats exactly
+-- like an ownership loss — a locally computed result is never returned
+-- as authoritative after a refused finalize.
 if rec.state ~= 'pending' then
   return 0
 end
@@ -255,6 +268,10 @@ LUA;
 
     public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
+        // The canonical writer-input rule: a non-canonical claim identity
+        // would mint a record every later boundary must treat as corrupt,
+        // so it is refused before any write.
+        SiteVerifyIdempotencyRecordSchema::assertCanonicalClaimIdentity($responseHash, $remoteipFingerprint, $binding);
         $owner = bin2hex(random_bytes(16));
         $lease = $leaseSeconds ?? $this->leaseSeconds;
         $result = $this->lua->executeMutation(self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint, $binding ?? '']);
@@ -284,6 +301,9 @@ LUA;
 
     public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
+        // The same canonical writer-input rule as the claim: a takeover
+        // under a non-canonical identity can never adopt a claim.
+        SiteVerifyIdempotencyRecordSchema::assertCanonicalClaimIdentity($responseHash, $remoteipFingerprint, $binding);
         $owner = bin2hex(random_bytes(16));
         // The takeover Lua already receives the lease via ARGV[4]; pass
         // the per-call override so the fixed configured lease is
@@ -317,6 +337,12 @@ LUA;
         SiteVerifyResult::validate($canonicalResponse);
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
         $result = $this->lua->executeSecurityFinal(self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
+        if ((string) $result === 'corrupt') {
+            // A lifetime-stripped or structurally impossible record is
+            // corrupt security state: the typed fail-closed exception
+            // (the controller answers the 503), zero mutation.
+            throw new SiteVerifyIdempotencyCorruptException('the siteverify idempotency record is structurally corrupt');
+        }
         $finalized = (int) $result === 1;
         // The verified-WAIT durability barrier applies to the successful
         // finalize only: the completed state must survive a promotion.
@@ -330,6 +356,12 @@ LUA;
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
     {
         $result = $this->lua->executeMutation(self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, $this->leaseSeconds, max(1, $this->retentionTtl($idempotencyKey))]);
+        if ((string) $result === 'corrupt') {
+            // The lifetime-stripped / structurally impossible record is
+            // corrupt security state: the typed fail-closed exception
+            // (the controller answers the 503), zero mutation.
+            throw new SiteVerifyIdempotencyCorruptException('the siteverify idempotency record is structurally corrupt');
+        }
         $renewed = (string) $result === '1';
         // A lost renewal write after a promotion would resurrect an older
         // (expired) lease state; the barrier applies to the successful
@@ -348,7 +380,16 @@ LUA;
 
     public function stored(string $backendId, string $idempotencyKey): ?array
     {
-        $raw = $this->redis->get($this->key($backendId, $idempotencyKey));
+        // The atomic live read: existence and key lifetime in one script,
+        // so a PERSISTed (lifetime-stripped) record can never be
+        // classified as live authorization-bearing cached state.
+        $raw = $this->lua->executeRead(self::READ_LIVE_LUA, $this->key($backendId, $idempotencyKey), []);
+        if ($raw === false || $raw === null) {
+            return null;
+        }
+        if ($raw === 'corrupt') {
+            throw new SiteVerifyIdempotencyCorruptException('the idempotency record carries no Redis key lifetime');
+        }
         if (!\is_string($raw) || $raw === '') {
             return null;
         }
@@ -366,17 +407,17 @@ LUA;
         if (!\is_array($rec)) {
             throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not an object');
         }
-        self::validateIdempotencyRecord($rec);
+        SiteVerifyIdempotencyRecordSchema::validate($rec);
         if (($rec['state'] ?? '') === 'complete') {
             if (!\is_array($rec['result'] ?? null)) {
                 throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
             }
             // A completed result is authorization-bearing cached state:
-            // the canonical-response validator runs on the read too, so
-            // a corrupted persisted result (a shape no conforming
-            // finalize could have written) fails closed as the typed
-            // corrupt exception instead of becoming a cached success.
-            SiteVerifyResult::validate($rec['result']);
+            // the canonical-response validator ran on the read too (inside
+            // the schema validation), so a corrupted persisted result (a
+            // shape no conforming finalize could have written) fails
+            // closed as the typed corrupt exception instead of becoming a
+            // cached success.
             // Failed-barrier replay guard: the finalize that wrote this
             // completed record may have landed on the primary with its
             // WAIT failing. Returning the stored success read-only would
@@ -391,52 +432,6 @@ LUA;
         }
 
         return null;
-    }
-
-    /**
-     * The PHP half of the idempotency-record predicate: exact key set and
-     * state invariants, identical to the Lua validIdempotencyRecord().
-     *
-     * @param array<string, mixed> $rec
-     *
-     * @throws SiteVerifyIdempotencyCorruptException on any violation
-     */
-    private static function validateIdempotencyRecord(array $rec): void
-    {
-        $allowed = ['state', 'response_hash', 'remoteip_fingerprint', 'binding', 'owner', 'lease_expires_at', 'result'];
-        $unknown = array_diff(array_keys($rec), $allowed);
-        if ($unknown !== []) {
-            throw new SiteVerifyIdempotencyCorruptException('the idempotency record carries unsupported keys: '.implode(',', $unknown));
-        }
-        if (!\is_string($rec['response_hash'] ?? null)) {
-            throw new SiteVerifyIdempotencyCorruptException('the idempotency record response_hash must be a string');
-        }
-        $state = $rec['state'] ?? null;
-        if ($state === 'pending') {
-            if (!\is_string($rec['owner'] ?? null) || $rec['owner'] === '') {
-                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record owner must be a non-empty string');
-            }
-            if (!\is_int($rec['lease_expires_at'] ?? null)) {
-                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record lease_expires_at must be an integer');
-            }
-            if (($rec['result'] ?? null) !== null) {
-                throw new SiteVerifyIdempotencyCorruptException('the pending idempotency record must not carry a result');
-            }
-
-            return;
-        }
-        if ($state === 'complete') {
-            if (($rec['owner'] ?? null) !== null || ($rec['lease_expires_at'] ?? null) !== null) {
-                throw new SiteVerifyIdempotencyCorruptException('the complete idempotency record owner/lease_expires_at must be null');
-            }
-            if (!\is_array($rec['result'] ?? null)) {
-                throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
-            }
-            SiteVerifyResult::validate($rec['result']);
-
-            return;
-        }
-        throw new SiteVerifyIdempotencyCorruptException('the idempotency record state must be pending|complete');
     }
 
     private function retentionTtl(string $idempotencyKey): int

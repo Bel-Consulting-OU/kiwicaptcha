@@ -216,11 +216,11 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         self::assertNotSame($idA, $idB, 'the backend identity must differ across secrets');
 
         $uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d480';
-        [$claimA, $ownerA] = $this->store->claim($idA, $uuid, hash('sha256', 'response-A'), 300, 'fp');
+        [$claimA, $ownerA] = $this->store->claim($idA, $uuid, hash('sha256', 'response-A'), 300, hash('sha256', 'fp'));
         self::assertSame(IdempotencyClaim::Claimed, $claimA, 'the A namespace must claim the key');
         self::assertIsString($ownerA);
 
-        [$claimB, $ownerB] = $this->store->claim($idB, $uuid, hash('sha256', 'response-B'), 300, 'fp');
+        [$claimB, $ownerB] = $this->store->claim($idB, $uuid, hash('sha256', 'response-B'), 300, hash('sha256', 'fp'));
         self::assertSame(
             IdempotencyClaim::Claimed,
             $claimB,
@@ -278,11 +278,11 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
         $idEpoch2 = $this->backendId(self::SECRET_A, self::SCOPE_A, 2, null);
         self::assertNotSame($idEpoch0, $idEpoch2, 'the backend identity must differ across policy epochs');
 
-        [$claim0, $owner0] = $this->store->claim($idEpoch0, $uuid, hash('sha256', 'epoch-0'), 300, 'fp');
+        [$claim0, $owner0] = $this->store->claim($idEpoch0, $uuid, hash('sha256', 'epoch-0'), 300, hash('sha256', 'fp'));
         self::assertSame(IdempotencyClaim::Claimed, $claim0);
         self::assertTrue($this->store->finalize($idEpoch0, $uuid, hash('sha256', 'epoch-0'), $owner0, ['success' => true, 'challenge_ts' => null, 'hostname' => null]));
 
-        [$claim2, $owner2] = $this->store->claim($idEpoch2, $uuid, hash('sha256', 'epoch-2'), 300, 'fp');
+        [$claim2, $owner2] = $this->store->claim($idEpoch2, $uuid, hash('sha256', 'epoch-2'), 300, hash('sha256', 'fp'));
         self::assertSame(
             IdempotencyClaim::Claimed,
             $claim2,

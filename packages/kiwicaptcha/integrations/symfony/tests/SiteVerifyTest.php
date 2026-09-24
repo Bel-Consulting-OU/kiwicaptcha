@@ -1222,7 +1222,7 @@ final class SiteVerifyTest extends TestCase
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = '623e4567-e89b-42d3-a456-426614174000';
-        $hash = 'response-hash';
+        $hash = hash('sha256', 'response-hash');
         $fingerprint = $this->remoteipFingerprint('127.0.0.1');
 
         [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
@@ -1259,7 +1259,7 @@ final class SiteVerifyTest extends TestCase
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = '723e4567-e89b-42d3-a456-426614174000';
-        $hash = 'response-hash';
+        $hash = hash('sha256', 'response-hash');
         $fingerprint = $this->remoteipFingerprint('127.0.0.1');
 
         [$claim, $oldOwner] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
@@ -1619,7 +1619,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'b3e4567e-e89b-42d3-a456-426614174000';
-        $hash = 'response-hash';
+        $hash = hash('sha256', 'response-hash');
         $fingerprint = $this->remoteipFingerprint('127.0.0.1');
 
         [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
@@ -1729,7 +1729,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $store = new ArraySiteVerifyIdempotencyStore();
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'e23e4567-e89b-42d3-a456-426614174000';
-        $hash = 'response-hash';
+        $hash = hash('sha256', 'response-hash');
         $fingerprint = $this->remoteipFingerprint('127.0.0.1');
 
         [$claim, $owner] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint);
@@ -1756,7 +1756,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'f23e4567-e89b-42d3-a456-426614174000';
-        $hash = 'response-hash';
+        $hash = hash('sha256', 'response-hash');
 
         [$claim] = $store->claim($backendId, $uuid, $hash, 300, $this->remoteipFingerprint('127.0.0.1'));
         self::assertSame(IdempotencyClaim::Claimed, $claim);

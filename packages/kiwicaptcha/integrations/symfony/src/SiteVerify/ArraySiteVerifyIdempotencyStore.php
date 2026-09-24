@@ -9,7 +9,7 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  */
 final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStore
 {
-    /** @var array<string, array{hash: string, remoteip_fingerprint: string, state: string, owner: string, result: ?array, lease_expires_at: int}> */
+    /** @var array<string, array{v: int, hash: string, remoteip_fingerprint: string, binding: ?string, state: string, owner: ?string, result: ?array, lease_expires_at: ?int}> */
     private array $records = [];
 
     private readonly \Closure $now;
@@ -33,12 +33,14 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
 
     public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
+        SiteVerifyIdempotencyRecordSchema::assertCanonicalClaimIdentity($responseHash, $remoteipFingerprint, $binding);
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
         if ($existing === null) {
             $owner = bin2hex(random_bytes(16));
             $lease = $leaseSeconds ?? $this->leaseSeconds;
             $this->records[$key] = [
+                'v' => SiteVerifyIdempotencyRecordSchema::VERSION_V2,
                 'hash' => $responseHash,
                 'remoteip_fingerprint' => $remoteipFingerprint,
                 'binding' => $binding,
@@ -49,6 +51,11 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
             ];
 
             return [IdempotencyClaim::Claimed, $owner];
+        }
+        // The legacy shape (no schema marker) is read-only: a claim never
+        // joins one, exactly like the Redis store.
+        if (($existing['v'] ?? null) !== SiteVerifyIdempotencyRecordSchema::VERSION_V2) {
+            return [IdempotencyClaim::Conflict, null];
         }
         if (
             $existing['hash'] !== $responseHash
@@ -66,10 +73,12 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
 
     public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
+        SiteVerifyIdempotencyRecordSchema::assertCanonicalClaimIdentity($responseHash, $remoteipFingerprint, $binding);
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
         $now = ($this->now)();
         if ($existing === null
+            || ($existing['v'] ?? null) !== SiteVerifyIdempotencyRecordSchema::VERSION_V2
             || $existing['state'] !== 'pending'
             || $existing['hash'] !== $responseHash
             || ($existing['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint
@@ -88,7 +97,13 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
-        if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner || $existing['hash'] !== $responseHash) {
+        if (
+            $existing === null
+            || ($existing['v'] ?? null) !== SiteVerifyIdempotencyRecordSchema::VERSION_V2
+            || $existing['state'] !== 'pending'
+            || $existing['owner'] !== $owner
+            || $existing['hash'] !== $responseHash
+        ) {
             return false;
         }
         SiteVerifyResult::validate($canonicalResponse);
@@ -101,7 +116,12 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     {
         $key = $this->key($backendId, $idempotencyKey);
         $existing = $this->records[$key] ?? null;
-        if ($existing === null || $existing['state'] !== 'pending' || $existing['owner'] !== $owner) {
+        if (
+            $existing === null
+            || ($existing['v'] ?? null) !== SiteVerifyIdempotencyRecordSchema::VERSION_V2
+            || $existing['state'] !== 'pending'
+            || $existing['owner'] !== $owner
+        ) {
             return false;
         }
         $this->records[$key] = array_replace($existing, ['lease_expires_at' => ($this->now)() + $this->leaseSeconds]);

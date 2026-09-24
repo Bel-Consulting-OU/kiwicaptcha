@@ -43,10 +43,19 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * signed-expiry guard. A past-expiry record whose key is still live is
  * stale and fails closed, the mirror of the Array store's liveRecord()
  * sweep.
+ *
+ * The same const also defines the ONE live-chain authority,
+ * `readLiveChainForObligation(key, expectedObligationId, now)`: the
+ * key-lifetime, strict-decode, v2-schema, obligation-identity and
+ * signed-expiry checks in one call returning 'absent' / 'corrupt' /
+ * 'expired' / the validated record. The chain live-read and the
+ * obligation-guarded post-solve acceptance both consult it, so the two
+ * surfaces can never drift into two different definitions of a live
+ * chain.
  */
 final class ChainV2LuaPredicate
 {
-    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)` and `chainRecordExpired(rec, now)` */
+    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)`, `chainRecordExpired(rec, now)` and `readLiveChainForObligation(key, expectedObligationId, now)` */
     public const LUA = <<<'LUA'
 local function isKiwiInteger(x)
   return type(x) == 'number' and x == math.floor(x)
@@ -203,6 +212,31 @@ end
 -- after isValidChainRecord, so expiresAt is a known integer.
 local function chainRecordExpired(rec, now)
   return rec['expiresAt'] <= now
+end
+-- The ONE live-chain authority shared by every read that gates on a
+-- chain record: the chain live-read itself and the obligation-guarded
+-- post-solve acceptance. The key must exist, carry a lifetime, strictly
+-- decode, satisfy the v2 schema, belong to the EXPECTED obligation and
+-- hold a not-yet-passed signed expiry. Answers the string 'absent',
+-- 'corrupt' or 'expired', or the validated record table. Mapping
+-- equality (the obligation key still points at the chain id the caller
+-- observed) remains part of the enclosing atomic script, because it
+-- couples a second key. A caller must treat 'corrupt' as fail-closed
+-- corruption with zero writes, never as absent: corrupt state is never
+-- healed. Call after PersistedJsonLuaPredicate::LUA is in scope
+-- (decodeUniqueObject) and after isValidChainRecord was defined.
+local function readLiveChainForObligation(key, expectedObligationId, now)
+  local existing = redis.call('GET', key)
+  if not existing or existing == '' then return 'absent' end
+  if chainKeyLifetimeMissing(tonumber(redis.call('TTL', key))) then return 'corrupt' end
+  local rec = decodeUniqueObject(existing)
+  if rec == nil or not isValidChainRecord(rec) then return 'corrupt' end
+  -- The binding invariant at the read boundary: a consulted chain must
+  -- BE the expected transaction's chain, or the state (a corrupted
+  -- mapping, a foreign record) is corrupt with zero writes.
+  if rec['obligationId'] ~= expectedObligationId then return 'corrupt' end
+  if chainRecordExpired(rec, now) then return 'expired' end
+  return rec
 end
 LUA;
 }

@@ -161,5 +161,22 @@ local function decodeUniqueObject(raw)
   return decoded
 end
 
+-- The one present-key lifetime read of persisted security state: the
+-- value, the Lua boolean false when the key is genuinely absent, or the
+-- string 'corrupt' when a PRESENT key carries no lifetime (TTL <= 0 —
+-- a stripped TTL, a bad restore, a foreign writer). A persistent key
+-- must never be treated as live authorization-bearing state: every
+-- caller fails closed with zero mutations exactly like a structural
+-- record violation, the same present-key rule the chain store's
+-- chainKeyLifetimeMissing() applies. GET and TTL run in the same script,
+-- so no expiry can interleave between them.
+local function readLivePersistedKey(key)
+  local existing = redis.call('GET', key)
+  if not existing or existing == '' then return false end
+  local ttl = tonumber(redis.call('TTL', key))
+  if ttl == nil or ttl <= 0 then return 'corrupt' end
+  return existing
+end
+
 LUA;
 }

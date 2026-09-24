@@ -379,6 +379,10 @@ final class DispositionWaitRedisFake extends \Predis\Client
         if (str_contains($script, 'Post-solve disposition finalize')) {
             return $this->luaFinalize($keys, $args);
         }
+        if (str_contains($script, 'Post-solve disposition live read')) {
+            // The fake keeps no key lifetimes: a present record is live.
+            return $this->strings[(string) $keys[0]] ?? false;
+        }
 
         throw new \LogicException('unexpected script');
     }

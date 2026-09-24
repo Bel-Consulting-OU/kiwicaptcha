@@ -207,7 +207,7 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
             } catch (SiteVerifyIdempotencyCorruptException) {
             }
             try {
-                $store->claim($backendId, $uuid, $hash, 300, 'ip-fingerprint');
+                $store->claim($backendId, $uuid, $hash, 300, hash('sha256', 'ip-fingerprint'));
                 self::fail('structural #'.$index.': the claim must answer the typed 503, never a client conflict');
             } catch (SiteVerifyIdempotencyCorruptException) {
             }

@@ -1151,7 +1151,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         $client->del([$keyA, $keyB]);
 
         try {
-            [$claimA, $ownerA] = $storeA->claim($backendId, $uuid, $responseHash, 300, 'ip-fingerprint');
+            [$claimA, $ownerA] = $storeA->claim($backendId, $uuid, $responseHash, 300, hash('sha256', 'ip-fingerprint'));
             self::assertSame(\BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed, $claimA);
             self::assertNotNull($ownerA);
             self::assertTrue($storeA->finalize($backendId, $uuid, $responseHash, $ownerA, [
@@ -1164,7 +1164,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
                 $storeB->stored($backendId, $uuid),
                 'B must never replay a result completed under another deployment namespace',
             );
-            [$claimB, $ownerB] = $storeB->claim($backendId, $uuid, $responseHash, 300, 'ip-fingerprint');
+            [$claimB, $ownerB] = $storeB->claim($backendId, $uuid, $responseHash, 300, hash('sha256', 'ip-fingerprint'));
             self::assertSame(
                 \BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed,
                 $claimB,
