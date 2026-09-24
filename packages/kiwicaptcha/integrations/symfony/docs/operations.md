@@ -103,15 +103,15 @@ sub-second sequential delay is acceptable.
 ### Verification rollout
 
 A verifier must carry the same modulus and lambda as the issuer that
-minted the record. The pair never rides the stored record, so a
-redeployment that loses the lambda configuration rejects every rsw
-record with unsupported_rsw_params until it is restored. Deploy the
-new binaries everywhere before arming the algorithm, mirroring the
-protocol-floor rollouts: an old binary rejects the rsw algorithm as
-malformed, which is the same fail-closed shape as an unknown protocol
-version. kiwicaptcha:doctor reports the armed posture, so a deploy
-gate can confirm every node verifies the rung before traffic is
-routed to it.
+minted the record, or resolve it through the rotation keyring (see
+below). The pair never rides the stored record, so a redeployment
+that loses the lambda configuration rejects every rsw record with
+unsupported_rsw_params until it is restored. Deploy the new binaries
+everywhere before arming the algorithm, mirroring the protocol-floor
+rollouts: an old binary rejects the rsw algorithm as malformed, which
+is the same fail-closed shape as an unknown protocol version.
+kiwicaptcha:doctor reports the armed posture, so a deploy gate can
+confirm every node verifies the rung before traffic is routed to it.
 
 The configuration boundary refuses weak or inconsistent pairs at
 boot: a modulus with a small prime factor, a probable-prime modulus,
@@ -122,6 +122,60 @@ the identity of the deployed modulus, and spot-check a node with the
 keygen's --fingerprint mode when a rotation or redeployment is
 audited. The primes themselves stay off the servers: only the
 --diagnostic run of the generator ever prints them.
+
+### The modulus identity and its rollout (protocol v5)
+
+An rsw record can carry the authenticated modulus identity: the
+canonical-byte fingerprint, exactly the keygen's
+rsw_modulus_n_sha256 (the sha256 of the decoded 256-byte modulus).
+Identity-armed issuance signs it as the final canonical segment and
+stamps protocol v5. The verifier resolves the trapdoor by that
+authenticated identity, so an accepted proof is always under the
+exact signed modulus. The writer switch is `kiwi_captcha.rsw_identity`
+(default false) and follows the same two-phase rule as the v3/v4
+extensions. Emission additionally requires the confirmed central
+`min_protocol_version` floor to be >= 5. Every uncertainty fails safe
+to the legacy identityless protocol v2 shape with a once-per-process
+warning. Enable the switch only after every serving binary accepts
+protocol v5:
+
+```text
+# 1. Deploy the v5-reading binaries fleet-wide (the switch still off).
+# 2. Confirm no old binary remains — set the central floor on the
+#    security Redis and watch readiness drain every binary whose max
+#    protocol is below it.
+redis: SET {kiwi:<ns>}:security-policy min_protocol_version 5 min_policy_epoch <n>
+# 3. Enable the writer switch (kiwi_captcha.rsw_identity: true) and
+#    reload. New records are protocol v5 with the signed identity.
+```
+
+Identity-bearing records issued before the v5 grammar (protocol 2..4
+with the old base64-text identity) stay verifiable through the
+clearly named legacy alias for one bounded migration window; the
+alias is never used for new issuance.
+
+### Rotating the rsw modulus
+
+`kiwi_captcha.rsw_verification_keys` is the rotation keyring: a map
+of the modulus identity to the historical `{modulus_n, lambda}` pair.
+The identity is the 64-lowercase-hex rsw_modulus_n_sha256, or its
+legacy alias in the migration window. Both the issuer's
+stored-response reconstruction and the verifier consult it, so
+outstanding challenges issued under A keep verifying after the active
+pair moves to B. An identity in neither the keyring nor the active
+pair fails closed with unsupported_rsw_params. Both core services
+receive the keyring. A keyring key that is not an identity form of
+its paired modulus is refused at container build.
+
+Bootstrap drain rule: identityless rsw challenges carry no identity.
+That covers records issued before the identity feature, or while the
+writer switch is off. No keyring entry can determine which historical
+modulus such a record belongs to. Before the first rotation after
+deploying this feature, let all outstanding identityless challenges
+drain for one maximum retained challenge lifetime (the configured
+TTL). Otherwise accept that they fail closed. Once the switch is on
+and the fleet floor is confirmed, every new record carries its
+identity and rotations are a keyring configuration action.
 
 ### Budget guidance
 
@@ -240,7 +294,7 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical), `min_execution_version <= 4` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical), `min_execution_version <= 4` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative.
   - the required execution tier is satisfiable, only when `risk.execution_challenge` is on. The effective fleet tier is the policy minimum of the node's `kiwi_captcha.execution_version` cap, the central `min_execution_version` floor (absent or 0 counts as version 1) and the generator's maximum execution version.
     A configured `kiwi_captcha.execution_required_version` above the effective tier refuses readiness (503 `security_policy_incompatible:execution_required_R_effective_E`), because every armed request would refuse every client until the confirmed floor reaches the required tier.

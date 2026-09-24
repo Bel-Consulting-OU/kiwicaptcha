@@ -473,6 +473,11 @@ kiwi_captcha:
     rsw_modulus_n: '%env(RSW_MODULUS_N)%'   # base64 of n = p*q, 256 bytes
     rsw_lambda: '%env(RSW_LAMBDA)%'         # base64 of lcm(p-1, q-1)
     rsw_t: 75000             # sequential squarings, 10000..300000
+    rsw_identity: false      # writer switch: sign the modulus identity (protocol v5)
+    rsw_verification_keys:   # rotation keyring: keep outstanding challenges verifiable
+        '<rsw_modulus_n_sha256>':
+            modulus_n: '%env(RSW_OLD_MODULUS_N)%'
+            lambda: '%env(RSW_OLD_LAMBDA)%'
 ```
 
 ### Modulus setup
@@ -500,7 +505,9 @@ the repository.
 
 Record the modulus fingerprint printed by the keygen
 (rsw_modulus_n_sha256, the sha256 of the canonical 256-byte n). It is
-the way to state which modulus a deployment holds. The command
+the way to state which modulus a deployment holds and — since the
+identity-bearing protocol v5 — the exact value the issuance signs
+into the record and resolves against. The command
 `rsw-keygen --fingerprint` recomputes it from a configured n, and a
 redeployment audit compares the two. Validation refuses the weak
 shapes up front: an even or mis-sized modulus, a modulus with a small
@@ -512,6 +519,65 @@ proof that lambda is the true Carmichael value of n: only the keygen
 p/q construction guarantees that. The full lcm relation still cannot
 be verified without the primes, which is why the keygen provenance
 and the fingerprint matter.
+
+### The authenticated modulus identity (protocol v5)
+
+`rsw_identity: true` arms the identity writer: issuance signs the
+canonical-byte modulus fingerprint (exactly the keygen's
+`rsw_modulus_n_sha256`) into the canonical as the final segment and
+stamps the record protocol v5. The verifier then resolves the
+trapdoor by the record's authenticated identity, never by whatever
+pair happens to be active. An accepted proof is therefore always
+under the exact authenticated modulus, and a challenge signed for A
+can never be satisfied under a different configured B.
+
+The switch defaults to false because v5 is a two-phase fleet
+rollout: a pre-v5 verifier rejects the unknown protocol version, so
+every serving binary must read v5 first. Enabling the switch alone is
+not enough. The challenge controller arms the identity only when the
+confirmed central floor is `min_protocol_version >= 5`, the same
+cached central read the v3/v4 gates use. Every uncertainty fails safe
+to the legacy identityless v2 shape with a once-per-process warning:
+a lower floor, an absent or corrupt policy hash, an unreadable
+central policy, or no security Redis. By default, and whenever the
+floor is not confirmed, rsw issuance keeps the legacy identityless
+protocol v2 shape.
+
+The v5 grammar binds the identity exactly. A v5 record must carry
+it, and the canonical fingerprint is the only accepted identity form
+for v5. That requirement is what refuses a signed identityless record
+whose stored version is flipped to 5, because such a record keeps the
+plain canonical bytes. The legacy base64-text alias is accepted only
+on the pre-v5 identity-bearing records, inside one bounded migration
+window. The alias exists so records issued by a release that hashed
+the base64 *text* keep verifying; it is never used for new issuance.
+
+### Rotating the modulus
+
+Rotating the pair while rsw challenges are outstanding requires the
+rotation keyring, `rsw_verification_keys`: a map of the modulus
+identity (the 64-lowercase-hex `rsw_modulus_n_sha256` from the
+keygen, or its legacy base64-text alias during the migration window)
+to that historical `{modulus_n, lambda}` pair. Both the Issuer's
+stored-response reconstruction and the Verifier resolve a record by
+its authenticated identity through this keyring, so an outstanding A
+challenge still reconstructs and verifies after the active pair moved
+to B. A record whose identity is in neither the keyring nor the
+active pair fails closed with `unsupported_rsw_params`, and the
+extension refuses a keyring entry whose key is not an identity form
+of its paired modulus at container build.
+
+The bootstrap rule: identityless rsw challenges carry no identity.
+That covers records issued before the v5 identity landed, or while
+the writer switch is off. No keyring entry can tell which historical
+modulus such a record belongs to: it resolves only through the pair
+active when it was issued. Before the first modulus rotation after
+deploying this feature, let all outstanding identityless challenges
+drain for one maximum retained challenge lifetime (the configured
+TTL), or accept that they fail closed with `unsupported_rsw_params`.
+Once the writer switch is on and the fleet floor is confirmed, every
+new record carries its identity and rotations use the keyring
+instead.
 
 ### The sequential cost T
 

@@ -81,6 +81,7 @@ fn rust_verifies_php_issued_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert!(
         matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -120,6 +121,7 @@ fn rust_verifies_php_issued_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert_eq!(
         verify_solution(&mut ctx2),
@@ -1613,6 +1615,7 @@ fn rust_verifies_php_issued_v4_record() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     };
     assert!(
         matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -1811,10 +1814,24 @@ fn rust_verifies_php_issued_rsw_record() {
     let mut record: kiwicaptcha::ChallengeRecord =
         serde_json::from_value(data).expect("PHP JSON must deserialize into the Rust record");
     assert_eq!(record.algorithm, kiwicaptcha::challenge::PoWAlgorithm::Rsw);
-    assert_eq!(
-        record.protocol_version, 2,
-        "PHP rsw issuance stays protocol v2"
+    // The identity-armed issuance (protocol v5) is the current PHP shape:
+    // the record authenticates its modulus. The older identityless v2
+    // shape stays accepted while a deployment has not enabled the writer.
+    assert!(
+        record.protocol_version == 5 || record.protocol_version == 2,
+        "PHP rsw issuance is v5 (identity-armed) or the legacy v2"
     );
+    if record.protocol_version >= 5 {
+        assert_eq!(
+            record.rsw_modulus_sha256.as_deref(),
+            Some(
+                kiwicaptcha::rsw::modulus_fingerprint_hex(&modulus)
+                    .expect("the fixture modulus is canonical")
+                    .as_str()
+            ),
+            "the v5 record carries the canonical-byte modulus identity"
+        );
+    }
 
     let proof = kiwicaptcha::rsw::fixtures::sequential_proof(
         &record.prefix,
@@ -1848,6 +1865,7 @@ fn rust_verifies_php_issued_rsw_record() {
         rsw_proof: Some(&proof),
         rsw_modulus_n: Some(&modulus),
         rsw_lambda: Some(&lambda),
+        rsw_keyring: None,
     });
     assert!(
         matches!(outcome, VerifyOutcome::Valid { .. }),

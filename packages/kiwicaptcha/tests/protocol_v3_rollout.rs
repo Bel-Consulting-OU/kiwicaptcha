@@ -112,6 +112,7 @@ fn verify_ctx<'a>(
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
     }
 }
 

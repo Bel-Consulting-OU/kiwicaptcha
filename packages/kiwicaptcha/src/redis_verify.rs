@@ -180,7 +180,7 @@ use crate::challenge::{
     verify_signature, verify_signature_v2_with_keys, ChallengeRecord, PoWAlgorithm,
 };
 use crate::keys::DerivedKeys;
-use crate::rsw::RswTrapdoor;
+use crate::rsw::{RswKeyring, RswTrapdoor};
 use crate::token::SolutionToken;
 use crate::verify::{
     check_execution_binding_cached, check_request_binding, check_rsw_params, ct_eq,
@@ -1714,6 +1714,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
         envelope.protocol_version,
         envelope.decoy_field.is_some(),
         envelope.execution_program.is_some(),
+        envelope.rsw_modulus_sha256.is_some(),
     ) {
         return None;
     }
@@ -3023,6 +3024,15 @@ pub struct ProductionVerifier {
     /// trapdoor computation, exactly the Argon2id
     /// configuration-mismatch semantics of the PHP core.
     rsw: Option<(String, String)>,
+    /// The rsw trapdoor rotation keyring (see
+    /// [`crate::rsw::RswKeyring`]): historical pairs indexed by their
+    /// authenticated modulus identity, the Rust mirror of the PHP
+    /// `$rswVerificationKeys`. A record whose authenticated identity is
+    /// not the active pair resolves through this keyring, so a rotated
+    /// (or mixed-node) outstanding challenge still verifies; an unknown
+    /// identity resolves to no trapdoor and fails closed with
+    /// [`VerifyError::UnsupportedRswParams`].
+    rsw_keyring: RswKeyring,
 }
 
 fn real_now_unix() -> u64 {
@@ -3075,6 +3085,7 @@ impl ProductionVerifier {
             derived_keys: Mutex::new(HashMap::new()),
             now_unix: real_now_unix,
             rsw: None,
+            rsw_keyring: RswKeyring::new(),
         }
     }
 
@@ -3097,12 +3108,49 @@ impl ProductionVerifier {
         self
     }
 
-    /// The verifier's resolved rsw trapdoor: the raw configured pair
-    /// decoded through the validated-pair memo. `None` when no pair is
-    /// configured or the pair fails validation.
-    fn rsw_trapdoor(&self) -> Option<Arc<RswTrapdoor>> {
-        let (modulus, lambda) = self.rsw.as_ref()?;
-        RswTrapdoor::validated(modulus, lambda)
+    /// Register a historical rsw trapdoor pair under its authenticated
+    /// modulus identity — the canonical-byte fingerprint
+    /// (`crate::rsw::modulus_fingerprint_hex`, exactly the rsw-keygen's
+    /// `rsw_modulus_n_sha256`) or its legacy base64-text alias during
+    /// the migration window. A record whose identity resolves here
+    /// verifies even after the active pair rotated.
+    ///
+    /// An entry whose identity matches neither form of the paired
+    /// modulus is ignored (the builder never panics): resolution then
+    /// fails closed for that identity, so a misconfigured keyring can
+    /// never map a signed identity onto an unrelated pair.
+    pub fn with_rsw_verification_key(
+        mut self,
+        identity: impl Into<String>,
+        modulus_b64: impl Into<String>,
+        lambda_b64: impl Into<String>,
+    ) -> Self {
+        let _ = self
+            .rsw_keyring
+            .insert(&identity.into(), &modulus_b64.into(), &lambda_b64.into());
+        self
+    }
+
+    /// The rsw trapdoor selected by the record's authenticated modulus
+    /// identity: the rotation keyring first, then the active pair,
+    /// through the one resolver the generic verifier also uses. The
+    /// legacy base64-text alias resolves a pre-v5 identity only; a v5
+    /// identity resolves its canonical fingerprint exactly; an identity
+    /// in neither (or a v5 record without one) resolves to `None` —
+    /// which the proof site answers as the authentic-but-unsupported
+    /// [`VerifyError::UnsupportedRswParams`], never by falling through
+    /// to an arbitrary active pair.
+    fn rsw_trapdoor_for(&self, record: &ChallengeRecord) -> Option<Arc<RswTrapdoor>> {
+        crate::rsw::resolve_rsw_trapdoor(
+            self.rsw
+                .as_ref()
+                .map(|(modulus, lambda)| (modulus.as_str(), lambda.as_str())),
+            Some(&self.rsw_keyring),
+            record.rsw_modulus_sha256.as_deref(),
+            record.protocol_version,
+        )
+        .ok()
+        .flatten()
     }
 
     /// Configure the tenant scope of every verification: the purpose
@@ -3701,7 +3749,7 @@ impl ProductionVerifier {
         //    rsw record compares the presented final value against the
         //    trapdoor expectation (the verifier's own resolved trapdoor,
         //    never a record field).
-        let trapdoor = self.rsw_trapdoor();
+        let trapdoor = self.rsw_trapdoor_for(&record);
         let valid = match proof_is_valid(
             &record,
             token.counter,
@@ -3990,7 +4038,7 @@ impl ProductionVerifier {
         //    resultless recovery whose fresh mutation was not proven
         //    durable cannot authorize anything, exactly like the
         //    original consume whose WAIT failed).
-        let resume_trapdoor = self.rsw_trapdoor();
+        let resume_trapdoor = self.rsw_trapdoor_for(&state.record);
         let valid = match proof_is_valid(
             &state.record,
             token.counter,

@@ -165,11 +165,15 @@ final class Config
      *                                      standard base64 of exactly 256 bytes (top bit
      *                                      set, odd), the public half of the time-lock
      *                                      trapdoor. Generate the pair with the shipped
-     *                                      tools/rsw-keygen binary and record its
-     *                                      rsw_modulus_n_sha256 fingerprint; weak or
-     *                                      fabricated moduli are refused here. Required
-     *                                      when algorithm is rsw; ignored otherwise (null
-     *                                      default = the rsw algorithm is not configured).
+     *                                      tools/rsw-keygen binary. Record its
+     *                                      rsw_modulus_n_sha256 fingerprint, the sha256 of
+     *                                      the decoded 256-byte modulus. Identity-armed
+     *                                      protocol v5 issuance signs that value into
+     *                                      every record and the verifier resolves by it.
+     *                                      Weak or fabricated moduli are refused here.
+     *                                      Required when algorithm is rsw; ignored
+     *                                      otherwise (null default = the rsw algorithm is
+     *                                      not configured).
      * @param string|null $rswLambda        The rsw secret lambda = lcm(p-1, q-1) as
      *                                      canonical standard base64 of 1..256 even
      *                                      bytes, the trapdoor that lets the server

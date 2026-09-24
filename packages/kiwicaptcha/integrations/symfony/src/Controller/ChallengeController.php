@@ -149,16 +149,19 @@ final class ChallengeController
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
     /**
-     * The once-per-process gate warning guard: when risk.decoy_v3_enabled
-     * is true but the confirmed central min_protocol_version floor is
-     * below 3 (or unconfirmed), or when risk.execution_challenge is on
-     * but the floor is below 4 (or unconfirmed).
-     * Issuance then falls back to the safe unarmed emission.
-     * This flag makes the actionable warning fire exactly once per
-     * process instead of once per issuance, so an issuance-rate log
-     * flood never drowns the signal.
+     * The once-per-process gate warning guard. A warning condition
+     * exists when a writer switch is on but the confirmed central
+     * `min_protocol_version` floor is too low, or unconfirmed:
+     * risk.decoy_v3_enabled below 3, risk.execution_challenge on below
+     * 4, or kiwi_captcha.rsw_identity on below 5. Issuance then falls
+     * back to the safe unarmed emission. This flag makes the actionable
+     * warning fire exactly once per process instead of once per
+     * issuance, so an issuance-rate log flood never drowns the signal.
      */
     private bool $decoyV3WarningLogged = false;
+
+    /** The once-per-process warning guard of the protocol-v5 writer gate. */
+    private bool $rswIdentityWarningLogged = false;
 
     public function __construct(
         private readonly Issuer $issuer,
@@ -270,6 +273,19 @@ final class ChallengeController
          * breakage, never an arm).
          */
         private readonly bool $executionGate = false,
+        /**
+         * The rsw identity writer switch (kiwi_captcha.rsw_identity,
+         * default false). When true and the algorithm is rsw, issuance
+         * may arm the authenticated modulus identity (protocol v5),
+         * subject to {@see self::rswIdentityEmissionEnabled()}: the
+         * central security-policy floor must confirm >= 5 first, and any
+         * uncertainty keeps issuance on the legacy identityless v2
+         * shape. The identity is the security property (the accepted
+         * proof is bound to the exact authenticated modulus), but a
+         * pre-v5 verifier rejects the unknown protocol version — the
+         * two-phase rollout gate is why the default is false.
+         */
+        private readonly bool $rswIdentityEnabled = false,
         /**
          * The issuance-side logger (when the app has one): receives the
          * once-per-process warning when decoy_v3_enabled cannot take
@@ -391,6 +407,51 @@ final class ChallengeController
                 'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 4 only after every serving binary accepts protocol v4 '.
                 '(deploy the new binaries fleet-wide and confirm no old binary remains); until then issuance stays execution-unarmed '.
                 '(protocol v3 at most, or v2 when the decoy floor is unmet too).',
+                $detail,
+            );
+            try {
+                $this->logger?->warning($message);
+            } catch (\Throwable) {
+                // A raising logger must never break issuance.
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The protocol-v5 emission gate implements the two-phase rollout
+     * invariant for the rsw modulus identity: identity-armed rsw
+     * issuance (kiwi_captcha.rsw_identity on, algorithm rsw) requires the
+     * confirmed central min_protocol_version floor
+     * ({kiwi:<ns>}:security-policy) to be >= 5, the binary's own maximum.
+     * The floor establishes that every serving binary accepts the v5
+     * identity-bearing canonical before any node emits it: a pre-v5
+     * verifier rejects the unknown protocol version, so the identity can
+     * never be silently ignored by an old reader. A floor below 5, an
+     * absent or corrupt floor, an unreadable central policy or no
+     * central policy at all all fail safe to the legacy identityless v2
+     * emission. The actionable warning fires once per process.
+     */
+    private function rswIdentityEmissionEnabled(): bool
+    {
+        if (!$this->rswIdentityEnabled) {
+            return false;
+        }
+        $floor = $this->epochMonitor?->minProtocolVersion();
+        if ($floor !== null && $floor >= \KiwiCaptcha\ChallengeRecord::MAX_PROTOCOL_VERSION) {
+            return true;
+        }
+        if (!$this->rswIdentityWarningLogged) {
+            $this->rswIdentityWarningLogged = true;
+            $detail = $floor === null
+                ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
+                : sprintf('the central min_protocol_version is %d', $floor);
+            $message = sprintf(
+                'kiwicaptcha: kiwi_captcha.rsw_identity is on but protocol-v5 emission stays DISABLED — %s (below 5). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 5 only after every serving binary accepts protocol v5 '.
+                '(deploy the new binaries fleet-wide and confirm no old binary remains); until then rsw issuance stays on the legacy identityless '.
+                'protocol v2 shape.',
                 $detail,
             );
             try {
@@ -1590,9 +1651,18 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
+            // The rsw identity arming decision: the writer switch
+            // (kiwi_captcha.rsw_identity) AND the confirmed central
+            // protocol floor >= 5, see
+            // {@see self::rswIdentityEmissionEnabled()}. Inert for a
+            // non-rsw algorithm; when the algorithm is rsw and the gate
+            // is unmet, issuance keeps the legacy identityless v2 shape
+            // so no pre-v5 verifier ever sees the identity-bearing
+            // canonical.
+            $armRswIdentity = $this->rswIdentityEmissionEnabled();
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion)
-                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion, armRswIdentity: $armRswIdentity)
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy, armRswIdentity: $armRswIdentity);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random

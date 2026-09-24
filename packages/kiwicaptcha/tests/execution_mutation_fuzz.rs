@@ -810,6 +810,7 @@ fn verify_probe(
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 0,
     };
     verify_solution(&mut ctx)

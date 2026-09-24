@@ -241,6 +241,17 @@ final class Verifier
     private array $rswByHash = [];
 
     /**
+     * The keyring's modulus base64 per identity form (canonical
+     * fingerprint and legacy alias): the resolution re-checks that the
+     * identity under which a record arrived is an accepted form for the
+     * record's protocol version (a v5 record resolves its canonical
+     * fingerprint exactly).
+     *
+     * @var array<string, string>
+     */
+    private array $rswModulusByHash = [];
+
+    /**
      * @var bool whether the one-time non-atomic-storage warning already
      *            fired in this process (the misconfiguration is a
      *            deployment property, not a per-verification event)
@@ -430,7 +441,7 @@ final class Verifier
             ? new Rsw($rswModulusN, $rswLambda)
             : null;
         foreach ($rswVerificationKeys as $hash => $pair) {
-            if (!\is_string($hash) || preg_match('/^[0-9a-f]{64}$/D', $hash) !== 1
+            if (!\is_string($hash) || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $hash) !== 1
                 || !\is_array($pair)
                 || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
                 || !\is_string($pair['lambda'] ?? null) || $pair['lambda'] === ''
@@ -439,12 +450,23 @@ final class Verifier
                     'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
                 );
             }
-            if (!hash_equals($hash, hash('sha256', $pair['modulus_n']))) {
+            // The keyring key must be an identity form of the paired
+            // modulus: the canonical fingerprint (the keygen's
+            // rsw_modulus_n_sha256) or its clearly named legacy
+            // base64-text alias during the migration window. Both forms
+            // resolve to the same decoded trapdoor below.
+            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], allowLegacyAlias: true)) {
                 throw new \InvalidArgumentException(
-                    'rswVerificationKeys keys must be the SHA-256 of the paired modulus_n'
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n (or its legacy base64-text alias)'
                 );
             }
-            $this->rswByHash[$hash] = new Rsw($pair['modulus_n'], $pair['lambda']);
+            $trapdoor = new Rsw($pair['modulus_n'], $pair['lambda']);
+            foreach (RswModulusIdentity::allFingerprints($pair['modulus_n']) as $identity) {
+                $this->rswByHash[$identity] = $trapdoor;
+                $this->rswModulusByHash[$identity] = $pair['modulus_n'];
+            }
+            $this->rswByHash[$hash] = $trapdoor;
+            $this->rswModulusByHash[$hash] = $pair['modulus_n'];
         }
         // A non-atomic storage (the {@see NonAtomicStorageInterface}
         // capability marker, e.g. the PSR-6 backend) keeps best-effort
@@ -1108,13 +1130,21 @@ final class Verifier
             // The authenticated trapdoor identity selects the pair: the
             // keyring first (a rotated/mixed-node record), then the
             // active pair (including a legacy record that predates the
-            // identity). An identity in neither fails closed as
-            // unsupported.
+            // identity). The legacy base64-text alias resolves only a
+            // pre-v5 identity; a v5 record resolves its canonical
+            // fingerprint exactly. An identity in neither fails closed
+            // as unsupported.
             $rsw = null;
             if ($record->rswModulusSha256 !== null) {
-                $rsw = $this->rswByHash[$record->rswModulusSha256] ?? null;
-                if ($rsw === null && $this->rsw !== null && $this->rswModulusN !== null
-                    && hash_equals($record->rswModulusSha256, hash('sha256', $this->rswModulusN))
+                $allowLegacyAlias = $record->protocolVersion <= 4;
+                $identity = $record->rswModulusSha256;
+                $keyringModulus = $this->rswModulusByHash[$identity] ?? null;
+                if ($keyringModulus !== null
+                    && RswModulusIdentity::matches($identity, $keyringModulus, $allowLegacyAlias)
+                ) {
+                    $rsw = $this->rswByHash[$identity];
+                } elseif ($this->rsw !== null && $this->rswModulusN !== null
+                    && RswModulusIdentity::matches($identity, $this->rswModulusN, $allowLegacyAlias)
                 ) {
                     $rsw = $this->rsw;
                 }
@@ -1842,6 +1872,7 @@ final class Verifier
             $record->protocolVersion,
             $record->decoyField !== null,
             $executionPresent,
+            $record->rswModulusSha256 !== null,
         )) {
             return false;
         }
@@ -1883,6 +1914,19 @@ final class Verifier
             }
         } elseif ($record->executionVersion !== null || $record->executionCommitment !== null) {
             return false;
+        }
+        // The authenticated rsw modulus identity: when present it must be
+        // 64 lowercase hex and may only ride an rsw record (the decoder
+        // enforces the same on the persisted path; this closes the
+        // hand-rolled-record surface). The protocol grammar above
+        // guarantees a v5 record always carries it and a v2..v4 record's
+        // identity is the pre-v5 legacy shape.
+        if ($record->rswModulusSha256 !== null) {
+            if ($record->algorithm !== PoWAlgorithm::Rsw
+                || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $record->rswModulusSha256) !== 1
+            ) {
+                return false;
+            }
         }
         $nonceBytes = base64_decode($record->nonce, true);
         if ($nonceBytes === false || \strlen($nonceBytes) !== 32) {

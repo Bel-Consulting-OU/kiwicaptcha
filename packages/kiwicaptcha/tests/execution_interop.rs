@@ -408,6 +408,7 @@ fn armed_issuance_verifies_with_correct_digest() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 0,
     };
     assert!(matches!(
@@ -462,6 +463,7 @@ fn armed_record_without_digest_is_execution_mismatch() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 0,
     };
     assert_eq!(
@@ -539,6 +541,7 @@ fn wrong_digest_and_digest_from_another_challenge_are_execution_mismatch() {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             max_attempts: 0,
         };
         assert_eq!(
@@ -625,6 +628,7 @@ fn unarmed_issuance_rejects_a_stray_digest() {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 0,
     };
     assert_eq!(

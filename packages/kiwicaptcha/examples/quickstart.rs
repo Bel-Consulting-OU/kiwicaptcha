@@ -110,6 +110,7 @@ fn quickstart() -> Result<(), String> {
         rsw_proof: None,
         rsw_modulus_n: None,
         rsw_lambda: None,
+        rsw_keyring: None,
         max_attempts: 10,
     };
 

@@ -10,6 +10,7 @@ use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Rsw;
+use KiwiCaptcha\RswModulusIdentity;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
@@ -495,7 +496,7 @@ final class RswTest extends TestCase
         self::assertSame(Config::RSW_TARGET_BITS_PIN, $challenge->targetBits);
         self::assertSame(RswFixture::MODULUS_N_B64, $challenge->rswModulus);
         self::assertArrayHasKey('rsw_modulus', $challenge->toArray());
-        self::assertSame(2, $record->protocolVersion, 'rsw issuance stays protocol v2');
+        self::assertSame(5, $record->protocolVersion, 'identity-armed rsw issuance is protocol v5');
         self::assertNull($record->decoyField);
         self::assertNull($record->executionProgram);
         self::assertSame($challenge->prefix, $record->prefix);
@@ -506,12 +507,12 @@ final class RswTest extends TestCase
         self::assertStringStartsWith('v2|', $payload);
         self::assertStringContainsString('|rsw|0|30000|1|1|', $payload);
         self::assertStringEndsWith(
-            '|'.hash('sha256', RswFixture::MODULUS_N_B64),
+            '|'.RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
             $payload,
             'the authenticated rsw trapdoor identity is the final canonical segment',
         );
         self::assertSame(
-            hash('sha256', RswFixture::MODULUS_N_B64),
+            RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
             $record->rswModulusSha256,
             'the record carries the authenticated modulus identity',
         );
@@ -568,7 +569,7 @@ final class RswTest extends TestCase
         $this->requireGmp();
         $config = $this->rswConfig(Config::MIN_RSW_T);
         [$challenge, $record, $storage] = $this->issue($config);
-        $identity = hash('sha256', RswFixture::MODULUS_N_B64);
+        $identity = RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64);
         self::assertSame($identity, $record->rswModulusSha256, 'the issued record carries the authenticated identity');
         $token = $this->solveToken($challenge->nonce, $challenge->prefix, $challenge->t);
         $keyring = [$identity => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]];
@@ -610,10 +611,10 @@ final class RswTest extends TestCase
         self::assertSame('unsupported_rsw_params', $bare->code());
 
         // A legacy rsw record without the identity resolves through the
-        // active pair (the pre-binding shape).
-        $legacy = ChallengeRecord::fromArray(\array_diff_key(
-            $record->toArray(),
-            ['rsw_modulus_sha256' => true],
+        // active pair (the pre-binding shape: protocol v2, no identity).
+        $legacy = ChallengeRecord::fromArray(array_replace(
+            \array_diff_key($record->toArray(), ['rsw_modulus_sha256' => true]),
+            ['protocol_version' => 2],
         ));
         self::assertNull($legacy->rswModulusSha256);
         $legacyIssuer = new Issuer(new Config(

@@ -56,6 +56,13 @@ The hex and base64 lines are two encodings of the same bytes. Deploy
 `rsw_lambda`; record `rsw_modulus_n_sha256` as the identity of the
 deployed modulus, and verify it later with the fingerprint mode.
 
+`rsw_modulus_n_sha256` is the one canonical identity every component
+shares: the sha256 of the DECODED 256-byte modulus (never of the
+base64 text). Identity-armed protocol v5 issuance signs exactly this
+value into the record, the verifiers resolve the trapdoor by it, and
+`kiwi_captcha.rsw_verification_keys` is keyed by it — the same 64 hex
+characters pin one modulus everywhere.
+
 ## Check a pair
 
 ```sh

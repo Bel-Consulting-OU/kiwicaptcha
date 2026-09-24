@@ -520,10 +520,10 @@ final class RealRedisIntegrationTest extends TestCase
 
         // A newer protocol or epoch takes the binary out of the pool.
         $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '4', 'min_policy_epoch', '1');
-        self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_protocol_version 4 <= the binary max (4) — the v4-capable binary stays ready');
+        self::assertSame(200, $controller()->ready()->getStatusCode(), 'central min_protocol_version 5 <= the binary max (5) — the v5-capable binary stays ready');
 
-        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '5', 'min_policy_epoch', '1');
-        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 5 > the binary max (4)');
+        $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '6', 'min_policy_epoch', '1');
+        self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_protocol_version 6 > the binary max (5)');
 
         $this->client->hset('{kiwi:ci-health}:security-policy', 'min_protocol_version', '3', 'min_policy_epoch', '2');
         self::assertSame(503, $controller()->ready()->getStatusCode(), 'central min_policy_epoch 2 > the configured risk.policy_version 1');

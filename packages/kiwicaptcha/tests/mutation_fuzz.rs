@@ -123,6 +123,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 rsw_proof: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
+                rsw_keyring: None,
             };
             let _ = verify_solution(&mut ctx); // must return an outcome, never panic
         }

@@ -523,14 +523,23 @@ final class StrictParserTest extends TestCase
         // The canonical protocol bounds are enforced at the parse
         // boundary, mirroring the Rust serde boundary: 0 is not a
         // protocol version, and everything above MAX_PROTOCOL_VERSION is
-        // a corrupt or foreign value no conforming issuer writes.
-        foreach ([0, 5, 99, 255] as $version) {
+        // a corrupt or foreign value no conforming issuer writes. A bare
+        // v5 (the identity-bearing grammar) without the rsw identity is
+        // rejected too: the version exists but its grammar requires the
+        // identity, so a version-only bump can never look valid.
+        foreach ([0, 6, 99, 255] as $version) {
             try {
                 ChallengeRecord::fromArray(self::mutate('protocol_version', $version));
                 self::fail("protocol_version $version must be rejected at parse");
             } catch (MalformedRecordException $e) {
                 self::assertStringContainsString('protocol_version', $e->getMessage());
             }
+        }
+        try {
+            ChallengeRecord::fromArray(self::mutate('protocol_version', 5));
+            self::fail('a v5 record without the rsw identity must be rejected at parse');
+        } catch (MalformedRecordException $e) {
+            self::assertStringContainsString('protocol_version', $e->getMessage());
         }
     }
 

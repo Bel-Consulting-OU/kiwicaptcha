@@ -91,16 +91,16 @@ use Symfony\Component\HttpFoundation\Response;
 final class KiwiHealthController
 {
     /**
-     * The binary's maximum challenge protocol version: 4 since the
-     * execution-capable canonical (protocol v4) landed — armed issuance
-     * writes version 4 and the verifier accepts versions 1..4. A
-     * central security-policy hash demanding a higher version means this
-     * binary cannot verify the challenges the fleet now issues, so it
-     * must not be ready. Mirrored by the php-core
+     * The binary's maximum challenge protocol version: 5 since the
+     * identity-bearing rsw canonical (protocol v5) landed —
+     * identity-armed rsw issuance writes version 5 and the verifier
+     * accepts versions 1..5. A central security-policy hash demanding a
+     * higher version means this binary cannot verify the challenges the
+     * fleet now issues, so it must not be ready. Mirrored by the php-core
      * (`ChallengeRecord::MAX_PROTOCOL_VERSION`) and the Rust crate
      * (`challenge::MAX_PROTOCOL_VERSION`).
      */
-    public const MAX_PROTOCOL_VERSION = 4;
+    public const MAX_PROTOCOL_VERSION = 5;
 
     /**
      * The binary's maximum execution-program version, taken from the

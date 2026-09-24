@@ -305,6 +305,16 @@ pub struct VerifyContext<'a> {
     /// persist it beside client material. Never stored on the record
     /// and never sent to the client.
     pub rsw_lambda: Option<&'a str>,
+    /// The rsw trapdoor rotation keyring (see
+    /// [`crate::rsw::RswKeyring`]): historical pairs indexed by their
+    /// authenticated modulus identity. A record whose authenticated
+    /// `rsw_modulus_sha256` is not the active pair resolves through
+    /// this keyring, so a rotated/mixed-node outstanding challenge
+    /// still verifies. `None` = only the active pair resolves. The
+    /// selection is exact and never falls through to an arbitrary
+    /// active pair: an unknown identity fails closed with
+    /// [`VerifyError::UnsupportedRswParams`].
+    pub rsw_keyring: Option<&'a crate::rsw::RswKeyring>,
 }
 
 /// Outcome of a verification.
@@ -662,8 +672,25 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
         record.protocol_version,
         record.decoy_field.is_some(),
         record.execution_program.is_some(),
+        record.rsw_modulus_sha256.is_some(),
     ) {
         return Err(VerifyError::MalformedRecord);
+    }
+    // The authenticated rsw modulus identity: when present it must be 64
+    // lowercase hex and may only ride an rsw record (the stored-record
+    // decoder enforces the same on the persisted path; this closes the
+    // hand-rolled-record surface). The grammar above guarantees a v5
+    // record always carries it and a v2..=4 record's identity is the
+    // pre-v5 legacy shape.
+    if let Some(identity) = record.rsw_modulus_sha256.as_deref() {
+        if record.algorithm != PoWAlgorithm::Rsw
+            || identity.len() != 64
+            || !identity
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(VerifyError::MalformedRecord);
+        }
     }
     let execution_present = record.execution_program.is_some();
     // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
@@ -1398,20 +1425,28 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     // 5. Re-derive and check the proof. The rsw record derives no hash:
     //    the presented final value is compared against the trapdoor
-    //    expectation (constant-time over the fixed 512-hex wire form);
-    //    the trapdoor pair is the verifier's configuration, resolved
-    //    per verification on this generic path through the
-    //    process-wide validated-pair memo (the expensive primality
-    //    tests run once per configured pair; every later verification
-    //    is a cache hit — the production verifier holds its own
-    //    resolved pair). A verifier without the pair refuses
-    //    the authentic record with UnsupportedRswParams.
-    let trapdoor = match (ctx.rsw_modulus_n, ctx.rsw_lambda) {
-        (Some(modulus), Some(lambda)) => match RswTrapdoor::validated(modulus, lambda) {
-            Some(trapdoor) => Some(trapdoor),
-            None => return VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+    //    expectation (constant-time over the fixed 512-hex wire form).
+    //    The trapdoor is selected by the record's authenticated modulus
+    //    identity — the rotation keyring first, then the active pair —
+    //    through the one resolver both this generic path and the
+    //    production verifier use: the legacy base64-text alias resolves
+    //    a pre-v5 identity only, a v5 identity resolves its canonical
+    //    fingerprint exactly, and an identity in neither fails closed
+    //    with UnsupportedRswParams (never an arbitrary active pair).
+    //    The process-wide validated-pair memo keeps the expensive
+    //    primality tests once per configured pair; every later
+    //    verification of the same pair is a cache hit.
+    let trapdoor = match crate::rsw::resolve_rsw_trapdoor(
+        match (ctx.rsw_modulus_n, ctx.rsw_lambda) {
+            (Some(modulus), Some(lambda)) => Some((modulus, lambda)),
+            _ => None,
         },
-        _ => None,
+        ctx.rsw_keyring,
+        ctx.record.rsw_modulus_sha256.as_deref(),
+        ctx.record.protocol_version,
+    ) {
+        Ok(trapdoor) => trapdoor,
+        Err(_) => return VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
     };
     let valid = match proof_is_valid(ctx.record, ctx.counter, ctx.rsw_proof, trapdoor.as_deref()) {
         Ok(valid) => valid,
@@ -1854,6 +1889,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -1937,6 +1973,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -2118,6 +2155,7 @@ mod tests {
                 rsw_proof: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
+                rsw_keyring: None,
                 expected_issuer: Some("prod"),
                 expected_policy_version: Some(2),
                 client_ip,
@@ -2791,6 +2829,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             accept_legacy_v1: false,
         };
         assert_eq!(
@@ -2830,6 +2869,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2876,6 +2916,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2914,6 +2955,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
@@ -2951,6 +2993,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
@@ -3006,6 +3049,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3046,6 +3090,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3092,6 +3137,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
@@ -3150,6 +3196,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3182,6 +3229,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx2),
@@ -3222,6 +3270,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         verify_solution(&mut ctx); // wrong counter
         let attempts = record.attempts_used;
@@ -3231,6 +3280,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             secret_key: "test-key-16-bytes!",
             tenant: None,
             secrets_by_kid: None,
@@ -3293,6 +3343,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3332,6 +3383,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3371,6 +3423,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
@@ -3384,6 +3437,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             tenant: None,
@@ -3445,6 +3499,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3487,6 +3542,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3525,6 +3581,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3567,6 +3624,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3608,6 +3666,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3648,6 +3707,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3826,6 +3886,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3866,6 +3927,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx2),
@@ -3911,6 +3973,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -4032,6 +4095,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4070,6 +4134,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4108,6 +4173,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -4215,6 +4281,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -4246,6 +4313,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_fast),
@@ -4518,6 +4586,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4555,6 +4624,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             execution_digest: None,
             execution_trace: None,
@@ -4613,6 +4683,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4653,6 +4724,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4693,6 +4765,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4707,6 +4780,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4770,6 +4844,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4811,6 +4886,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4851,6 +4927,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4884,6 +4961,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_none),
@@ -4980,6 +5058,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -5016,6 +5095,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_wrong),
@@ -5049,6 +5129,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_plain),
@@ -5094,6 +5175,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5127,6 +5209,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_empty),
@@ -5175,6 +5258,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5212,6 +5296,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_boundary),
@@ -5249,6 +5334,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_rolled),
@@ -5301,6 +5387,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5335,6 +5422,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_plain),
@@ -5383,6 +5471,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -5628,6 +5717,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5667,6 +5757,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5713,6 +5804,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5770,6 +5862,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5888,6 +5981,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5932,6 +6026,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5981,6 +6076,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -6174,6 +6270,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
             revoked_kids: None,
             counter,
             duration_ms: 5000,
@@ -6286,6 +6383,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -6397,6 +6495,7 @@ mod tests {
             rsw_proof: proof,
             rsw_modulus_n: trapdoor.then_some(crate::rsw::fixtures::MODULUS_N_B64),
             rsw_lambda: trapdoor.then_some(crate::rsw::fixtures::LAMBDA_B64),
+            rsw_keyring: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -6596,6 +6695,7 @@ mod tests {
             rsw_proof: proof,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64),
             rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64),
+            rsw_keyring: None,
             execution_digest: digest,
             execution_trace: trace_b64,
             telemetry: None,
@@ -6614,7 +6714,7 @@ mod tests {
         // (the fifth and sixth segments) and verifies. This is the
         // acceptance the mutually-exclusive decoder used to break.
         let mut record = make_rsw_execution_record();
-        assert_eq!(record.protocol_version, 4);
+        assert_eq!(record.protocol_version, 5);
         let proof =
             crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
         let (digest, trace_b64) = execution_evidence(&record);

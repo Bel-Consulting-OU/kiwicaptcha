@@ -200,15 +200,24 @@ final class ChallengeRecord
     public const MAX_STRING_BYTES = 4096;
 
     /**
-     * The binary's maximum challenge protocol version, mirrored by the
-     * Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the extension's
-     * readiness probe (KiwiHealthController): 4 since the
-     * execution-capable canonical (protocol v4) landed — armed issuance
-     * writes version 4 and the verifier accepts versions 1..4. A
-     * central security-policy floor above this means the binary cannot
-     * verify the challenges the fleet now issues.
+     * The binary's maximum challenge protocol version is 5, mirrored by
+     * the Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the
+     * extension's readiness probe (`KiwiHealthController`).
+     * Identity-armed rsw issuance writes version 5 and the verifier
+     * accepts versions 1..5. A central security-policy floor above this
+     * means the binary cannot verify the challenges the fleet now
+     * issues.
      */
-    public const MAX_PROTOCOL_VERSION = 4;
+    public const MAX_PROTOCOL_VERSION = 5;
+
+    /**
+     * The first protocol version that requires the authenticated rsw
+     * modulus identity on an rsw record. Identity-bearing records at
+     * versions 2..4 are the pre-v5 legacy shape, accepted (and resolved
+     * through the legacy base64-text alias) for the bounded migration
+     * window.
+     */
+    public const RSW_IDENTITY_PROTOCOL_VERSION = 5;
 
     /**
      * The wire-key whitelist as a flipped isset() hash, built once per
@@ -423,12 +432,24 @@ final class ChallengeRecord
      * execution triplet and may also carry the decoy (the canonical
      * appends both segments).
      */
-    public static function protocolExtensionGrammarOk(int $protocolVersion, bool $decoyPresent, bool $executionPresent): bool
+    public static function protocolExtensionGrammarOk(int $protocolVersion, bool $decoyPresent, bool $executionPresent, bool $rswIdentityPresent = false): bool
     {
         return match ($protocolVersion) {
-            1, 2 => !$decoyPresent && !$executionPresent,
+            // The legacy v1 signature covers no canonical segment at
+            // all, so the identity is refused there too.
+            1 => !$decoyPresent && !$executionPresent && !$rswIdentityPresent,
+            2 => !$decoyPresent && !$executionPresent,
             3 => $decoyPresent && !$executionPresent,
             4 => $executionPresent,
+            // The identity-bearing rsw grammar: the identity is
+            // mandatory (a signed identityless record with its stored
+            // version flipped to 5 would keep the signatureless-identity
+            // canonical bytes — the identity requirement is what refuses
+            // it). The decoy and execution segments remain governed by
+            // their own canonical shape and signed equivalence, so an
+            // rsw + execution composition signs the identity as the
+            // final segment under the same version.
+            self::RSW_IDENTITY_PROTOCOL_VERSION => $rswIdentityPresent,
             default => false,
         };
     }
@@ -679,12 +700,20 @@ final class ChallengeRecord
         // enforces the same split.
         $protocolVersion = (int) ($data['protocol_version'] ?? 1);
         $decoyField = \array_key_exists('decoy_field', $data) ? $data['decoy_field'] : null;
+        // The authenticated rsw trapdoor identity, parsed before the
+        // grammar so the matrix sees its presence. The identity may only
+        // ride an rsw record and is a v2+ canonical segment (v1 has no
+        // identity segment at all).
+        $rswModulusSha256 = self::parseRswModulusSha256($data);
         // The shared grammar matrix: every protocol-version and
         // extension combination is judged by one table, so the decoder
         // and the verifier can never disagree about which records are
         // structurally valid — including the legacy v1 shape, which
-        // admits neither extension.
-        if (!self::protocolExtensionGrammarOk($protocolVersion, $decoyField !== null, $executionProgram !== null)) {
+        // admits neither extension, the pre-v5 identity-bearing rsw
+        // shape (protocol 2..4, accepted for the bounded migration
+        // window) and the v5 grammar, which requires the identity and
+        // combines it with neither of the other extensions.
+        if (!self::protocolExtensionGrammarOk($protocolVersion, $decoyField !== null, $executionProgram !== null, $rswModulusSha256 !== null)) {
             throw MalformedRecordException::invalidProtocolFieldCombination($protocolVersion);
         }
 
@@ -728,14 +757,16 @@ final class ChallengeRecord
             executionCommitment: $hasExecutionCommitment ? $data['execution_commitment'] : null,
             // The authenticated rsw trapdoor identity (absent on legacy
             // rsw records and on every non-rsw record).
-            rswModulusSha256: self::parseRswModulusSha256($data),
+            rswModulusSha256: $rswModulusSha256,
         );
     }
 
     /**
-     * The optional authenticated rsw modulus hash: absent/null on every
-     * record except an rsw record issued with the binding. A present
-     * value must be 64 lowercase hex and the record must be rsw.
+     * The optional authenticated rsw modulus identity: absent/null on
+     * every record except an identity-bearing rsw record. A present value
+     * must be 64 lowercase hex, may only ride an rsw record, and may not
+     * ride the legacy v1 canonical (which signs no identity segment, so
+     * a v1 identity would be unauthenticated).
      *
      * @param array<string, mixed> $data
      */
@@ -745,11 +776,14 @@ final class ChallengeRecord
         if ($value === null) {
             return null;
         }
-        if (!\is_string($value) || preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
+        if (!\is_string($value) || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $value) !== 1) {
             throw MalformedRecordException::for('rsw_modulus_sha256 must be 64 lowercase hex characters');
         }
         if (($data['algorithm'] ?? null) !== PoWAlgorithm::Rsw->value) {
             throw MalformedRecordException::for('rsw_modulus_sha256 may only ride an rsw record');
+        }
+        if ((int) ($data['protocol_version'] ?? 1) === 1) {
+            throw MalformedRecordException::for('rsw_modulus_sha256 may not ride the v1 canonical (the v1 signature carries no identity segment)');
         }
 
         return $value;

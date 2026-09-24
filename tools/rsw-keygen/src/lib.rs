@@ -27,7 +27,6 @@ use kiwicaptcha::rsw::{
 use num_bigint::BigUint;
 use num_integer::Integer;
 use rand::RngCore;
-use sha2::{Digest, Sha256};
 
 /// The size of each generated prime.
 pub const PRIME_BITS: u64 = 1024;
@@ -126,9 +125,15 @@ impl KeyPair {
 }
 
 /// The sha256 fingerprint of the canonical 256-byte modulus.
+///
+/// Delegates to the shipped engine's one canonical primitive
+/// ([`kiwicaptcha::rsw::modulus_fingerprint_hex_of_bytes`]) so the
+/// generator's `rsw_modulus_n_sha256` output and the verifier-side
+/// identity can never diverge. The caller guarantees a canonical
+/// modulus, so a length violation is a programming error.
 pub fn modulus_fingerprint_hex(n_bytes: &[u8]) -> String {
-    let digest = Sha256::digest(n_bytes);
-    hex::encode(digest)
+    kiwicaptcha::rsw::modulus_fingerprint_hex_of_bytes(n_bytes)
+        .expect("the generator only fingerprints canonical 256-byte moduli")
 }
 
 /// Generate a fresh trapdoor pair: two independent random 1024-bit
@@ -423,6 +428,41 @@ mod tests {
         assert_eq!(
             fingerprint_of_hex(FIXTURE_N_HEX).unwrap(),
             FIXTURE_FINGERPRINT
+        );
+    }
+
+    /// The cross-language fixture (protocol/rsw-identity-v1/fixtures.json)
+    /// pins the exact 64 hex characters this generator prints for the
+    /// shared modulus, so the keygen, the PHP core and the Rust crate can
+    /// never disagree about the identity again. The fixture value is read
+    /// by plain text extraction: the tool builds standalone and does not
+    /// depend on a JSON parser.
+    #[test]
+    fn the_generator_fingerprint_equals_the_shared_cross_language_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/rsw-identity-v1/fixtures.json"
+        );
+        let raw = std::fs::read_to_string(path).expect("the shared fixture exists");
+        let marker = "\"rsw_modulus_n_sha256\": \"";
+        let start = raw.find(marker).expect("canonical identity present") + marker.len();
+        let canonical = &raw[start..start + 64];
+        let marker = "\"legacy_base64_text_sha256\": \"";
+        let start = raw.find(marker).expect("legacy identity present") + marker.len();
+        let legacy = &raw[start..start + 64];
+
+        assert_eq!(
+            canonical, FIXTURE_FINGERPRINT,
+            "the keygen prints the fixture's canonical identity"
+        );
+        assert_eq!(fingerprint_of_hex(FIXTURE_N_HEX).unwrap(), canonical);
+        assert_ne!(
+            canonical, legacy,
+            "the canonical identity is not the legacy base64-text alias"
+        );
+        assert_eq!(
+            modulus_fingerprint_hex(&hex::decode(FIXTURE_N_HEX).unwrap()),
+            canonical
         );
     }
 

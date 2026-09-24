@@ -556,6 +556,181 @@ pub mod fixtures {
     }
 }
 
+/// The canonical rsw modulus identity: lowercase-hex SHA-256 of the
+/// decoded 256-byte modulus.
+///
+/// This is exactly the `rsw_modulus_n_sha256` the shipped
+/// `tools/rsw-keygen` prints, so the generator, the identity riding an
+/// issued record and the verifier's resolution share one semantic rule.
+/// The base64 must be the canonical padded round-trip of exactly
+/// [`MODULUS_BYTES`] bytes before anything is hashed: a non-canonical
+/// spelling of the same bytes never mints a second identity.
+pub fn modulus_fingerprint_hex(modulus_b64: &str) -> Result<String, RswError> {
+    modulus_fingerprint_hex_of_bytes(&canonical_base64_bytes(modulus_b64)?)
+}
+
+/// The canonical fingerprint of an already-decoded modulus: lowercase-hex
+/// SHA-256 of exactly [`MODULUS_BYTES`] bytes. The bytes-level primitive
+/// the base64 entry point and the offline `tools/rsw-keygen` share, so
+/// the generator output and the service-side identity can never diverge.
+pub fn modulus_fingerprint_hex_of_bytes(n_bytes: &[u8]) -> Result<String, RswError> {
+    if n_bytes.len() != MODULUS_BYTES {
+        return Err(RswError::InvalidModulusSize);
+    }
+    Ok(hex::encode(Sha256::digest(n_bytes)))
+}
+
+/// The legacy (pre-migration) identity: SHA-256 of the base64 text
+/// itself — the rule PHP applied before the canonical-byte fingerprint.
+/// It disagrees with the keygen's `rsw_modulus_n_sha256` and exists only
+/// so identity-bearing records issued before the protocol v5 grammar
+/// keep resolving during their bounded lifetime. Never mint new
+/// identities with this value.
+pub fn legacy_base64_text_fingerprint_hex(modulus_b64: &str) -> String {
+    hex::encode(Sha256::digest(modulus_b64.as_bytes()))
+}
+
+/// Whether `identity` is an accepted identity form of the modulus: the
+/// canonical fingerprint always, the legacy base64-text alias only when
+/// `allow_legacy_alias` is set (identity-bearing records below protocol
+/// v5; never a v5 record or new issuance).
+pub fn identity_matches(identity: &str, modulus_b64: &str, allow_legacy_alias: bool) -> bool {
+    let canonical = modulus_fingerprint_hex(modulus_b64)
+        .map(|fingerprint| fingerprint == identity)
+        .unwrap_or(false);
+    canonical || (allow_legacy_alias && legacy_base64_text_fingerprint_hex(modulus_b64) == identity)
+}
+
+/// Why a keyring entry is refused: the operator-supplied identity is
+/// neither the canonical fingerprint nor the legacy alias of the paired
+/// modulus.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RswKeyringError {
+    #[error("the rsw keyring identity is neither the canonical SHA-256 of the decoded modulus nor its legacy base64-text alias")]
+    MismatchedIdentity,
+}
+
+/// The rsw trapdoor rotation keyring: historical trapdoor pairs indexed
+/// by their authenticated modulus identity, the verifier-side half of
+/// the documented rotation mechanism (PHP `$rswVerificationKeys`).
+///
+/// Each inserted pair is registered under the operator-supplied
+/// identity and both computed identity forms (canonical and legacy
+/// alias), so a record issued under either spelling of a rotated pair
+/// resolves. An entry whose identity does not match its modulus is
+/// refused: resolution then fails closed rather than mapping a signed
+/// identity onto an unrelated pair.
+#[derive(Clone, Debug, Default)]
+pub struct RswKeyring {
+    by_identity: HashMap<String, (String, String)>,
+}
+
+impl RswKeyring {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_identity.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_identity.len()
+    }
+
+    /// Register the pair under `identity` and every computed identity
+    /// form of the modulus.
+    pub fn insert(
+        &mut self,
+        identity: &str,
+        modulus_b64: &str,
+        lambda_b64: &str,
+    ) -> Result<(), RswKeyringError> {
+        if !identity_matches(identity, modulus_b64, true) {
+            return Err(RswKeyringError::MismatchedIdentity);
+        }
+        self.by_identity.insert(
+            identity.to_string(),
+            (modulus_b64.to_string(), lambda_b64.to_string()),
+        );
+        if let Ok(canonical) = modulus_fingerprint_hex(modulus_b64) {
+            self.by_identity
+                .entry(canonical)
+                .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+        }
+        self.by_identity
+            .entry(legacy_base64_text_fingerprint_hex(modulus_b64))
+            .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+
+        Ok(())
+    }
+
+    /// The raw pair registered under the exact identity form.
+    pub fn lookup(&self, identity: &str) -> Option<&(String, String)> {
+        self.by_identity.get(identity)
+    }
+}
+
+/// Why the trapdoor resolution refused a record.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RswResolutionError {
+    /// The record's authenticated identity is in neither the keyring nor
+    /// the active pair (the identity is exact: the resolver never falls
+    /// through to an arbitrary active pair).
+    #[error("the record's authenticated rsw modulus identity is unknown to this verifier")]
+    UnknownIdentity,
+    /// A protocol v5 record carries no identity — the v5 canonical
+    /// requires it. The structural gate rejects this shape; the
+    /// resolver keeps the same rule as defense in depth.
+    #[error("the protocol v5 rsw canonical requires the authenticated modulus identity")]
+    IdentityRequired,
+}
+
+/// Resolve the rsw trapdoor of a record from its authenticated modulus
+/// identity.
+///
+/// Selection is exact, never a fall-through:
+/// - identity present: the keyring first, then the active pair, both
+///   accepted only when the identity is an identity form of that
+///   modulus (`allow_legacy_alias` for protocols <= 4, the pre-v5
+///   migration window; a v5 record resolves its canonical fingerprint
+///   exactly). An identity in neither is [`RswResolutionError::UnknownIdentity`].
+/// - identity absent: the active pair only (the explicit legacy
+///   behavior for pre-identity records); a v5 record without the
+///   identity is [`RswResolutionError::IdentityRequired`].
+///
+/// `Ok(None)` means the record may not use a trapdoor here (no active
+/// pair configured and no identity entry): the caller answers the
+/// authentic-but-unsupported outcome, exactly the invalid-pair
+/// semantics.
+pub fn resolve_rsw_trapdoor(
+    active: Option<(&str, &str)>,
+    keyring: Option<&RswKeyring>,
+    identity: Option<&str>,
+    protocol_version: u8,
+) -> Result<Option<Arc<RswTrapdoor>>, RswResolutionError> {
+    let Some(identity) = identity else {
+        if protocol_version >= crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION {
+            return Err(RswResolutionError::IdentityRequired);
+        }
+
+        return Ok(active.and_then(|(modulus, lambda)| RswTrapdoor::validated(modulus, lambda)));
+    };
+    let allow_legacy_alias = protocol_version <= 4;
+    if let Some((modulus, lambda)) = keyring.and_then(|ring| ring.lookup(identity)) {
+        if identity_matches(identity, modulus, allow_legacy_alias) {
+            return Ok(RswTrapdoor::validated(modulus, lambda));
+        }
+    }
+    if let Some((modulus, lambda)) = active {
+        if identity_matches(identity, modulus, allow_legacy_alias) {
+            return Ok(RswTrapdoor::validated(modulus, lambda));
+        }
+    }
+
+    Err(RswResolutionError::UnknownIdentity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

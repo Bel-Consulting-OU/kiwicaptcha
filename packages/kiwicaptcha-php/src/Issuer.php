@@ -142,12 +142,14 @@ final class Issuer
     ];
 
     /**
-     * The authenticated rsw trapdoor identity: the hex SHA-256 of the
-     * canonical base64 modulus string.
+     * The authenticated rsw trapdoor identity: the canonical
+     * {@see RswModulusIdentity::fingerprint()} — lowercase-hex SHA-256 of
+     * the decoded 256-byte modulus. This is exactly the
+     * `rsw_modulus_n_sha256` the shipped rsw-keygen prints.
      */
     public static function rswModulusSha256(string $modulusNBase64): string
     {
-        return hash('sha256', $modulusNBase64);
+        return RswModulusIdentity::fingerprint($modulusNBase64);
     }
 
     public function __construct(
@@ -183,7 +185,7 @@ final class Issuer
             );
         }
         foreach ($rswVerificationKeys as $hash => $pair) {
-            if (!\is_string($hash) || preg_match('/^[0-9a-f]{64}$/D', $hash) !== 1
+            if (!\is_string($hash) || preg_match(RswModulusIdentity::FINGERPRINT_PATTERN, $hash) !== 1
                 || !\is_array($pair)
                 || !\is_string($pair['modulus_n'] ?? null) || $pair['modulus_n'] === ''
             ) {
@@ -191,13 +193,34 @@ final class Issuer
                     'rswVerificationKeys must map a 64-hex modulus SHA-256 to a {modulus_n, lambda} pair'
                 );
             }
-            if (!hash_equals($hash, hash('sha256', $pair['modulus_n']))) {
+            // The keyring key must be an identity form of the paired
+            // modulus: the canonical fingerprint (the keygen's
+            // rsw_modulus_n_sha256) or its clearly named legacy
+            // base64-text alias during the migration window.
+            if (!self::isRswIdentityOfModulus($hash, $pair['modulus_n'])) {
                 throw new \InvalidArgumentException(
-                    'rswVerificationKeys keys must be the SHA-256 of the paired modulus_n'
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n (or its legacy base64-text alias)'
                 );
+            }
+            // Both identity forms resolve to the pair, so a legacy
+            // identity-bearing record and a canonical v5 record resolve
+            // against the same keyring entry.
+            foreach (RswModulusIdentity::allFingerprints($pair['modulus_n']) as $identity) {
+                $this->rswModuliByHash[$identity] = $pair['modulus_n'];
             }
             $this->rswModuliByHash[$hash] = $pair['modulus_n'];
         }
+    }
+
+    /**
+     * Whether `$identity` is an accepted identity form of `$modulusNBase64`
+     * for the record's protocol version: the canonical fingerprint always,
+     * the legacy base64-text alias only on a pre-v5 identity-bearing
+     * record.
+     */
+    public static function isRswIdentityOfModulus(string $identity, string $modulusNBase64, bool $allowLegacyAlias = true): bool
+    {
+        return RswModulusIdentity::matches($identity, $modulusNBase64, $allowLegacyAlias);
     }
 
     /**
@@ -244,7 +267,10 @@ final class Issuer
             tenantId: $c->tenantId,
         );
 
-        return new self($clone, $this->storage, $this->now, $this->region);
+        // Every constructor field is carried over, including the rsw
+        // trapdoor rotation keyring: a TTL-variant issuer must resolve
+        // the same outstanding records as its source.
+        return new self($clone, $this->storage, $this->now, $this->region, $this->rswVerificationKeys);
     }
 
     /**
@@ -297,6 +323,16 @@ final class Issuer
      * generator's live maximum), passed as an int — never a string that
      * is cast.
      *
+     * `$armRswIdentity` is the rsw identity writer switch. When the
+     * configured algorithm is rsw, true (the default, since the
+     * identity is the security property) signs the canonical-byte
+     * modulus identity into the canonical as the final
+     * `|<rsw_modulus_sha256>` segment, and stamps the record protocol
+     * v5. A pre-v5 verifier rejects that unknown version. A deployment
+     * roll-out that is not yet fleet-confirmed passes false to keep
+     * issuing the legacy identityless v2 shape until every reader
+     * accepts v5. A true value on a non-rsw algorithm is inert.
+     *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
      */
@@ -310,6 +346,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        bool $armRswIdentity = true,
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -324,6 +361,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
+            $armRswIdentity,
         );
     }
 
@@ -377,6 +415,7 @@ final class Issuer
         bool $armDecoyField = false,
         ?string $decoyNameOverride = null,
         ?ChallengeProfile $profile = null,
+        bool $armRswIdentity = true,
     ): Challenge {
         if ($profile !== null) {
             return $this->issueWithProfile(
@@ -389,6 +428,7 @@ final class Issuer
                 armExecution: $armExecution,
                 executionAction: $executionAction,
                 executionVersion: $executionVersion,
+                armRswIdentity: $armRswIdentity,
             );
         }
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
@@ -404,6 +444,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
+            $armRswIdentity,
         );
     }
 
@@ -545,6 +586,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        bool $armRswIdentity = true,
     ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -625,6 +667,15 @@ final class Issuer
         $executionCommitment = $executionProgram !== null
             ? self::executionCommitment($executionProgram)
             : null;
+        // The authenticated rsw trapdoor identity (protocol v5): the
+        // canonical-byte modulus fingerprint, signed as the final
+        // canonical segment. It may compose with the decoy/execution
+        // segments (their own signed segments stay authoritative); the
+        // identity is appended last, see {@see self::canonicalPayload()}.
+        $rswIdentity = null;
+        if ($isRsw && $armRswIdentity && $this->config->rswModulusN !== null) {
+            $rswIdentity = self::rswModulusSha256($this->config->rswModulusN);
+        }
         $payload = self::canonicalPayload(
             $nonce,
             $scope,
@@ -651,10 +702,9 @@ final class Issuer
             // segment.
             $executionProgram !== null ? $executionVersion : null,
             $executionCommitment,
-            // The rsw trapdoor identity: only an rsw issuance carries it.
-            $algorithm === PoWAlgorithm::Rsw && $this->config->rswModulusN !== null
-                ? self::rswModulusSha256($this->config->rswModulusN)
-                : null,
+            // The rsw trapdoor identity: only an identity-armed rsw
+            // issuance carries it.
+            $rswIdentity,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey, $this->config->tenantId);
 
@@ -681,15 +731,19 @@ final class Issuer
             // persisted to shared storage). The name/JSON key stay
             // issuedAtNs for ChallengeRecord serialization stability.
             issuedAtNs: (int) (microtime(true) * 1_000_000),
-            // Protocol version by arm: an execution-armed record carries
-            // the execution-capable canonical (the
+            // Protocol version by arm: an identity-armed rsw record
+            // carries the identity-capable v5 canonical (the final
+            // `|rsw_modulus_sha256` segment), so it is protocol v5 — a
+            // pre-v5 verifier rejects the unknown version instead of
+            // silently ignoring the identity; an execution-armed record
+            // carries the execution-capable canonical (the
             // `|execution_version|execution_commitment` segments after
             // the decoy/kid), so it is protocol v4; a decoy-only record
             // carries the decoy-capable canonical (the `|decoy_field`
             // segment after the kid), so it is protocol v3; an unarmed
             // record keeps protocol v2 with the byte-identical 18-field
             // canonical.
-            protocolVersion: $executionProgram !== null ? 4 : ($decoyField !== null ? 3 : 2),
+            protocolVersion: $rswIdentity !== null ? 5 : ($executionProgram !== null ? 4 : ($decoyField !== null ? 3 : 2)),
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -705,9 +759,7 @@ final class Issuer
             // byte-for-byte through storage round-trips.
             executionVersion: $executionProgram !== null ? $executionVersion : null,
             executionCommitment: $executionCommitment,
-            rswModulusSha256: $algorithm === PoWAlgorithm::Rsw && $this->config->rswModulusN !== null
-                ? self::rswModulusSha256($this->config->rswModulusN)
-                : null,
+            rswModulusSha256: $rswIdentity,
         );
         $this->storage->store($record);
 
@@ -755,15 +807,21 @@ final class Issuer
             // the record's authenticated identity, never by whatever pair
             // is currently active: the keyring (a rotation or mixed-node
             // record) first, then the active pair, including a legacy
-            // record that predates the identity. An identity in neither
+            // record that predates the identity. The legacy base64-text
+            // alias resolves only a pre-v5 identity; a v5 record resolves
+            // its canonical fingerprint exactly. An identity in neither
             // fails closed. SHA and Argon records are self-contained
             // (Argon carries its full parameter set on the record), so a
             // risk-escalated Argon challenge issued by a SHA-configured
             // deployment reconstructs without the rsw material.
             if ($record->rswModulusSha256 !== null) {
+                $allowLegacyAlias = $record->protocolVersion <= 4;
                 $rswModulus = $this->rswModuliByHash[$record->rswModulusSha256] ?? null;
+                if ($rswModulus !== null && !self::isRswIdentityOfModulus($record->rswModulusSha256, $rswModulus, $allowLegacyAlias)) {
+                    $rswModulus = null;
+                }
                 if ($rswModulus === null && $this->config->rswModulusN !== null
-                    && hash_equals($record->rswModulusSha256, self::rswModulusSha256($this->config->rswModulusN))
+                    && self::isRswIdentityOfModulus($record->rswModulusSha256, $this->config->rswModulusN, $allowLegacyAlias)
                 ) {
                     $rswModulus = $this->config->rswModulusN;
                 }
@@ -828,6 +886,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
+        bool $armRswIdentity = true,
     ): Challenge {
         $profile->validate();
 
@@ -887,9 +946,11 @@ final class Issuer
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
         // The hostname (server-owned issuance metadata) must
-        // survive the profile path.
-        return (new self($config, $this->storage, $nowFn, $this->region))
-            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion);
+        // survive the profile path, and every constructor field is
+        // carried — including the rsw trapdoor rotation keyring, so the
+        // profile clone resolves the same outstanding records.
+        return (new self($config, $this->storage, $nowFn, $this->region, $this->rswVerificationKeys))
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion, $armRswIdentity);
     }
 
     /**

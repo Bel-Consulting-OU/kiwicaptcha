@@ -916,8 +916,13 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// identical table): v1 and v2 carry neither extension — the legacy v1
 /// canonical signs no extension segment, so a stored v1 record carrying
 /// either would hold unauthenticated semantics — v3 requires the decoy
-/// and carries no execution, and v4 requires the execution triplet and
-/// may also carry the decoy (the canonical appends both segments).
+/// and carries no execution, v4 requires the execution triplet and
+/// may also carry the decoy (the canonical appends both segments), and
+/// v5 requires the authenticated rsw modulus identity (the identity
+/// segment is the final canonical field; the decoy/execution segments
+/// stay governed by their own signed equivalence). Identity-bearing
+/// records at v2..=4 are the pre-v5 legacy shape, accepted for the
+/// bounded migration window.
 /// The one structural record contract at every deserialization
 /// boundary: the shared grammar matrix, the exact armed/unarmed
 /// execution-triplet equivalence (with the commitment hash compare),
@@ -934,11 +939,23 @@ pub fn protocol_extension_grammar_ok(
     protocol_version: u8,
     decoy_present: bool,
     execution_present: bool,
+    rsw_identity_present: bool,
 ) -> bool {
     match protocol_version {
-        1 | 2 => !decoy_present && !execution_present,
+        // The legacy v1 signature covers no canonical segment at all,
+        // so the identity is refused there too.
+        1 => !decoy_present && !execution_present && !rsw_identity_present,
+        2 => !decoy_present && !execution_present,
         3 => decoy_present && !execution_present,
         4 => execution_present,
+        // The identity-bearing rsw grammar: the identity is mandatory
+        // (a signed identityless record with its stored version flipped
+        // to 5 would keep the plain canonical bytes — the identity
+        // requirement is what refuses it). The decoy and execution
+        // segments stay governed by their own signed equivalence, so an
+        // rsw + execution composition signs the identity as the final
+        // segment under the same version.
+        RSW_IDENTITY_PROTOCOL_VERSION => rsw_identity_present,
         _ => false,
     }
 }
@@ -1232,12 +1249,19 @@ pub const MAX_TTL_SECS: u64 = 300;
 
 /// The binary's maximum challenge protocol version, mirrored by the PHP
 /// core (`ChallengeRecord::MAX_PROTOCOL_VERSION`) and the extension's
-/// readiness probe (KiwiHealthController): 4 since the execution-capable
-/// canonical (protocol v4) landed — armed issuance writes version 4 and
-/// the verifier accepts versions 1..=4. A central security-policy floor
-/// above this means the binary cannot verify the challenges the fleet
-/// now issues.
-pub const MAX_PROTOCOL_VERSION: u8 = 4;
+/// readiness probe (KiwiHealthController): 5 since the identity-bearing
+/// rsw canonical (protocol v5) landed — identity-armed rsw issuance
+/// writes version 5 and the verifier accepts versions 1..=5. A central
+/// security-policy floor above this means the binary cannot verify the
+/// challenges the fleet now issues.
+pub const MAX_PROTOCOL_VERSION: u8 = 5;
+
+/// The first protocol version that requires the authenticated rsw
+/// modulus identity on an rsw record. Identity-bearing records at
+/// versions 2..=4 are the pre-v5 legacy shape, accepted (and resolved
+/// through the legacy base64-text alias) for the bounded migration
+/// window.
+pub const RSW_IDENTITY_PROTOCOL_VERSION: u8 = 5;
 
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
 /// clocks. The TTL check rejects challenges whose `issued_at` is
@@ -2095,6 +2119,24 @@ fn issue_challenge_inner(
     // program, signed into the canonical below.
     let execution_commitment: Option<String> =
         execution_program.as_deref().map(execution_commitment);
+    // The authenticated rsw modulus identity (protocol v5): the
+    // canonical-byte fingerprint, exactly the rsw-keygen's
+    // rsw_modulus_n_sha256. Computed before the record is built so it
+    // rides canonical_signing_input_v2() and the signature. The
+    // configured pair was validated above, so the fingerprint must
+    // succeed; a non-canonical modulus is refused rather than minted
+    // without an identity.
+    let rsw_identity: Option<String> = if is_rsw {
+        match config.rsw_modulus_n.as_deref() {
+            Some(modulus) => Some(
+                crate::rsw::modulus_fingerprint_hex(modulus)
+                    .map_err(|_| SignError::InvalidRswParams)?,
+            ),
+            None => return Err(SignError::InvalidRswParams),
+        }
+    } else {
+        None
+    };
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -2117,8 +2159,14 @@ fn issue_challenge_inner(
         // canonical, signed with the execution commitment segments when
         // the dimension is armed); decoy-only issuance writes protocol
         // v3 (the decoy-capable canonical); unarmed issuance stays v2,
-        // byte-identical to the pre-decoy format.
-        protocol_version: if execution_program.is_some() {
+        // byte-identical to the pre-decoy format. An rsw issuance
+        // writes protocol v5: the identity-bearing canonical (the
+        // identity is the final signed segment) — a pre-v5 verifier
+        // rejects the unknown version instead of silently ignoring the
+        // identity.
+        protocol_version: if rsw_identity.is_some() {
+            RSW_IDENTITY_PROTOCOL_VERSION
+        } else if execution_program.is_some() {
             4
         } else if arm_decoy_field {
             3
@@ -2141,7 +2189,10 @@ fn issue_challenge_inner(
             .as_ref()
             .map(|_| execution_version.unwrap_or(1)),
         execution_commitment: execution_commitment.clone(),
-        rsw_modulus_sha256: None,
+        // The authenticated rsw modulus identity: the canonical-byte
+        // fingerprint, set before canonical_signing_input_v2()/signing
+        // so the identity segment is covered by the signature.
+        rsw_modulus_sha256: rsw_identity.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
@@ -3089,8 +3140,15 @@ mod tests {
             "the modulus rides the client-facing response"
         );
         assert_eq!(
-            issued.record.protocol_version, 2,
-            "rsw issuance stays protocol v2"
+            issued.record.protocol_version, 5,
+            "identity-armed rsw issuance is protocol v5"
+        );
+        assert_eq!(
+            issued.record.rsw_modulus_sha256.as_deref(),
+            crate::rsw::modulus_fingerprint_hex(crate::rsw::fixtures::MODULUS_N_B64)
+                .ok()
+                .as_deref(),
+            "the record carries the canonical-byte modulus identity"
         );
         assert_eq!(
             issued.record.decoy_field, None,
@@ -3890,6 +3948,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(
             matches!(
@@ -3989,6 +4048,7 @@ mod tests {
                 rsw_proof: None,
                 rsw_modulus_n: None,
                 rsw_lambda: None,
+                rsw_keyring: None,
             };
             assert!(
                 matches!(
@@ -4048,6 +4108,7 @@ mod tests {
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
+            rsw_keyring: None,
         };
         assert!(matches!(
             crate::verify::verify_solution(&mut ctx),

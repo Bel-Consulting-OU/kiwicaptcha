@@ -880,6 +880,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $storageRef,
         ]))->setPublic(true));
 
+        // The rsw trapdoor rotation keyring (rsw_verification_keys): the
+        // documented rotation mechanism the core Issuer already supports.
+        // Without this wiring a rotation (or a mixed-node rollout) drops
+        // every outstanding rsw challenge the moment the active pair
+        // changes. Wired only when the installed core Issuer declares
+        // the parameter (a core addition), guarded exactly like the
+        // other RSW parameters.
+        if (self::coreConstructorAccepts(Issuer::class, 'rswVerificationKeys')) {
+            $container->getDefinition('kiwi_captcha.issuer')
+                ->setArgument('$rswVerificationKeys', $config['rsw_verification_keys']);
+        }
+
         // risk.region is baked into every issued challenge record and
         // enforced at verification, so a result token issued in one region
         // is never redeemable elsewhere. Set only when configured (the
@@ -1022,6 +1034,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $container->getDefinition('kiwi_captcha.verifier')
                 ->setArgument('$rswModulusN', $config['rsw_modulus_n'])
                 ->setArgument('$rswLambda', $config['rsw_lambda']);
+        }
+        // The rsw rotation keyring rides the verifier: the record's
+        // authenticated identity selects the historical pair, so a
+        // rotated/mixed-node outstanding challenge still verifies.
+        // Wired only when the installed core Verifier declares the
+        // parameter.
+        if (self::coreConstructorAccepts(Verifier::class, 'rswVerificationKeys')) {
+            $container->getDefinition('kiwi_captcha.verifier')
+                ->setArgument('$rswVerificationKeys', $config['rsw_verification_keys']);
         }
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 
@@ -1776,6 +1797,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // every deployment emitting protocol v2 — the two-phase
             // rollout gate, see operations.md.
             ->setArgument('$decoyV3Enabled', $config['risk']['decoy_v3_enabled'])
+            // The rsw identity writer switch (kiwi_captcha.rsw_identity,
+            // default false): an rsw issuance arms the authenticated
+            // modulus identity (protocol v5) only when this is true AND
+            // the SecurityEpochMonitor confirms the central
+            // min_protocol_version floor >= 5. The default keeps rsw
+            // issuance on the legacy identityless protocol v2 shape —
+            // the two-phase rollout gate, see operations.md.
+            ->setArgument('$rswIdentityEnabled', $config['rsw_identity'])
             // The ExecutionChallengeV1 gate (risk.execution_challenge,
             // default off): when on, issuance MAY arm the browser-
             // execution dimension when a risk trigger passes AND the
@@ -3290,6 +3319,30 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
         foreach ($constructor->getParameters() as $parameter) {
             if ($parameter->getName() === 'resumeClaimTtlSecs') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether the installed core class's constructor declares the named
+     * parameter. The bundle wires optional named arguments (the rsw
+     * rotation keyring among them) only when the parameter exists,
+     * because Symfony's ResolveNamedArgumentsPass refuses a named
+     * argument the class does not declare at container compile time.
+     *
+     * @param class-string $class
+     */
+    private static function coreConstructorAccepts(string $class, string $parameter): bool
+    {
+        $constructor = (new \ReflectionClass($class))->getConstructor();
+        if ($constructor === null) {
+            return false;
+        }
+        foreach ($constructor->getParameters() as $candidate) {
+            if ($candidate->getName() === $parameter) {
                 return true;
             }
         }

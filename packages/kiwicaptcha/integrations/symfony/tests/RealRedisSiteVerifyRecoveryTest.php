@@ -456,7 +456,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // fails closed on this replica-less server: 0 of 1 acked).
         $waitsBefore = \count($counting->waits());
         try {
-            $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+            $store->claim($backendId, $key, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
             self::fail('the claim WAIT must fail closed on a replica-less server');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
             // the fail-closed barrier fired ✓
@@ -466,7 +466,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // The claim landed (the WAIT comes after the write): a second
         // claim with the same hash is pending_same — the read-only
         // outcome never WAITs.
-        [$claim2] = $store->claim($backendId, $key, 'hash-a', 300, 'ip:127.0.0.1', null, null);
+        [$claim2] = $store->claim($backendId, $key, hash('sha256', 'hash-a'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
         self::assertSame(IdempotencyClaim::PendingSame, $claim2);
         self::assertSame($waitsBefore + 1, \count($counting->waits()), 'pending_same never WAITs');
 
@@ -476,7 +476,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // WAIT-enabled store.
         $key2 = sprintf('223e4567-e89b-42d3-a456-42661417%04d', random_int(0, 9999));
         $plain = new RedisSiteVerifyIdempotencyStore($counting, 'ci-idem-wait', 3);
-        [, $owner2] = $plain->claim($backendId, $key2, 'hash-b', 300, 'ip:127.0.0.1', null, null);
+        [, $owner2] = $plain->claim($backendId, $key2, hash('sha256', 'hash-b'), 300, hash('sha256', 'ip:127.0.0.1'), null, null);
         try {
             $store->renew($backendId, $key2, (string) $owner2);
             self::fail('the renewal WAIT must fail closed');
@@ -486,11 +486,11 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
         // finalize: the successful finalize WAITs; a refused finalize
         // (the wrong owner) returns false and never WAITs.
-        $refused = $store->finalize($backendId, $key2, 'hash-b', 'wrong-owner', ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+        $refused = $store->finalize($backendId, $key2, hash('sha256', 'hash-b'), 'wrong-owner', ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
         self::assertFalse($refused, 'a refused finalize returns false');
         self::assertSame($waitsBefore + 2, \count($counting->waits()), 'a refused finalize never WAITs');
         try {
-            $store->finalize($backendId, $key2, 'hash-b', (string) $owner2, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
+            $store->finalize($backendId, $key2, hash('sha256', 'hash-b'), (string) $owner2, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
             self::fail('the successful finalize WAIT must fail closed');
         } catch (\KiwiCaptcha\Storage\ReplicaWaitException) {
         }
