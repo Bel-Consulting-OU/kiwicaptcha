@@ -2150,24 +2150,21 @@ fn execution_armed_record_at_the_register_maximum_verifies_through_the_productio
         decoded.op_version,
         kiwicaptcha::execution::MAX_EXECUTION_VERSION
     );
-    let spine_codes: Vec<u8> = decoded
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(
-                op.opcode,
-                execution::OP_DOM_CLONE
-                    | execution::OP_DOM_REPARENT
-                    | execution::OP_DOM_URL_CANON
-                    | execution::OP_DOM_TEXT_MUTATE
-            )
-        })
-        .map(|op| op.opcode)
-        .collect();
-    assert_eq!(
-        spine_codes.len(),
-        4,
-        "the max-register program carries the version-5 spine ops"
+    // The version-5 spine ops must all be present. The read-only extra
+    // probe pool may repeat URL_CANON, so membership is asserted per op
+    // instead of an exact occurrence count.
+    let spine_position = |opcode: u8| decoded.ops.iter().position(|op| op.opcode == opcode);
+    let clone_at = spine_position(execution::OP_DOM_CLONE);
+    let reparent_at = spine_position(execution::OP_DOM_REPARENT);
+    let text_at = spine_position(execution::OP_DOM_TEXT_MUTATE);
+    let canon_at = spine_position(execution::OP_DOM_URL_CANON);
+    assert!(
+        clone_at.is_some() && reparent_at.is_some() && text_at.is_some() && canon_at.is_some(),
+        "the max-register program carries every version-5 spine op"
+    );
+    assert!(
+        clone_at < reparent_at && reparent_at < text_at,
+        "the version-5 mutation spine keeps its fixed order"
     );
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let (digest, trace_b64) = execution_evidence(&issued.record);

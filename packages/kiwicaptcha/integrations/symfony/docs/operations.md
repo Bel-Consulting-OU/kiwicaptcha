@@ -150,9 +150,9 @@ redis: SET {kiwi:<ns>}:security-policy min_protocol_version 5 min_policy_epoch <
 ```
 
 Identity-bearing records issued before the v5 grammar (protocol 2..4
-with the old base64-text identity) stay verifiable through the
-clearly named legacy alias for one bounded migration window; the
-alias is never used for new issuance.
+with the base64-text identity) stay verifiable through the clearly
+named legacy alias for one bounded migration window; the alias is
+never used for new issuance.
 
 ### Rotating the rsw modulus
 

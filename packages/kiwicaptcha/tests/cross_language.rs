@@ -1815,8 +1815,8 @@ fn rust_verifies_php_issued_rsw_record() {
         serde_json::from_value(data).expect("PHP JSON must deserialize into the Rust record");
     assert_eq!(record.algorithm, kiwicaptcha::challenge::PoWAlgorithm::Rsw);
     // The identity-armed issuance (protocol v5) is the current PHP shape:
-    // the record authenticates its modulus. The older identityless v2
-    // shape stays accepted while a deployment has not enabled the writer.
+    // the record authenticates its modulus. The identityless v2 shape
+    // stays accepted while a deployment has not enabled the writer.
     assert!(
         record.protocol_version == 5 || record.protocol_version == 2,
         "PHP rsw issuance is v5 (identity-armed) or the legacy v2"
