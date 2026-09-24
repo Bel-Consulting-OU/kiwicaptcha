@@ -73,7 +73,10 @@ final class SiteVerifyResult
                 self::corrupt('a failure result carries null challenge_ts and hostname');
             }
             $codes = $result['error-codes'];
-            if (!\is_array($codes) || \count($codes) !== 1 || !\is_string($codes[0]) || !\in_array($codes[0], self::ERROR_CODES, true)) {
+            // error-codes is a canonical list of exactly one known code:
+            // array_is_list refuses an associative/object shape a decoded
+            // JSON document could carry.
+            if (!\is_array($codes) || !array_is_list($codes) || \count($codes) !== 1 || !\is_string($codes[0]) || !\in_array($codes[0], self::ERROR_CODES, true)) {
                 self::corrupt('a failure result carries exactly one known provider error code');
             }
 

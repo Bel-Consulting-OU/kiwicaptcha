@@ -275,12 +275,22 @@ local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
--- A chain record WITHOUT an expiry is CORRUPTED state: fail closed,
--- never manufacture a lifetime from the configured TTL. PTTL 0 is a
--- live key inside its final second, not a stripped lifetime.
+-- A PRESENT empty value is corrupted state, never absence.
+if existing == '' then
+  return 'corrupt'
+end
+-- The PTTL sentinels classify the boundary exactly: -2 is the key
+-- actually gone (missing), -1 is a PRESENT record whose lifetime was
+-- stripped (corrupt, the same answer every other transition gives), and
+-- a sub-second remainder (PTTL 0) is a LIVE key. Manufacturing
+-- 'missing' for a persistent record would let a corrupted reservation
+-- look like an expired challenge.
 local key_pttl_ms = tonumber(redis.call('PTTL', KEYS[1]))
-if chainKeyLifetimeMissing(key_pttl_ms) then
+if key_pttl_ms == -2 then
   return 'missing'
+end
+if chainKeyLifetimeMissing(key_pttl_ms) then
+  return 'corrupt'
 end
 -- The reservation lease never outlives the key lifetime, and a
 -- sub-second remainder rounds UP to one second so the bounded SET EX

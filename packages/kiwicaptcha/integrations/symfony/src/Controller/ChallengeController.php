@@ -434,30 +434,42 @@ final class ChallengeController
      * so the identity can never be silently ignored by an old reader. A
      * floor below 5, an absent or corrupt floor, an unreadable central
      * policy or no central policy at all all fail safe to the legacy
-     * identityless v2 emission. The actionable warning fires once per
-     * process.
+     * identityless v2 emission while still leaving the other confirmed
+     * dimensions to their own gates. The actionable warning fires once
+     * per process.
      *
      * @return int the confirmed emission ceiling the core Issuer receives:
-     *             {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
-     *             (or the floor when higher) only when the switch is on
-     *             AND the feature floor is confirmed, otherwise the
-     *             capability-free {@see ChallengeRecord::BASE_PROTOCOL_VERSION}
+     *             the confirmed central floor (at least
+     *             {@see ChallengeRecord::BASE_PROTOCOL_VERSION}), lowered
+     *             below {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
+     *             while the writer switch is off. The core then arms the
+     *             identity only at the feature version while still
+     *             admitting the decoy/execution dimensions their own
+     *             confirmed floors allow.
      */
     private function rswIdentityEmissionCap(): int
     {
         $featureVersion = ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION;
-        if (!$this->rswIdentityEnabled) {
-            return ChallengeRecord::BASE_PROTOCOL_VERSION;
+        $reportedFloor = $this->epochMonitor?->minProtocolVersion();
+        $floor = $reportedFloor ?? ChallengeRecord::BASE_PROTOCOL_VERSION;
+        if ($floor < ChallengeRecord::BASE_PROTOCOL_VERSION) {
+            $floor = ChallengeRecord::BASE_PROTOCOL_VERSION;
         }
-        $floor = $this->epochMonitor?->minProtocolVersion();
-        if ($floor !== null && $floor >= $featureVersion) {
+        if (!$this->rswIdentityEnabled) {
+            // The writer switch off: the confirmed ceiling still admits
+            // the other confirmed dimensions (the decoy and execution
+            // arms are gated by their own floors), but the identity
+            // feature stays off by lowering the ceiling below it.
+            return min($floor, $featureVersion - 1);
+        }
+        if ($floor >= $featureVersion) {
             return $floor;
         }
         if (!$this->rswIdentityWarningLogged) {
             $this->rswIdentityWarningLogged = true;
-            $detail = $floor === null
+            $detail = $reportedFloor === null
                 ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
-                : sprintf('the central min_protocol_version is %d', $floor);
+                : sprintf('the central min_protocol_version is %d', $reportedFloor);
             $message = sprintf(
                 'kiwicaptcha: kiwi_captcha.rsw_identity is on but protocol-v5 emission stays DISABLED — %s (below %d). '.
                 'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to %d only after every serving binary accepts protocol v5 '.
@@ -474,7 +486,11 @@ final class ChallengeController
             }
         }
 
-        return ChallengeRecord::BASE_PROTOCOL_VERSION;
+        // The switch is on but the feature floor is unconfirmed: keep the
+        // confirmed floor (the decoy/execution arms stay governed by
+        // their own gates) — the core sees a ceiling below the feature
+        // version and emits the identityless shape.
+        return $floor;
     }
 
     /**

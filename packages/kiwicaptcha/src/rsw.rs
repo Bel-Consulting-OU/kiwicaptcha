@@ -624,19 +624,35 @@ pub enum RswKeyringError {
 /// the documented rotation mechanism (PHP `$rswVerificationKeys`).
 ///
 /// Each inserted pair is registered under the operator-supplied
-/// identity and both computed identity forms (canonical and legacy
-/// alias), so a record issued under either spelling of a rotated pair
-/// resolves. An entry whose identity does not match its modulus is
+/// identity and the canonical computed identity form; the legacy
+/// base64-text alias is registered only while the explicit migration
+/// mode is enabled ([`RswKeyring::with_legacy_aliases`]), so the
+/// temporary compatibility grammar is removable. An entry whose
+/// identity does not match its modulus (under the active mode) is
 /// refused: resolution then fails closed rather than mapping a signed
 /// identity onto an unrelated pair.
 #[derive(Clone, Debug, Default)]
 pub struct RswKeyring {
     by_identity: HashMap<String, (String, String)>,
+    legacy_aliases: bool,
 }
 
 impl RswKeyring {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable or disable the legacy base64-text identity alias (the
+    /// bounded migration window for records issued before the canonical
+    /// fingerprint rule). Default: disabled.
+    pub fn with_legacy_aliases(mut self, enabled: bool) -> Self {
+        self.legacy_aliases = enabled;
+        self
+    }
+
+    /// Whether the legacy base64-text alias is currently accepted.
+    pub fn legacy_aliases_enabled(&self) -> bool {
+        self.legacy_aliases
     }
 
     pub fn is_empty(&self) -> bool {
@@ -665,7 +681,10 @@ impl RswKeyring {
         // supplied string, so it must never be the only validation.
         let canonical =
             modulus_fingerprint_hex(modulus_b64).map_err(|_| RswKeyringError::InvalidModulus)?;
-        if !identity_matches(identity, modulus_b64, true) {
+        // With the migration mode off, a legacy-alias identity is not an
+        // accepted form: the operator must address the pair by its
+        // canonical fingerprint (or explicitly enable the migration).
+        if !identity_matches(identity, modulus_b64, self.legacy_aliases) {
             return Err(RswKeyringError::MismatchedIdentity);
         }
         if RswTrapdoor::validated(modulus_b64, lambda_b64).is_none() {
@@ -678,9 +697,11 @@ impl RswKeyring {
         self.by_identity
             .entry(canonical)
             .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
-        self.by_identity
-            .entry(legacy_base64_text_fingerprint_hex(modulus_b64))
-            .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+        if self.legacy_aliases {
+            self.by_identity
+                .entry(legacy_base64_text_fingerprint_hex(modulus_b64))
+                .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
+        }
 
         Ok(())
     }
@@ -742,7 +763,14 @@ pub fn resolve_rsw_trapdoor(
 
         return Ok(active.and_then(|(modulus, lambda)| RswTrapdoor::validated(modulus, lambda)));
     };
-    let allow_legacy_alias = protocol_version <= 4;
+    // The legacy base64-text alias resolves only inside the bounded
+    // migration window AND only while the configured keyring enables the
+    // mode; without it, pre-v5 identity-bearing records fail closed with
+    // UnknownIdentity instead of keeping the temporary grammar alive.
+    let allow_legacy_alias = protocol_version <= 4
+        && keyring
+            .map(|ring| ring.legacy_aliases_enabled())
+            .unwrap_or(false);
     let mut named_invalid_pair = false;
     if let Some((modulus, lambda)) = keyring.and_then(|ring| ring.lookup(identity)) {
         if identity_matches(identity, modulus, allow_legacy_alias) {

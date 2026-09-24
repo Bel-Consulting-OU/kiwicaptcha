@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
@@ -177,7 +178,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertTrue(json_decode((string) $response->getContent(), true)['success']);
         $backendIdA = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestA);
-        self::assertTrue(($store->stored($backendIdA, $uuid)['success'] ?? false) === true, 'the success is cached under the digest-A namespace');
+        self::assertTrue((SiteVerifyStoreAssert::completed($store->storedForOperation($backendIdA, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), ''))['success'] ?? false) === true, 'the success is cached under the digest-A namespace');
 
         // The issuer rotates: digest B. The same key + same response now
         // belongs to a different logical operation; the cached success
@@ -190,10 +191,10 @@ final class SiteVerifyTest extends TestCase
         $secondBody = json_decode((string) $second->getContent(), true);
         self::assertFalse($secondBody['success'], 'a same-key retry after the security-context rotation must NEVER return the cached success');
         $backendIdB = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestB);
-        $storedB = $store->stored($backendIdB, $uuid);
+        $storedB = SiteVerifyStoreAssert::completed($store->storedForOperation($backendIdB, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), ''));
         self::assertIsArray($storedB, 'the retry created its own entry in the digest-B namespace');
         self::assertFalse($storedB['success'] ?? true, 'the digest-B entry carries the duplicate outcome, never the cached success');
-        self::assertTrue(($store->stored($backendIdA, $uuid)['success'] ?? false) === true, 'the digest-A cached success stays untouched');
+        self::assertTrue((SiteVerifyStoreAssert::completed($store->storedForOperation($backendIdA, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), ''))['success'] ?? false) === true, 'the digest-A cached success stays untouched');
     }
 
     private function siteverifyRequest(array $fields, string $contentType = 'application/x-www-form-urlencoded'): Request
@@ -1272,11 +1273,11 @@ final class SiteVerifyTest extends TestCase
 
         // The displaced owner's finalize must be a no-op after the takeover.
         $store->finalize($backendId, $uuid, $hash, $oldOwner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
-        self::assertNull($store->stored($backendId, $uuid), 'a displaced owner cannot finalize after the takeover');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'a displaced owner cannot finalize after the takeover');
 
         // The takeover winner finalizes with ITS token.
         $store->finalize($backendId, $uuid, $hash, $newOwner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
-        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
+        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, $hash, $fingerprint, '')));
     }
 
     public function testMalformedTokenFinalizesTheClaimDeterministically(): void
@@ -1303,7 +1304,7 @@ final class SiteVerifyTest extends TestCase
         self::assertSame(['invalid-input-response'], json_decode($second, true)['error-codes'] ?? null);
 
         // The claim was finalized: the store exposes the failure.
-        $stored = $store->stored($backendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $malformed), 'no-ip', ''));
         self::assertIsArray($stored);
         self::assertFalse($stored['success'] ?? true);
         self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
@@ -1392,7 +1393,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $wonBody = json_decode((string) $won->getContent(), true);
         self::assertSame(true, $wonBody['success'] ?? null, 'waiter body: '.(string) $won->getContent());
         self::assertSame(1, $counting->consumes, 'the token was consumed exactly once, by the takeover winner');
-        self::assertSame($wonBody, $store->stored($backendId, $uuid), 'the takeover winner finalizes its canonical response');
+        self::assertSame($wonBody, SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), '')), 'the takeover winner finalizes its canonical response');
     }
 
     // ── the `PENDING_SAME` exponential backoff + lease-aware takeover ────
@@ -1450,11 +1451,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
             {
                 $this->polls[] = microtime(true);
 
-                return $this->inner->stored($backendId, $idempotencyKey);
+                return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
             }
         };
 
@@ -1577,7 +1578,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $response->getStatusCode(), 'the hard bound must answer the retryable 503 internal-error');
         self::assertSame(['internal-error'], json_decode((string) $response->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'the entry stays pending — a later retry can still take over or read the stored result');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the entry stays pending — a later retry can still take over or read the stored result');
         // Beyond the one-time lease probe, no takeover is wasted while
         // the lease has room: every later attempt lands only after the
         // lease window.
@@ -1693,7 +1694,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(400, $response->getStatusCode());
         self::assertSame(['bad-request'], json_decode((string) $response->getContent(), true)['error-codes']);
-        self::assertNull($store->stored(hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'), $uuid), 'no idempotency entry may exist under a malformed remoteip');
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($store->storedForOperation(hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'), $uuid, ...SiteVerifyStoreAssert::probe())),
+            'no idempotency entry may exist under a malformed remoteip',
+        );
     }
 
     public function testMappedV6RemoteipFingerprintIsTheSameIdentityAsPlainIpv4(): void
@@ -1740,10 +1744,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertNotNull($owner);
 
         $store->finalize($backendId, $uuid, 'wrong-hash', $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
-        self::assertNull($store->stored($backendId, $uuid), 'a wrong-hash finalize must not complete the entry');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'a wrong-hash finalize must not complete the entry');
 
         $store->finalize($backendId, $uuid, $hash, $owner, ['success' => true, 'challenge_ts' => null, 'hostname' => null]);
-        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], $store->stored($backendId, $uuid));
+        self::assertSame(['success' => true, 'challenge_ts' => null, 'hostname' => null], SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, $hash, $fingerprint, '')));
     }
 
     public function testTakeoverWithWrongRemoteipFingerprintIsRefused(): void
@@ -1860,10 +1864,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = 'e4f5a6b7-8c9d-4eaf-b012-3c4d5e6f7081';
@@ -1883,7 +1887,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
         // The owner consumed + committed but never finalized: the entry is
         // still pending with a committed core result.
-        self::assertNull($store->stored($backendId, $uuid), 'the owner crashed before the Siteverify finalize');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the owner crashed before the Siteverify finalize');
         $consumed = $storage->consumedState($challenge->nonce);
         self::assertNotNull($consumed);
         self::assertSame(
@@ -1962,7 +1966,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]))->getContent(), true);
         self::assertSame(false, $second['success'] ?? null);
         self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
-        $storedB = $store->stored($backendId, $uuidB);
+        $storedB = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), ''));
         self::assertIsArray($storedB, 'the duplicate-detecting claim must be finalized as CompleteSame');
         self::assertFalse($storedB['success'] ?? true);
         self::assertSame(['timeout-or-duplicate'], $storedB['error-codes'] ?? null);
@@ -2053,10 +2057,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $controller = $this->controller(idempotencyStore: $crashingStore, storage: $storage, waitSecs: 0.5);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
@@ -2090,7 +2094,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(503, $secondResponse->getStatusCode(), 'a refused finalize never returns the local duplicate as authoritative');
         $second = json_decode((string) $secondResponse->getContent(), true);
         self::assertSame(['internal-error'], $second['error-codes'] ?? null);
-        self::assertNull($store->stored($backendId, $uuidB), 'the finalize crashed between detect and landing — claim B stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, ...SiteVerifyStoreAssert::probe())), 'the finalize crashed between detect and landing — claim B stays pending');
 
         // 3. B's lease expires while the entry is still pending — the
         // exact window where a takeover would reconstruct the success.
@@ -2137,9 +2141,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
             {
-                return null;
+                return \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup::missing();
             }
 
             public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
@@ -2211,10 +2215,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 throw new \RuntimeException('finalize outage');
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
         $uuid = '123e4567-e89b-42d3-a456-42661417401f';
@@ -2230,7 +2234,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'a throwing finalize after consumption must map to 503 internal-error, never a 500');
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-        self::assertNull($inner->stored($backendId, $uuid), 'the finalize failed — the entry stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($inner->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the finalize failed — the entry stays pending');
 
         // Expire the owner's lease: a same-key retry takes over and
         // reconstructs the committed outcome via the retained state — the
@@ -2308,9 +2312,9 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             {
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
             {
-                return null;
+                return \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup::missing();
             }
 
             public function takeover(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
@@ -2408,10 +2412,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $controller = $this->controller(idempotencyStore: $crashingStore, storage: $storage, waitSecs: 0.5);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
@@ -2438,7 +2442,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(503, $secondResponse->getStatusCode(), 'the refused replay finalize answers the 503');
         $second = json_decode((string) $secondResponse->getContent(), true);
         self::assertSame(['internal-error'], $second['error-codes'] ?? null);
-        self::assertNull($store->stored($backendId, $uuidB), 'the replay finalize crashed — claim B stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, ...SiteVerifyStoreAssert::probe())), 'the replay finalize crashed — claim B stays pending');
 
         // 3. B's lease expires while the entry is still pending.
         $now += 4;
@@ -2523,10 +2527,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 return $this->inner->finalize($backendId, $idempotencyKey, $responseHash, $owner, $canonicalResponse);
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $secret1 = 'secret-one-'.str_repeat('a', 16);
         $secret2 = 'secret-two-'.str_repeat('b', 16);
@@ -2565,7 +2569,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $second = json_decode((string) $secondResponse->getContent(), true);
         self::assertSame(false, $second['success'] ?? null);
         self::assertSame(['timeout-or-duplicate'], $second['error-codes'] ?? null);
-        self::assertNotNull($store->stored($backendId2, $uuid), 'the secret-2 duplicate finalize lands');
+        self::assertNotNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId2, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), '')), 'the secret-2 duplicate finalize lands');
 
         // 3. The lease expires while secret-2's entry is still pending.
         $now += 4;
@@ -2656,10 +2660,10 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
                 throw new \RuntimeException('finalize outage');
             }
 
-            public function stored(string $backendId, string $idempotencyKey): ?array
-            {
-                return $this->inner->stored($backendId, $idempotencyKey);
-            }
+            public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): \BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookup
+                {
+                    return $this->inner->storedForOperation($backendId, $idempotencyKey, $responseHash, $remoteipFingerprint, $binding);
+                }
         };
         $bController = $this->controller(idempotencyStore: $finalizeThrowing, storage: $storage, waitSecs: 0.5);
         $bResponse = $bController->siteverify($this->siteverifyRequest([
@@ -2667,7 +2671,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $bResponse->getStatusCode(), 'the takeover owner\'s crashed finalize must map to the retryable internal-error');
         self::assertSame(['internal-error'], json_decode((string) $bResponse->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuidK), 'B crashed before the Siteverify finalize — the entry stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidK, ...SiteVerifyStoreAssert::probe())), 'B crashed before the Siteverify finalize — the entry stays pending');
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed, 'B consumed and committed the token');
         self::assertNotNull($consumed->consumedResult, 'B committed its success');
@@ -2870,7 +2874,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim — the entry stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the lost reply must NOT finalize the claim — the entry stays pending');
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
         self::assertSame(
@@ -2904,7 +2908,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ], JsonResponse::DEFAULT_ENCODING_OPTIONS);
         self::assertSame($expectedCanonical, (string) $retryResponse->getContent(), 'the retry receives the ORIGINAL canonical success bytes');
         self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed derivation must be committed');
-        $stored = $store->stored($backendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), $this->remoteipFingerprint('127.0.0.1'), ''));
         self::assertTrue($stored['success'] === true, 'the resumed outcome is finalized as COMPLETE_SAME');
         self::assertNotNull($stored['challenge_ts'], 'the stored canonical success carries the server-bound challenge timestamp');
         self::assertArrayHasKey('hostname', $stored, 'the stored canonical success carries the hostname field');
@@ -2993,7 +2997,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
-        self::assertNull($store->stored($backendId, $uuid), 'the claim stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the claim stays pending');
 
         // The same-key retry takes over and resumes: the derivation fails
         // deterministically (wrong counter) — InsufficientWork maps to the
@@ -3009,7 +3013,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(['invalid-input-response'], $retryBody['error-codes'] ?? null, 'insufficient work maps to the invalid-response vocabulary');
         self::assertNotNull($storage->consumedState($nonce)?->consumedResult, 'the resumed invalid outcome must be committed');
         self::assertSame(false, $storage->consumedState($nonce)->consumedResult->valid);
-        $stored = $store->stored($backendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $wrongToken), $this->remoteipFingerprint('127.0.0.1'), ''));
         self::assertIsArray($stored, 'a failed resumed verification is ALSO finalized');
         self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
 
@@ -3108,7 +3112,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         self::assertSame(503, $bFirstResponse->getStatusCode(), 'B cannot derive a consumed-without-result record — the retryable 503');
-        self::assertNull($store->stored($backendId, $uuidB), 'B\'s claim stays pending — nothing was finalized');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, ...SiteVerifyStoreAssert::probe())), 'B\'s claim stays pending — nothing was finalized');
         $now += 4;
 
         // B's retry takes over B's own pending claim: the identity gate
@@ -3216,7 +3220,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
         ]));
         self::assertSame(503, $keyedResponse->getStatusCode(), 'a keyed replay of a no-key redemption must NEVER resume');
-        self::assertNull($store->stored($backendId, $uuidB), 'the keyed replay must not finalize anything');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuidB, ...SiteVerifyStoreAssert::probe())), 'the keyed replay must not finalize anything');
     }
 
     /**
@@ -3552,7 +3556,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             self::assertSame(503, $gatedResponse->getStatusCode(), 'admission exhaustion during the resume must map to the retryable 503');
             self::assertSame(['internal-error'], json_decode((string) $gatedResponse->getContent(), true)['error-codes']);
             self::assertNull($storage->consumedState($nonce)?->consumedResult, 'admission rejection must NOT commit anything');
-            self::assertNull($store->stored($backendId, $uuid), 'the admission rejection must NOT finalize — the entry stays pending');
+            self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the admission rejection must NOT finalize — the entry stays pending');
 
             // Capacity freed: the next same-key retry resumes to the
             // original success.
@@ -3659,7 +3663,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'an indeterminate consume must map to the retryable 503 internal-error, never a permanent duplicate');
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'the indeterminate consume must NOT finalize the claim — the entry stays pending for a same-key retry');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the indeterminate consume must NOT finalize the claim — the entry stays pending for a same-key retry');
         self::assertNull($storage->consumedState($nonce), 'the transition never executed — the challenge stays perfectly redeemable');
 
         // The same-key retry with the working storage: pending -> wait ->
@@ -3784,7 +3788,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'a lost response after the consume transition must map to the retryable 503 internal-error');
         self::assertSame(['internal-error'], json_decode((string) $ownerResponse->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'the lost response must NOT finalize the claim — the entry stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the lost response must NOT finalize the claim — the entry stays pending');
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
         self::assertSame(
@@ -3869,10 +3873,13 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $staticEpochBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|2|');
         $effectiveEpochBackendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|3|');
         self::assertNotSame($staticEpochBackendId, $effectiveEpochBackendId, 'precondition: the effective epoch must differ from the static one');
-        $stored = $store->stored($effectiveEpochBackendId, $uuid);
+        $stored = SiteVerifyStoreAssert::completed($store->storedForOperation($effectiveEpochBackendId, $uuid, hash('sha256', $token), $this->remoteipFingerprint('203.0.113.7'), ''));
         self::assertIsArray($stored, 'the claim must be finalized under the EFFECTIVE-epoch backend identity');
         self::assertTrue($stored['success'] ?? false);
-        self::assertNull($store->stored($staticEpochBackendId, $uuid), 'the static-epoch key must never be touched');
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($store->storedForOperation($staticEpochBackendId, $uuid, hash('sha256', $token), $this->remoteipFingerprint('203.0.113.7'), '')),
+            'the static-epoch key must never be touched',
+        );
     }
 
     public function testStaleMonitorRefusesVerificationWithRetryableInternalError(): void
@@ -3925,7 +3932,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $idemResponse->getStatusCode(), 'the idempotent path must fail closed identically');
         self::assertSame(['internal-error'], json_decode((string) $idemResponse->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'a stale request must not claim');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'a stale request must not claim');
         self::assertNull($storage->consumedState($nonce), 'the idempotent stale path must not verify either');
 
         // The token is still redeemable once the central state is
@@ -4024,7 +4031,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
         ]));
         self::assertSame(503, $ownerResponse->getStatusCode(), 'the lost consume reply must map to the retryable 503 internal-error');
-        self::assertNull($store->stored($backendId, $uuid), 'the lost reply must NOT finalize the claim — the entry stays pending');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the lost reply must NOT finalize the claim — the entry stays pending');
         $consumed = $storage->consumedState($nonce);
         self::assertNotNull($consumed, 'the transition executed — the token IS consumed');
         self::assertSame(
@@ -4045,7 +4052,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         ]));
         self::assertSame(503, $staleRetry->getStatusCode(), 'a stale monitor must fail the retry closed');
         self::assertSame(['internal-error'], json_decode((string) $staleRetry->getContent(), true)['error-codes']);
-        self::assertNull($store->stored($backendId, $uuid), 'the stale retry must not touch the pending claim');
+        self::assertNull(SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, ...SiteVerifyStoreAssert::probe())), 'the stale retry must not touch the pending claim');
         self::assertNull($storage->consumedState($nonce)?->consumedResult, 'the stale retry must not resume the derivation');
 
         // The monitor recovers (the central read answers again): the same

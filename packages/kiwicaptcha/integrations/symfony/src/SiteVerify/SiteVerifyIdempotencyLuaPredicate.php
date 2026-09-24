@@ -52,6 +52,22 @@ local function kiwiSiteVerifyIsBinding(s)
   return type(s) == 'string' and (s == '' or kiwiSiteVerifyIsLowerHex(s, 64))
 end
 
+-- The canonical JSON list predicate: numeric integer keys 1..n with no
+-- gaps, no string/object keys and no extra members. cjson decodes both
+-- JSON arrays and objects into Lua tables, so an associative shape like
+-- {"x":"bad-request"} would otherwise satisfy a count-only check while
+-- PHP (which decodes it to an associative array and requires a list)
+-- rejects it.
+local function kiwiSiteVerifyIsCanonicalList(t, n)
+  if type(t) ~= 'table' then return false end
+  local count = 0
+  for k in pairs(t) do
+    count = count + 1
+    if type(k) ~= 'number' or k % 1 ~= 0 or k < 1 or k > n then return false end
+  end
+  return count == n
+end
+
 -- The canonical provider-response validator, the exact mirror of
 -- SiteVerifyResult::validate(): success=true with either the six-key
 -- full form (error-codes = the empty array) or the three-key minimal
@@ -95,14 +111,12 @@ local function kiwiSiteVerifyResultValid(result)
     end
     if result['challenge_ts'] ~= cjson.null or result['hostname'] ~= cjson.null then return false end
     local codes = result['error-codes']
-    if type(codes) ~= 'table' then return false end
-    local count = 0
-    local only = nil
-    for _, code in pairs(codes) do
-      count = count + 1
-      only = code
-    end
-    if count ~= 1 or type(only) ~= 'string' then return false end
+    -- error-codes is a canonical LIST of exactly one known code: the
+    -- representation itself is part of the schema (an object shape is
+    -- PHP-associative and must never classify as valid here).
+    if not kiwiSiteVerifyIsCanonicalList(codes, 1) then return false end
+    local only = codes[1]
+    if type(only) ~= 'string' then return false end
     local known = {
       ['missing-input-secret'] = true,
       ['invalid-input-secret'] = true,

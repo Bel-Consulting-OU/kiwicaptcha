@@ -143,20 +143,42 @@ final class RswModulusIdentityTest extends TestCase
         self::assertSame($fixture['rsw_modulus_n_sha256'], $record->rswModulusSha256);
         self::assertSame(5, $record->protocolVersion);
 
-        // The keyring may be keyed by either identity form; both resolve
-        // the same pair.
-        foreach ([$fixture['rsw_modulus_n_sha256'], $legacyAlias] as $keyringKey) {
-            $issuer = new Issuer(
+        // The canonical keyring key resolves the v5 record with the
+        // migration mode off (the default).
+        $canonicalIssuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8),
+            new ArrayStorage(),
+            rswVerificationKeys: [$fixture['rsw_modulus_n_sha256'] => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]],
+        );
+        self::assertSame(
+            RswFixture::MODULUS_N_B64,
+            $canonicalIssuer->responseFromRecord($record)?->rswModulus,
+            'the canonical keyring entry resolves the v5 record',
+        );
+
+        // The legacy-alias key is refused with the mode off and accepted
+        // with the explicit migration mode on.
+        try {
+            new Issuer(
                 new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8),
                 new ArrayStorage(),
-                rswVerificationKeys: [$keyringKey => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]],
+                rswVerificationKeys: [$legacyAlias => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]],
             );
-            self::assertSame(
-                RswFixture::MODULUS_N_B64,
-                $issuer->responseFromRecord($record)?->rswModulus,
-                "the {$keyringKey} keyring entry resolves the v5 record",
-            );
+            self::fail('a legacy-alias keyring key must be refused while the migration mode is off');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('allowLegacyRswIdentity', $e->getMessage());
         }
+        $migrationIssuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8),
+            new ArrayStorage(),
+            rswVerificationKeys: [$legacyAlias => ['modulus_n' => RswFixture::MODULUS_N_B64, 'lambda' => RswFixture::LAMBDA_B64]],
+            allowLegacyRswIdentity: true,
+        );
+        self::assertSame(
+            RswFixture::MODULUS_N_B64,
+            $migrationIssuer->responseFromRecord($record)?->rswModulus,
+            'the legacy keyring key resolves while the migration mode is on',
+        );
 
         // A keyring key that is neither form of the paired modulus is
         // refused at construction.
@@ -258,7 +280,18 @@ final class RswModulusIdentityTest extends TestCase
         $legacyRecord = $this->resign($record->toArray(), 2, $legacyAlias);
         $legacyStorage->store($legacyRecord);
         $legacyToken = $this->solveTokenForRecord($legacyRecord);
-        $legacyVerifier = new Verifier($legacyStorage, now: static fn (): int => self::ISSUED_AT, rswModulusN: RswFixture::MODULUS_N_B64, rswLambda: RswFixture::LAMBDA_B64);
+        // With the migration mode OFF (the default) the temporary
+        // grammar is refused fail-closed...
+        $strictVerifier = new Verifier($legacyStorage, now: static fn (): int => self::ISSUED_AT, rswModulusN: RswFixture::MODULUS_N_B64, rswLambda: RswFixture::LAMBDA_B64);
+        self::assertSame(
+            VerifyError::UnsupportedRswParams,
+            $strictVerifier->verify($legacyToken, Vectors::SECRET, 'login', '198.51.100.7')->error,
+            'the legacy alias requires the explicit migration mode',
+        );
+        // ... and accepted while the bounded migration window is enabled.
+        $legacyStorage2 = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
+        $legacyStorage2->store($legacyRecord);
+        $legacyVerifier = new Verifier($legacyStorage2, now: static fn (): int => self::ISSUED_AT, rswModulusN: RswFixture::MODULUS_N_B64, rswLambda: RswFixture::LAMBDA_B64, allowLegacyRswIdentity: true);
         self::assertTrue($legacyVerifier->verify($legacyToken, Vectors::SECRET, 'login', '198.51.100.7')->isOk(), 'a pre-v5 legacy identity resolves in the migration window');
 
         // The same legacy alias on a v5 record is not a canonical
@@ -267,7 +300,7 @@ final class RswModulusIdentityTest extends TestCase
         $v5LegacyIdentity = $this->resign($record->toArray(), 5, $legacyAlias);
         $v5Storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $v5Storage->store($v5LegacyIdentity);
-        $v5Verifier = new Verifier($v5Storage, now: static fn (): int => self::ISSUED_AT, rswModulusN: RswFixture::MODULUS_N_B64, rswLambda: RswFixture::LAMBDA_B64);
+        $v5Verifier = new Verifier($v5Storage, now: static fn (): int => self::ISSUED_AT, rswModulusN: RswFixture::MODULUS_N_B64, rswLambda: RswFixture::LAMBDA_B64, allowLegacyRswIdentity: true);
         self::assertSame(
             VerifyError::UnsupportedRswParams,
             $v5Verifier->verify($this->solveTokenForRecord($v5LegacyIdentity), Vectors::SECRET, 'login', '198.51.100.7')->error,

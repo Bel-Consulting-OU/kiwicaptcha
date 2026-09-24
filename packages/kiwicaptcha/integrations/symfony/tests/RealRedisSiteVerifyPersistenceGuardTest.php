@@ -8,6 +8,8 @@ use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyCorruptException;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -108,7 +110,10 @@ final class RealRedisSiteVerifyPersistenceGuardTest extends TestCase
             $firstBody = json_decode((string) $first->getContent(), true, 8, JSON_THROW_ON_ERROR);
             self::assertSame(200, $first->getStatusCode());
             self::assertTrue($firstBody['success'] ?? null, 'the first redemption succeeds and finalizes');
-            self::assertNotNull($store->stored($backendId, $uuid), 'the completed canonical success is cached for retries');
+            self::assertNotNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, hash('sha256', $token), SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET), '')),
+                'the completed canonical success is cached for retries',
+            );
             self::assertGreaterThan(0, (int) $probe->ttl($idemKey), 'the cached success carries a bounded Redis lifetime');
 
             // The corruption: the Redis lifetime is accidentally stripped
@@ -186,12 +191,12 @@ final class RealRedisSiteVerifyPersistenceGuardTest extends TestCase
             } catch (SiteVerifyIdempotencyCorruptException) {
             }
 
-            // stored: the acceptance read also refuses.
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail('the stored read must fail closed on a persistent record');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            // The operation-bound acceptance read also refuses.
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, $hash, $fingerprint, '')->kind,
+                'the operation-bound read must fail closed on a persistent record',
+            );
 
             self::assertSame($before, $probe->get($key), 'every refusal performed zero mutation');
             self::assertSame(-1, (int) $probe->ttl($key), 'no lifetime is manufactured by any refusal');

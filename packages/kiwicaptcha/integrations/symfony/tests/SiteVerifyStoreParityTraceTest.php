@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -81,7 +82,7 @@ final class SiteVerifyStoreParityTraceTest extends TestCase
         $out['owner_changed'] = \is_string($owner2) && $owner2 !== $owner1;
         $out['finalize_wrong_owner'] = $store->finalize($backendId, $uuid, $hash, (string) $owner1, $result);
         $out['finalize_owner'] = $store->finalize($backendId, $uuid, $hash, (string) $owner2, $result);
-        $out['stored'] = $store->stored($backendId, $uuid);
+        $out['stored'] = SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, $hash, $fingerprint, $binding));
         [$out['replay']] = $store->claim($backendId, $uuid, $hash, 300, $fingerprint, null, $binding);
 
         $expireKey();

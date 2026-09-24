@@ -393,6 +393,16 @@ final class Verifier
          * @var array<string, array{modulus_n: string, lambda: string}>
          */
         private readonly array $rswVerificationKeys = [],
+        /**
+         * The bounded legacy rsw identity migration mode (default false):
+         * while enabled, the historical base64-text identity alias stays
+         * accepted for identity-bearing records below protocol v5 and as
+         * a keyring key. Enable it only while pre-v5 identity-bearing
+         * records drain (the maximum challenge TTL plus clock skew), then
+         * leave it off: a drained deployment must refuse the temporary
+         * grammar fail-closed.
+         */
+        private readonly bool $allowLegacyRswIdentity = false,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -451,17 +461,20 @@ final class Verifier
                 );
             }
             // The keyring key must be an identity form of the paired
-            // modulus: the canonical fingerprint (the keygen's
-            // rsw_modulus_n_sha256) or its clearly named legacy
-            // base64-text alias during the migration window. Both forms
-            // resolve to the same decoded trapdoor below.
-            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], allowLegacyAlias: true)) {
+            // modulus under THE active mode: the canonical fingerprint
+            // always, the legacy base64-text alias only while the
+            // migration mode is enabled.
+            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], $this->allowLegacyRswIdentity)) {
                 throw new \InvalidArgumentException(
-                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n (or its legacy base64-text alias)'
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n'
+                    .' (or its legacy base64-text alias while allowLegacyRswIdentity is enabled)'
                 );
             }
             $trapdoor = new Rsw($pair['modulus_n'], $pair['lambda']);
-            foreach (RswModulusIdentity::allFingerprints($pair['modulus_n']) as $identity) {
+            $forms = $this->allowLegacyRswIdentity
+                ? RswModulusIdentity::allFingerprints($pair['modulus_n'])
+                : [RswModulusIdentity::fingerprint($pair['modulus_n'])];
+            foreach ($forms as $identity) {
                 $this->rswByHash[$identity] = $trapdoor;
                 $this->rswModulusByHash[$identity] = $pair['modulus_n'];
             }
@@ -1136,7 +1149,7 @@ final class Verifier
             // as unsupported.
             $rsw = null;
             if ($record->rswModulusSha256 !== null) {
-                $allowLegacyAlias = $record->protocolVersion <= 4;
+                $allowLegacyAlias = $this->allowLegacyRswIdentity && $record->protocolVersion <= 4;
                 $identity = $record->rswModulusSha256;
                 $keyringModulus = $this->rswModulusByHash[$identity] ?? null;
                 if ($keyringModulus !== null

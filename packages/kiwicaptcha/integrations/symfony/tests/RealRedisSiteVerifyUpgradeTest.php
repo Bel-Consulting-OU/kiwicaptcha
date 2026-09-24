@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\Config;
@@ -201,6 +202,93 @@ final class RealRedisSiteVerifyUpgradeTest extends TestCase
             ]));
             self::assertSame(400, $response->getStatusCode(), 'an identity-less legacy record conflicts');
             self::assertSame($before, $probe->get($idemKey), 'the conflict performed zero mutation');
+        } finally {
+            $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
+        }
+    }
+
+    public function testACrashedLegacyPendingRecordIsTakenOverAndMigratedWithoutWaitingForExpiry(): void
+    {
+        $probe = $this->redisOrSkip();
+        if ($probe === null) {
+            return;
+        }
+        $storage = new RedisStorage($probe);
+        [$token, $nonce] = $this->issueSha($storage);
+        $uuid = '8e2f7a40-4444-4000-8000-0000000000a4';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $probe->del([$idemKey]);
+        $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha');
+
+        // The exact preceding-release pending bytes: no `v` member, the
+        // full operation identity, an owner whose lease expired long ago,
+        // and a healthy remaining key lifetime. The predecessor worker
+        // crashed.
+        $legacy = (string) json_encode([
+            'response_hash' => hash('sha256', $token),
+            'remoteip_fingerprint' => hash_hmac('sha256', 'siteverify-idem-ip-v1|127.0.0.1', self::SECRET),
+            'binding' => '',
+            'state' => 'pending',
+            'owner' => str_repeat('b', 32),
+            'result' => null,
+            'lease_expires_at' => time() - 60,
+        ], JSON_THROW_ON_ERROR);
+        $probe->set($idemKey, $legacy, 'EX', 300);
+
+        try {
+            $controller = $this->controller($storage, $store);
+            $response = $controller->siteverify($this->siteverifyRequest([
+                'secret' => self::SITEVERIFY_SECRET,
+                'response' => $token,
+                'remoteip' => '127.0.0.1',
+                'idempotency_key' => $uuid,
+            ]));
+            self::assertSame(200, $response->getStatusCode(), 'HEAD takes over the crashed legacy claim without waiting for key expiry');
+            $body = json_decode((string) $response->getContent(), true, 8, JSON_THROW_ON_ERROR);
+            self::assertTrue($body['success'] ?? null);
+
+            // The migrated record is the canonical v2 completion.
+            $record = json_decode((string) $probe->get($idemKey), true, 8, JSON_THROW_ON_ERROR);
+            self::assertSame(2, $record['v'] ?? null, 'the takeover upgraded the record to canonical v2');
+            self::assertSame('complete', $record['state'] ?? null);
+        } finally {
+            $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
+        }
+    }
+
+    public function testAnUnderspecifiedLegacyPendingRecordIsNeverMigrated(): void
+    {
+        $probe = $this->redisOrSkip();
+        if ($probe === null) {
+            return;
+        }
+        $storage = new RedisStorage($probe);
+        [$token, $nonce] = $this->issueSha($storage);
+        $uuid = '8e2f7a40-5555-4000-8000-0000000000a5';
+        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
+        $probe->del([$idemKey]);
+        $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha');
+
+        // An even older writer with no fingerprint at all: the operation
+        // identity is underspecified, so the record is never mutated even
+        // with an expired lease.
+        $legacy = (string) json_encode([
+            'response_hash' => hash('sha256', $token),
+            'state' => 'pending',
+            'owner' => str_repeat('c', 32),
+            'result' => null,
+            'lease_expires_at' => time() - 60,
+        ], JSON_THROW_ON_ERROR);
+        $probe->set($idemKey, $legacy, 'EX', 300);
+        $before = $probe->get($idemKey);
+
+        try {
+            // The store-level takeover refuses.
+            [$takeover] = $store->takeover($backendId, $uuid, hash('sha256', $token), 300, hash_hmac('sha256', 'siteverify-idem-ip-v1|127.0.0.1', self::SECRET), null, '');
+            self::assertSame(IdempotencyClaim::StillPending, $takeover, 'an underspecified legacy pending record is never taken over');
+            self::assertSame($before, $probe->get($idemKey), 'and never mutated');
         } finally {
             $probe->del([$idemKey, 'kiwicaptcha:'.$nonce]);
         }

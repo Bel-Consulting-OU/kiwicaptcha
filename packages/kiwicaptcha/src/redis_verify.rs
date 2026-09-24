@@ -3132,6 +3132,17 @@ impl ProductionVerifier {
         Ok(self)
     }
 
+    /// Enable or disable the legacy base64-text rsw identity alias (the
+    /// bounded migration window for identity-bearing records issued
+    /// before the canonical fingerprint rule). Disabled by default: once
+    /// every pre-v5 record has drained, a stale alias must not keep the
+    /// temporary grammar alive. Enable it only during the documented
+    /// drain (see the operations guide), keyring entries included.
+    pub fn with_rsw_legacy_identity(mut self, enabled: bool) -> Self {
+        self.rsw_keyring = std::mem::take(&mut self.rsw_keyring).with_legacy_aliases(enabled);
+        self
+    }
+
     /// The rsw trapdoor selected by the record's authenticated modulus
     /// identity: the rotation keyring first, then the active pair,
     /// through the one resolver the generic verifier also uses. The

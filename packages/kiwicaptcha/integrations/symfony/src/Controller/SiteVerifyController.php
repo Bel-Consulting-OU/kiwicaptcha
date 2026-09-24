@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecu
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\SolutionToken;
@@ -591,6 +592,14 @@ final class SiteVerifyController
         // when the record's identity equals this claim's fingerprint,
         // written atomically with the state flip.
         $operationFingerprint = hash('sha256', $backendId."\0".($idempotencyKey ?? "\0no-key")."\0".hash('sha256', $response)."\0".$this->remoteipFingerprint($remoteIp)."\0".($canonicalBinding ?? "\0no-binding"));
+        // The operation identity every idempotency transition and every
+        // operation-bound acceptance read must be bound to: computed once
+        // per request, so a later stored-result read re-proves exactly
+        // what the claim proved and can never accept a reused key that
+        // now belongs to a different operation (an ABA).
+        $idempotencyResponseHash = hash('sha256', $response);
+        $idempotencyFingerprint = $this->remoteipFingerprint($remoteIp);
+        $idempotencyBindingDigest = $this->idempotencyBinding($canonicalBinding) ?? '';
 
         // The token is decoded before the claim so a malformed token is a
         // deterministic failure: the claiming request finalizes it, so a
@@ -631,7 +640,7 @@ final class SiteVerifyController
             $claimOwner = null;
             if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
                 try {
-                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
+                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, $idempotencyResponseHash, 300, $idempotencyFingerprint, null, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     // The malformed-token claim is a raw store operation:
                     // nothing has been consumed (the decode failed), so a
@@ -644,19 +653,27 @@ final class SiteVerifyController
                 return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
+                // The acceptance is operation-bound: a key that expired
+                // and was reused by a different operation reads as
+                // Changed, never as this request's cached result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                } catch (SiteVerifyIdempotencyCorruptException $e) {
-                    // Corrupt security state is never "nothing here": the
-                    // typed fail-closed 503, never a fresh claim.
-                    $this->logGate('kiwicaptcha: corrupt siteverify idempotency record: {message}', ['message' => $e->getMessage()]);
-
-                    return $this->internalErrorResponse();
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
+                if ($lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // Corrupt security state is never "nothing here", and
+                    // a reused key is never this operation's result: the
+                    // typed fail-closed 503 in both cases.
+                    $this->logGate('kiwicaptcha: operation-bound siteverify read refused: {message}', ['message' => $lookup->kind->value]);
 
-                return $this->privateJson($stored !== null ? $this->canonicalizeResponse($stored) : ['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
+                    return $this->internalErrorResponse();
+                }
+
+                return $this->privateJson(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
             }
             $canonical = $this->canonicalizeResponse([
                 'success' => false,
@@ -696,7 +713,7 @@ final class SiteVerifyController
         if ($idempotencyKey !== null) {
             $idempotent = true;
             try {
-                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
+                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, $idempotencyResponseHash, 300, $idempotencyFingerprint, null, $idempotencyBindingDigest);
             } catch (\Throwable) {
                 // The claim is a raw store operation (a Redis outage):
                 // nothing has been consumed yet, so a same-key retry is
@@ -708,23 +725,27 @@ final class SiteVerifyController
                 return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
             if ($claim === IdempotencyClaim::CompleteSame) {
+                // The acceptance is operation-bound: a key that expired
+                // and was reused by a different operation reads as
+                // Changed, never as this request's cached result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
-                } catch (SiteVerifyIdempotencyCorruptException $e) {
-                    // Corrupt security state is never "nothing here": the
-                    // typed fail-closed 503, never a fresh claim.
-                    $this->logGate('kiwicaptcha: corrupt siteverify idempotency record: {message}', ['message' => $e->getMessage()]);
-
-                    return $this->internalErrorResponse();
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
-                    if (($stored['success'] ?? false) === true) {
-                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                if ($lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    if (($lookup->result['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($lookup->result));
                     }
 
-                    return $this->privateJson($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // A reused key (ABA) or corrupt state: the typed
+                    // fail-closed 503, never the new operation's result.
+                    $this->logGate('kiwicaptcha: operation-bound siteverify read refused: {message}', ['message' => $lookup->kind->value]);
+
+                    return $this->internalErrorResponse();
                 }
 
                 return $this->privateJson(['success' => false, 'error-codes' => ['timeout-or-duplicate']]);
@@ -766,8 +787,13 @@ final class SiteVerifyController
             $leaseProbed = false;
             $takeoverArmed = false;
             while (true) {
+                // Every poll is operation-bound: it re-proves the exact
+                // response hash, remoteip fingerprint and binding digest
+                // that produced the PendingSame, so a key that expired and
+                // was reused by a different operation can never hand this
+                // waiter the new operation's result.
                 try {
-                    $stored = $this->idempotencyStore->stored($backendId, $idempotencyKey);
+                    $lookup = $this->idempotencyStore->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     // The wait-loop reads are raw store operations: a
                     // failure maps to the retryable provider error (the
@@ -775,8 +801,16 @@ final class SiteVerifyController
                     // 500.
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
+                if ($lookup->kind === StoredLookupKind::CompleteSame) {
+                    $stored = $lookup->result;
                     break;
+                }
+                if ($lookup->kind === StoredLookupKind::Changed || $lookup->kind === StoredLookupKind::Corrupt) {
+                    // The key was reused by a different operation (an ABA)
+                    // or the record is corrupt: the waiter refuses with
+                    // the retryable provider error, never with the new
+                    // operation's result.
+                    return $this->internalErrorResponse();
                 }
                 if (microtime(true) >= $waitDeadline) {
                     // Hard bound without ownership: no stored result and
@@ -1022,17 +1056,21 @@ final class SiteVerifyController
                 // expired mid-verification): the local result is not
                 // authoritative. Return the stored authoritative result,
                 // or a retryable provider error when none exists yet.
+                // The recovery read is operation-bound too: it accepts
+                // only this operation's completed result, so a reused key
+                // (an ABA) maps to the retryable provider error instead of
+                // crossing the results of two logical operations.
                 try {
-                    $stored = $this->idempotencyStore?->stored($backendId, $idempotencyKey);
+                    $lookup = $this->idempotencyStore?->storedForOperation($backendId, $idempotencyKey, $idempotencyResponseHash, $idempotencyFingerprint, $idempotencyBindingDigest);
                 } catch (\Throwable) {
                     return $this->internalErrorResponse();
                 }
-                if ($stored !== null) {
-                    if (($stored['success'] ?? false) === true) {
-                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($stored));
+                if ($lookup !== null && $lookup->kind === StoredLookupKind::CompleteSame && $lookup->result !== null) {
+                    if (($lookup->result['success'] ?? false) === true) {
+                        return $this->releaseAndJsonResponse($token->nonce, $this->canonicalizeResponse($lookup->result));
                     }
 
-                    return $this->privateJson($this->canonicalizeResponse($stored));
+                    return $this->privateJson($this->canonicalizeResponse($lookup->result));
                 }
 
                 return $this->internalErrorResponse();

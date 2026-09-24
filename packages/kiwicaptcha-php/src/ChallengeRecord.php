@@ -206,6 +206,12 @@ final class ChallengeRecord
      */
     public const BASE_PROTOCOL_VERSION = 2;
 
+    /** The decoy-capable canonical version (requires a confirmed ceiling of at least 3). */
+    public const DECOY_PROTOCOL_VERSION = 3;
+
+    /** The execution-capable canonical version (requires a confirmed ceiling of at least 4). */
+    public const EXECUTION_PROTOCOL_VERSION = 4;
+
     /**
      * The binary's maximum challenge protocol version is 5, mirrored by
      * the Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the
@@ -445,9 +451,9 @@ final class ChallengeRecord
             // The legacy v1 signature covers no canonical segment at
             // all, so the identity is refused there too.
             1 => !$decoyPresent && !$executionPresent && !$rswIdentityPresent,
-            2 => !$decoyPresent && !$executionPresent,
-            3 => $decoyPresent && !$executionPresent,
-            4 => $executionPresent,
+            self::BASE_PROTOCOL_VERSION => !$decoyPresent && !$executionPresent,
+            self::DECOY_PROTOCOL_VERSION => $decoyPresent && !$executionPresent,
+            self::EXECUTION_PROTOCOL_VERSION => $executionPresent,
             // The identity-bearing rsw grammar: the identity is
             // mandatory (a signed identityless record with its stored
             // version flipped to 5 would keep the signatureless-identity

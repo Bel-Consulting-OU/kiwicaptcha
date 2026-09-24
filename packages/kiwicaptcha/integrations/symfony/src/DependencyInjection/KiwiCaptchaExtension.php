@@ -891,6 +891,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $container->getDefinition('kiwi_captcha.issuer')
                 ->setArgument('$rswVerificationKeys', $config['rsw_verification_keys']);
         }
+        // The bounded legacy rsw identity migration mode: wired only when
+        // the installed core Issuer declares the parameter.
+        if (self::coreConstructorAccepts(Issuer::class, 'allowLegacyRswIdentity')) {
+            $container->getDefinition('kiwi_captcha.issuer')
+                ->setArgument('$allowLegacyRswIdentity', $config['rsw_legacy_identity']);
+        }
 
         // risk.region is baked into every issued challenge record and
         // enforced at verification, so a result token issued in one region
@@ -1043,6 +1049,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         if (self::coreConstructorAccepts(Verifier::class, 'rswVerificationKeys')) {
             $container->getDefinition('kiwi_captcha.verifier')
                 ->setArgument('$rswVerificationKeys', $config['rsw_verification_keys']);
+        }
+        // The bounded legacy rsw identity migration mode rides the
+        // verifier too: the alias must be accepted exactly while the
+        // operator's drain window is declared.
+        if (self::coreConstructorAccepts(Verifier::class, 'allowLegacyRswIdentity')) {
+            $container->getDefinition('kiwi_captcha.verifier')
+                ->setArgument('$allowLegacyRswIdentity', $config['rsw_legacy_identity']);
         }
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 

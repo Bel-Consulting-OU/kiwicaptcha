@@ -159,17 +159,37 @@ final class ArraySiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
         return $this->leaseSeconds;
     }
 
-    public function stored(string $backendId, string $idempotencyKey): ?array
+    public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): StoredLookup
     {
-        $entry = $this->liveEntry($this->key($backendId, $idempotencyKey));
-        if ($entry === null || $entry['record']['state'] !== 'complete') {
-            return null;
+        $key = $this->key($backendId, $idempotencyKey);
+        try {
+            $entry = $this->liveEntry($key);
+        } catch (SiteVerifyIdempotencyCorruptException) {
+            return StoredLookup::corrupt();
         }
-        if (!\is_array($entry['record']['result'] ?? null)) {
-            throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
+        if ($entry === null) {
+            return StoredLookup::missing();
         }
+        $record = $entry['record'];
+        if (
+            $record['response_hash'] !== $responseHash
+            || $record['remoteip_fingerprint'] !== $remoteipFingerprint
+            || $record['binding'] !== ($binding ?? '')
+        ) {
+            // The key now holds a different operation (an ABA/reuse): the
+            // caller must never accept the new operation's result.
+            return StoredLookup::changed();
+        }
+        if ($record['state'] !== 'complete') {
+            return StoredLookup::pendingSame();
+        }
+        $result = $record['result'] ?? null;
+        if (!\is_array($result)) {
+            return StoredLookup::corrupt();
+        }
+        SiteVerifyResult::validate($result);
 
-        return $entry['record']['result'];
+        return StoredLookup::completeSame($result);
     }
 
     /**

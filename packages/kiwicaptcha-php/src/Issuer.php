@@ -178,6 +178,16 @@ final class Issuer
          * @var array<string, array{modulus_n: string, lambda: string}>
          */
         private readonly array $rswVerificationKeys = [],
+        /**
+         * The bounded legacy rsw identity migration mode (default false):
+         * while enabled, the historical base64-text identity alias stays
+         * accepted for identity-bearing records below protocol v5 and as
+         * a keyring key. Enable it only while pre-v5 identity-bearing
+         * records drain (the maximum challenge TTL plus clock skew), then
+         * leave it off: a drained deployment must refuse the temporary
+         * grammar fail-closed.
+         */
+        private readonly bool $allowLegacyRswIdentity = false,
     ) {
         if ($region !== null && !Config::isValidIdentifier($region, 64)) {
             throw new \InvalidArgumentException(
@@ -194,18 +204,23 @@ final class Issuer
                 );
             }
             // The keyring key must be an identity form of the paired
-            // modulus: the canonical fingerprint (the keygen's
-            // rsw_modulus_n_sha256) or its clearly named legacy
-            // base64-text alias during the migration window.
-            if (!self::isRswIdentityOfModulus($hash, $pair['modulus_n'])) {
+            // modulus under THE active mode: the canonical fingerprint
+            // (the keygen's rsw_modulus_n_sha256) always, the legacy
+            // base64-text alias only while the migration mode is enabled.
+            if (!RswModulusIdentity::matches($hash, $pair['modulus_n'], $this->allowLegacyRswIdentity)) {
                 throw new \InvalidArgumentException(
-                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n (or its legacy base64-text alias)'
+                    'rswVerificationKeys keys must be the canonical SHA-256 of the decoded modulus_n'
+                    .' (or its legacy base64-text alias while allowLegacyRswIdentity is enabled)'
                 );
             }
-            // Both identity forms resolve to the pair, so a legacy
-            // identity-bearing record and a canonical v5 record resolve
-            // against the same keyring entry.
-            foreach (RswModulusIdentity::allFingerprints($pair['modulus_n']) as $identity) {
+            // The accepted identity forms resolve to the pair, so a
+            // legacy identity-bearing record (in the migration window)
+            // and a canonical v5 record resolve against the same keyring
+            // entry.
+            $forms = $this->allowLegacyRswIdentity
+                ? RswModulusIdentity::allFingerprints($pair['modulus_n'])
+                : [RswModulusIdentity::fingerprint($pair['modulus_n'])];
+            foreach ($forms as $identity) {
                 $this->rswModuliByHash[$identity] = $pair['modulus_n'];
             }
             $this->rswModuliByHash[$hash] = $pair['modulus_n'];
@@ -270,10 +285,15 @@ final class Issuer
         // Every constructor field is carried over, including the rsw
         // trapdoor rotation keyring: a TTL-variant issuer must resolve
         // the same outstanding records as its source.
-        return new self($clone, $this->storage, $this->now, $this->region, $this->rswVerificationKeys);
+        return new self($clone, $this->storage, $this->now, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity);
     }
 
     /**
+     * `$maxProtocolVersionToEmit` is the confirmed write capability
+     * ceiling, documented on {@see self::issueWithDecoyField()}. This
+     * entry point issues the capability-free base shape, so its default
+     * is {@see ChallengeRecord::BASE_PROTOCOL_VERSION}.
+     *
      * @throws \InvalidArgumentException when the scope is empty, longer than
      *                                   128 bytes, or outside the identifier
      *                                   alphabet [A-Za-z0-9._:-];
@@ -329,17 +349,25 @@ final class Issuer
      * is cast.
      *
      * `$maxProtocolVersionToEmit` is the confirmed write capability
-     * ceiling: the highest challenge protocol version this writer's fleet
-     * has been confirmed to read. The rsw modulus identity is emitted
-     * only when the ceiling is at least
-     * {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION} (5). A
-     * pre-v5 verifier rejects the unknown version, so an unconfirmed
-     * fleet must keep receiving the legacy identityless v2 shape. The
-     * default {@see ChallengeRecord::BASE_PROTOCOL_VERSION} (2) is the
-     * safe, capability-free shape every binary reads; pass the confirmed
-     * central floor (or 5 once every reader is deployed) to arm v5. It
-     * never overrides the explicit decoy/execution arms, which are gated
-     * by their own callers' confirmed dimensions.
+     * ceiling: the highest challenge protocol version this writer's
+     * fleet has been confirmed to read. It is a real authority over
+     * every protocol extension, not a hint. Arming the decoy requires a
+     * ceiling of at least {@see ChallengeRecord::DECOY_PROTOCOL_VERSION},
+     * and arming the execution program requires at least
+     * {@see ChallengeRecord::EXECUTION_PROTOCOL_VERSION}. A request
+     * beyond the confirmed ceiling fails issuance with
+     * {@see EmissionCapabilityExceededException} instead of silently
+     * downgrading, and a ceiling below
+     * {@see ChallengeRecord::BASE_PROTOCOL_VERSION} is rejected
+     * outright.
+     *
+     * The one documented fallback is the rsw modulus identity. It is
+     * emitted only at {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
+     * and otherwise falls back to the identityless legacy base shape.
+     * The identity is additive signing metadata with a defined
+     * backward-compatible form. This entry point arms the decoy by
+     * default, so its default ceiling is the decoy version; pass the
+     * confirmed central floor explicitly for a real rollout ceiling.
      *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
@@ -354,7 +382,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
-        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
+        int $maxProtocolVersionToEmit = ChallengeRecord::DECOY_PROTOCOL_VERSION,
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -423,7 +451,7 @@ final class Issuer
         bool $armDecoyField = false,
         ?string $decoyNameOverride = null,
         ?ChallengeProfile $profile = null,
-        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
+        int $maxProtocolVersionToEmit = ChallengeRecord::EXECUTION_PROTOCOL_VERSION,
     ): Challenge {
         if ($profile !== null) {
             return $this->issueWithProfile(
@@ -610,6 +638,20 @@ final class Issuer
         if ($requestBinding !== null && !Config::isValidIdentifier($requestBinding, 128)) {
             throw new \InvalidArgumentException('request binding must be 1-128 characters of [A-Za-z0-9._:-]');
         }
+        // The emission ceiling is a real protocol authority: a value below
+        // the base protocol cannot describe any readable fleet, and every
+        // requested extension is checked against it below.
+        if ($maxProtocolVersionToEmit < ChallengeRecord::BASE_PROTOCOL_VERSION) {
+            throw new \InvalidArgumentException(
+                'maxProtocolVersionToEmit must be at least the base protocol version ('.ChallengeRecord::BASE_PROTOCOL_VERSION.')'
+            );
+        }
+        if ($decoyField !== null && $maxProtocolVersionToEmit < ChallengeRecord::DECOY_PROTOCOL_VERSION) {
+            throw new EmissionCapabilityExceededException(
+                'the decoy field requires an emission ceiling of at least '.ChallengeRecord::DECOY_PROTOCOL_VERSION
+                .'; the confirmed ceiling is '.$maxProtocolVersionToEmit
+            );
+        }
         $now = $this->nowUnix();
 
         $nonce = base64_encode(random_bytes(32));
@@ -659,6 +701,12 @@ final class Issuer
             if ($this->config->executionKey === null) {
                 throw new \InvalidArgumentException(
                     'execution challenges are armed but no execution_key is configured'
+                );
+            }
+            if ($maxProtocolVersionToEmit < ChallengeRecord::EXECUTION_PROTOCOL_VERSION) {
+                throw new EmissionCapabilityExceededException(
+                    'the execution program requires an emission ceiling of at least '.ChallengeRecord::EXECUTION_PROTOCOL_VERSION
+                    .'; the confirmed ceiling is '.$maxProtocolVersionToEmit
                 );
             }
             $executionProgram = ExecutionChallengeGenerator::generate(
@@ -826,7 +874,7 @@ final class Issuer
             // risk-escalated Argon challenge issued by a SHA-configured
             // deployment reconstructs without the rsw material.
             if ($record->rswModulusSha256 !== null) {
-                $allowLegacyAlias = $record->protocolVersion <= 4;
+                $allowLegacyAlias = $this->allowLegacyRswIdentity && $record->protocolVersion <= 4;
                 $rswModulus = $this->rswModuliByHash[$record->rswModulusSha256] ?? null;
                 if ($rswModulus !== null && !self::isRswIdentityOfModulus($record->rswModulusSha256, $rswModulus, $allowLegacyAlias)) {
                     $rswModulus = null;
@@ -897,7 +945,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
-        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
+        int $maxProtocolVersionToEmit = ChallengeRecord::EXECUTION_PROTOCOL_VERSION,
     ): Challenge {
         $profile->validate();
 
@@ -960,7 +1008,7 @@ final class Issuer
         // survive the profile path, and every constructor field is
         // carried — including the rsw trapdoor rotation keyring, so the
         // profile clone resolves the same outstanding records.
-        return (new self($config, $this->storage, $nowFn, $this->region, $this->rswVerificationKeys))
+        return (new self($config, $this->storage, $nowFn, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity))
             ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion, $maxProtocolVersionToEmit);
     }
 

@@ -12,6 +12,8 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyCorruptException;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use PHPUnit\Framework\TestCase;
@@ -66,16 +68,19 @@ final class RealRedisPresentEmptyStateTest extends TestCase
             self::assertSame(0, (int) $this->client->ttl($key), 'precondition: TTL rounds to 0 at a sub-half-second remainder');
             self::assertGreaterThan(0, (int) $this->client->pttl($key), 'precondition: PTTL reports the real remainder');
 
-            self::assertNotNull($store->stored($backendId, $uuid), 'a sub-second lifetime-bearing record is live, never corrupt');
+            self::assertNotNull(
+                SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, str_repeat('a', 64), 'no-ip', '')),
+                'a sub-second lifetime-bearing record is live, never corrupt',
+            );
 
             // The same key PERSISTed is genuinely lifetime-stripped.
             $this->client->persist($key);
             self::assertSame(-1, (int) $this->client->pttl($key));
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail('a persistent record must fail closed');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, str_repeat('a', 64), 'no-ip', '')->kind,
+                'a persistent record must fail closed',
+            );
 
             // The chain store's live read obeys the same boundary.
             $chains = new RedisChainedChallengeStateStore($this->client, 'kiwicaptcha-emptystate');
@@ -98,6 +103,62 @@ final class RealRedisPresentEmptyStateTest extends TestCase
         }
     }
 
+    public function testAPersistInjectedBetweenThePreflightAndTheReserveScriptIsCorruptNotMissing(): void
+    {
+        // The reserve path has a PHP preflight read and then an atomic Lua
+        // transition. The script itself must classify a present key whose
+        // lifetime was stripped as corrupt, never missing: if the persist
+        // lands in the preflight->EVAL window, 'missing' would let a
+        // corrupted reservation look like an expired challenge.
+        $chains = new RedisChainedChallengeStateStore($this->client, 'kiwicaptcha-emptystate');
+        $chainId = 'chain-'.bin2hex(random_bytes(8));
+        $obligationId = bin2hex(random_bytes(32));
+        $chains->createWithObligation($chainId, $obligationId, base64_encode(random_bytes(32)), 'login', null, 'sha20', 1, 300);
+        $chainKey = '{kiwi:kiwicaptcha-emptystate}:chain:'.$chainId;
+
+        // The preflight read passes on the valid lifetime-bearing record.
+        self::assertNotNull($chains->read($chainId));
+
+        // The injected client strips the lifetime exactly when the reserve
+        // script runs, after the preflight already saw a live record.
+        $injecting = new class($this->client, $chainKey) extends \Predis\Client {
+            public function __construct(
+                private readonly \Predis\Client $inner,
+                private readonly string $chainKey,
+            ) {
+            }
+
+            public function __call($commandID, $arguments)
+            {
+                if (\is_string($commandID) && strtolower($commandID) === 'eval'
+                    && isset($arguments[0]) && \is_string($arguments[0])
+                    && str_contains($arguments[0], 'Chain reservation')
+                ) {
+                    $this->inner->persist($this->chainKey);
+                }
+
+                return $this->inner->{$commandID}(...$arguments);
+            }
+        };
+        $injected = new RedisChainedChallengeStateStore($injecting, 'kiwicaptcha-emptystate');
+
+        try {
+            $injected->reserve($chainId, bin2hex(random_bytes(16)), 30);
+            self::fail('a PERSISTed chain at the reservation boundary must throw, never answer missing');
+        } catch (MalformedChainedChallengeStateException) {
+        }
+        self::assertSame(-1, (int) $this->client->pttl($chainKey));
+
+        // And the raw script answer is the corruption verdict, not missing:
+        // a second preflight-free caller sees the same classification.
+        try {
+            $injected->reserve($chainId, bin2hex(random_bytes(16)), 30);
+            self::fail('the persistent chain stays corrupt');
+        } catch (MalformedChainedChallengeStateException) {
+        }
+        $this->client->del([$chainKey, '{kiwi:kiwicaptcha-emptystate}:chain-obligation:'.$obligationId]);
+    }
+
     public function testAPresentEmptySiteVerifyRecordFailsClosedAndIsNeverHealed(): void
     {
         $store = new RedisSiteVerifyIdempotencyStore($this->client, 'kiwicaptcha-emptystate');
@@ -113,11 +174,11 @@ final class RealRedisPresentEmptyStateTest extends TestCase
                 self::fail('an empty record must fail closed, never be re-claimed');
             } catch (SiteVerifyIdempotencyCorruptException) {
             }
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail('an empty record must fail closed on the read');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, str_repeat('a', 64), 'no-ip', '')->kind,
+                'an empty record must fail closed on the read',
+            );
             self::assertSame($before, $this->client->get($key), 'the empty value is untouched (zero mutation, never healed)');
         } finally {
             $this->client->del([$key]);

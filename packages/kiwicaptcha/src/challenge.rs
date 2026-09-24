@@ -1268,6 +1268,28 @@ pub const RSW_IDENTITY_PROTOCOL_VERSION: u8 = 5;
 /// always writes it, so it needs no confirmed fleet capability.
 pub const BASE_PROTOCOL_VERSION: u8 = 2;
 
+/// The decoy-capable canonical version (requires a confirmed ceiling of
+/// at least 3).
+pub const DECOY_PROTOCOL_VERSION: u8 = 3;
+
+/// The execution-capable canonical version (requires a confirmed ceiling
+/// of at least 4).
+pub const EXECUTION_PROTOCOL_VERSION: u8 = 4;
+
+/// Why an emission-capability ceiling is invalid or a requested arm
+/// exceeds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EmissionCapabilityError {
+    /// The ceiling is below [`BASE_PROTOCOL_VERSION`]: it cannot describe
+    /// any fleet that reads even the base protocol.
+    #[error("the emission ceiling is below the base protocol version ({BASE_PROTOCOL_VERSION})")]
+    BelowBase,
+    /// An explicitly requested extension needs a higher confirmed
+    /// ceiling. The request fails instead of being silently downgraded.
+    #[error("the requested protocol extension requires a higher emission ceiling than the confirmed one")]
+    Exceeded,
+}
+
 /// The explicit issuance emission-capability ceiling: the highest
 /// challenge protocol version this writer's fleet is confirmed to read.
 ///
@@ -1282,9 +1304,15 @@ pub const BASE_PROTOCOL_VERSION: u8 = 2;
 /// [`EmissionCapabilities::confirmed`] only once every reader in their
 /// own environment accepts the ceiling.
 ///
-/// The ceiling governs the identity dimension today; the decoy/execution
-/// dimensions remain governed by their explicit arming parameters and the
-/// callers' own confirmed floors.
+/// It is a real authority over every protocol extension: arming the
+/// decoy requires [`EmissionCapabilities::admits_decoy`], arming the
+/// execution program requires [`EmissionCapabilities::admits_execution`],
+/// and either request beyond the confirmed ceiling fails issuance with
+/// [`SignError::EmissionCapabilityExceeded`] instead of silently
+/// downgrading. The one documented fallback is the rsw modulus identity,
+/// which degrades to the identityless base shape below
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`] (additive signing metadata with a
+/// defined backward-compatible form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmissionCapabilities {
     max_protocol_version: u8,
@@ -1298,17 +1326,37 @@ impl EmissionCapabilities {
         }
     }
 
-    /// A confirmed ceiling. The RSW identity arms when this reaches
-    /// [`RSW_IDENTITY_PROTOCOL_VERSION`].
-    pub const fn confirmed(max_protocol_version: u8) -> Self {
-        Self {
-            max_protocol_version,
+    /// A confirmed ceiling. A value below [`BASE_PROTOCOL_VERSION`] is
+    /// refused: it cannot describe any readable fleet.
+    pub const fn confirmed(max_protocol_version: u8) -> Result<Self, EmissionCapabilityError> {
+        if max_protocol_version < BASE_PROTOCOL_VERSION {
+            return Err(EmissionCapabilityError::BelowBase);
         }
+        Ok(Self {
+            max_protocol_version,
+        })
     }
 
     /// The confirmed ceiling value.
     pub const fn max_protocol_version(&self) -> u8 {
         self.max_protocol_version
+    }
+
+    /// Whether the confirmed ceiling admits the base canonical (always
+    /// true for a valid ceiling).
+    pub const fn admits_base(&self) -> bool {
+        self.max_protocol_version >= BASE_PROTOCOL_VERSION
+    }
+
+    /// Whether the confirmed ceiling admits the decoy-capable canonical.
+    pub const fn admits_decoy(&self) -> bool {
+        self.max_protocol_version >= DECOY_PROTOCOL_VERSION
+    }
+
+    /// Whether the confirmed ceiling admits the execution-capable
+    /// canonical.
+    pub const fn admits_execution(&self) -> bool {
+        self.max_protocol_version >= EXECUTION_PROTOCOL_VERSION
     }
 
     /// Whether the confirmed ceiling admits the identity-bearing rsw
@@ -1900,7 +1948,11 @@ pub fn issue_challenge_with_decoy(
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
     issue_challenge_with_decoy_capabilities(
-        EmissionCapabilities::base(),
+        // The decoy-arming convenience entry point assumes the decoy
+        // dimension's floor by default; pass a *_capabilities variant for
+        // a confirmed fleet ceiling.
+        EmissionCapabilities::confirmed(DECOY_PROTOCOL_VERSION)
+            .expect("the decoy protocol version is a valid ceiling"),
         config,
         scope,
         client_ip,
@@ -1988,7 +2040,11 @@ pub fn issue_challenge_with_execution(
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
     issue_challenge_with_execution_capabilities(
-        EmissionCapabilities::base(),
+        // The execution-arming convenience entry point assumes the
+        // execution dimension's floor by default; pass a *_capabilities
+        // variant for a confirmed fleet ceiling.
+        EmissionCapabilities::confirmed(EXECUTION_PROTOCOL_VERSION)
+            .expect("the execution protocol version is a valid ceiling"),
         config,
         scope,
         client_ip,
@@ -2052,6 +2108,16 @@ fn issue_challenge_inner(
     execution_action: Option<&str>,
     execution_version: Option<u8>,
 ) -> Result<Issued, SignError> {
+    // The emission ceiling is a real protocol authority: an explicitly
+    // requested extension beyond the confirmed ceiling fails issuance
+    // instead of being silently downgraded (the rsw identity is the one
+    // documented additive fallback, handled below).
+    if arm_decoy_field && !capabilities.admits_decoy() {
+        return Err(SignError::EmissionCapabilityExceeded);
+    }
+    if arm_execution && !capabilities.admits_execution() {
+        return Err(SignError::EmissionCapabilityExceeded);
+    }
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
     }
@@ -2472,6 +2538,13 @@ pub enum SignError {
     /// (raised by [`binding_tag`] when a nonce-bound binding tag is computed).
     #[error("client IP is not a valid IPv4 or IPv6 address")]
     InvalidIp,
+    /// Issuance was asked to arm a protocol extension beyond the
+    /// confirmed [`EmissionCapabilities`] ceiling. The request fails
+    /// explicitly instead of being silently downgraded. (The rsw modulus
+    /// identity is the one documented fallback: it degrades to the
+    /// identityless base shape below [`RSW_IDENTITY_PROTOCOL_VERSION`].)
+    #[error("the requested protocol extension exceeds the confirmed emission ceiling")]
+    EmissionCapabilityExceeded,
     /// SHA-256 difficulty must be within the solver ceiling — 0 would
     /// mint a trivially-solvable challenge and values above the ceiling can
     /// never be solved by the widget.
@@ -3290,7 +3363,8 @@ mod tests {
         // exact feature version (and above) arms the identity.
         for ceiling in [2u8, 4] {
             let issued = issue_challenge_with_capabilities(
-                crate::challenge::EmissionCapabilities::confirmed(ceiling),
+                crate::challenge::EmissionCapabilities::confirmed(ceiling)
+                    .expect("the confirmed ceiling is at least the base protocol"),
                 &rsw_config(MIN_RSW_T),
                 "login",
                 "1.2.3.4",
@@ -3309,7 +3383,8 @@ mod tests {
         let issued = issue_challenge_with_capabilities(
             crate::challenge::EmissionCapabilities::confirmed(
                 crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-            ),
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &rsw_config(MIN_RSW_T),
             "login",
             "1.2.3.4",

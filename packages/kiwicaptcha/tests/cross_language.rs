@@ -1925,7 +1925,8 @@ fn rust_issues_rsw_record_for_php() {
     let issued = issue_challenge_with_capabilities(
         kiwicaptcha::challenge::EmissionCapabilities::confirmed(
             kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-        ),
+        )
+        .expect("the confirmed ceiling is at least the base protocol"),
         &config,
         "login",
         "198.51.100.7",
@@ -2111,7 +2112,8 @@ echo $token;
         issue_challenge_with_capabilities(
             kiwicaptcha::challenge::EmissionCapabilities::confirmed(
                 kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-            ),
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &config,
             "login",
             "127.0.0.1",
@@ -2291,7 +2293,8 @@ echo $token;
         issue_challenge_with_execution_capabilities(
             kiwicaptcha::challenge::EmissionCapabilities::confirmed(
                 kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-            ),
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &config,
             "login",
             "127.0.0.1",

@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -232,8 +233,14 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
             $this->store->finalize($idA, $uuid, hash('sha256', 'response-A'), $ownerA, ['success' => true, 'challenge_ts' => null, 'hostname' => null]),
             'the A owner must finalize its own namespace',
         );
-        self::assertIsArray($this->store->stored($idA, $uuid), 'the A namespace must hold the finalized record');
-        self::assertNull($this->store->stored($idB, $uuid), 'the B namespace must remain untouched');
+        self::assertNotNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idA, $uuid, hash('sha256', 'response-A'), hash('sha256', 'fp'), '')),
+            'the A namespace must hold the finalized record',
+        );
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idB, $uuid, hash('sha256', 'response-A'), hash('sha256', 'fp'), '')),
+            'the B namespace must remain untouched',
+        );
 
         $keys = $this->idempotencyKeys($uuid);
         self::assertCount(2, $keys, 'each backend namespace must own its literal key');
@@ -289,7 +296,10 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
             'a policy-epoch bump must start a fresh logical operation for the same key',
         );
         self::assertIsString($owner2);
-        self::assertNull($this->store->stored($idEpoch2, $uuid), 'the new epoch namespace must be untouched');
+        self::assertNull(
+            SiteVerifyStoreAssert::completed($this->store->storedForOperation($idEpoch2, $uuid, hash('sha256', 'epoch-2'), hash('sha256', 'fp'), '')),
+            'the new epoch namespace must be untouched',
+        );
 
         $keys = $this->idempotencyKeys($uuid);
         self::assertCount(2, $keys, 'each epoch must own its literal key');

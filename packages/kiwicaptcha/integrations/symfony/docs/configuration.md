@@ -474,6 +474,7 @@ kiwi_captcha:
     rsw_lambda: '%env(RSW_LAMBDA)%'         # base64 of lcm(p-1, q-1)
     rsw_t: 75000             # sequential squarings, 10000..300000
     rsw_identity: false      # writer switch: sign the modulus identity (protocol v5)
+    rsw_legacy_identity: false  # bounded migration: accept the pre-v5 base64-text identity alias
     rsw_verification_keys:   # rotation keyring: keep outstanding challenges verifiable
         '<rsw_modulus_n_sha256>':
             modulus_n: '%env(RSW_OLD_MODULUS_N)%'
@@ -554,10 +555,19 @@ The v5 grammar binds the identity exactly. A v5 record must carry
 it, and the canonical fingerprint is the only accepted identity form
 for v5. That requirement is what refuses a signed identityless record
 whose stored version is flipped to 5, because such a record keeps the
-plain canonical bytes. The legacy base64-text alias is accepted only
-on the pre-v5 identity-bearing records, inside one bounded migration
-window. The alias exists so records issued by a release that hashed
-the base64 *text* keep verifying; it is never used for new issuance.
+plain canonical bytes.
+
+The legacy base64-text alias exists so records issued by a release that
+hashed the base64 *text* keep verifying, and it is never used for new
+issuance. It is a removable compatibility mode, not permanent protocol
+surface. The `rsw_legacy_identity` option (default false) accepts the
+alias only for pre-v5 identity-bearing records and as an
+`rsw_verification_keys` key. Enable it for the upgrade drain, then
+retire it. Once the last writer that emits the alias is gone, wait one
+maximum retained challenge lifetime (the configured TTL) plus the
+allowed clock skew and any retained-record margin. Then set the option
+back to false: a drained deployment refuses the alias fail-closed and
+rejects a legacy-alias keyring key at container build.
 
 ### Rotating the modulus
 

@@ -19,6 +19,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGua
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ChainRedisFake;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Storage\ArrayStorage;
@@ -1159,9 +1160,12 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
                 'challenge_ts' => null,
                 'hostname' => null,
             ]));
-            self::assertNotNull($storeA->stored($backendId, $uuid), 'A reads back its completed result');
+            self::assertNotNull(
+                SiteVerifyStoreAssert::completed($storeA->storedForOperation($backendId, $uuid, $responseHash, hash('sha256', 'ip-fingerprint'), '')),
+                'A reads back its completed result',
+            );
             self::assertNull(
-                $storeB->stored($backendId, $uuid),
+                SiteVerifyStoreAssert::completed($storeB->storedForOperation($backendId, $uuid, $responseHash, hash('sha256', 'ip-fingerprint'), '')),
                 'B must never replay a result completed under another deployment namespace',
             );
             [$claimB, $ownerB] = $storeB->claim($backendId, $uuid, $responseHash, 300, hash('sha256', 'ip-fingerprint'));

@@ -10,6 +10,8 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyCorruptExcep
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataCorruptException;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
+use BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyResult;
 use PHPUnit\Framework\TestCase;
 
@@ -137,13 +139,22 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         // envelope a conforming finalize writes) so the read-side
         // validation runs against genuine stored bytes.
         $key = '{kiwi:kiwitest_result-corrupt_'.getmypid().'}:siteverify-idem:'.$backendId.':'.$uuid;
+        $fingerprint = hash('sha256', 'ip-fingerprint');
         $client->set($key, json_encode([
-            'state' => 'complete',
+            'v' => 2,
             'response_hash' => $hash,
-            'remoteip_fingerprint' => 'ip-fingerprint',
+            'remoteip_fingerprint' => $fingerprint,
+            'binding' => '',
+            'state' => 'complete',
+            'owner' => null,
+            'lease_expires_at' => null,
             'result' => ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error']],
         ], JSON_THROW_ON_ERROR), 'EX', 300);
-        self::assertSame(['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error']], $store->stored($backendId, $uuid), 'the legitimate completed record reads back');
+        self::assertSame(
+            ['success' => false, 'challenge_ts' => null, 'hostname' => null, 'error-codes' => ['internal-error']],
+            SiteVerifyStoreAssert::completed($store->storedForOperation($backendId, $uuid, $hash, $fingerprint, '')),
+            'the legitimate completed record reads back',
+        );
 
         // Corrupt the persisted completed result in place: the cached
         // read must fail closed as the typed corrupt exception.
@@ -153,11 +164,11 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
             ['state' => 'complete', 'result' => ['success' => 'true']],
         ] as $corrupt) {
             $client->set($key, json_encode($corrupt, JSON_THROW_ON_ERROR));
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail('the corrupt completed result must fail closed');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, $hash, 'ip-fingerprint', '')->kind,
+                'the corrupt completed result must fail closed',
+            );
         }
 
         // Raw semantic duplicate spellings (escaped aliases), in both
@@ -179,11 +190,11 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         foreach ($ambiguousRows as $label => $ambiguous) {
             self::assertNotSame($clean, $ambiguous, $label.': the duplicate is injected');
             $client->set($key, $ambiguous);
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail($label.': an ambiguous idempotency record must fail closed');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, $hash, 'ip-fingerprint', '')->kind,
+                $label.': an ambiguous idempotency record must fail closed',
+            );
         }
 
         // Unique-key structural corruption: JSON-clean records no
@@ -201,11 +212,11 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         ];
         foreach ($structural as $index => $bad) {
             $client->set($key, json_encode($bad, JSON_THROW_ON_ERROR), 'EX', 300);
-            try {
-                $store->stored($backendId, $uuid);
-                self::fail('structural #'.$index.': the read must fail closed');
-            } catch (SiteVerifyIdempotencyCorruptException) {
-            }
+            self::assertSame(
+                StoredLookupKind::Corrupt,
+                $store->storedForOperation($backendId, $uuid, $hash, 'ip-fingerprint', '')->kind,
+                'structural #'.$index.': the read must fail closed',
+            );
             try {
                 $store->claim($backendId, $uuid, $hash, 300, hash('sha256', 'ip-fingerprint'));
                 self::fail('structural #'.$index.': the claim must answer the typed 503, never a client conflict');

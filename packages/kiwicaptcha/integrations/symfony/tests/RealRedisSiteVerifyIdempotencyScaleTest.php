@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SiteVerifyStoreAssert;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -200,6 +201,15 @@ final class RealRedisSiteVerifyIdempotencyScaleTest extends TestCase
             }
         }
         self::assertFalse($crashed, 'every idempotency worker must exit cleanly');
+        // Keep the per-uuid token mapping for the operation-bound reads.
+        $tokensByUuid = [];
+        foreach (explode("\n", (string) file_get_contents($tokensFile)) as $line) {
+            if ($line === '') {
+                continue;
+            }
+            $entry = json_decode($line, true, 8, JSON_THROW_ON_ERROR);
+            $tokensByUuid[$entry['uuid']] = $entry['token'];
+        }
         @unlink($startBarrier);
         @unlink($base);
         @unlink($tokensFile);
@@ -248,8 +258,14 @@ final class RealRedisSiteVerifyIdempotencyScaleTest extends TestCase
             }
             for ($j = 0; $j < self::CHALLENGES; $j++) {
                 $uuid = sprintf('f47ac10b-58cc-4372-a567-%012d', $j);
-                $stored = $store->stored($backendId, $uuid);
-                self::assertIsArray($stored, 'every idempotency entry must be complete');
+                $stored = SiteVerifyStoreAssert::completed($store->storedForOperation(
+                    $backendId,
+                    $uuid,
+                    hash('sha256', $tokensByUuid[$uuid]),
+                    SiteVerifyStoreAssert::fingerprint('127.0.0.1', self::SECRET),
+                    '',
+                ));
+                self::assertIsArray($stored, 'every idempotency entry must be complete under the operation identity');
                 ksort($stored);
                 self::assertSame(true, $stored['success'] ?? null, 'the stored outcome is the canonical success');
             }

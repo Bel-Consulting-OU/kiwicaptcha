@@ -154,8 +154,14 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 
 Identity-bearing records issued before the v5 grammar (protocol 2..4
 with the base64-text identity) stay verifiable through the clearly
-named legacy alias for one bounded migration window; the alias is
-never used for new issuance. The gate is a core issuance invariant,
+named legacy alias only while `kiwi_captcha.rsw_legacy_identity` is
+enabled (default false); the alias is never used for new issuance. The
+safe retirement point comes after the last legacy-capable writer is
+removed. Wait one maximum retained challenge lifetime (the configured
+TTL) plus the allowed clock skew and any retained-record margin, then
+set the option to false. A drained deployment refuses the temporary
+grammar fail-closed and rejects a legacy-alias keyring key at
+container build. The gate is a core issuance invariant,
 not a controller convention: direct `Issuer::issue()` callers pass an
 explicit capability ceiling and default to the capability-free
 identityless v2 shape, so no path can emit v5 before its readers are

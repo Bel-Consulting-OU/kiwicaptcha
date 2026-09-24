@@ -201,6 +201,69 @@ final class SiteVerifyIdempotencySchemaParityTest extends TestCase
         return $url;
     }
 
+    /**
+     * Raw-JSON vectors (never PHP-array-generated): the JSON collection
+     * representation of error-codes is part of the schema, and a decoded
+     * PHP array can silently normalize shapes Lua sees distinctly. Each
+     * vector is a complete record document fed verbatim to both sides.
+     *
+     * @return list<array{0: string, 1: string, 2: bool}> [name, record json, parity expected]
+     */
+    private function rawJsonCorpus(): array
+    {
+        $hash = str_repeat('a', 64);
+        $prefix = '{"v":2,"state":"complete","response_hash":"'.$hash.'","remoteip_fingerprint":"no-ip","binding":"","owner":null,"lease_expires_at":null,"result":{"success":false,"challenge_ts":null,"hostname":null,"error-codes":';
+        $suffix = '}}';
+
+        return [
+            ['raw-list-one', $prefix.'["bad-request"]'.$suffix, true],
+            ['raw-object-key', $prefix.'{"x":"bad-request"}'.$suffix, true],
+            ['raw-object-key-one', $prefix.'{"1":"bad-request"}'.$suffix, true],
+            ['raw-object-key-two', $prefix.'{"2":"bad-request"}'.$suffix, true],
+            ['raw-list-two', $prefix.'["bad-request","internal-error"]'.$suffix, true],
+            ['raw-list-unknown', $prefix.'["not-a-code"]'.$suffix, true],
+            // PHP's json_decode coerces the numeric string key "0" to a
+            // list position, so {"0":...} is indistinguishable from
+            // ["..."] in the decoded domain and PHP accepts it; Lua sees
+            // the object spelling and refuses it. The parity assertion is
+            // skipped for this ONE representation edge and each side's
+            // documented behavior is asserted instead.
+            ['raw-object-key-zero', $prefix.'{"0":"bad-request"}'.$suffix, false],
+        ];
+    }
+
+    public function testTheRawJsonRepresentationVectorsMatchOnBothSides(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis not installed');
+        }
+        $client = new \Predis\Client(self::redisUrl());
+        try {
+            $client->ping();
+        } catch (\Throwable $e) {
+            self::markTestSkipped('Redis unreachable: '.$e->getMessage());
+        }
+
+        $script = SiteVerifyIdempotencyLuaPredicate::LUA."\nreturn classifyIdempotencyRecord(cjson.decode(ARGV[1])) ~= nil and 'accept' or 'reject'";
+        foreach ($this->rawJsonCorpus() as [$name, $raw, $expectParity]) {
+            $luaRaw = $client->eval($script, 1, 'parity-key', $raw);
+            $decoded = json_decode($raw, true, 8, JSON_THROW_ON_ERROR);
+            $php = SiteVerifyIdempotencyRecordSchema::tryClassify($decoded) !== null;
+            $lua = $luaRaw === 'accept';
+            if ($expectParity) {
+                self::assertSame($php, $lua, $name.': PHP and Lua must agree on the raw representation');
+            } else {
+                // The one documented representation edge: PHP accepts the
+                // numerically-keyed object (its decoder normalizes it to
+                // a list) while Lua's canonical-list rule refuses it. The
+                // strict Lua rule is what protects the transition
+                // boundary; PHP's acceptance is the decoded-domain limit.
+                self::assertFalse($lua, $name.': Lua refuses the object spelling');
+                self::assertTrue($php, $name.': PHP normalizes the numeric key to a list position');
+            }
+        }
+    }
+
     public function testEveryCorpusRecordGetsIdenticalPhpAndLuaOutcomes(): void
     {
         if (!\class_exists(\Predis\Client::class)) {

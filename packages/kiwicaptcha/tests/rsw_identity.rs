@@ -73,7 +73,8 @@ fn issued(modulus_b64: &str, lambda_b64: &str) -> kiwicaptcha::challenge::Issued
     issue_challenge_with_capabilities(
         kiwicaptcha::challenge::EmissionCapabilities::confirmed(
             kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-        ),
+        )
+        .expect("the confirmed ceiling is at least the base protocol"),
         &rsw_config(modulus_b64, lambda_b64),
         "login",
         "198.51.100.7",
@@ -202,15 +203,32 @@ fn the_keyring_registers_both_identity_forms_and_refuses_mismatches() {
     let canonical = s(&fixture, &["rsw_modulus_n_sha256"]);
     let legacy = s(&fixture, &["legacy_base64_text_sha256"]);
 
+    // The migration mode OFF (the default): only the canonical identity
+    // form is accepted and registered.
     let mut keyring = RswKeyring::new();
+    assert_eq!(
+        keyring.insert(legacy, modulus, lambda),
+        Err(RswKeyringError::MismatchedIdentity),
+        "a legacy-alias key is refused while the migration mode is off"
+    );
+    keyring
+        .insert(canonical, modulus, lambda)
+        .expect("the canonical identity is accepted");
+    assert_eq!(keyring.len(), 1, "only the canonical form is registered");
+    assert!(keyring.lookup(canonical).is_some());
+    assert!(keyring.lookup(legacy).is_none());
+
+    // The migration mode ON: both identity forms are accepted and
+    // registered, as documented for the bounded drain.
     for identity in [canonical, legacy] {
-        let mut ring = RswKeyring::new();
+        let mut ring = RswKeyring::new().with_legacy_aliases(true);
         ring.insert(identity, modulus, lambda)
-            .expect("both identity forms are accepted");
+            .expect("both identity forms are accepted in the migration mode");
         assert_eq!(ring.len(), 2, "both computed forms are registered");
         assert!(ring.lookup(canonical).is_some());
         assert!(ring.lookup(legacy).is_some());
     }
+    let mut keyring = RswKeyring::new();
     assert!(
         keyring.insert(&"f".repeat(64), modulus, lambda).is_err(),
         "a mismatched identity is refused"
@@ -312,11 +330,27 @@ fn identity_selection_is_exact_and_never_falls_through() {
         .unwrap_err(),
         RswResolutionError::UnknownIdentity
     );
-    // ... while the same alias resolves a protocol-2 record (the bounded
-    // migration window).
+    // ... and the alias does NOT resolve a protocol-2 record either while
+    // the migration mode is off (default): the temporary grammar is
+    // removable, so a drained deployment refuses it fail-closed.
+    assert_eq!(
+        resolve_rsw_trapdoor(
+            Some((modulus_a, lambda_a)),
+            Some(&keyring_a),
+            Some(legacy_a),
+            2
+        )
+        .map(|t| t.is_some())
+        .unwrap_err(),
+        RswResolutionError::UnknownIdentity,
+        "the migration mode is off by default"
+    );
+    // ... while the same alias resolves a protocol-2 record once the
+    // bounded migration window is explicitly enabled.
+    let migration = RswKeyring::new().with_legacy_aliases(true);
     assert!(resolve_rsw_trapdoor(
         Some((modulus_a, lambda_a)),
-        Some(&keyring_a),
+        Some(&migration),
         Some(legacy_a),
         2
     )

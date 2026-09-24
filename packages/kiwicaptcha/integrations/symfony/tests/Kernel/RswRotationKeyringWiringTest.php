@@ -95,6 +95,39 @@ final class RswRotationKeyringWiringTest extends TestCase
         self::assertSame(RswFixture::MODULUS_N_B64, $this->keyringModulus($verifier, 'rswModulusByHash', $identityA));
     }
 
+    public function testTheLegacyMigrationModeReachesBothCoreServices(): void
+    {
+        $this->requireGmp();
+        $options = [
+            'algorithm' => 'rsw',
+            'rsw_modulus_n' => RswFixture::MODULUS_N_B64,
+            'rsw_lambda' => RswFixture::LAMBDA_B64,
+            'rsw_t' => 10_000,
+        ];
+
+        // The default: the temporary grammar is off on both services.
+        $default = $this->container($options, new ArrayStorage());
+        self::assertFalse(
+            (new \ReflectionProperty($default->get('kiwi_captcha.issuer'), 'allowLegacyRswIdentity'))->getValue($default->get('kiwi_captcha.issuer')),
+            'the issuer defaults the legacy mode off',
+        );
+        self::assertFalse(
+            (new \ReflectionProperty($default->get('kiwi_captcha.verifier'), 'allowLegacyRswIdentity'))->getValue($default->get('kiwi_captcha.verifier')),
+            'the verifier defaults the legacy mode off',
+        );
+
+        // The declared drain window reaches both core services.
+        $migration = $this->container($options + ['rsw_legacy_identity' => true], new ArrayStorage());
+        self::assertTrue(
+            (new \ReflectionProperty($migration->get('kiwi_captcha.issuer'), 'allowLegacyRswIdentity'))->getValue($migration->get('kiwi_captcha.issuer')),
+            'the issuer receives the declared migration window',
+        );
+        self::assertTrue(
+            (new \ReflectionProperty($migration->get('kiwi_captcha.verifier'), 'allowLegacyRswIdentity'))->getValue($migration->get('kiwi_captcha.verifier')),
+            'the verifier receives the declared migration window',
+        );
+    }
+
     public function testIssuedUnderAReconstructsAndVerifiesAfterTheRotation(): void
     {
         $this->requireGmp();

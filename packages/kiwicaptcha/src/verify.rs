@@ -6634,7 +6634,8 @@ mod tests {
         crate::challenge::issue_challenge_with_execution_capabilities(
             crate::challenge::EmissionCapabilities::confirmed(
                 crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
-            ),
+            )
+            .expect("the confirmed ceiling is at least the base protocol"),
             &config,
             "login",
             "1.2.3.4",

@@ -36,11 +36,17 @@ use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
  * retry with the same key but a different pseudonym or binding digest
  * is a conflict. A changed remoteip or transaction context can
  * materially change the verification outcome, and no entry may be
- * joined or reused across them. A legacy record (the shape
- * written before schema versioning, no `v` member) is recognized
- * read-only: stored() can still serve its completed result for the
- * record's bounded remaining TTL, but no transition ever claims,
- * renews, takes over or finalizes it. The owner's lease
+ * joined or reused across them.
+ *
+ * A legacy record (the shape written before schema versioning, no `v`
+ * member) is recognized read-only with one documented migration.
+ * Stored-result reads still serve its completed result for the record's
+ * bounded remaining TTL, and no transition claims, renews or finalizes
+ * it. The exception: an identity-complete pending record whose owner
+ * lease already expired may be taken over, atomically upgrading it to
+ * the canonical v2 schema so a crashed predecessor owner never strands
+ * the key. An underspecified legacy record is never mutated. The
+ * owner's lease
  * (`lease_expires_at`, set from the server clock via redis TIME at
  * claim creation) is configurable (`leaseSeconds`, default
  * {@see SiteVerifyIdempotencyStore::LEASE_SECONDS}) and bounds how long
@@ -61,17 +67,43 @@ final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStor
     private readonly RedisSecurityCommandExecutor $lua;
 
     /**
-     * The atomic live-record read used by stored(): existence and key
-     * lifetime are obtained in the same script, so only a lifetime-bearing
-     * record can ever be returned. Absent -> the Lua boolean false;
-     * present without a lifetime -> 'corrupt'; live -> the raw JSON.
+     * The atomic operation-bound result read. Existence, key lifetime,
+     * strict decode, the full record schema, the caller's operation
+     * identity and the state extraction run in one script, so the
+     * classified outcome can never cross between two logical operations
+     * that reused the key (an ABA after expiry). Answers 'missing',
+     * 'pending_same', 'changed', 'corrupt', or the two-element
+     * {'complete_same', record-json} whose record already passed the
+     * shared schema and result validators.
      */
-    private const READ_LIVE_LUA = PersistedJsonLuaPredicate::LUA . <<<'LUA'
+    private const STORED_FOR_OPERATION_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
 local existing = readLivePersistedKey(KEYS[1])
+if existing == false then
+  return 'missing'
+end
 if existing == 'corrupt' then
   return 'corrupt'
 end
-return existing
+local rec = decodeUniqueObject(existing)
+if rec == nil then
+  return 'corrupt'
+end
+if classifyIdempotencyRecord(rec) == nil then
+  return 'corrupt'
+end
+-- The operation identity: a record that now belongs to a DIFFERENT
+-- operation (a reused key) is never this caller's result.
+if rec.response_hash ~= ARGV[1] or rec.remoteip_fingerprint ~= ARGV[2] or rec.binding ~= ARGV[3] then
+  return 'changed'
+end
+if rec.state == 'complete' then
+  -- Return the EXACT persisted record bytes alongside the verdict: the
+  -- PHP side extracts the result from the same bytes the script
+  -- classified, so the cached response keeps its byte-for-byte document
+  -- order through the round trip (a cjson re-encode would not).
+  return { 'complete_same', existing }
+end
+return 'pending_same'
 LUA;
 
     private const CLAIM_LUA = PersistedJsonLuaPredicate::LUA . SiteVerifyIdempotencyLuaPredicate::LUA . <<<'LUA'
@@ -101,17 +133,19 @@ if schema == nil then
   return 'corrupt'
 end
 -- The legacy shape (written by the immediately preceding release, no `v`
--- member) is read-only: no transition ever claims, renews, takes over or
--- finalizes it. The preceding release already bound the full operation
+-- member). The preceding release already bound the full operation
 -- identity (response_hash, remoteip_fingerprint, binding) and compared
 -- all three before answering, so an EXACT retry of its own record is
--- recognized — a completed legacy record replays the cached response
--- through stored(), and an in-flight legacy pending record reports the
--- non-authoritative pending state (the waiter keeps reading; takeover
--- refuses until it expires). Any missing or differing identity component
--- stays a conflict; truly underspecified legacy records (a missing
--- fingerprint/binding, or an even older writer) conflict exactly as
--- before.
+-- recognized: a completed legacy record replays the cached response
+-- through the operation-bound read, and an in-flight legacy pending
+-- record reports the non-authoritative pending state. The waiter keeps
+-- reading; once the predecessor's owner lease has expired, the takeover
+-- migrates that SAME identity-complete operation to the canonical v2
+-- schema (TAKEOVER_LUA), so a crashed old owner never strands the key
+-- until its full TTL. Any missing or differing identity component stays
+-- a conflict; truly underspecified legacy records (a missing
+-- fingerprint/binding, or an even older writer) are never mutated and
+-- conflict exactly as before.
 if schema == 'legacy' then
   local identity_complete = type(rec.response_hash) == 'string'
     and type(rec.remoteip_fingerprint) == 'string'
@@ -162,10 +196,40 @@ local schema = classifyIdempotencyRecord(rec)
 if schema == nil then
   return 'corrupt'
 end
--- The legacy shape is read-only: a takeover never takes ownership of a
--- record no transition may finalize.
+-- The legacy shape. An identity-complete predecessor record whose
+-- owner lease already expired is safely migratable: the preceding
+-- release bound the same three operation-identity fields, so once the
+-- lease lapsed the new generation may take over EXACTLY that operation
+-- and simultaneously upgrade the object to the canonical v2 schema
+-- (fresh owner, new lease, the identity fields preserved). An
+-- underspecified legacy record (any identity component missing) is
+-- never mutated.
 if schema == 'legacy' then
-  return 'still_pending'
+  local identity_complete = type(rec.response_hash) == 'string'
+    and type(rec.remoteip_fingerprint) == 'string'
+    and type(rec.binding) == 'string'
+    and rec.response_hash == response_hash
+    and rec.remoteip_fingerprint == fingerprint
+    and rec.binding == binding
+  if not identity_complete or rec.state ~= 'pending' then
+    return 'still_pending'
+  end
+  local legacy_lease = tonumber(rec.lease_expires_at)
+  if legacy_lease == nil or legacy_lease >= now then
+    return 'still_pending'
+  end
+  local upgraded = {
+    v = 2,
+    response_hash = rec.response_hash,
+    remoteip_fingerprint = rec.remoteip_fingerprint,
+    binding = rec.binding,
+    state = 'pending',
+    owner = owner,
+    result = cjson.null,
+    lease_expires_at = now + lease_seconds,
+  }
+  redis.call('SET', key, cjson.encode(upgraded), 'EX', ttl)
+  return 'took_over'
 end
 if rec.state ~= 'pending' then
   return 'still_pending'
@@ -401,46 +465,63 @@ LUA;
         return $this->leaseSeconds;
     }
 
-    public function stored(string $backendId, string $idempotencyKey): ?array
+    public function storedForOperation(string $backendId, string $idempotencyKey, string $responseHash, string $remoteipFingerprint, ?string $binding = null): StoredLookup
     {
-        // The atomic live read: existence and key lifetime in one script,
-        // so a PERSISTed (lifetime-stripped) record can never be
-        // classified as live authorization-bearing cached state.
-        $raw = $this->lua->executeRead(self::READ_LIVE_LUA, $this->key($backendId, $idempotencyKey), []);
-        if ($raw === false || $raw === null) {
-            return null;
+        // The ONE atomic read: lifetime, decode, schema, the operation
+        // identity and the state extraction in a single script, so the
+        // acceptance cannot be re-bound by an expiry+reuse between a
+        // structural read and an identity check in PHP.
+        $raw = $this->lua->executeRead(
+            self::STORED_FOR_OPERATION_LUA,
+            $this->key($backendId, $idempotencyKey),
+            [$responseHash, $remoteipFingerprint, $binding ?? ''],
+        );
+        if ($raw === false || $raw === null || $raw === 'missing') {
+            return StoredLookup::missing();
+        }
+        if ($raw === 'pending_same') {
+            return StoredLookup::pendingSame();
+        }
+        if ($raw === 'changed') {
+            return StoredLookup::changed();
         }
         if ($raw === 'corrupt') {
-            throw new SiteVerifyIdempotencyCorruptException('the idempotency record carries no Redis key lifetime');
+            return StoredLookup::corrupt();
         }
-        if (!\is_string($raw) || $raw === '') {
-            return null;
-        }
-        try {
-            $rec = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw, 8192);
-            if ($rec === null) {
-                throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not a clean JSON object (malformed, oversized or carrying a semantic duplicate key)');
+        if (\is_array($raw) && ($raw[0] ?? null) === 'complete_same' && \is_string($raw[1] ?? null)) {
+            try {
+                $rec = \KiwiCaptcha\Storage\StrictJson::decodeObject($raw[1], 8192);
+            } catch (\JsonException) {
+                return StoredLookup::corrupt();
             }
-        } catch (\JsonException $e) {
-            // Corrupt security state is never transformed into "nothing
-            // here": a malformed idempotency record maps to the typed
-            // fail-closed exception (the controller answers the 503).
-            throw new SiteVerifyIdempotencyCorruptException('the idempotency record is malformed', 0, $e);
-        }
-        if (!\is_array($rec)) {
-            throw new SiteVerifyIdempotencyCorruptException('the idempotency record is not an object');
-        }
-        SiteVerifyIdempotencyRecordSchema::validate($rec);
-        if (($rec['state'] ?? '') === 'complete') {
-            if (!\is_array($rec['result'] ?? null)) {
-                throw new SiteVerifyIdempotencyCorruptException('the completed idempotency record has no result');
+            if (!\is_array($rec)) {
+                return StoredLookup::corrupt();
             }
-            // A completed result is authorization-bearing cached state:
-            // the canonical-response validator ran on the read too (inside
-            // the schema validation), so a corrupted persisted result (a
-            // shape no conforming finalize could have written) fails
-            // closed as the typed corrupt exception instead of becoming a
-            // cached success.
+            // The script classified the same bytes; re-validate the
+            // schema and the operation identity in PHP (defense in depth
+            // against a Lua/PHP divergence), then extract the result so
+            // it keeps its persisted document order.
+            try {
+                SiteVerifyIdempotencyRecordSchema::validate($rec);
+            } catch (SiteVerifyIdempotencyCorruptException) {
+                return StoredLookup::corrupt();
+            }
+            if (($rec['state'] ?? null) !== 'complete'
+                || ($rec['response_hash'] ?? null) !== $responseHash
+                || ($rec['remoteip_fingerprint'] ?? null) !== $remoteipFingerprint
+                || ($rec['binding'] ?? null) !== ($binding ?? '')
+            ) {
+                return StoredLookup::corrupt();
+            }
+            $result = $rec['result'] ?? null;
+            if (!\is_array($result)) {
+                return StoredLookup::corrupt();
+            }
+            try {
+                SiteVerifyResult::validate($result);
+            } catch (SiteVerifyIdempotencyCorruptException) {
+                return StoredLookup::corrupt();
+            }
             // Failed-barrier replay guard: the finalize that wrote this
             // completed record may have landed on the primary with its
             // WAIT failing. Returning the stored success read-only would
@@ -451,10 +532,10 @@ LUA;
                 $this->establishReplicationFence('the siteverify stored-success acceptance');
             }
 
-            return $rec['result'];
+            return StoredLookup::completeSame($result);
         }
 
-        return null;
+        return StoredLookup::corrupt();
     }
 
     private function retentionTtl(string $idempotencyKey): int
