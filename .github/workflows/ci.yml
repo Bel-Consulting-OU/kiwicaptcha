@@ -901,8 +901,8 @@ jobs:
             if ($claim2 !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::CompleteSame || $owner2 !== null) {
                 fwrite(STDERR, "re-claim was not COMPLETE_SAME\n"); exit(1);
             }
-            // The operation-bound acceptance read: the EXACT operation's
-            // completed result, classified in one atomic script.
+            // The operation-bound acceptance read: the exact operation
+            // identity, classified in one atomic script.
             $lookup = $store->storedForOperation($backendId, $uuid, $responseHash, "no-ip", "");
             if ($lookup->kind !== BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind::CompleteSame
                 || ($lookup->result["success"] ?? null) !== true
