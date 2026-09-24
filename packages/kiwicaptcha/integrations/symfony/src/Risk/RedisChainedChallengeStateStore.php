@@ -164,7 +164,7 @@ if mapped then
     -- never healed (zero writes here) — only a genuinely missing or
     -- signed-expired record is a stale mapping eligible for repair. The
     -- caller turns 'corrupt' into the retryable fail-closed 503.
-    if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[3]))) then
+    if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[3]))) then
       return {'', 0, 'corrupt'}
     end
     local rec = decodeUniqueObject(chained)
@@ -269,18 +269,23 @@ LUA;
      * reserve a past-expiry record).
      */
     private const RESERVE_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
--- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining TTL).
+-- Chain reservation: owner-scoped SHORT lease (redis TIME + remaining lifetime).
 local now = tonumber(redis.call('TIME')[1])
 local existing = redis.call('GET', KEYS[1])
 if not existing then
   return 'missing'
 end
 -- A chain record WITHOUT an expiry is CORRUPTED state: fail closed,
--- never manufacture a lifetime from the configured TTL.
-local ttl = tonumber(redis.call('TTL', KEYS[1]))
-if ttl <= 0 then
+-- never manufacture a lifetime from the configured TTL. PTTL 0 is a
+-- live key inside its final second, not a stripped lifetime.
+local key_pttl_ms = tonumber(redis.call('PTTL', KEYS[1]))
+if chainKeyLifetimeMissing(key_pttl_ms) then
   return 'missing'
 end
+-- The reservation lease never outlives the key lifetime, and a
+-- sub-second remainder rounds UP to one second so the bounded SET EX
+-- below can never write a non-positive expiry.
+local remaining_lease_secs = math.max(1, math.floor(key_pttl_ms / 1000))
 local rec = decodeUniqueObject(existing)
 if rec == nil or not isValidChainRecord(rec) then
   return 'corrupt'
@@ -313,8 +318,8 @@ if rec['state'] == 'reserved' then
     return 'busy'
   end
   local lease = tonumber(ARGV[2])
-  if ttl < lease then
-    lease = ttl
+  if remaining_lease_secs < lease then
+    lease = remaining_lease_secs
   end
   rec['state'] = 'reserved'
   rec['owner'] = ARGV[1]
@@ -327,8 +332,8 @@ if rec['state'] == 'reserved' then
   return 'taken_over'
 end
 local lease = tonumber(ARGV[2])
-if ttl < lease then
-  lease = ttl
+if remaining_lease_secs < lease then
+  lease = remaining_lease_secs
 end
 rec['state'] = 'reserved'
 rec['owner'] = ARGV[1]
@@ -361,7 +366,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -439,7 +444,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -487,7 +492,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -532,7 +537,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -599,7 +604,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -681,7 +686,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -735,7 +740,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -776,7 +781,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -819,7 +824,7 @@ if not existing then
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and every
 -- mutating transition fails closed like the reservation does.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -893,12 +898,16 @@ LUA;
     private const READ_LUA = PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Chain live read: existence + key lifetime + strict decode + signed expiry.
 local existing = redis.call('GET', KEYS[1])
-if not existing or existing == '' then
+if not existing then
   return false
+end
+-- A PRESENT empty value is corruption, never absence.
+if existing == '' then
+  return 'corrupt'
 end
 -- The key-lifetime guard: a TTL-less chain is corrupted state and fails
 -- closed at the read like everywhere else.
-if chainKeyLifetimeMissing(tonumber(redis.call('TTL', KEYS[1]))) then
+if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
@@ -1184,7 +1193,12 @@ LUA;
     public function obligationLookup(string $obligationId): ?array
     {
         $chainId = $this->redis->get($this->obligationKey($obligationId));
-        if (\is_string($chainId) && $chainId !== '') {
+        if ($chainId === '') {
+            // A present empty mapping is damaged state, never "no open
+            // obligation": healing it would restart the transaction.
+            throw new MalformedChainedChallengeStateException('the obligation mapping is an empty value');
+        }
+        if (\is_string($chainId)) {
             if (!ChainId::isValid($chainId)) {
                 throw new MalformedChainedChallengeStateException('the obligation mapping carries a malformed chain id');
             }
@@ -1200,7 +1214,10 @@ LUA;
         // (the primary-namespace scripts answer missing), which never
         // restarts the transaction at stage 1.
         $legacy = $this->redis->get($this->legacyObligationKey($obligationId));
-        if (\is_string($legacy) && $legacy !== '') {
+        if ($legacy === '') {
+            throw new MalformedChainedChallengeStateException('the legacy obligation mapping is an empty value');
+        }
+        if (\is_string($legacy)) {
             if (!ChainId::isValid($legacy)) {
                 throw new MalformedChainedChallengeStateException('the legacy obligation mapping carries a malformed chain id');
             }

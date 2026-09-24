@@ -6629,7 +6629,12 @@ mod tests {
             issuer: None,
             policy_version: 1,
         };
-        crate::challenge::issue_challenge_with_execution(
+        // The composition confirms the v5 ceiling explicitly: the
+        // capability-free default would emit the identityless shape.
+        crate::challenge::issue_challenge_with_execution_capabilities(
+            crate::challenge::EmissionCapabilities::confirmed(
+                crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            ),
             &config,
             "login",
             "1.2.3.4",

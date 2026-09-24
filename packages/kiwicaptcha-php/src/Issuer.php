@@ -281,9 +281,14 @@ final class Issuer
      *                                   than 128 bytes or outside the same
      *                                   alphabet
      */
-    public function issue(string $scope, string $clientIp, ?string $requestBinding = null, ?string $hostname = null): Challenge
-    {
-        return $this->issueChallenge($scope, $clientIp, $requestBinding, $hostname, null);
+    public function issue(
+        string $scope,
+        string $clientIp,
+        ?string $requestBinding = null,
+        ?string $hostname = null,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
+    ): Challenge {
+        return $this->issueChallenge($scope, $clientIp, $requestBinding, $hostname, null, false, null, 1, $maxProtocolVersionToEmit);
     }
 
     /**
@@ -323,15 +328,18 @@ final class Issuer
      * generator's live maximum), passed as an int — never a string that
      * is cast.
      *
-     * `$armRswIdentity` is the rsw identity writer switch. When the
-     * configured algorithm is rsw, true (the default, since the
-     * identity is the security property) signs the canonical-byte
-     * modulus identity into the canonical as the final
-     * `|<rsw_modulus_sha256>` segment, and stamps the record protocol
-     * v5. A pre-v5 verifier rejects that unknown version. A deployment
-     * roll-out that is not yet fleet-confirmed passes false to keep
-     * issuing the legacy identityless v2 shape until every reader
-     * accepts v5. A true value on a non-rsw algorithm is inert.
+     * `$maxProtocolVersionToEmit` is the confirmed write capability
+     * ceiling: the highest challenge protocol version this writer's fleet
+     * has been confirmed to read. The rsw modulus identity is emitted
+     * only when the ceiling is at least
+     * {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION} (5). A
+     * pre-v5 verifier rejects the unknown version, so an unconfirmed
+     * fleet must keep receiving the legacy identityless v2 shape. The
+     * default {@see ChallengeRecord::BASE_PROTOCOL_VERSION} (2) is the
+     * safe, capability-free shape every binary reads; pass the confirmed
+     * central floor (or 5 once every reader is deployed) to arm v5. It
+     * never overrides the explicit decoy/execution arms, which are gated
+     * by their own callers' confirmed dimensions.
      *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
@@ -346,7 +354,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
-        bool $armRswIdentity = true,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -361,7 +369,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
-            $armRswIdentity,
+            $maxProtocolVersionToEmit,
         );
     }
 
@@ -415,7 +423,7 @@ final class Issuer
         bool $armDecoyField = false,
         ?string $decoyNameOverride = null,
         ?ChallengeProfile $profile = null,
-        bool $armRswIdentity = true,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
     ): Challenge {
         if ($profile !== null) {
             return $this->issueWithProfile(
@@ -428,7 +436,7 @@ final class Issuer
                 armExecution: $armExecution,
                 executionAction: $executionAction,
                 executionVersion: $executionVersion,
-                armRswIdentity: $armRswIdentity,
+                maxProtocolVersionToEmit: $maxProtocolVersionToEmit,
             );
         }
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
@@ -444,7 +452,7 @@ final class Issuer
             $armExecution,
             $executionAction,
             $executionVersion,
-            $armRswIdentity,
+            $maxProtocolVersionToEmit,
         );
     }
 
@@ -586,7 +594,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
-        bool $armRswIdentity = true,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
     ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -673,7 +681,10 @@ final class Issuer
         // segments (their own signed segments stay authoritative); the
         // identity is appended last, see {@see self::canonicalPayload()}.
         $rswIdentity = null;
-        if ($isRsw && $armRswIdentity && $this->config->rswModulusN !== null) {
+        if ($isRsw
+            && $this->config->rswModulusN !== null
+            && $maxProtocolVersionToEmit >= ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
+        ) {
             $rswIdentity = self::rswModulusSha256($this->config->rswModulusN);
         }
         $payload = self::canonicalPayload(
@@ -886,7 +897,7 @@ final class Issuer
         bool $armExecution = false,
         ?string $executionAction = null,
         int $executionVersion = 1,
-        bool $armRswIdentity = true,
+        int $maxProtocolVersionToEmit = ChallengeRecord::BASE_PROTOCOL_VERSION,
     ): Challenge {
         $profile->validate();
 
@@ -950,7 +961,7 @@ final class Issuer
         // carried — including the rsw trapdoor rotation keyring, so the
         // profile clone resolves the same outstanding records.
         return (new self($config, $this->storage, $nowFn, $this->region, $this->rswVerificationKeys))
-            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion, $armRswIdentity);
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion, $maxProtocolVersionToEmit);
     }
 
     /**

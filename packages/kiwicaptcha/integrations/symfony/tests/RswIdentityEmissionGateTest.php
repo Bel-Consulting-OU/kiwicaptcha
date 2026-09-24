@@ -120,21 +120,25 @@ final class RswIdentityEmissionGateTest extends TestCase
     public function testEnabledWithFloorFiveArmsProtocolV5(): void
     {
         // The operator completed the two-phase rollout: rsw_identity on
-        // AND the central floor confirms 5. Issuance signs the canonical
-        // identity as the final canonical segment and stamps protocol
-        // v5.
-        $stack = $this->stack(true, 5);
-        [$status, $data] = $this->issue($stack['controller']);
-        self::assertSame(200, $status);
-        $record = $stack['storage']->find((string) $data['nonce']);
-        self::assertNotNull($record);
-        self::assertSame(5, $record->protocolVersion, 'the identity-armed record is protocol v5');
-        self::assertSame(
-            RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
-            $record->rswModulusSha256,
-            'the record carries the canonical-byte modulus identity (the keygen fingerprint)',
-        );
-        self::assertSame([], $stack['logger']->warnings);
+        // AND the central floor confirms the feature version. Issuance
+        // signs the canonical identity as the final canonical segment and
+        // stamps protocol v5. A later global maximum (6) must not shut the
+        // feature off: the gate compares against the feature constant,
+        // never the binary's global maximum.
+        foreach ([5, 6] as $floor) {
+            $stack = $this->stack(true, $floor);
+            [$status, $data] = $this->issue($stack['controller']);
+            self::assertSame(200, $status);
+            $record = $stack['storage']->find((string) $data['nonce']);
+            self::assertNotNull($record);
+            self::assertSame(5, $record->protocolVersion, "floor {$floor}: the identity-armed record is protocol v5");
+            self::assertSame(
+                RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
+                $record->rswModulusSha256,
+                'the record carries the canonical-byte modulus identity (the keygen fingerprint)',
+            );
+            self::assertSame([], $stack['logger']->warnings);
+        }
     }
 
     public function testEnabledWithFloorFourStaysV2AndWarnsOnce(): void

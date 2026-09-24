@@ -7,10 +7,12 @@
 //! rejection, the legacy base64-text alias window, and the explicit
 //! negative: a B proof computed for an A-bound record must never pass.
 
-use kiwicaptcha::challenge::{issue_challenge, BindingMode, ChallengeConfig, PoWAlgorithm};
+use kiwicaptcha::challenge::{
+    issue_challenge_with_capabilities, BindingMode, ChallengeConfig, PoWAlgorithm,
+};
 use kiwicaptcha::rsw::{
     legacy_base64_text_fingerprint_hex, modulus_fingerprint_hex, resolve_rsw_trapdoor, RswKeyring,
-    RswResolutionError, RswTrapdoor,
+    RswKeyringError, RswResolutionError, RswTrapdoor,
 };
 use kiwicaptcha::verify::{
     verify_solution, RequestBindingExpectation, VerifyContext, VerifyError, VerifyOutcome,
@@ -65,7 +67,13 @@ fn rsw_config(modulus_b64: &str, lambda_b64: &str) -> ChallengeConfig {
 }
 
 fn issued(modulus_b64: &str, lambda_b64: &str) -> kiwicaptcha::challenge::Issued {
-    issue_challenge(
+    // These interop cases test the identity-bearing generation, so the
+    // capability ceiling is confirmed explicitly (the plain
+    // issue_challenge default is the capability-free legacy shape).
+    issue_challenge_with_capabilities(
+        kiwicaptcha::challenge::EmissionCapabilities::confirmed(
+            kiwicaptcha::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+        ),
         &rsw_config(modulus_b64, lambda_b64),
         "login",
         "198.51.100.7",
@@ -144,6 +152,46 @@ fn the_three_components_agree_on_the_canonical_fingerprint() {
         modulus_fingerprint_hex("not base64!").is_err(),
         "a non-canonical modulus mints no identity"
     );
+}
+
+#[test]
+fn an_invalid_keyring_entry_is_refused_at_configuration() {
+    // The shadowing hazard: active A is valid, but a historical keyring
+    // entry carries A with a bad lambda. Configuring it must fail, not
+    // turn valid A challenges into UnsupportedRswParams — once insert()
+    // validates the full pair, the invalid entry cannot exist and the
+    // resolver can never shadow the active pair with it.
+    let fixture = fixture();
+    let modulus = s(&fixture, &["modulus_n_b64"]);
+    let lambda = s(&fixture, &["lambda_b64"]);
+    let identity = s(&fixture, &["rsw_modulus_n_sha256"]);
+
+    let mut ring = RswKeyring::new();
+    assert_eq!(
+        ring.insert(identity, modulus, "not-a-lambda!"),
+        Err(RswKeyringError::InvalidTrapdoor),
+        "a pair that fails trapdoor validation is refused"
+    );
+    assert!(
+        ring.is_empty(),
+        "the refused entry was never stored, so it cannot shadow the active pair"
+    );
+    assert_eq!(
+        ring.insert(&"f".repeat(64), modulus, lambda),
+        Err(RswKeyringError::MismatchedIdentity)
+    );
+    assert_eq!(
+        ring.insert("not-an-identity", "not-base64!", lambda),
+        Err(RswKeyringError::InvalidModulus),
+        "the modulus is canonical-decoded before anything else"
+    );
+
+    // A valid entry inserts, and the resolver still selects the active
+    // pair for the active identity.
+    ring.insert(identity, modulus, lambda)
+        .expect("the valid pair inserts");
+    let resolved = resolve_rsw_trapdoor(Some((modulus, lambda)), Some(&ring), Some(identity), 5);
+    assert!(resolved.expect("resolution succeeds").is_some());
 }
 
 #[test]

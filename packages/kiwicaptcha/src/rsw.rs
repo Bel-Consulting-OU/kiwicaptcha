@@ -601,13 +601,22 @@ pub fn identity_matches(identity: &str, modulus_b64: &str, allow_legacy_alias: b
     canonical || (allow_legacy_alias && legacy_base64_text_fingerprint_hex(modulus_b64) == identity)
 }
 
-/// Why a keyring entry is refused: the operator-supplied identity is
-/// neither the canonical fingerprint nor the legacy alias of the paired
-/// modulus.
+/// Why a keyring entry is refused at configuration time.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RswKeyringError {
+    /// The operator-supplied identity is neither the canonical
+    /// fingerprint nor the legacy base64-text alias of the paired
+    /// modulus.
     #[error("the rsw keyring identity is neither the canonical SHA-256 of the decoded modulus nor its legacy base64-text alias")]
     MismatchedIdentity,
+    /// The modulus is not canonical standard base64 of exactly 256 bytes.
+    #[error("the rsw keyring modulus_n is not canonical standard base64 of exactly 256 bytes")]
+    InvalidModulus,
+    /// The pair fails the same trapdoor validation the active pair goes
+    /// through (size, small factors, probable primality, lambda
+    /// consistency), so it could never verify a proof.
+    #[error("the rsw keyring pair fails trapdoor validation")]
+    InvalidTrapdoor,
 }
 
 /// The rsw trapdoor rotation keyring: historical trapdoor pairs indexed
@@ -639,25 +648,36 @@ impl RswKeyring {
     }
 
     /// Register the pair under `identity` and every computed identity
-    /// form of the modulus.
+    /// form of the modulus. The entry is fully validated before it is
+    /// stored: the modulus must canonical-decode to exactly 256 bytes,
+    /// the identity must be an accepted form of that modulus, and the
+    /// pair must pass the same [`RswTrapdoor::validated`] check the
+    /// active pair goes through. An invalid historical entry can
+    /// therefore never shadow a valid active pair in
+    /// [`resolve_rsw_trapdoor`].
     pub fn insert(
         &mut self,
         identity: &str,
         modulus_b64: &str,
         lambda_b64: &str,
     ) -> Result<(), RswKeyringError> {
+        // Canonical decode first: the legacy alias comparison hashes the
+        // supplied string, so it must never be the only validation.
+        let canonical =
+            modulus_fingerprint_hex(modulus_b64).map_err(|_| RswKeyringError::InvalidModulus)?;
         if !identity_matches(identity, modulus_b64, true) {
             return Err(RswKeyringError::MismatchedIdentity);
+        }
+        if RswTrapdoor::validated(modulus_b64, lambda_b64).is_none() {
+            return Err(RswKeyringError::InvalidTrapdoor);
         }
         self.by_identity.insert(
             identity.to_string(),
             (modulus_b64.to_string(), lambda_b64.to_string()),
         );
-        if let Ok(canonical) = modulus_fingerprint_hex(modulus_b64) {
-            self.by_identity
-                .entry(canonical)
-                .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
-        }
+        self.by_identity
+            .entry(canonical)
+            .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
         self.by_identity
             .entry(legacy_base64_text_fingerprint_hex(modulus_b64))
             .or_insert_with(|| (modulus_b64.to_string(), lambda_b64.to_string()));
@@ -679,6 +699,12 @@ pub enum RswResolutionError {
     /// through to an arbitrary active pair).
     #[error("the record's authenticated rsw modulus identity is unknown to this verifier")]
     UnknownIdentity,
+    /// The identity DID name a configured pair, but that pair fails
+    /// trapdoor validation. Configuration-time insert() validation
+    /// prevents this; if it is ever observed the record still fails
+    /// closed instead of falling through to another pair.
+    #[error("the rsw pair named by the record's authenticated identity fails trapdoor validation")]
+    InvalidTrapdoor,
     /// A protocol v5 record carries no identity — the v5 canonical
     /// requires it. The structural gate rejects this shape; the
     /// resolver keeps the same rule as defense in depth.
@@ -717,15 +743,28 @@ pub fn resolve_rsw_trapdoor(
         return Ok(active.and_then(|(modulus, lambda)| RswTrapdoor::validated(modulus, lambda)));
     };
     let allow_legacy_alias = protocol_version <= 4;
+    let mut named_invalid_pair = false;
     if let Some((modulus, lambda)) = keyring.and_then(|ring| ring.lookup(identity)) {
         if identity_matches(identity, modulus, allow_legacy_alias) {
-            return Ok(RswTrapdoor::validated(modulus, lambda));
+            named_invalid_pair = true;
+            // Configuration-time insert() validation makes this Some; a
+            // pair that somehow fails here must NOT shadow the active
+            // pair — fall through and fail closed below.
+            if let Some(trapdoor) = RswTrapdoor::validated(modulus, lambda) {
+                return Ok(Some(trapdoor));
+            }
         }
     }
     if let Some((modulus, lambda)) = active {
         if identity_matches(identity, modulus, allow_legacy_alias) {
-            return Ok(RswTrapdoor::validated(modulus, lambda));
+            return match RswTrapdoor::validated(modulus, lambda) {
+                Some(trapdoor) => Ok(Some(trapdoor)),
+                None => Err(RswResolutionError::InvalidTrapdoor),
+            };
         }
+    }
+    if named_invalid_pair {
+        return Err(RswResolutionError::InvalidTrapdoor);
     }
 
     Err(RswResolutionError::UnknownIdentity)

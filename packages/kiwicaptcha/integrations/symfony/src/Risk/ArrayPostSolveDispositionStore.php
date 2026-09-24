@@ -264,7 +264,7 @@ final class ArrayPostSolveDispositionStore implements PostSolveDispositionStore
             return false;
         }
 
-        return $now > $existing['created'] + $existing['ttl'];
+        return $now >= $existing['created'] + $existing['ttl'];
     }
 
     /**

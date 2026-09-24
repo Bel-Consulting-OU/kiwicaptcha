@@ -100,10 +100,33 @@ local schema = classifyIdempotencyRecord(rec)
 if schema == nil then
   return 'corrupt'
 end
--- The legacy shape is read-only: a claim never joins, claims or renews
--- it. Conflict is the fail-closed answer (never a cached success, never
--- a join).
+-- The legacy shape (written by the immediately preceding release, no `v`
+-- member) is read-only: no transition ever claims, renews, takes over or
+-- finalizes it. The preceding release already bound the full operation
+-- identity (response_hash, remoteip_fingerprint, binding) and compared
+-- all three before answering, so an EXACT retry of its own record is
+-- recognized — a completed legacy record replays the cached response
+-- through stored(), and an in-flight legacy pending record reports the
+-- non-authoritative pending state (the waiter keeps reading; takeover
+-- refuses until it expires). Any missing or differing identity component
+-- stays a conflict; truly underspecified legacy records (a missing
+-- fingerprint/binding, or an even older writer) conflict exactly as
+-- before.
 if schema == 'legacy' then
+  local identity_complete = type(rec.response_hash) == 'string'
+    and type(rec.remoteip_fingerprint) == 'string'
+    and type(rec.binding) == 'string'
+    and rec.response_hash == response_hash
+    and rec.remoteip_fingerprint == fingerprint
+    and rec.binding == binding
+  if identity_complete then
+    if rec.state == 'complete' then
+      return 'complete_same'
+    end
+    if rec.state == 'pending' then
+      return 'pending_same'
+    end
+  end
   return 'conflict'
 end
 if rec.response_hash ~= response_hash or rec.remoteip_fingerprint ~= fingerprint or rec.binding ~= binding then

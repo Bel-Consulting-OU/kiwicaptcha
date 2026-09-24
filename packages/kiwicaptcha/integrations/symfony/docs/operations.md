@@ -142,9 +142,12 @@ protocol v5:
 ```text
 # 1. Deploy the v5-reading binaries fleet-wide (the switch still off).
 # 2. Confirm no old binary remains — set the central floor on the
-#    security Redis and watch readiness drain every binary whose max
-#    protocol is below it.
-redis: SET {kiwi:<ns>}:security-policy min_protocol_version 5 min_policy_epoch <n>
+#    security Redis (a HASH: SecurityEpochMonitor reads it with
+#    HGETALL, so HSET, never SET) and watch readiness drain every
+#    binary whose max protocol is below it.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 5 \
+    min_policy_epoch <n>
 # 3. Enable the writer switch (kiwi_captcha.rsw_identity: true) and
 #    reload. New records are protocol v5 with the signed identity.
 ```
@@ -152,7 +155,11 @@ redis: SET {kiwi:<ns>}:security-policy min_protocol_version 5 min_policy_epoch <
 Identity-bearing records issued before the v5 grammar (protocol 2..4
 with the base64-text identity) stay verifiable through the clearly
 named legacy alias for one bounded migration window; the alias is
-never used for new issuance.
+never used for new issuance. The gate is a core issuance invariant,
+not a controller convention: direct `Issuer::issue()` callers pass an
+explicit capability ceiling and default to the capability-free
+identityless v2 shape, so no path can emit v5 before its readers are
+confirmed.
 
 ### Rotating the rsw modulus
 

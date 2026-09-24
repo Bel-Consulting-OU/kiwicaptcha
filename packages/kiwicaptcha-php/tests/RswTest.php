@@ -51,11 +51,16 @@ final class RswTest extends TestCase
         );
     }
 
-    private function issue(Config $config, string $scope = 'login', string $ip = '198.51.100.7', ?int $now = null): array
-    {
+    private function issue(
+        Config $config,
+        string $scope = 'login',
+        string $ip = '198.51.100.7',
+        ?int $now = null,
+        int $maxProtocolVersionToEmit = ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION,
+    ): array {
         $storage = new ArrayStorage();
         $issuer = new Issuer($config, $storage, now: $now !== null ? static fn (): int => $now : null);
-        $challenge = $issuer->issue($scope, $ip);
+        $challenge = $issuer->issue($scope, $ip, maxProtocolVersionToEmit: $maxProtocolVersionToEmit);
         $record = $storage->find($challenge->nonce);
 
         return [$challenge, $record, $storage];
@@ -562,6 +567,54 @@ final class RswTest extends TestCase
 
         self::assertTrue($outcome->isOk(), 'the client-style sequential solve must verify: '.$outcome->code());
         self::assertSame($record->nonce, $outcome->nonce());
+    }
+
+    public function testTheEmissionCeilingGatesTheRswIdentity(): void
+    {
+        $this->requireGmp();
+        $config = $this->rswConfig(10_000);
+        $identity = RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64);
+
+        // The capability-free public default: a direct core caller in a
+        // rolling-upgrade-capable deployment must NOT see v5 records
+        // appear implicitly.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($config, $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(ChallengeRecord::BASE_PROTOCOL_VERSION, $record->protocolVersion);
+        self::assertNull($record->rswModulusSha256);
+
+        // Any confirmed ceiling below the feature version stays on the
+        // legacy identityless shape, and an old in-range reader accepts
+        // and verifies it exactly like before the identity feature.
+        foreach ([ChallengeRecord::BASE_PROTOCOL_VERSION, 4] as $ceiling) {
+            [$capped, $record, $cappedStorage] = $this->issue($config, now: self::ISSUED_AT, maxProtocolVersionToEmit: $ceiling);
+            self::assertSame(ChallengeRecord::BASE_PROTOCOL_VERSION, $record->protocolVersion, "ceiling {$ceiling} stays legacy");
+            self::assertNull($record->rswModulusSha256);
+            $reader = new Verifier(
+                $cappedStorage,
+                now: static fn (): int => self::ISSUED_AT,
+                rswModulusN: RswFixture::MODULUS_N_B64,
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            $outcome = $reader->verify(
+                $this->solveToken($capped->nonce, $capped->prefix, $capped->t),
+                Vectors::SECRET,
+                'login',
+                '198.51.100.7',
+            );
+            self::assertTrue($outcome->isOk(), 'an old reader accepts the capped identityless record: '.$outcome->code());
+        }
+
+        // The feature version arms the identity; a later protocol maximum
+        // must not shut it off.
+        foreach ([ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION, 6] as $ceiling) {
+            [, $record] = $this->issue($config, now: self::ISSUED_AT, maxProtocolVersionToEmit: $ceiling);
+            self::assertSame(ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION, $record->protocolVersion, "ceiling {$ceiling} arms v5");
+            self::assertSame($identity, $record->rswModulusSha256);
+        }
     }
 
     public function testTheTrapdoorIdentityDrivesRotationSelection(): void

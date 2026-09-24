@@ -524,7 +524,12 @@ LUA;
         $resolvedChainId = '';
         if ($guardEnabled && ($snapshotChainId ?? '') === '') {
             $mapped = $this->redis->get($obligationKey);
-            if (\is_string($mapped) && $mapped !== '') {
+            if ($mapped === '') {
+                // A present empty mapping is damaged state, never "no open
+                // obligation": fail closed before any transition.
+                throw new MalformedPostSolveDispositionException('the obligation mapping is an empty value');
+            }
+            if (\is_string($mapped)) {
                 $resolvedChainId = $mapped;
             }
         }
@@ -764,7 +769,12 @@ LUA;
         $resolvedChainId = '';
         if ($guardEnabled && ($snapshotChainId ?? '') === '') {
             $mapped = $this->redis->get($obligationKey);
-            if (\is_string($mapped) && $mapped !== '') {
+            if ($mapped === '') {
+                // A present empty mapping is damaged state, never "no open
+                // obligation": fail closed before any transition.
+                throw new MalformedPostSolveDispositionException('the obligation mapping is an empty value');
+            }
+            if (\is_string($mapped)) {
                 $resolvedChainId = $mapped;
             }
         }

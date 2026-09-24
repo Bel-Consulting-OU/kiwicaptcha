@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
@@ -201,7 +202,13 @@ final class TokenShapeMatrixTest extends TestCase
         );
         $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer = new Issuer($config, $storage, now: static fn (): int => self::ISSUED_AT);
-        $challenge = $issuer->issueWithExecutionField('login', self::CLIENT_IP, true, executionAction: 'login-action');
+        $challenge = $issuer->issueWithExecutionField(
+            'login',
+            self::CLIENT_IP,
+            true,
+            executionAction: 'login-action',
+            maxProtocolVersionToEmit: ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION,
+        );
         self::assertNotNull($challenge->executionProgram, 'the composed challenge carries the execution program');
         $record = $storage->find($challenge->nonce);
         self::assertSame(5, $record->protocolVersion, 'the composed identity-armed issuance stores protocol v5');

@@ -108,7 +108,11 @@ final class RswRotationKeyringWiringTest extends TestCase
             'rsw_lambda' => RswFixture::LAMBDA_B64,
             'rsw_t' => 10_000,
         ], $shared);
-        $challenge = $containerA->get('kiwi_captcha.issuer')->issue('login', '198.51.100.7');
+        $challenge = $containerA->get('kiwi_captcha.issuer')->issue(
+            'login',
+            '198.51.100.7',
+            maxProtocolVersionToEmit: \KiwiCaptcha\ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION,
+        );
         $record = $shared->find($challenge->nonce);
         self::assertNotNull($record);
         self::assertSame(5, $record->protocolVersion, 'the current writer arms the identity');
@@ -146,7 +150,11 @@ final class RswRotationKeyringWiringTest extends TestCase
         // Control: B without the keyring cannot verify a fresh A-bound
         // record either (the identity never falls through to the active
         // pair).
-        $controlChallenge = $containerA->get('kiwi_captcha.issuer')->issue('login', '198.51.100.7');
+        $controlChallenge = $containerA->get('kiwi_captcha.issuer')->issue(
+            'login',
+            '198.51.100.7',
+            maxProtocolVersionToEmit: \KiwiCaptcha\ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION,
+        );
         $controlRecord = $shared->find($controlChallenge->nonce);
         self::assertNotNull($controlRecord);
         $controlToken = SolutionToken::create(

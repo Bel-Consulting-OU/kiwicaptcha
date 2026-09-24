@@ -16,6 +16,7 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
+use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
@@ -277,7 +278,7 @@ final class ChallengeController
          * The rsw identity writer switch (kiwi_captcha.rsw_identity,
          * default false). When true and the algorithm is rsw, issuance
          * may arm the authenticated modulus identity (protocol v5),
-         * subject to {@see self::rswIdentityEmissionEnabled()}: the
+         * subject to {@see self::rswIdentityEmissionCap()}: the
          * central security-policy floor must confirm >= 5 first, and any
          * uncertainty keeps issuance on the legacy identityless v2
          * shape. The identity is the security property (the accepted
@@ -421,26 +422,36 @@ final class ChallengeController
 
     /**
      * The protocol-v5 emission gate implements the two-phase rollout
-     * invariant for the rsw modulus identity: identity-armed rsw
-     * issuance (kiwi_captcha.rsw_identity on, algorithm rsw) requires the
-     * confirmed central min_protocol_version floor
-     * ({kiwi:<ns>}:security-policy) to be >= 5, the binary's own maximum.
-     * The floor establishes that every serving binary accepts the v5
-     * identity-bearing canonical before any node emits it: a pre-v5
-     * verifier rejects the unknown protocol version, so the identity can
-     * never be silently ignored by an old reader. A floor below 5, an
-     * absent or corrupt floor, an unreadable central policy or no
-     * central policy at all all fail safe to the legacy identityless v2
-     * emission. The actionable warning fires once per process.
+     * invariant for the rsw modulus identity. Identity-armed rsw
+     * issuance requires the configured switch (kiwi_captcha.rsw_identity)
+     * and the algorithm rsw. It also requires the confirmed central
+     * min_protocol_version floor ({kiwi:<ns>}:security-policy) to reach
+     * at least the feature version
+     * {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION} (5), not the
+     * binary's global maximum. The floor establishes that every serving
+     * binary accepts the v5 identity-bearing canonical before any node
+     * emits it: a pre-v5 verifier rejects the unknown protocol version,
+     * so the identity can never be silently ignored by an old reader. A
+     * floor below 5, an absent or corrupt floor, an unreadable central
+     * policy or no central policy at all all fail safe to the legacy
+     * identityless v2 emission. The actionable warning fires once per
+     * process.
+     *
+     * @return int the confirmed emission ceiling the core Issuer receives:
+     *             {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}
+     *             (or the floor when higher) only when the switch is on
+     *             AND the feature floor is confirmed, otherwise the
+     *             capability-free {@see ChallengeRecord::BASE_PROTOCOL_VERSION}
      */
-    private function rswIdentityEmissionEnabled(): bool
+    private function rswIdentityEmissionCap(): int
     {
+        $featureVersion = ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION;
         if (!$this->rswIdentityEnabled) {
-            return false;
+            return ChallengeRecord::BASE_PROTOCOL_VERSION;
         }
         $floor = $this->epochMonitor?->minProtocolVersion();
-        if ($floor !== null && $floor >= \KiwiCaptcha\ChallengeRecord::MAX_PROTOCOL_VERSION) {
-            return true;
+        if ($floor !== null && $floor >= $featureVersion) {
+            return $floor;
         }
         if (!$this->rswIdentityWarningLogged) {
             $this->rswIdentityWarningLogged = true;
@@ -448,11 +459,13 @@ final class ChallengeController
                 ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
                 : sprintf('the central min_protocol_version is %d', $floor);
             $message = sprintf(
-                'kiwicaptcha: kiwi_captcha.rsw_identity is on but protocol-v5 emission stays DISABLED — %s (below 5). '.
-                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 5 only after every serving binary accepts protocol v5 '.
+                'kiwicaptcha: kiwi_captcha.rsw_identity is on but protocol-v5 emission stays DISABLED — %s (below %d). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to %d only after every serving binary accepts protocol v5 '.
                 '(deploy the new binaries fleet-wide and confirm no old binary remains); until then rsw issuance stays on the legacy identityless '.
                 'protocol v2 shape.',
                 $detail,
+                $featureVersion,
+                $featureVersion,
             );
             try {
                 $this->logger?->warning($message);
@@ -461,7 +474,7 @@ final class ChallengeController
             }
         }
 
-        return false;
+        return ChallengeRecord::BASE_PROTOCOL_VERSION;
     }
 
     /**
@@ -1651,18 +1664,20 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            // The rsw identity arming decision: the writer switch
+            // The rsw identity emission capability: the writer switch
             // (kiwi_captcha.rsw_identity) AND the confirmed central
-            // protocol floor >= 5, see
-            // {@see self::rswIdentityEmissionEnabled()}. Inert for a
-            // non-rsw algorithm; when the algorithm is rsw and the gate
-            // is unmet, issuance keeps the legacy identityless v2 shape
-            // so no pre-v5 verifier ever sees the identity-bearing
-            // canonical.
-            $armRswIdentity = $this->rswIdentityEmissionEnabled();
+            // feature floor min_protocol_version >=
+            // {@see ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION}, see
+            // {@see self::rswIdentityEmissionCap()}. The core Issuer
+            // arms the identity only when this ceiling reaches the
+            // feature version; when the gate is unmet the ceiling stays
+            // at the capability-free base, so issuance keeps the legacy
+            // identityless v2 shape and no pre-v5 verifier ever sees the
+            // identity-bearing canonical. Inert for a non-rsw algorithm.
+            $maxProtocolVersionToEmit = $this->rswIdentityEmissionCap();
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion, armRswIdentity: $armRswIdentity)
-                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy, armRswIdentity: $armRswIdentity);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion, maxProtocolVersionToEmit: $maxProtocolVersionToEmit)
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy, maxProtocolVersionToEmit: $maxProtocolVersionToEmit);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random

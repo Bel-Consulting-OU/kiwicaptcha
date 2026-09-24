@@ -62,7 +62,7 @@ final class RswModulusIdentityTest extends TestCase
             rswLambda: RswFixture::LAMBDA_B64,
             rswT: $t,
         ), $storage, now: static fn (): int => self::ISSUED_AT);
-        $challenge = $issuer->issue('login', '198.51.100.7');
+        $challenge = $issuer->issue('login', '198.51.100.7', maxProtocolVersionToEmit: ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION);
 
         return [$challenge, $storage->find($challenge->nonce), $storage, $issuer];
     }

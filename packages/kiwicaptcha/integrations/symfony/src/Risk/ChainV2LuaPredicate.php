@@ -199,12 +199,17 @@ local function isValidChainRecord(rec)
   end
   return true
 end
--- The key-lifetime guard shared by every mutating transition: a chain
--- key WITHOUT a TTL is corrupted state (the signed-ticket lifetime was
--- stripped); a transition must never manufacture a lifetime from the
--- configured TTL, it fails closed like the reservation does.
-local function chainKeyLifetimeMissing(ttl)
-  return ttl <= 0
+-- The key-lifetime guard shared by every transition and read, over the
+-- PTTL sentinels: a PRESENT chain key with PTTL -1 (no lifetime) is
+-- corrupted state (the signed-ticket lifetime was stripped) and a
+-- transition must never manufacture one from the configured TTL. The
+-- sentinels are exact — a live key with a sub-second remainder
+-- legitimately reports PTTL 0 and is LIVE, never corrupt; -2 means the
+-- key is absent (callers check existence first; defensively it is still
+-- "no lifetime"), and any other negative value is impossible.
+local function chainKeyLifetimeMissing(pttl)
+  if pttl == nil then return true end
+  return pttl < 0
 end
 -- The signed-expiry guard: an expired-but-live record (the key still
 -- exists while the record's own expiresAt lapsed) is stale, the same
@@ -227,8 +232,11 @@ end
 -- (decodeUniqueObject) and after isValidChainRecord was defined.
 local function readLiveChainForObligation(key, expectedObligationId, now)
   local existing = redis.call('GET', key)
-  if not existing or existing == '' then return 'absent' end
-  if chainKeyLifetimeMissing(tonumber(redis.call('TTL', key))) then return 'corrupt' end
+  if not existing then return 'absent' end
+  -- A PRESENT empty value is corruption, never absence: it must not be
+  -- healed into fresh state by a caller's missing path.
+  if existing == '' then return 'corrupt' end
+  if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', key))) then return 'corrupt' end
   local rec = decodeUniqueObject(existing)
   if rec == nil or not isValidChainRecord(rec) then return 'corrupt' end
   -- The binding invariant at the read boundary: a consulted chain must

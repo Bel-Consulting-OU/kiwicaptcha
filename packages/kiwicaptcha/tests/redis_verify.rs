@@ -7644,3 +7644,54 @@ fn tenant_scoped_records_verify_only_under_the_same_tenant() {
         "the global (tenant-free) verifier rejects the t1 record"
     );
 }
+
+#[test]
+fn the_rsw_keyring_builder_refuses_an_invalid_pair() {
+    // The shadowing hazard: active A is valid, but the
+    // historical keyring carries A with a bad lambda. The builder must
+    // refuse that configuration instead of silently storing an entry
+    // that resolution would consult before the valid active pair.
+    let client = redis::Client::open("redis://127.0.0.1:1/").expect("client");
+    let make = || {
+        ProductionVerifier::new(
+            kiwicaptcha::redis_verify::RedisChallengeStore::new(
+                client.clone(),
+                "rsw-keyring-test:",
+            ),
+            "0123456789abcdef0123456789abcdef",
+        )
+    };
+    let identity =
+        kiwicaptcha::rsw::modulus_fingerprint_hex(kiwicaptcha::rsw::fixtures::MODULUS_N_B64)
+            .expect("the fixture modulus is canonical");
+
+    let refused = make().with_rsw_verification_key(
+        identity.clone(),
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        "not-a-lambda!",
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(kiwicaptcha::rsw::RswKeyringError::InvalidTrapdoor)
+        ),
+        "an invalid historical pair must refuse configuration, never shadow the active pair"
+    );
+
+    let mismatched = make().with_rsw_verification_key(
+        "f".repeat(64),
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(matches!(
+        mismatched,
+        Err(kiwicaptcha::rsw::RswKeyringError::MismatchedIdentity)
+    ));
+
+    let valid = make().with_rsw_verification_key(
+        identity,
+        kiwicaptcha::rsw::fixtures::MODULUS_N_B64,
+        kiwicaptcha::rsw::fixtures::LAMBDA_B64,
+    );
+    assert!(valid.is_ok(), "the valid rotated pair configures");
+}

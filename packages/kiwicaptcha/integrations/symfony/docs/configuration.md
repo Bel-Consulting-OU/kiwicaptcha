@@ -535,8 +535,15 @@ The switch defaults to false because v5 is a two-phase fleet
 rollout: a pre-v5 verifier rejects the unknown protocol version, so
 every serving binary must read v5 first. Enabling the switch alone is
 not enough. The challenge controller arms the identity only when the
-confirmed central floor is `min_protocol_version >= 5`, the same
-cached central read the v3/v4 gates use. Every uncertainty fails safe
+confirmed central floor reaches the feature version
+(`ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION`, 5) — compared
+against that constant, never the binary's global maximum, so a later
+protocol v6 cannot shut the feature off. The safe default lives in the
+core issuance API as an explicit emission-capability ceiling. A direct
+`Issuer::issue()` caller emits the legacy identityless v2 shape unless
+it passes a confirmed `maxProtocolVersionToEmit >= 5`, mirrored by the
+Rust `EmissionCapabilities`. No integration can leak v5 by forgetting
+the gate. Every uncertainty fails safe
 to the legacy identityless v2 shape with a once-per-process warning:
 a lower floor, an absent or corrupt policy hash, an unreadable
 central policy, or no security Redis. By default, and whenever the

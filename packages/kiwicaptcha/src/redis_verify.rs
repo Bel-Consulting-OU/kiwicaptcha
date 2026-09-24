@@ -180,7 +180,7 @@ use crate::challenge::{
     verify_signature, verify_signature_v2_with_keys, ChallengeRecord, PoWAlgorithm,
 };
 use crate::keys::DerivedKeys;
-use crate::rsw::{RswKeyring, RswTrapdoor};
+use crate::rsw::{RswKeyring, RswKeyringError, RswTrapdoor};
 use crate::token::SolutionToken;
 use crate::verify::{
     check_execution_binding_cached, check_request_binding, check_rsw_params, ct_eq,
@@ -3115,20 +3115,21 @@ impl ProductionVerifier {
     /// the migration window. A record whose identity resolves here
     /// verifies even after the active pair rotated.
     ///
-    /// An entry whose identity matches neither form of the paired
-    /// modulus is ignored (the builder never panics): resolution then
-    /// fails closed for that identity, so a misconfigured keyring can
-    /// never map a signed identity onto an unrelated pair.
+    /// The entry is fully validated and the builder returns the typed
+    /// [`RswKeyringError`] instead of silently dropping a misconfigured
+    /// key: an identity that matches neither form of the paired modulus,
+    /// a non-canonical modulus, or a pair that fails trapdoor validation
+    /// all refuse configuration. An invalid historical entry can
+    /// therefore never shadow — and disable — a valid active pair.
     pub fn with_rsw_verification_key(
         mut self,
         identity: impl Into<String>,
         modulus_b64: impl Into<String>,
         lambda_b64: impl Into<String>,
-    ) -> Self {
-        let _ = self
-            .rsw_keyring
-            .insert(&identity.into(), &modulus_b64.into(), &lambda_b64.into());
-        self
+    ) -> Result<Self, RswKeyringError> {
+        self.rsw_keyring
+            .insert(&identity.into(), &modulus_b64.into(), &lambda_b64.into())?;
+        Ok(self)
     }
 
     /// The rsw trapdoor selected by the record's authenticated modulus

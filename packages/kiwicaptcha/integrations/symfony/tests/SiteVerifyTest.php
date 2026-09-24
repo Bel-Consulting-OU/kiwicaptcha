@@ -1250,11 +1250,12 @@ final class SiteVerifyTest extends TestCase
     public function testFinalizeByTheDisplacedOwnerIsRefusedAfterTakeover(): void
     {
         $now = 1_700_000_000;
-        // The clock ticks one second per store call: the stalled owner's
-        // lease expires while the waiter polls, so the atomic takeover
-        // wins deterministically within the waiter's bound.
+        // The store clock advances only when the test moves it: the
+        // stalled owner's lease stays held for the whole bounded waiter
+        // window, and the explicit advance below expires it so the
+        // atomic takeover wins deterministically.
         $clock = static function () use (&$now): int {
-            return ++$now;
+            return $now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
@@ -1353,11 +1354,12 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         };
         $verifier = new Verifier($counting);
         $now = 1_700_000_000;
-        // The clock ticks one second per store call: the stalled owner's
-        // lease expires while the waiter polls, so the atomic takeover
-        // wins deterministically within the waiter's bound.
+        // The store clock advances only when the test moves it: the
+        // stalled owner's lease stays held for the whole bounded waiter
+        // window, and the explicit advance below expires it so the
+        // atomic takeover wins deterministically.
         $clock = static function () use (&$now): int {
-            return ++$now;
+            return $now;
         };
         $store = new ArraySiteVerifyIdempotencyStore($clock, 3);
         $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
@@ -1474,10 +1476,11 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $storage = new ArrayStorage();
         [$token] = $this->issuedToken($storage);
         $now = 1_700_000_000;
-        // The store clock ticks one second per takeover call (the crashed
-        // owner's lease expires while the waiter polls).
+        // The store clock advances only when the test moves it: the
+        // crashed owner's lease stays held across the bounded waiter
+        // window and is expired explicitly at the boundary below.
         $clock = static function () use (&$now): int {
-            return ++$now;
+            return $now;
         };
         // A short fixed lease (1s) keeps the boundary quick; the waiter
         // bound (5s) exceeds it (the construction invariant).

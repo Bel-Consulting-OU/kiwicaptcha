@@ -1263,6 +1263,67 @@ pub const MAX_PROTOCOL_VERSION: u8 = 5;
 /// window.
 pub const RSW_IDENTITY_PROTOCOL_VERSION: u8 = 5;
 
+/// The base challenge protocol version every binary reads: the
+/// identityless, decoyless, executionless canonical. Unarmed issuance
+/// always writes it, so it needs no confirmed fleet capability.
+pub const BASE_PROTOCOL_VERSION: u8 = 2;
+
+/// The explicit issuance emission-capability ceiling: the highest
+/// challenge protocol version this writer's fleet is confirmed to read.
+///
+/// The RSW modulus identity is emitted only when the ceiling reaches
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`]; a pre-v5 verifier rejects the
+/// unknown protocol version, so an unconfirmed fleet must keep receiving
+/// the legacy identityless [`BASE_PROTOCOL_VERSION`] shape. The default
+/// is [`EmissionCapabilities::base`] — never an implicit v5 — because a
+/// rolling-upgrade-capable deployment cannot assume every reader is
+/// current. The Symfony controller derives it from the confirmed central
+/// `min_protocol_version` floor; direct core callers pass
+/// [`EmissionCapabilities::confirmed`] only once every reader in their
+/// own environment accepts the ceiling.
+///
+/// The ceiling governs the identity dimension today; the decoy/execution
+/// dimensions remain governed by their explicit arming parameters and the
+/// callers' own confirmed floors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmissionCapabilities {
+    max_protocol_version: u8,
+}
+
+impl EmissionCapabilities {
+    /// The capability-free ceiling: unarmed base emission only.
+    pub const fn base() -> Self {
+        Self {
+            max_protocol_version: BASE_PROTOCOL_VERSION,
+        }
+    }
+
+    /// A confirmed ceiling. The RSW identity arms when this reaches
+    /// [`RSW_IDENTITY_PROTOCOL_VERSION`].
+    pub const fn confirmed(max_protocol_version: u8) -> Self {
+        Self {
+            max_protocol_version,
+        }
+    }
+
+    /// The confirmed ceiling value.
+    pub const fn max_protocol_version(&self) -> u8 {
+        self.max_protocol_version
+    }
+
+    /// Whether the confirmed ceiling admits the identity-bearing rsw
+    /// canonical.
+    pub const fn admits_rsw_identity(&self) -> bool {
+        self.max_protocol_version >= RSW_IDENTITY_PROTOCOL_VERSION
+    }
+}
+
+impl Default for EmissionCapabilities {
+    fn default() -> Self {
+        Self::base()
+    }
+}
+
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
 /// clocks. The TTL check rejects challenges whose `issued_at` is
 /// more than this far in the future relative to the verifier's current time
@@ -1761,7 +1822,38 @@ pub fn issue_challenge(
     active_solves: u64,
     request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_capabilities(
+        EmissionCapabilities::base(),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+    )
+}
+
+/// Issue a challenge under an explicit emission-capability ceiling (see
+/// [`EmissionCapabilities`]): identical to [`issue_challenge`] except the
+/// RSW modulus identity is armed only when the confirmed ceiling admits
+/// [`RSW_IDENTITY_PROTOCOL_VERSION`]. The plain [`issue_challenge`] keeps
+/// the capability-free default, so a direct caller in a
+/// rolling-upgrade-capable deployment must confirm the ceiling before v5
+/// records exist on the wire.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1807,7 +1899,35 @@ pub fn issue_challenge_with_decoy(
     request_binding: Option<&str>,
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_decoy_capabilities(
+        EmissionCapabilities::base(),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_decoy_field,
+    )
+}
+
+/// Issue a decoy-armed (or plain) challenge under an explicit
+/// emission-capability ceiling; see [`issue_challenge_with_capabilities`].
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_decoy_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1867,7 +1987,41 @@ pub fn issue_challenge_with_execution(
     execution_version: Option<u8>,
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
+    issue_challenge_with_execution_capabilities(
+        EmissionCapabilities::base(),
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_execution,
+        execution_action,
+        execution_version,
+        arm_decoy_field,
+    )
+}
+
+/// Issue an execution-armed (or plain) challenge under an explicit
+/// emission-capability ceiling; see [`issue_challenge_with_capabilities`].
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_execution_capabilities(
+    capabilities: EmissionCapabilities,
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_execution: bool,
+    execution_action: Option<&str>,
+    execution_version: Option<u8>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
     issue_challenge_inner(
+        capabilities,
         config,
         scope,
         client_ip,
@@ -1885,6 +2039,7 @@ pub fn issue_challenge_with_execution(
 /// The shared issuance body (see the [`issue_challenge`] contract).
 #[allow(clippy::too_many_arguments)]
 fn issue_challenge_inner(
+    capabilities: EmissionCapabilities,
     config: &ChallengeConfig,
     scope: &str,
     client_ip: &str,
@@ -2126,7 +2281,7 @@ fn issue_challenge_inner(
     // configured pair was validated above, so the fingerprint must
     // succeed; a non-canonical modulus is refused rather than minted
     // without an identity.
-    let rsw_identity: Option<String> = if is_rsw {
+    let rsw_identity: Option<String> = if is_rsw && capabilities.admits_rsw_identity() {
         match config.rsw_modulus_n.as_deref() {
             Some(modulus) => Some(
                 crate::rsw::modulus_fingerprint_hex(modulus)
@@ -2267,7 +2422,8 @@ pub fn issue_challenge_with_profile(
         effective.p = profile.p;
         effective.argon2_target_bits = profile.target_bits as u32;
     }
-    issue_challenge(
+    issue_challenge_with_capabilities(
+        EmissionCapabilities::base(),
         &effective,
         scope,
         client_ip,
@@ -3115,7 +3271,45 @@ mod tests {
 
     #[test]
     fn rsw_issuance_carries_the_canonical_parameter_mapping() {
-        let issued = issue_challenge(
+        // The capability-free default emits the legacy identityless shape:
+        // a direct core caller in a rolling-upgrade-capable deployment
+        // must confirm the ceiling before v5 records exist on the wire.
+        let identityless = issue_challenge(
+            &rsw_config(MIN_RSW_T),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(identityless.record.protocol_version, 2);
+        assert_eq!(identityless.record.rsw_modulus_sha256, None);
+        // A confirmed ceiling below the feature version stays legacy; the
+        // exact feature version (and above) arms the identity.
+        for ceiling in [2u8, 4] {
+            let issued = issue_challenge_with_capabilities(
+                crate::challenge::EmissionCapabilities::confirmed(ceiling),
+                &rsw_config(MIN_RSW_T),
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                issued.record.protocol_version, 2,
+                "ceiling {ceiling} stays legacy"
+            );
+            assert_eq!(issued.record.rsw_modulus_sha256, None);
+        }
+        let issued = issue_challenge_with_capabilities(
+            crate::challenge::EmissionCapabilities::confirmed(
+                crate::challenge::RSW_IDENTITY_PROTOCOL_VERSION,
+            ),
             &rsw_config(MIN_RSW_T),
             "login",
             "1.2.3.4",

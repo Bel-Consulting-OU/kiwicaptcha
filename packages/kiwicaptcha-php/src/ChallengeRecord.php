@@ -200,6 +200,13 @@ final class ChallengeRecord
     public const MAX_STRING_BYTES = 4096;
 
     /**
+     * The base challenge protocol version every binary reads: the
+     * identityless, decoyless, executionless canonical. Unarmed issuance
+     * always writes it, so it needs no confirmed fleet capability.
+     */
+    public const BASE_PROTOCOL_VERSION = 2;
+
+    /**
      * The binary's maximum challenge protocol version is 5, mirrored by
      * the Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the
      * extension's readiness probe (`KiwiHealthController`).
