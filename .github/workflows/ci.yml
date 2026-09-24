@@ -901,8 +901,12 @@ jobs:
             if ($claim2 !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::CompleteSame || $owner2 !== null) {
                 fwrite(STDERR, "re-claim was not COMPLETE_SAME\n"); exit(1);
             }
-            $stored = $store->stored($backendId, $uuid);
-            if (!is_array($stored) || ($stored["success"] ?? null) !== true) {
+            // The operation-bound acceptance read: the EXACT operation's
+            // completed result, classified in one atomic script.
+            $lookup = $store->storedForOperation($backendId, $uuid, $responseHash, "no-ip", "");
+            if ($lookup->kind !== BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind::CompleteSame
+                || ($lookup->result["success"] ?? null) !== true
+            ) {
                 fwrite(STDERR, "stored canonical response missing\n"); exit(1);
             }
             $r->del($key);
