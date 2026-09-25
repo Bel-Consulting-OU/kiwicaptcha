@@ -165,7 +165,7 @@ jobs:
         # start than the other.
         run: |
           set -euo pipefail
-          for pass in 1 2; do
+          for _ in 1 2; do
             for root in "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE"; do
               (cd "$root" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true
             done
