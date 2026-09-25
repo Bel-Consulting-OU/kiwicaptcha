@@ -55,6 +55,16 @@
 #       - "maximum execution version 2" style claims and a "versions
 #         1..4" supported-set claim.
 #
+# Group 7 bans stale CHALLENGE-PROTOCOL-version claims. The live
+# maximum is derived from the PHP core constant
+# (ChallengeRecord::MAX_PROTOCOL_VERSION, mirrored by the Rust crate and
+# the readiness probe): a present-tense claim that the maximum/max
+# protocol version is a below-live numeral, or that the supported set is
+# "protocol versions 1..4" / "1, 2, 3 and 4" / "accepts protocol
+# versions 1 through 4", is stale and fails CI. Legacy narratives about
+# the pre-v5 shapes start at 2 (e.g. "versions 2..4"), so they are not
+# affected.
+#
 # Group 6 bans stale claims that the driver's execution-capability
 # advertisement carries a value below the manifest maximum. The live
 # widget driver sends the `Kiwi-Execution-Max-Version` request header
@@ -95,6 +105,17 @@ manifest="$repo_root/protocol/execution-v1.json"
 live_max="$(sed -n -E 's/^  "max_execution_version": ([0-9]+),?$/\1/p' "$manifest" | head -n 1)"
 if [ -z "$live_max" ] || ! [ "$live_max" -ge 1 ] 2>/dev/null; then
   echo "version prose lint FAILED: cannot read max_execution_version from $manifest" >&2
+  exit 1
+fi
+
+# The live challenge-protocol maximum comes from the PHP core constant
+# (the same authority the Rust crate's MAX_PROTOCOL_VERSION and the
+# readiness probe mirror). A missing or unreadable constant is a hard
+# failure: the ratchet must never silently disarm itself.
+protocol_src="$repo_root/packages/kiwicaptcha-php/src/ChallengeRecord.php"
+live_protocol_max="$(sed -n -E 's/^    public const MAX_PROTOCOL_VERSION = ([0-9]+);$/\1/p' "$protocol_src" | head -n 1)"
+if [ -z "$live_protocol_max" ] || ! [ "$live_protocol_max" -ge 1 ] 2>/dev/null; then
+  echo "version prose lint FAILED: cannot read MAX_PROTOCOL_VERSION from $protocol_src" >&2
   exit 1
 fi
 
@@ -237,6 +258,37 @@ capability_matches="$(printf '%s\n' "$capability_matches" | drop_compat_files)"
 if [ -n "$capability_matches" ]; then
   report "stale claim: the driver's execution-capability advertisement is described with a below-maximum value (the live driver sends the header with its current maximum, manifest max_execution_version = ${live_max}; mark frozen N-1 fixtures with 'historical-compat fixture:' to exempt them)"
   printf '%s\n' "$capability_matches"
+fi
+
+# 7. stale challenge-protocol-version claims: a present-tense maximum
+# below the live constant, or a supported-set claim that ends below it.
+protocol_patterns=()
+for n in $(seq 2 $((live_protocol_max - 1))); do
+  protocol_patterns+=(
+    # A present-tense claim about the live binary's maximum: "this
+    # binary's max protocol version 4", "maximum protocol version is
+    # 4", "max protocol 4 is the current maximum". Historical
+    # narratives about simulated N-1 verifiers ("max protocol 3
+    # rejects ...") are deliberately out of scope: they describe a
+    # predecessor, not the live constant.
+    -e "(this|the)[[:space:]]+binary'?s?[[:space:]]+(maximum|max)[[:space:]]+(challenge[[:space:]]+)?protocol[[:space:]]+(version[[:space:]]+)?${n}([^0-9]|$)"
+    -e "(maximum|max)[[:space:]]+(challenge[[:space:]]+)?protocol[[:space:]]+version[[:space:]]+is[[:space:]]+${n}([^0-9]|$)"
+    -e "(maximum|max)[[:space:]]+(challenge[[:space:]]+)?protocol[[:space:]]+(version[[:space:]]+)?${n}[[:space:]]+is[[:space:]]+the"
+    -e "(accepts?|supports?)[^.!?\n]{0,40}protocol[[:space:]]+versions?[[:space:]]+1[^.!?\n]{0,20}${n}([^0-9]|$)"
+  )
+done
+# The supported-set list ending below the live maximum ("versions 1, 2,
+# 3 and 4", "1..4", "1-4"): legacy narratives that start at 2 are not
+# claims about the supported set and do not match.
+protocol_patterns+=(
+  -e "protocol[[:space:]]+versions?[[:space:]]+1[[:space:]]*[.,/ -]+[[:space:]]*(2[[:space:]]*[.,/ -]+[[:space:]]*)?(3[[:space:]]*[.,/ -]+[[:space:]]*)?4([^0-9]|$)"
+)
+protocol_matches="$(
+  search "${protocol_patterns[@]}" "${scan_roots[@]}"
+)"
+if [ -n "$protocol_matches" ]; then
+  report "stale claim: the challenge protocol maximum or supported set is described below the live MAX_PROTOCOL_VERSION (${live_protocol_max}, the PHP core constant; the Rust crate and the readiness probe mirror it)"
+  printf '%s\n' "$protocol_matches"
 fi
 
 if [ "$hits" -ne 0 ]; then

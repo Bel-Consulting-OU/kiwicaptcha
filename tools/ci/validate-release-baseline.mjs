@@ -105,6 +105,10 @@
  *      newest physical tested_at (a qualification date may never
  *      precede the evidence it certifies; a regenerated baseline can
  *      never launder old measurements).
+ *   6b. qualification.pending_release_tiers (optional): the physical
+ *      tiers declared for measurement with no device evidence yet.
+ *      Ordinary CI notes them; release mode refuses certification
+ *      until each one is certified (release_tiers + budgets + devices).
  *   7. release mode only: qualification.status must be "physical";
  *      and a current-harness (schema 3) payload must additionally
  *      satisfy the completed-run guards: the completion marker,
@@ -822,6 +826,34 @@ function main() {
   if (budgetTiers.length === 0) {
     reasons.push(`budget file ${budgetsPath}: tiers list is empty (a release gate must name the tiers it qualifies)`);
   }
+    // The pending physical ladder: tiers the release claim must
+    // eventually certify but which have NO measured device evidence
+    // yet. Ordinary CI records them as notes (the honest "not
+    // measured" state); release mode refuses certification until each
+    // one moves into release_tiers with its budgets and devices.
+    if (qualification.pending_release_tiers !== undefined) {
+      if (!Array.isArray(qualification.pending_release_tiers)) {
+        reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers must be an array of harness tier keys (the physical tiers declared for measurement, release-blocking until evidence lands)`);
+      } else {
+        const seenPending = new Set();
+        for (const t of qualification.pending_release_tiers) {
+          if (typeof t !== 'string' || !t.length) {
+            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers entries must be non-empty tier key strings (got ${JSON.stringify(t)})`);
+            continue;
+          }
+          if (!tierNames.includes(t)) {
+            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers names unknown tier ${JSON.stringify(t)} (not a harness tier)`);
+          }
+          if (seenPending.has(t)) {
+            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers repeats tier ${t}`);
+          }
+          seenPending.add(t);
+          if (Array.isArray(qualification.release_tiers) && qualification.release_tiers.includes(t)) {
+            reasons.push(`budget file ${budgetsPath}: tier ${t} is declared both release_tiers and pending_release_tiers (a tier is either certified with device evidence or pending)`);
+          }
+        }
+      }
+    }
   const unknownBudgetTiers = budgetTiers.filter((t) => !tierNames.includes(t));
   if (unknownBudgetTiers.length) {
     reasons.push(`budget file ${budgetsPath}: unknown tier(s) ${unknownBudgetTiers.join(', ')} (not harness tiers)`);
@@ -836,6 +868,10 @@ function main() {
   // committed, ordinary CI must prove every physical invariant (and
   // the release-tier budget rows must exist) immediately, never only
   // under --release.
+  const pendingReleaseTiers =
+    qualification && Array.isArray(qualification.pending_release_tiers)
+      ? qualification.pending_release_tiers.filter((t) => typeof t === 'string' && tierNames.includes(t))
+      : [];
   const releaseTierSet = new Set(releaseTiers);
   const certTiers = releaseMode || physicalClaim ? [...new Set([...budgetTiers, ...releaseTiers])] : [...budgetTiers];
   if (releaseMode || physicalClaim) {
@@ -1531,14 +1567,25 @@ function main() {
   const physicalCount = physicalDevices.length;
   const statusLine =
     status === 'physical'
-      ? `performance qualification status=physical (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded, ${physicalCount} physical device(s) on release tiers ${(Array.isArray(qual.release_tiers) ? qual.release_tiers : []).join('+') || '(none)'})`
+      ? `performance qualification status=physical (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded, ${physicalCount} physical device(s) on release tiers ${(Array.isArray(qual.release_tiers) ? qual.release_tiers : []).join('+') || '(none)'}${Array.isArray(qual.pending_release_tiers) && qual.pending_release_tiers.length ? `, pending release tier(s) ${qual.pending_release_tiers.join('+')}` : ''})`
       : `performance qualification status=${status} — physical-device data required before release certification`;
   if (releaseMode) {
     if (status !== 'physical') {
       reasons.push(`qualification status ${JSON.stringify(status)} is not "physical": release certification requires physical-device qualification data (qualified_at date and recorded devices), not lab-rig or emulation evidence`);
     }
+    // A tier the product's public profile exposes (mobile / low-memory)
+    // cannot be certified from emulation or from a desktop-only record:
+    // each declared pending tier is a hard release reason until its
+    // physical device evidence lands and the tier moves into
+    // release_tiers with its budgets.
+    for (const t of pendingReleaseTiers) {
+      reasons.push(`physical release tier ${t} is declared pending in qualification.pending_release_tiers: no measured device evidence exists, so release certification is refused until the tier carries its physical devices and p95 budget rows`);
+    }
   } else {
     console.log(statusLine);
+    for (const t of pendingReleaseTiers) {
+      notes.push(`physical release tier ${t} is declared pending (release-blocking until measured device evidence lands)`);
+    }
   }
 
   if (reasons.length) {

@@ -14,6 +14,25 @@ name: Latency regression (self-hosted base/head)
 # "latest" label). The machine must run the pinned PHP patch version
 # and Redis on loopback (KC_REDIS_URL, default redis://127.0.0.1:6399).
 #
+# Methodology (the order-bias fixes):
+#   * Balanced pair order: repeat 1 runs base then head, repeat 2 runs
+#     head then base, and so on (abba), so thermal drift, CPU-frequency
+#     changes, filesystem/cache warming and background-host drift are
+#     spread evenly across the two sides instead of correlating with
+#     one of them.
+#   * Both trees are warmed before the measured window (two interleaved
+#     discarded passes), so no side starts from a colder governor,
+#     page cache or connection pool than the other.
+#   * Six repeats by default (an even count: three abba pairs), so the
+#     paired distributions have a meaningful sample on each side.
+#   * The harness records p50/p90/p95 per phase (perf-bench.php prints
+#     all three); the comparator reports each side's per-percentile
+#     distribution and the paired per-repeat deltas (median and p90),
+#     the paired per-repeat deltas rather than only a median sign.
+#   * The host state (machine identity, CPU governor, load, PHP and
+#     Redis versions) is recorded to the evidence directory and the
+#     whole evidence bundle is uploaded as an artifact.
+#
 # Safe to add now, before the runner exists: the job reuses the skip
 # pattern of the existing manual latency job in ci.yml
 # (perf-latency-quiet, `if: github.event_name == 'workflow_dispatch'`),
@@ -24,16 +43,6 @@ name: Latency regression (self-hosted base/head)
 # timing baselines on it, drop the dispatch-only `if` so the push
 # trigger engages, and add the job to the protected-main required
 # contexts.
-#
-# The measured percentiles are p50 and p95: those are the percentiles
-# the repo's benchmark harness publishes (perf-bench.php prints
-# p50/p95 per phase; the recorded figures in
-# docs/performance-analysis.md use them). p90 is NOT yet published by
-# the harness — recording p90 and the within-run spread is the
-# documented harness-extension step (docs step 7) that lands when the
-# runner is provisioned; until then the p95/p50 spread bound below is
-# the variance signal. The comparison harness here is deliberately
-# self-contained (bash + awk, no repo tooling beyond perf-bench.php).
 #
 # Periodic reverse-order validation: to prove the comparison is not
 # biased by run order or host drift, periodically run the same job
@@ -59,18 +68,20 @@ permissions:
 env:
   # Gate thresholds, overridable per dispatch via repository variables
   # or a temporary env edit. A regression fires only when both are
-  # exceeded (relative % and absolute ms) with repeated-runs
-  # agreement, so a noisy single window never trips the gate.
+  # exceeded (relative % and absolute ms) with the paired-sign
+  # agreement and the paired-p90 distribution shift, so a noisy single
+  # window never trips the gate.
   LATENCY_REGRESSION_MAX_REL_PCT: '20'
   LATENCY_REGRESSION_MAX_ABS_MS: '0.5'
   # Within-run variance bound: a phase whose p95/p50 ratio exceeds the
-  # bound marks the window noisy (the p95/p50 spread is the variance
-  # signal until the harness records p90).
+  # bound marks the window noisy.
   LATENCY_REGRESSION_MAX_SPREAD: '10'
   # Benchmark modes: array (always), redis and argon (opt-in).
   LATENCY_REGRESSION_MODES: 'array'
-  # Repeated interleaved runs per side for the agreement gate.
-  LATENCY_REGRESSION_REPEATS: '3'
+  # Repeated balanced runs per side for the paired agreement gate. An
+  # even count keeps the balanced alternating order balanced; six gives three balanced
+  # pairs per phase.
+  LATENCY_REGRESSION_REPEATS: '6'
 
 jobs:
   latency-regression:
@@ -80,7 +91,7 @@ jobs:
     # gate is flipped (see the header comment).
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, kiwi-perf]
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         with:
@@ -111,29 +122,75 @@ jobs:
       - name: composer install (base tree)
         working-directory: base/packages/kiwicaptcha-php
         run: composer install --no-interaction --prefer-dist
-      - name: host warm-up run (head, discarded; settles governor, page cache, pools)
-        # The workloads already discard their own warmup iterations;
-        # this extra run settles the CPU governor, the page cache and
-        # the connection pools before the measured window starts
-        # (docs: "Warm-up before measurement").
-        run: |
-          set -euo pipefail
-          php packages/kiwicaptcha/tools/perf-bench.php >/dev/null 2>&1 || true
-          echo "warm-up run done"
-      - name: interleaved repeated benchmark runs (base then head per repeat)
-        # One base run and one head run per repeat, interleaved, so
-        # host drift is spread evenly across the two sides instead of
-        # correlating with run order. Each perf-bench run is recorded
-        # even when its internal 3x advisory ratchet fails (the log
-        # carries the p50/p95 line either way); a run whose workload
-        # hard-errors (a verification failed) writes no perf-bench
-        # line and the comparator below fails on the gap.
+      - name: record the host state (machine identity, governor, load, versions)
+        # Persisted machine identity and load evidence: the comparison is
+        # only trustworthy if the host state is on the record, and a
+        # governor/load change between runs is visible instead of
+        # silently biasing one side.
         env:
           KC_REDIS_URL: ${{ inputs.redis_url }}
         run: |
           set -euo pipefail
-          repeats="${LATENCY_REGRESSION_REPEATS:-3}"
+          mkdir -p "$RUNNER_TEMP/kiwi-latency"
+          evidence="$RUNNER_TEMP/kiwi-latency/host-evidence.txt"
+          {
+            echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "head_sha=$(git rev-parse HEAD)"
+            echo "base_ref=$BASE_REF"
+            echo "uname=$(uname -a)"
+            echo "nproc=$(nproc 2>/dev/null || true)"
+            echo "php=$(php -r 'echo PHP_VERSION;')"
+            if command -v redis-cli >/dev/null 2>&1; then
+              echo "redis=$(redis-cli -u "$KC_REDIS_URL" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\r')"
+            fi
+            if [ -r /proc/cpuinfo ]; then
+              echo "cpu_model=$(awk -F: '/model name/ { gsub(/^ +/, "", $2); print $2; exit }' /proc/cpuinfo)"
+            fi
+            if command -v lscpu >/dev/null 2>&1; then
+              lscpu | sed -n 's/^ *\(Model name\|CPU(s)\|CPU max MHz\|CPU min MHz\|Thread(s) per core\|Core(s) per socket\): */lscpu_\1=/p'
+            fi
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              [ -r "$cpu" ] || continue
+              echo "$cpu=$(cat "$cpu")"
+            done
+            echo "uptime=$(uptime 2>/dev/null || true)"
+            echo "loadavg=$(cat /proc/loadavg 2>/dev/null || true)"
+          } | tee "$evidence"
+      - name: host warm-up runs (both trees, discarded; settles governor, page cache, pools)
+        # The workloads already discard their own warmup iterations;
+        # this extra pair of interleaved runs settles the CPU governor,
+        # the page cache and the connection pools on both trees before
+        # the measured window starts (docs: "Warm-up before
+        # measurement"). Warming only one side would hand it a colder
+        # start than the other.
+        run: |
+          set -euo pipefail
+          for pass in 1 2; do
+            for root in "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE"; do
+              (cd "$root" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true
+            done
+          done
+          echo "warm-up runs done (base and head, two interleaved passes)"
+      - name: balanced repeated benchmark runs (balanced alternating order per repeat)
+        # One base run and one head run per repeat, with the side order
+        # alternating per repeat (repeat 1 base->head, repeat 2
+        # head->base, ...), so host drift is spread evenly across the
+        # two sides instead of correlating with run order. Each
+        # perf-bench run is recorded even when its internal 3x advisory
+        # ratchet fails (the log carries the p50/p90/p95 line either
+        # way); a run whose workload hard-errors (a verification
+        # failed) writes no perf-bench line and the comparator below
+        # fails on the gap.
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: |
+          set -euo pipefail
+          repeats="${LATENCY_REGRESSION_REPEATS:-6}"
           modes="${LATENCY_REGRESSION_MODES:-array}"
+          if (( repeats < 2 || repeats % 2 != 0 )); then
+            echo "LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $repeats)" >&2
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/kiwi-latency/base" "$RUNNER_TEMP/kiwi-latency/head"
           for mode in $modes; do
             case "$mode" in
@@ -143,7 +200,8 @@ jobs:
               *) echo "unknown LATENCY_REGRESSION_MODES entry: $mode" >&2; exit 1 ;;
             esac
             for ((repeat = 1; repeat <= repeats; repeat++)); do
-              for side in base head; do
+              if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi
+              for side in "${order[@]}"; do
                 if [ "$side" = base ]; then
                   root="$GITHUB_WORKSPACE/base"
                   out="$RUNNER_TEMP/kiwi-latency/base/$mode-$repeat.log"
@@ -152,14 +210,14 @@ jobs:
                   out="$RUNNER_TEMP/kiwi-latency/head/$mode-$repeat.log"
                 fi
                 (cd "$root" && php packages/kiwicaptcha/tools/perf-bench.php "${flags[@]}") >"$out" 2>&1 || true
-                echo "$side $mode repeat $repeat: $(sed -n 's/perf-bench: \(SHA-256 [a-z]*\|Argon2id admission\) issuance.*/bench line recorded/p' "$out" || true)"
+                echo "$side $mode repeat $repeat (order $repeat%2): $(sed -n 's/perf-bench: \(SHA-256 [a-z]*\|Argon2id admission\) issuance.*/bench line recorded/p' "$out" || true)"
               done
             done
           done
-      - name: compare base vs head (p50/p95, repeated-runs agreement gate)
+      - name: compare base vs head (paired distributions, balanced order)
         run: |
           set -euo pipefail
-          repeats="${LATENCY_REGRESSION_REPEATS:-3}"
+          repeats="${LATENCY_REGRESSION_REPEATS:-6}"
           modes="${LATENCY_REGRESSION_MODES:-array}"
           rel_max="${LATENCY_REGRESSION_MAX_REL_PCT:-20}"
           abs_max="${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}"
@@ -179,71 +237,111 @@ jobs:
                   echo "$mode: Redis unavailable — $side repeat $repeat skipped (loud note only)"
                   continue
                 fi
-                # One perf-bench line per mode: issuance p50 p95 then
-                # verification p50 p95 on the same line (the phase
-                # summaries are separated by their sample-count
+                # One perf-bench line per mode: issuance p50 p95 p90
+                # then verification p50 p95 p90 on the same line (the
+                # phase summaries are separated by their sample-count
                 # segments, so each phase is extracted on its own).
-                issue="$(sed -n 's/.*issuance p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms.*/\1 \2/p' "$log")"
-                verify="$(sed -n 's/.*verification p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms.*/\1 \2/p' "$log")"
+                issue="$(sed -n 's/.*issuance p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms p90 \([0-9.]*\) ms.*/\1 \2 \3/p' "$log")"
+                verify="$(sed -n 's/.*verification p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms p90 \([0-9.]*\) ms.*/\1 \2 \3/p' "$log")"
                 if [ -z "$issue" ] || [ -z "$verify" ]; then
                   echo "no perf-bench measurement line in $log (hard error or missing workload):" >&2
                   cat "$log" >&2
                   exit 1
                 fi
-                read -r i50 i95 <<<"$issue"
-                read -r v50 v95 <<<"$verify"
-                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$side" "$repeat" "$i50" "$i95" "$v50" "$v95" >>"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
+                read -r i50 i95 i90 <<<"$issue"
+                read -r v50 v95 v90 <<<"$verify"
+                # columns: 1=mode 2=side 3=repeat 4=i50 5=i90 6=i95 7=v50 8=v90 9=v95
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$side" "$repeat" "$i50" "$i90" "$i95" "$v50" "$v90" "$v95" >>"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
               done
             done
             echo "=== mode $mode ==="
-            # metric columns in the TSV: 1=issuance p50, 2=issuance
-            # p95, 3=verification p50, 4=verification p95 (offset 3).
-            for metric in 1 2 3 4; do
+            for metric in 1 2 3 4 5 6; do
               case "$metric" in
-                1) name="issue p50" ;;
-                2) name="issue p95" ;;
-                3) name="verify p50" ;;
-                4) name="verify p95" ;;
+                1) name="issue p50"; col=4; p50c=4; p95c=6 ;;
+                2) name="issue p90"; col=5; p50c=4; p95c=6 ;;
+                3) name="issue p95"; col=6; p50c=4; p95c=6 ;;
+                4) name="verify p50"; col=7; p50c=7; p95c=9 ;;
+                5) name="verify p90"; col=8; p50c=7; p95c=9 ;;
+                6) name="verify p95"; col=9; p50c=7; p95c=9 ;;
               esac
-              col=$((metric + 3))
-              # The within-run spread of the phase is its p95/p50
-              # ratio (fixed TSV columns per phase).
-              if [ "$metric" -le 2 ]; then p50c=4; p95c=5; else p50c=6; p95c=7; fi
               tsv="$RUNNER_TEMP/kiwi-latency/$mode.tsv"
+              # Per-side per-percentile distribution: the median across
+              # the repeats of that side's per-run percentile.
               b_med="$(awk -F '\t' -v c="$col" '$2 == "base" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
               h_med="$(awk -F '\t' -v c="$col" '$2 == "head" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
               if [ -z "$b_med" ] || [ -z "$h_med" ]; then
                 echo "$mode $name: no paired samples — skipped"
                 continue
               fi
-              rel="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { if (b > 0) printf "%.1f", (h - b) / b * 100; else print "inf" }')"
-              absd="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { printf "%.4f", h - b }')"
-              # Repeated-runs agreement: no run pair may contradict the
-              # median delta's sign (a pair within exact equality is
-              # not a contradiction).
-              agreement="$(awk -F '\t' -v c="$col" -v b="$b_med" -v h="$h_med" '
-                $2 == "head" { hh[$3] = $c }
+              # Paired per-repeat deltas (head - base), with the base
+              # value of the same repeat: the balanced balanced alternating order makes
+              # repeat i the same thermal/host window for both sides.
+              pair_stats="$(awk -F '\t' -v c="$col" -v rm="$rel_max" -v am="$abs_max" '
                 $2 == "base" { bb[$3] = $c }
+                $2 == "head" { hh[$3] = $c }
+                # Insertion sort: mawk (the ubuntu default awk) has no
+                # asort, and the comparator must run on the plain runner.
+                function sort_num(a, n,   i, j, key) {
+                  for (i = 2; i <= n; i++) {
+                    key = a[i]
+                    for (j = i - 1; j >= 1 && a[j] > key; j--) a[j + 1] = a[j]
+                    a[j + 1] = key
+                  }
+                }
                 END {
                   n = 0
-                  for (r in hh) if (hh[r] != bb[r] && ((hh[r] - bb[r] > 0) != (h - b > 0))) n++
-                  print (n == 0 ? "agree" : "disagree:" n)
+                  for (r in hh) if (r in bb) {
+                    d = hh[r] - bb[r]
+                    deltas[n] = d
+                    if (bb[r] > 0) rels[n] = d / bb[r] * 100
+                    n++
+                  }
+                  if (n < 2) { print "n<2 0 0 0 0"; exit }
+                  # median of the paired deltas and of the relative deltas
+                  sort_num(deltas, n)
+                  sort_num(rels, n)
+                  med = (n % 2) ? deltas[(n + 1) / 2] : (deltas[n / 2] + deltas[n / 2 + 1]) / 2
+                  relmed = (n % 2) ? rels[(n + 1) / 2] : (rels[n / 2] + rels[n / 2 + 1]) / 2
+                  # p90 of the paired deltas: the broad distribution
+                  # shift, so one slow pair cannot trip the gate and a
+                  # wide shift cannot hide in the median alone.
+                  idx = int(0.9 * n); if (idx < 1) idx = 1; if (idx > n) idx = n
+                  p90 = deltas[idx]
+                  # paired-sign agreement: count pairs contradicting the
+                  # median delta sign
+                  contra = 0
+                  for (i = 0; i < n; i++) if (deltas[i] != 0 && med != 0 && ((deltas[i] > 0) != (med > 0))) contra++
+                  printf "%d %.4f %.1f %.4f %d\n", n, med, relmed, p90, contra
                 }' "$tsv")"
-              # Within-run spread bound (docs variance limit): any
-              # base/head run whose p95/p50 ratio for this phase
-              # exceeds the bound marks the window noisy — a noisy
-              # window cannot produce a trustworthy comparison.
+              read -r pairs p_med p_relmed p_p90 p_contra <<<"$pair_stats"
+              # Within-run spread bound: any base/head run whose p95/p50
+              # ratio for this phase exceeds the bound marks the window
+              # noisy — a noisy window cannot produce a trustworthy
+              # comparison.
               noisy="$(awk -F '\t' -v p="$p50c" -v q="$p95c" -v smax="$spread_max" '
-                $2 == "base" || $2 == "head" {
-                  if ($p > 0 && $q / $p > smax) { print "noisy"; exit }
-                }
-                END { if (!noisy && NR > 0) print "quiet" }' "$tsv")"
+                ($2 == "base" || $2 == "head") && $p > 0 && $q / $p > smax { bad = 1; print "noisy"; exit }
+                END { if (!bad) print "quiet" }' "$tsv")"
               [ -z "$noisy" ] && noisy="quiet"
-              echo "$mode $name: base median ${b_med} ms, head median ${h_med} ms, delta ${absd} ms (${rel}%), agreement ${agreement}, window ${noisy}"
-              over="$(awk -v r="$rel" -v rm="$rel_max" -v a="$absd" -v am="$abs_max" 'BEGIN { print (r >= rm && a >= am) ? 1 : 0 }')"
+              absd="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { printf "%.4f", h - b }')"
+              rel="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { if (b > 0) printf "%.1f", (h - b) / b * 100; else print "inf" }')"
+              agreement="$([ "$p_contra" = "0" ] && echo agree || echo "disagree:$p_contra")"
+              echo "$mode $name: base median ${b_med} ms, head median ${h_med} ms, delta ${absd} ms (${rel}%); paired n=${pairs} median delta ${p_med} ms / ${p_relmed}%, paired p90 delta ${p_p90} ms, agreement ${agreement}, window ${noisy}"
+              # The gate: the side medians AND the paired median must
+              # exceed both thresholds, the paired p90 delta must also
+              # exceed the practical bound (a distribution-wide shift,
+              # not one slow pair), and no pair may contradict the sign.
+              over="$(awk -v r="$rel" -v rm="$rel_max" -v a="$absd" -v am="$abs_max" -v pr="$p_relmed" -v pm="$p_med" -v pp90="$p_p90" '
+                BEGIN {
+                  median_over = (r >= rm && a >= am) ? 1 : 0
+                  paired_over = (pr >= rm && pm >= am) ? 1 : 0
+                  # the broad distribution shift: the 90th percentile of
+                  # the paired deltas also clears the absolute bound
+                  broad = (pp90 >= am) ? 1 : 0
+                  print (median_over && paired_over && broad) ? 1 : 0
+                }')"
               if [ "$over" = "1" ]; then
                 if [ "$agreement" = "agree" ] && [ "$noisy" = "quiet" ]; then
-                  echo "REGRESSION: $mode $name head is slower by $absd ms ($rel%) — over the ${rel_max}% / ${abs_max} ms thresholds with repeated-runs agreement" >&2
+                  echo "REGRESSION: $mode $name head is slower by $absd ms ($rel%); paired median ${p_med} ms, paired p90 ${p_p90} ms — over the ${rel_max}% / ${abs_max} ms thresholds with paired-distribution agreement" >&2
                   failed=1
                 else
                   echo "SIGNAL BUT AMBIGUOUS: $mode $name delta $absd ms ($rel%) exceeds the thresholds but agreement=$agreement window=$noisy — re-run on the quiet runner before concluding" >&2
@@ -257,10 +355,18 @@ jobs:
             exit 1
           fi
           if [ "$ambiguous" -eq 1 ]; then
-            echo "latency-regression: AMBIGUOUS — signals over threshold without repeated-runs agreement; re-run on the quiet runner" >&2
+            echo "latency-regression: AMBIGUOUS — signals over threshold without paired-distribution agreement; re-run on the quiet runner" >&2
             exit 1
           fi
-          echo "latency-regression: PASS — no phase exceeds the ${rel_max}% / ${abs_max} ms thresholds with agreement"
+          echo "latency-regression: PASS — no phase exceeds the ${rel_max}% / ${abs_max} ms thresholds with paired-distribution agreement"
+      - name: upload the latency evidence (logs + host state)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kiwi-latency-evidence
+          path: ${{ runner.temp }}/kiwi-latency
+          if-no-files-found: warn
+          retention-days: 14
       - name: reverse-order validation note
         # Periodic head->base reverse-order validation (see the header
         # comment): dispatch the workflow with base_ref set to a
@@ -269,5 +375,7 @@ jobs:
         # regression. A "regression" in that order proves run-order or
         # host-drift bias in the comparison, and the run must be
         # investigated before the gate can trust its forward results.
+        # The balanced balanced alternating order already removes the systematic
+        # first-side bias; this probe is the periodic proof.
         run: |
           echo "reverse-order probe: dispatch with base_ref newer than the head commit; expect PASS"

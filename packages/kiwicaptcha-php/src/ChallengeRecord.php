@@ -12,7 +12,10 @@ namespace KiwiCaptcha;
  * Redis records. The JSON keys match the Rust serde schema one-to-one.
  *
  * Protocol v2 records carry `binding_tag` (a nonce-bound HMAC, not a
- * stable IP-derived identifier) and `protocol_version` (2). `toArray()` emits the v2 key set only, and
+ * stable IP-derived identifier) and `protocol_version` (2). The
+ * accepted protocol versions are 1 through 5; the maximum is the
+ * `MAX_PROTOCOL_VERSION` constant below. `toArray()` emits the v2 key
+ * set only, and
  * `fromArray()` accepts either `binding_tag` or the legacy `ip_hash` key
  * (the serde alias attribute); the two must not appear
  * together, matching serde's duplicate-field rejection. Legacy records
@@ -46,11 +49,27 @@ namespace KiwiCaptcha;
  * the challenge, because the canonical bytes are signed and the
  * tamper breaks the HMAC or the structural gate.
  * An old verifier rejects version 4 as unknown.
- * `fromArray()` accepts protocol versions 1, 2, 3 and 4 and rejects
- * every forbidden combination (v2-plus-decoy, decoyless-v3,
- * v2/v3-with-execution, executionless-v4 and any partial execution
- * field set); the verifier's malformed-record path enforces the same
- * split.
+ *
+ * Protocol v5 is the identity-bearing rsw canonical: the base canonical
+ * plus the `|rsw_modulus_sha256` segment as the final signed field.
+ * The identity is mandatory on v5. It is exactly the canonical
+ * fingerprint of the decoded 256-byte modulus: 64 lowercase hex, the
+ * keygen's `rsw_modulus_n_sha256`. A signed identityless record with
+ * its stored version flipped to 5 keeps the plain canonical bytes and
+ * is refused by the grammar. A v5 record is always an rsw record, and the
+ * identity may ride neither a v1 record (whose canonical signs no
+ * segment) nor a non-rsw record. The decoy and execution segments stay
+ * governed by their own signed equivalence, so an rsw + execution
+ * composition signs the identity last under the same version.
+ * Identity-bearing records at versions 2..4 are the pre-v5 legacy shape
+ * (the historical base64-text identity), accepted for the bounded
+ * migration window.
+ *
+ * `fromArray()` accepts protocol versions 1 through 5. It rejects
+ * every forbidden combination: v2-plus-decoy, decoyless-v3,
+ * v2/v3-with-execution, executionless-v4, v5 without an rsw identity,
+ * identity on a v1 or non-rsw record, and any partial execution field
+ * set. The verifier's malformed-record path enforces the same split.
  *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record, which has `#[serde(default)]` and

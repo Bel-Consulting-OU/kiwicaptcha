@@ -134,34 +134,38 @@ rsw rungs and the
 execution cells, so no run recorded against an earlier matrix can ever
 be promoted. The lab README documents the full procedure.
 
-The release gate over the client lab: `tools/client-perf/release-budgets.json`
-declares an explicit p95 budget row for every released solver mode x
-qualified tier x cold/warm (currently the unthrottled mainstream-desktop
-lab tier) plus a qualification block, and
+The release gate over the client lab:
+`tools/client-perf/release-budgets.json` declares an explicit p95
+budget row for every released solver mode x qualified tier x
+cold/warm, plus a qualification block, and
 `tools/ci/validate-release-baseline.mjs` enforces it: coverage gaps and
 uncovered cells fail the run, CI mode prints the qualification status
 line without failing on it, and release mode (`--release`) refuses to
-certify unless `qualification.status` is `"physical"`. The current
-status is `lab`: the committed baseline rows for the mainstream-desktop
-tier were re-recorded at the real ladder on 2026-09-03/04 (the runs
-`results/run-2026-09-03.json` and
-`tools/client-perf/results/results-2026-09-04.json`, merged per cache
-across asset modes), the argon family at the round-5 retuned rung on
-2026-09-05, and the six ExecutionChallengeV1 cells at the live
-execution grammar (manifest maximum) on 2026-09-05 from
-`tools/client-perf/results/results-2026-09-05-exec-v5.json` — the
-earlier execution rows had measured the fixture's historical v3
-default, so the harness now arms every execution query at the current
-grammar and records the decoded program version byte
-(`executionVersion`) on every execution result row, which the
-validator requires to equal the execution manifest maximum. The
-interactive/non-interactive ceiling classification derives from the
-harness difficulty profiles (execchain only), never from the budgets
-file. No physical-device data exists yet. The
-physical-device tiers remain the release boundary for
-the widget and the difficulty ladder, and the budget file's
-qualification block documents the outstanding physical-device
-requirement.
+certify unless `qualification.status` is `"physical"`.
+
+The current qualification status is `physical`: the committed baseline
+(`tools/client-perf/results/baseline.json`, generated 2026-09-07) was
+recorded on the physical mainstream-desktop device described in
+`qualification.devices` (Apple MacBook Pro, Apple M5 Pro, macOS, the
+machine browser), so the desktop tier's budgets are
+ceil(1.2 x merged physical p95) over real device repetitions. The
+earlier lab runs remain in `tools/client-perf/results/` as history;
+they are not the certified record.
+
+The physical release ladder is deliberately split. The public product
+exposes a mobile / low-memory profile, so
+`qualification.pending_release_tiers` declares `current-iphone`,
+`mid-android` and `low-android` as required-before-mobile-claim tiers
+that have no physical device evidence yet; the harness carries those
+tier profiles, but emulation is not physical evidence (the client-lab
+README states this explicitly). Ordinary CI prints the pending tiers as
+notes; release certification refuses each of them with an explicit
+reason until a physical device of that tier records the full solver
+mode x cache matrix and the tier moves into `release_tiers` with its
+own devices and p95 budget rows in the same file. A missing mobile
+cell is therefore a hard release reason exactly as a missing desktop
+cell is. The budget file documents the full ladder; the physical
+measurement procedure lives in `tools/client-perf/README.md`.
 
 ## Measured baselines
 

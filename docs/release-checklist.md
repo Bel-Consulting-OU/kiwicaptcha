@@ -18,17 +18,26 @@ each one can block a tag on data that ages:
 - Release-mode baseline validation: `node tools/ci/validate-release-baseline.mjs
   --release tools/client-perf/results/baseline.json`. The qualification
   must be `physical` with fresh device evidence; a stale or lab-status
-  qualification refuses the release. Re-record the baseline on physical
-  devices when the qualification window or the asset set changes.
+  qualification refuses the release. The release ladder must also have
+  no `qualification.pending_release_tiers` entry: the declared mobile
+  tiers (`current-iphone`, `mid-android`, `low-android`, the product's
+  public mobile/low-memory profile) refuse certification until each
+  carries its own physical devices and p95 budget rows. Re-record the
+  baseline on physical devices when the qualification window or the
+  asset set changes.
 - Protocol manifest check: `bash tools/ci/protocol-manifest-check.sh`
   (also a required CI lane). The execution-v1 register must agree
   across the manifest, the PHP core, the Rust core and the interpreter
   asset before a release is cut.
 - Autofill qualification matrix: `node tools/ci/validate-autofill-qualification.mjs
-  tests/browser/qualification/autofill-matrix.json`. Every required
-  surface must carry a `pass` row with a `tested_at` inside the
-  90-day window; re-run the qualification protocol when a release
-  touches the decoy surface.
+  tests/browser/qualification/autofill-matrix.json`. The required
+  surface set is the machine-readable registry
+  `tests/browser/qualification/surfaces.json` (stable surface ids,
+  expected platform classes, exact-version requirements). Every
+  required surface must carry a `pass` row with an exact version and a
+  strict ISO-8601 `tested_at` inside the 90-day window; blocked or
+  pending rows never satisfy the claim. Re-run the qualification
+  protocol when a release touches the decoy surface.
 
 ## Step 1. Publish the package chain to Packagist
 
@@ -156,45 +165,77 @@ open work. Each lists its pass criteria and its current status.
 ### Milestone A. Dedicated latency runner
 
 Provision the dedicated, isolated latency runner (fixed CPU class,
-pinned PHP and Redis, warm-up, p50/p90/p95 recording, variance
-limits, base-commit comparison) and flip the hard-latency gate from
-the manual dispatch-only job to a required check context on
-protected `main`. The stable end state and the operational steps are
-documented in the latency-runner sections of
-`docs/performance-analysis.md`; the manual job remains the one CI job
-skipped on every push and pull_request until then.
+pinned PHP and Redis, both-tree warm-up, balanced ABBA base/head order,
+p50/p90/p95 recording, paired-distribution comparison, host-state
+evidence) and flip the hard-latency gate from the manual
+dispatch-only job to a required check context on protected `main`.
+The stable end state and the operational steps are documented in the
+latency-runner sections of `docs/performance-analysis.md`; the manual
+job remains the one CI job skipped on every push and pull_request
+until then.
+
+The draft workflow `.github/workflows/latency-regression.yml` now
+carries the corrected methodology: the side order alternates per
+repeat (base->head, head->base, ...), both trees are warmed before the
+measured window, the default is six repeats, the harness records
+p50/p90/p95, the comparator gates on the paired per-repeat deltas
+(median and p90 of the deltas, not merely the sign of a median
+difference), and the host state plus every log is uploaded as an
+artifact. The remaining work is hardware and governance: provision
+the runner, re-record the baselines on it, drop the dispatch-only
+condition, and add the job to the protected-main required contexts.
 
 Pass criteria: the runner is provisioned and validated, the baselines
 are re-recorded on it, and the latency job runs on every push and
 pull_request as a required context that blocks only on confident
 regressions.
 
-Status: not started.
+Status: in progress (methodology fixed; runner provisioning and the
+required-context flip outstanding).
 
-### Milestone B. OrganizationAdmin bypass narrowing
+### Milestone B1. OrganizationAdmin bypass narrowing
 
 Status: closed. The OrganizationAdmin always-bypass removal is live:
 both rulesets carry empty bypass-actor lists, protected `main` has
 zero bypass actors, and the `refs/tags/v*` ruleset blocks tag
 creation, deletion and non-fast-forward updates for every actor.
-Releases are blocked by design until the remaining step lands: a
-dedicated hardware-backed GitHub App release authority, scoped to `v*`
-tag creation with audit-log coverage and bypass alerting, through the
-rulesets API.
 
-Pass criteria: no routine actor holds a permanent always-bypass, and
-the release identity is scoped and hardware-authenticated. The first
-criterion is met by the live empty bypass lists. The second is the
-remaining step: a dedicated hardware-backed GitHub App release
-authority for `v*` tag creation, with audit-log coverage and bypass
-alerting.
+Pass criteria: no routine actor holds a permanent always-bypass. Met
+by the live empty bypass lists.
+
+### Milestone B2. Dedicated release authority
+
+Status: open. Releases are blocked by design until a dedicated,
+hardware-backed release identity exists: a narrowly scoped GitHub App
+authorized for `v*` tag creation only, invoked with hardware-backed
+operator authentication, added as the ruleset's single tag-creation
+bypass actor, with audit-log coverage and bypass alerting. Verify the
+behavior with a dry-run release (ruleset, audit log and bypass alert)
+before the milestone closes.
+
+Pass criteria: a dry-run release through the scoped hardware-backed
+release identity succeeds, the ruleset shows that identity as the only
+tag-creation bypass actor, and the audit log and bypass alert fire as
+documented.
 
 ### Milestone C. Independent external security audit
 
 Commission an independent external security audit attacking the full
 production surface, with the 100/100 acceptance criterion: every item
 of the scope checklist in `SECURITY.md` is attacked, and no finding
-rated high or critical is open at closure.
+rated high or critical is open at closure. Because the internal suite
+is authored alongside the implementation, this engagement is the
+remaining assurance step the internal tests cannot replace.
+
+The engagement scope centers on `SECURITY.md` and the areas the
+internal armor cannot independently vouch for: Redis failover and
+replay semantics, cross-language serialization differential behavior,
+SiteVerify ABA and idempotency (including the operation-bound
+acceptance and the legacy migration path), the legacy migration
+grammars (SiteVerify schema v2, protocol v5 and the bounded rsw
+identity window), RSW parameter validation and rotation, browser decoy
+false positives, CSP and sandbox escape assumptions, request binding,
+the HA authority model, and release provenance.
 
 Pass criteria: the audit report covers the full checklist, every
 finding has a disposition, and the high and critical bands are

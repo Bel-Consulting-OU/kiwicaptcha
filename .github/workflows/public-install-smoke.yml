@@ -1,17 +1,27 @@
 name: Public install smoke
 
 # Clean-room public-registry install proof (release-checklist.md
-# steps 1-3 and 6): a completely empty application that shares no
-# files with this repository installs the published packages from the
-# public registries — Packagist (composer smoke) and crates.io (cargo
-# smoke) — with no path repository, no local artifact and no
-# repository checkout. These jobs are the machine proof that the
-# public instructions work from the registries alone; until the
-# packages are actually published (release-checklist.md step 1/2), a
-# dispatch run fails at the require/add step, which is the expected
-# honest state of a proof that cannot pass yet. The jobs run only on
-# workflow_dispatch with the exact versions to smoke, so a failed
-# proof is always attributable to a version pair.
+# steps 1-6): a completely empty application that shares no files with
+# this repository installs the published packages from the public
+# registries — Packagist (composer smoke) and crates.io (cargo smoke) —
+# with no path repository, no local artifact and no repository
+# checkout. These jobs are the machine proof that the public
+# instructions work from the registries alone. The composer smoke
+# covers the full published flow: create the empty application,
+# require the bundle, boot it, run the doctor, assert the installed
+# package is self-contained, assert the Flex recipe's starter config
+# and routes exist, then exercise uninstall -> reinstall -> update.
+# Until the packages are published (release-checklist.md step 1/2) a
+# dispatch run fails at the require/add step, and until the recipe is
+# live (steps 4/5) it fails at the configuration assertion, which is
+# the expected honest state of a proof that cannot pass yet. The jobs
+# run only on workflow_dispatch with the exact versions to smoke, so a
+# failed proof is always attributable to a version pair. The HTTP
+# issue -> solve -> verify round trip of step 6 additionally needs a
+# served page with the widget (the recipe's starter template and a
+# headless browser); it remains a manual step of step 6 until this
+# smoke grows that lane, and the checklist keeps step 6 open until it
+# passes.
 on:
   workflow_dispatch:
     inputs:
@@ -102,6 +112,35 @@ jobs:
           fi
           echo "doctor: exit $code with check-level failures — recorded above; a smoke app without production wiring legitimately fails checks, so only hard errors fail this step"
           exit 0
+      - name: the Flex recipe delivered the starter config and the routes
+        # The recipe is part of the public instructions (checklist steps
+        # 4-5): it writes the starter configuration and registers the
+        # bundle routes. Its absence fails this proof loudly instead of
+        # pretending the installation story is complete.
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          test -f config/packages/kiwicaptcha.yaml \
+            || { echo "the Flex recipe has not been applied (checklist steps 4-5 outstanding)"; exit 1; }
+          php bin/console debug:router | grep -q kiwicaptcha \
+            || { echo "the recipe's kiwicaptcha routes are missing"; exit 1; }
+          echo "recipe config + routes present"
+      - name: uninstall -> reinstall -> update cycle
+        # The remaining composer half of checklist step 6: a published
+        # package must survive removal, a fresh require and an update
+        # without leaving the application broken.
+        working-directory: kiwi-smoke
+        env:
+          BUNDLE_VERSION: ${{ inputs.bundle_version }}
+        run: |
+          set -euo pipefail
+          composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
+          composer require "bel-consulting/kiwicaptcha-symfony:$BUNDLE_VERSION" --no-interaction --no-progress
+          php bin/console about
+          composer update bel-consulting/kiwicaptcha-symfony --no-interaction --no-progress
+          php bin/console about
+          echo "uninstall -> reinstall -> update cycle OK"
+
       - name: the installed bundle ships its own assets (no repository file)
         # The installed package must be self-contained: the widget
         # assets ride the bundle's own Resources/public (the files-tier

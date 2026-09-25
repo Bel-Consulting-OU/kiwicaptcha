@@ -1206,5 +1206,70 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   );
 }
 
+// ── Pending release tiers (the physical mobile ladder). ─────────────
+//     The budget file declares tiers the release claim must eventually
+//     certify (current-iphone, mid-android, low-android: the product's
+//     public mobile/low-memory profile) before their device evidence
+//     exists. Ordinary CI records them as notes; release mode refuses
+//     certification until each one moves into release_tiers with its
+//     devices and budgets. The corpus proves the note/refusal split and
+//     the structural validation of the pending ladder.
+{
+  const budgets = baseBudgets();
+  budgets.qualification.pending_release_tiers = ['current-iphone', 'mid-android'];
+  const ci = runValidator(schema3Payload(), budgets, false);
+  check(
+    'pending release tiers: CI mode notes them without failing',
+    ci,
+    { status: 0, mustInclude: ['declared pending'] },
+  );
+  const release = runValidator(schema3Payload(), budgets, true);
+  reject(
+    'pending release tiers: release mode refuses certification until measured',
+    release,
+    ['is declared pending in qualification.pending_release_tiers', 'current-iphone', 'mid-android'],
+  );
+}
+
+{
+  const budgets = baseBudgets();
+  budgets.qualification.pending_release_tiers = ['nokia-3310'];
+  reject(
+    'pending release tier unknown to the harness: reject',
+    runValidator(schema3Payload(), budgets, false),
+    ['names unknown tier'],
+  );
+}
+
+{
+  const budgets = baseBudgets();
+  budgets.qualification.pending_release_tiers = ['current-iphone', 'current-iphone'];
+  reject(
+    'pending release tier repeated: reject',
+    runValidator(schema3Payload(), budgets, false),
+    ['repeats tier'],
+  );
+}
+
+{
+  const budgets = baseBudgets();
+  budgets.qualification.pending_release_tiers = [RELEASE_TIER];
+  reject(
+    'tier declared both certified and pending: reject',
+    runValidator(schema3Payload(), budgets, false),
+    ['both release_tiers and pending_release_tiers'],
+  );
+}
+
+{
+  const budgets = baseBudgets();
+  budgets.qualification.pending_release_tiers = 'current-iphone';
+  reject(
+    'pending release tiers not an array: reject',
+    runValidator(schema3Payload(), budgets, false),
+    ['must be an array'],
+  );
+}
+
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -5,142 +5,377 @@
  *
  * Usage:
  *   node tools/ci/validate-autofill-qualification.mjs <matrix.json>
+ *        [--registry <surfaces.json>] [--window-days <n>]
  *
  * The matrix is the machine-readable record behind the manual
  * qualification protocol (docs/autofill-qualification-protocol.md):
- * one row per real autofill / password-manager / screen-reader
- * surface, with {product, version, platform, status, tested_at}.
+ * one row per real autofill / password-manager / screen-reader surface.
+ * The ONE canonical surface registry
+ * (tests/browser/qualification/surfaces.json) is authoritative for
+ * which stable surface ids exist, their expected platform class, and
+ * whether a pass row must record an exact version; the protocol
+ * document refers to those same ids.
  *
  * This validator is the release-touching-decoy gate. A release that
  * touches the decoy surface (the server-issued decoy field, its
  * rendering, the fill-evidence pipeline or the autofill-relevant
  * presentation facts) must pass it before the broad third-party
- * autofill and password-manager compatibility claim is made. The
- * validator rejects the matrix, with every reason printed, unless
+ * autofill and password-manager compatibility claim is made.
+ *
+ * Row shape (exact):
+ *   surface   the stable registry id (kebab-case); an id the registry
+ *             does not know is an advisory surface and never gates
+ *   version   the tested surface version; a pass row must record an
+ *             exact version (CURRENT/TBD/unknown/blank placeholders
+ *             are rejected); a non-pass row may carry the placeholder
+ *             or null
+ *   platform  the tested platform; must equal the registry's expected
+ *             platform class for a known surface (and be one of
+ *             desktop|windows|macos|ios|android in every case)
+ *   status    pass | fail | blocked | manual_pending
+ *   tested_at null for a non-pass row, or a strict ISO-8601 date for a
+ *             pass row
+ *   product   optional display name; when present for a known id it
+ *             must equal the registry's product
+ *
+ * The validator rejects the matrix, with every reason printed, unless
  * all of these hold:
  *
- *   1. the matrix schema is kiwicaptcha.autofill-qualification/1;
- *   2. every required product below has a row in the matrix (a
- *      missing row is a rejection, not a silent gap);
- *   3. every required product row has status "pass";
- *   4. every passing row records a tested_at within the qualification
- *      window (90 days by default): an old qualification cannot gate
- *      a current release. Rows in any other status are reported as
- *      blocking notes but only "pass" rows carry the tested_at
- *      requirement.
+ *   1. the registry and the matrix schemas are the expected ones;
+ *   2. the registry itself is well-formed (unique kebab-case ids, known
+ *      platform classes, boolean exact_version/required, non-empty
+ *      products);
+ *   3. every row is structurally complete and well-typed: every field
+ *      present, surface ids unique across rows, only one row per
+ *      surface id, no two rows for one registry product;
+ *   4. a known surface's row platform equals the registry's expected
+ *      platform class;
+ *   5. every REQUIRED surface (registry required=true) has exactly one
+ *      row with status "pass";
+ *   6. every required pass row records an exact, non-placeholder
+ *      version;
+ *   7. every required pass row records a strict ISO-8601 tested_at
+ *      that is neither materially in the future nor older than the
+ *      qualification window (90 days by default).
  *
- * Rows not in the required list are advisory: they are printed but
- * never gate. The required set is the compact matrix the protocol
- * defines for the broad claim.
+ * Rows whose surface id is not in the registry, or whose registry
+ * entry is advisory (required=false), are printed as notes but never
+ * gate; their structural fields are still validated.
  *
- * Exit status: 0 when every gate holds (all required products pass
- * within the window), 1 otherwise. Runnable standalone; intended to
- * be wired into the release workflow next to the client-performance
- * baseline validator.
+ * Exit status: 0 when every gate holds (all required surfaces pass
+ * with exact versions within the window), 1 otherwise. Runnable
+ * standalone; wired into the release workflow next to the
+ * client-performance baseline validator, and its adversarial mutation
+ * suite (tools/ci/test-validate-autofill-qualification.mjs) guards the
+ * validator itself in CI.
  */
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MATRIX_SCHEMA = 'kiwicaptcha.autofill-qualification/1';
+const REGISTRY_SCHEMA = 'kiwicaptcha.autofill-surfaces/1';
 const QUALIFICATION_WINDOW_DAYS = 90;
+/**
+ * A qualification date more than this far ahead of now is rejected as
+ * materially in the future: clock skew between the recording host and
+ * the validator cannot exceed a day.
+ */
+const FUTURE_SKEW_MS = 86400000;
+const PLATFORM_CLASSES = ['desktop', 'windows', 'macos', 'ios', 'android'];
+const STATUSES = ['pass', 'fail', 'blocked', 'manual_pending'];
+const SURFACE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+/**
+ * Version placeholders that never record a qualification, matched
+ * case-insensitively against the trimmed value of a pass row. The
+ * optional group makes the empty string a placeholder too.
+ */
+const VERSION_PLACEHOLDER_PATTERN = /^(current|tbd|tba|unknown|blank|n\/?a|none|null|pending|unversioned|-+)?$/i;
+/**
+ * A strict ISO-8601 calendar date or date-time, nothing else: Date.parse
+ * alone accepts loose spellings (slashes, bare years) that cannot be
+ * trusted as qualification evidence.
+ */
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 
-// The compact matrix required for the broad third-party claim
-// (docs/autofill-qualification-protocol.md, the qualification matrix):
-// every listed surface, exactly one row each. Product names match the
-// matrix rows. A required product missing from the file is a
-// rejection.
-const REQUIRED_PRODUCTS = [
-  'Chrome built-in autofill',
-  'Edge',
-  'Firefox',
-  'Safari',
-  'iOS Safari',
-  'Android Chrome',
-  'iCloud Keychain',
-  '1Password',
-  'Bitwarden',
-  'VoiceOver',
-  'NVDA',
-];
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_REGISTRY = resolve(SCRIPT_DIR, '..', '..', 'tests', 'browser', 'qualification', 'surfaces.json');
+
+function usage() {
+  process.stderr.write(
+    'usage: node tools/ci/validate-autofill-qualification.mjs <matrix.json> [--registry <surfaces.json>] [--window-days <n>]\n',
+  );
+}
+
+function parseArgs(argv) {
+  const args = { matrix: null, registry: DEFAULT_REGISTRY, windowDays: QUALIFICATION_WINDOW_DAYS };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--help' || arg === '-h') return null;
+    if (arg === '--registry') {
+      args.registry = argv[++i];
+      if (!args.registry) throw new Error('--registry needs a path');
+      continue;
+    }
+    if (arg === '--window-days') {
+      const raw = argv[++i];
+      const parsed = Number.parseInt(raw ?? '', 10);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new Error(`--window-days needs a positive integer, got ${JSON.stringify(raw)}`);
+      }
+      args.windowDays = parsed;
+      continue;
+    }
+    if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`);
+    if (args.matrix !== null) throw new Error(`unexpected extra argument ${arg}`);
+    args.matrix = arg;
+  }
+  return args;
+}
+
+function readJson(path, label) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (e) {
+    process.stderr.write(`autofill ${label} cannot be read at ${path}: ${e.message}\n`);
+    process.exit(1);
+  }
+}
+
+/** Validate the registry itself; returns a Map id -> surface. */
+function loadRegistry(path, reasons) {
+  const registry = readJson(path, 'registry');
+  if (registry.schema !== REGISTRY_SCHEMA) {
+    reasons.push(`registry schema ${JSON.stringify(registry.schema)} is not ${REGISTRY_SCHEMA}`);
+    return new Map();
+  }
+  if (!Array.isArray(registry.surfaces)) {
+    reasons.push('registry surfaces must be an array');
+    return new Map();
+  }
+  const byId = new Map();
+  for (const [index, surface] of registry.surfaces.entries()) {
+    const where = `registry surface #${index}`;
+    if (!surface || typeof surface !== 'object' || Array.isArray(surface)) {
+      reasons.push(`${where} must be an object`);
+      continue;
+    }
+    if (typeof surface.id !== 'string' || !SURFACE_ID_PATTERN.test(surface.id)) {
+      reasons.push(`${where} id ${JSON.stringify(surface.id)} must match ${SURFACE_ID_PATTERN}`);
+      continue;
+    }
+    if (byId.has(surface.id)) {
+      reasons.push(`registry surface id ${surface.id} is duplicated`);
+      continue;
+    }
+    if (typeof surface.product !== 'string' || surface.product.trim() === '') {
+      reasons.push(`registry surface ${surface.id} product must be a non-empty string`);
+      continue;
+    }
+    if (!PLATFORM_CLASSES.includes(surface.platform)) {
+      reasons.push(
+        `registry surface ${surface.id} platform ${JSON.stringify(surface.platform)} is not one of ${PLATFORM_CLASSES.join('|')}`,
+      );
+      continue;
+    }
+    if (typeof surface.exact_version !== 'boolean') {
+      reasons.push(`registry surface ${surface.id} exact_version must be a boolean`);
+      continue;
+    }
+    if (typeof surface.required !== 'boolean') {
+      reasons.push(`registry surface ${surface.id} required must be a boolean`);
+      continue;
+    }
+    byId.set(surface.id, surface);
+  }
+  if (byId.size === 0 && reasons.length === 0) {
+    reasons.push('registry declares no surfaces');
+  }
+  return byId;
+}
+
+function isIsoDate(value) {
+  if (typeof value !== 'string' || !ISO_DATE_PATTERN.test(value)) return false;
+  return !Number.isNaN(Date.parse(value));
+}
+
+function isVersionPlaceholder(value) {
+  return typeof value !== 'string' || VERSION_PLACEHOLDER_PATTERN.test(value.trim());
+}
 
 function main() {
   const argv = process.argv.slice(2);
-  if (argv.length < 1 || argv[0] === '--help' || argv[0] === '-h') {
-    process.stderr.write('usage: node tools/ci/validate-autofill-qualification.mjs <matrix.json>\n');
-    process.exit(argv.length ? 0 : 1);
+  if (argv.length < 1) {
+    usage();
+    process.exit(1);
   }
-  const matrixPath = argv[0];
-  let matrix;
+  let args;
   try {
-    matrix = JSON.parse(readFileSync(matrixPath, 'utf8'));
+    args = parseArgs(argv);
   } catch (e) {
-    process.stderr.write(`autofill matrix cannot be read at ${matrixPath}: ${e.message}\n`);
+    process.stderr.write(`validate-autofill-qualification: ${e.message}\n`);
+    usage();
+    process.exit(1);
+  }
+  if (args === null) {
+    usage();
+    process.exit(0);
+  }
+  if (args.matrix === null) {
+    usage();
     process.exit(1);
   }
 
   const reasons = [];
   const notes = [];
+  const notQualified = [];
 
+  const registry = loadRegistry(args.registry, reasons);
+
+  const matrix = readJson(args.matrix, 'matrix');
   if (matrix.schema !== MATRIX_SCHEMA) {
     reasons.push(`schema ${JSON.stringify(matrix.schema)} is not ${MATRIX_SCHEMA}`);
   }
-
   const rows = Array.isArray(matrix.rows) ? matrix.rows : [];
-  const byProduct = new Map();
-  for (const row of rows) {
-    if (!row || typeof row.product !== 'string') continue;
-    if (!byProduct.has(row.product)) byProduct.set(row.product, row);
+  if (!Array.isArray(matrix.rows)) {
+    reasons.push('matrix rows must be an array');
   }
 
-  const missing = REQUIRED_PRODUCTS.filter((p) => !byProduct.has(p));
-  if (missing.length) {
-    reasons.push(`required product row(s) missing from the matrix: ${missing.join(', ')}`);
-  }
-
-  const windowMs = QUALIFICATION_WINDOW_DAYS * 86400000;
+  const windowMs = args.windowDays * 86400000;
   const now = Date.now();
-  const blockedNotes = [];
-  for (const product of REQUIRED_PRODUCTS) {
-    const row = byProduct.get(product);
-    if (!row) continue;
-    const status = row.status;
-    if (status !== 'pass') {
-      blockedNotes.push(`${product}: status "${status}" (${row.version || 'CURRENT'}${row.tested_at ? `, tested ${row.tested_at}` : ', never tested'})`);
+
+  // Structural validation and duplicate detection: a duplicate id or a
+  // repeated registry product is a rejection whatever the two rows say,
+  // never a silent first-row-wins collapse.
+  const bySurface = new Map();
+  const productOwner = new Map();
+  for (const [index, row] of rows.entries()) {
+    const where = `row #${index}${row && typeof row.surface === 'string' ? ` (${row.surface})` : ''}`;
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      reasons.push(`${where} must be an object`);
       continue;
     }
-    if (typeof row.tested_at !== 'string' || row.tested_at === '') {
-      reasons.push(`${product}: status "pass" without a tested_at date`);
+    for (const field of ['surface', 'version', 'platform', 'status', 'tested_at']) {
+      if (!Object.prototype.hasOwnProperty.call(row, field)) {
+        reasons.push(`${where} is missing the required field ${field}`);
+      }
+    }
+    if (typeof row.surface !== 'string' || !SURFACE_ID_PATTERN.test(row.surface)) {
+      reasons.push(`${where} surface ${JSON.stringify(row.surface)} must be a kebab-case id matching ${SURFACE_ID_PATTERN}`);
+      continue;
+    }
+    if (bySurface.has(row.surface)) {
+      reasons.push(`surface id ${row.surface} is duplicated (row #${index} repeats the earlier row)`);
+      continue;
+    }
+    bySurface.set(row.surface, row);
+
+    const surface = registry.get(row.surface);
+    if (surface && Object.prototype.hasOwnProperty.call(row, 'product') && row.product !== surface.product) {
+      reasons.push(`${row.surface} product ${JSON.stringify(row.product)} is not the registry product ${JSON.stringify(surface.product)}`);
+    }
+    if (surface) {
+      if (productOwner.has(surface.product)) {
+        reasons.push(`${row.surface} repeats the registry product ${JSON.stringify(surface.product)} already carried by ${productOwner.get(surface.product)}`);
+      } else {
+        productOwner.set(surface.product, row.surface);
+      }
+    }
+
+    if (typeof row.platform !== 'string' || !PLATFORM_CLASSES.includes(row.platform)) {
+      reasons.push(`${where} platform ${JSON.stringify(row.platform)} is not one of ${PLATFORM_CLASSES.join('|')}`);
+    } else if (surface && row.platform !== surface.platform) {
+      reasons.push(`${row.surface} platform ${JSON.stringify(row.platform)} is not the registry platform ${JSON.stringify(surface.platform)}`);
+    }
+    if (!STATUSES.includes(row.status)) {
+      reasons.push(`${where} status ${JSON.stringify(row.status)} is not one of ${STATUSES.join('|')}`);
+      continue;
+    }
+    if (row.tested_at !== null && row.tested_at !== undefined && !isIsoDate(row.tested_at)) {
+      reasons.push(`${where} tested_at ${JSON.stringify(row.tested_at)} is not a strict ISO-8601 date`);
+    }
+    if (row.version !== null && typeof row.version !== 'string') {
+      reasons.push(`${where} version ${JSON.stringify(row.version)} must be a string or null`);
+    }
+  }
+
+  // Required-surface gating.
+  for (const [id, surface] of registry) {
+    if (!surface.required) {
+      if (bySurface.has(id)) {
+        notes.push(`${id} (${surface.product}) is an advisory registry surface; its row never gates`);
+      }
+      continue;
+    }
+    const row = bySurface.get(id);
+    if (!row) {
+      reasons.push(`required surface ${id} (${surface.product}) has no row in the matrix`);
+      continue;
+    }
+    if (row.status !== 'pass') {
+      notQualified.push(
+        `${id} (${surface.product}): status "${row.status}" (version ${JSON.stringify(row.version ?? null)}${
+          row.tested_at ? `, tested ${row.tested_at}` : ', never tested'
+        })`,
+      );
+      continue;
+    }
+    // A pass row must record an exact version and a fresh, real date.
+    if (surface.exact_version && isVersionPlaceholder(row.version)) {
+      reasons.push(
+        `required surface ${id} is marked pass with a placeholder version ${JSON.stringify(row.version ?? null)}; an exact tested version is required`,
+      );
+    }
+    if (typeof row.tested_at !== 'string' || row.tested_at.trim() === '') {
+      reasons.push(`required surface ${id} is marked pass without a tested_at date`);
+      continue;
+    }
+    if (!isIsoDate(row.tested_at)) {
+      reasons.push(`required surface ${id} tested_at ${JSON.stringify(row.tested_at)} is not a strict ISO-8601 date`);
       continue;
     }
     const testedMs = Date.parse(row.tested_at);
-    if (Number.isNaN(testedMs)) {
-      reasons.push(`${product}: tested_at ${JSON.stringify(row.tested_at)} is not a parseable date`);
+    if (testedMs - now > FUTURE_SKEW_MS) {
+      reasons.push(
+        `required surface ${id} tested_at ${row.tested_at} is materially in the future (more than a day ahead of the validator clock)`,
+      );
       continue;
     }
     const ageMs = now - testedMs;
     if (ageMs > windowMs) {
-      reasons.push(`${product}: qualified ${(ageMs / 86400000).toFixed(1)} days ago (tested_at ${row.tested_at}), older than the ${QUALIFICATION_WINDOW_DAYS}-day qualification window`);
-    }
-  }
-  if (blockedNotes.length) {
-    const prefix = reasons.length ? 'additional' : 'release';
-    process.stderr.write(`validate-autofill-qualification: ${prefix} gate not met — the following required surfaces are not qualified within the window (release-touching-decoy requires every required row to be status "pass" with a fresh tested_at):\n`);
-    for (const n of blockedNotes) process.stderr.write(`  - ${n}\n`);
-    process.exit(1);
-  }
-
-  for (const row of rows) {
-    if (!REQUIRED_PRODUCTS.includes(row.product) && row.status === 'pass') {
-      notes.push(`${row.product} is qualified but not in the required set (advisory only)`);
+      reasons.push(
+        `required surface ${id} qualified ${(ageMs / 86400000).toFixed(1)} days ago (tested_at ${row.tested_at}), older than the ${args.windowDays}-day qualification window`,
+      );
     }
   }
 
-  if (reasons.length) {
-    process.stderr.write(`validate-autofill-qualification: REJECTED ${matrixPath}\n`);
+  // Per-row freshness/version notes for advisory rows (never gating).
+  for (const [id, row] of bySurface) {
+    if (!registry.has(id)) {
+      notes.push(`${id} is not in the surface registry (advisory row, never gates)`);
+      continue;
+    }
+    const surface = registry.get(id);
+    if (!surface.required && row.status === 'pass') {
+      notes.push(`${id} (${surface.product}) is an advisory surface with a recorded pass; it never satisfies a required gate`);
+    }
+  }
+
+  if (notQualified.length) {
+    process.stderr.write(
+      'validate-autofill-qualification: release gate not met — the following required surfaces are not qualified within the window (release-touching-decoy requires every required surface to be status "pass" with an exact version and a fresh tested_at):\n',
+    );
+    for (const n of notQualified) process.stderr.write(`  - ${n}\n`);
+  }
+
+  if (reasons.length || notQualified.length) {
+    process.stderr.write(`validate-autofill-qualification: REJECTED ${args.matrix}\n`);
     for (const r of reasons) process.stderr.write(`  - ${r}\n`);
     process.exit(1);
   }
+  const requiredCount = [...registry.values()].filter((s) => s.required).length;
   console.log(
-    `validate-autofill-qualification: PASS ${matrixPath} (schema ${MATRIX_SCHEMA}; ${REQUIRED_PRODUCTS.length} required surfaces qualified within ${QUALIFICATION_WINDOW_DAYS} days)`,
+    `validate-autofill-qualification: PASS ${args.matrix} (registry ${REGISTRY_SCHEMA}; ${requiredCount} required surfaces qualified with exact versions within ${args.windowDays} days)`,
   );
   for (const n of notes) console.log(`  note: ${n}`);
   process.exit(0);

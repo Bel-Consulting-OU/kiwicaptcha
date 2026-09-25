@@ -191,14 +191,26 @@ impl RswTrapdoor {
         VALIDATION_CALLS.fetch_add(1, Ordering::Relaxed);
         let key = (modulus_b64.to_string(), lambda_b64.to_string());
         let map = VALIDATED_PAIRS.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(cached) = map.lock().unwrap().get(&key) {
-            return Some(Arc::clone(cached));
+        // Poison recovery: the guarded map only ever holds decoded
+        // operator-configured pairs, so a panicking holder cannot leave
+        // it logically inconsistent — a poisoned lock is recovered
+        // rather than propagated as a second panic on every later
+        // verification.
+        {
+            let guard = map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(cached) = guard.get(&key) {
+                return Some(Arc::clone(cached));
+            }
         }
         let trapdoor = Arc::new(RswTrapdoor::new(modulus_b64, lambda_b64).ok()?);
         // The first computed allocation of a pair wins and is served
         // forever (or-insert, never overwrite): concurrent first
         // validations of the same pair resolve to one stable identity.
-        let mut guard = map.lock().unwrap();
+        let mut guard = map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some(Arc::clone(guard.entry(key).or_insert_with(|| trapdoor)))
     }
 

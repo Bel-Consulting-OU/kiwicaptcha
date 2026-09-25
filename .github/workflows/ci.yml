@@ -1460,7 +1460,7 @@ jobs:
             --glob '!**/node_modules/**' \
             --glob '!**/target/**' \
             "$PATTERN" \
-            packages tests README.md SECURITY.md .github/workflows; then
+            packages tests README.md SECURITY.md .github/workflows .woodpecker; then
             echo "internal-history commentary found in product source/docs (see matches above)" >&2
             exit 1
           fi
@@ -2125,8 +2125,14 @@ jobs:
     # evidence proofs (per-device coverage, per-device sample floors
     # and failure budgets, worst-physical-p95, provenance), the
     # tested_at freshness/chronology rules, the physical-claim-in-CI
-    # rules, and the legacy schema-1 path. New job only: it does not
-    # touch the existing perf-budget or docker/no-GMP steps.
+    # rules, and the legacy schema-1 path. The same job carries the
+    # autofill-qualification mutation corpus (the release-touching-decoy
+    # gate): schema, registry integrity, duplicate rows in both status
+    # orders, version placeholders, platform classes and mismatches,
+    # strict ISO dates, stale/future dates, non-pass required rows,
+    # advisory surfaces, and the committed fail-closed matrix. New job
+    # only: it does not touch the existing perf-budget or docker/no-GMP
+    # steps.
     name: Release-validator mutation suite
     runs-on: ubuntu-latest
     permissions:
@@ -2135,3 +2141,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
       - name: adversarial mutation corpus of the release-baseline validator
         run: node tools/ci/test-validate-release-baseline.mjs
+      - name: adversarial mutation corpus of the autofill-qualification validator
+        run: node tools/ci/test-validate-autofill-qualification.mjs

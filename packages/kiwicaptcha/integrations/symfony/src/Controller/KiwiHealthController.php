@@ -35,15 +35,16 @@ use Symfony\Component\HttpFoundation\Response;
  *         `{kiwi:<ns>}:security-policy` (a hash with
  *         `min_protocol_version`, `min_policy_epoch` and the optional
  *         `min_execution_version`). When the key is
- *         present, ready requires min_protocol_version <= 4 (this
- *         binary's max protocol version, the execution-capable
+ *         present, ready requires min_protocol_version <= 5 (this
+ *         binary's max protocol version, the identity-bearing rsw
  *         canonical), min_execution_version <=
  *         {@see self::MAX_EXECUTION_VERSION} (an absent field imposes
  *         nothing) and min_policy_epoch <= the configured
  *         risk.policy_version. A newer central policy
  *         (mixed-version rolling deployments, rollbacks) takes an
  *         outdated binary out of the pool before it serves traffic it
- *         cannot honor. When the key is absent the binary's own
+ *         cannot honor (execution programs and identity-bearing rsw
+ *         records). When the key is absent the binary's own
  *         configuration is authoritative.
  *      4. when the execution dimension is armed
  *         (risk.execution_challenge on), the required execution tier

@@ -21,9 +21,22 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * 32 lowercase hex. The lease is a positive integer, and a completed
  * result passes the canonical {@see SiteVerifyResult} validator.
  *
- * The legacy shape (no `v` member) is recognized read-only: it can be
- * decoded for a bounded cached read, but no transition may claim, renew,
- * take over or finalize it.
+ * The legacy shape (no `v` member) is recognized with one narrowly
+ * constrained transition.
+ *
+ *   - An identity-complete pending legacy record may be taken over
+ *     once its owner lease expired. Identity-complete means
+ *     response_hash, remoteip_fingerprint and binding are all present
+ *     and equal to the caller's operation. The takeover atomically
+ *     rewrites the record as the canonical v2 schema with a fresh
+ *     owner, a new lease and the identity fields preserved.
+ *   - Every other legacy record is read-only. A completed record may
+ *     replay through the operation-bound read. An underspecified
+ *     record, with any identity component missing or differing, is
+ *     never mutated and never taken over.
+ *
+ * No claim or renewal ever touches a legacy record, and none is ever
+ * finalized in place.
  */
 final class SiteVerifyIdempotencyRecordSchema
 {

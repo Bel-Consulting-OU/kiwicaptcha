@@ -459,7 +459,19 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    the steady state a real user hits on a warmed phone. Thermal
    saturation is a state to measure in, not a reason to stop: report
    both the early and the saturated windows.
-5. The release boundary is met when the physical-device p95 solve
+5. The mobile tiers are part of the boundary. The public product
+   exposes a mobile / low-memory profile, so the release ladder must
+   cover a current physical iPhone and a representative mid-range
+   Android device (and the low-end Android tier while KiwiCaptcha
+   supports that population). Until those measurements exist, the
+   budget file declares them in `qualification.pending_release_tiers`:
+   ordinary CI prints them as notes, and release certification refuses
+   each pending tier with an explicit reason. A mobile tier joins
+   `qualification.release_tiers` only with its own physical devices,
+   its full solver mode x cache p95 budget rows and its device-indexed
+   evidence. A fast desktop or a CPU-throttled emulation tier is never
+   mobile evidence.
+6. The release boundary is met when the physical-device p95 solve
    times stay within the documented budget for every tier the
    deployment targets, and no tier shows a failure rate above the
    mode's `failureRateBudgets` limit (1% per cell by default; the 2%
@@ -470,7 +482,7 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    server-selected
    ladder globally or transition earlier to StepUp, never weaken the
    rung based on client-reported device capabilities (bots lie).
-6. Record the physical-device rows device-indexed in the results
+7. Record the physical-device rows device-indexed in the results
    payload's top-level `physical_results` object
    (`{ "<device-id>": { "<tier>:<difficulty>:<cache>:<asset-mode>":
    <row> } }`) — the shape `merge-cells.mjs --physical-index` emits

@@ -1,0 +1,52 @@
+# Woodpecker CI: the browser lanes (mirrors .github/workflows/ci.yml
+# jobs `browser` and `browser-a11y`). The Playwright image carries the
+# three engines for the pinned lockfile version; PHP is installed for
+# the fixture router, which serves /kiwi-captcha/api.js and
+# /kiwi-captcha/widget.css through the real Symfony controller.
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: browser-native-chromium
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
+    commands:
+      - |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
+        php -r 'if (!extension_loaded("gmp")) { fwrite(STDERR, "gmp missing\n"); exit(1); }'
+        curl -sS https://getcomposer.org/installer | php8.3 -- --install-dir=/usr/local/bin --filename=composer
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        cd ../kiwicaptcha/integrations/symfony
+        composer install --no-interaction --prefer-dist --no-scripts
+      - |
+        set -euo pipefail
+        cd tests/browser
+        npm ci --no-audit --no-fund
+        npx playwright test
+
+  - name: browser-a11y-three-engines
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
+    depends_on: [browser-native-chromium]
+    commands:
+      - |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
+        curl -sS https://getcomposer.org/installer | php8.3 -- --install-dir=/usr/local/bin --filename=composer
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        cd ../kiwicaptcha/integrations/symfony
+        composer install --no-interaction --prefer-dist --no-scripts
+      - |
+        set -euo pipefail
+        cd tests/browser
+        npm ci --no-audit --no-fund
+        npx playwright test --config=playwright.a11y.config.mjs

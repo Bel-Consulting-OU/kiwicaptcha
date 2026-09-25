@@ -23,13 +23,19 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  *   owns the canonical provider response, the same validator PHP
  *   applies at write and read time.
  *
- * The legacy shape (written before schema versioning, no `v` member):
- * recognized read-only. No transition ever claims, renews, takes over
- * or finalizes a legacy record; every transition refuses it
- * fail-closed. A legacy complete record may still be read by stored()
- * for its bounded remaining TTL. An in-flight deployment window
- * therefore neither loses nor reinterprets its authorization-bearing
- * cached results.
+ * The legacy shape (written before schema versioning, no `v` member)
+ * has exactly one narrow migration path.
+ *
+ *   - An identity-complete pending record whose owner lease expired is
+ *     taken over. The takeover script atomically rewrites it as
+ *     canonical v2, so a crashed predecessor owner never strands it.
+ *     Identity-complete means the three operation fields are present
+ *     and equal to the caller's.
+ *   - An identity-complete completed record replays read-only through
+ *     the operation-bound read.
+ *   - Anything else is refused fail-closed and never mutated. No claim
+ *     or renewal ever touches a legacy record, and none is ever
+ *     finalized in place.
  *
  * The one representational edge Lua 5.1 cannot express: a JSON float
  * with an integral value (2.0) decodes as a Lua number equal to 2 while
