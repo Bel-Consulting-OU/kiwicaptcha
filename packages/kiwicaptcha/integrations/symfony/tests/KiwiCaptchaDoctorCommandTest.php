@@ -832,6 +832,80 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('[FAIL] Continuity cookie', $display);
     }
 
+    public function testDoctorFailsOnAHostPrefixedCookieWithANonRootPath(): void
+    {
+        // The config tree refuses this pairing, but a stale or
+        // hand-built config can still present it: the doctor must fail
+        // loudly instead of PASSing on the prefix alone, because a
+        // dropped __Host- cookie silently eliminates session continuity.
+        $tester = $this->doctorWithCookieConfig([
+            'name' => '__Host-kiwi-session',
+            'path' => '/sub',
+        ]);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Continuity cookie', $display);
+        self::assertStringContainsString('path "/sub"', $display);
+        self::assertStringContainsString('session continuity', $display);
+    }
+
+    public function testDoctorFailsOnSameSiteNoneWithoutAnEffectiveSecureFlag(): void
+    {
+        $tester = $this->doctorWithCookieConfig([
+            'name' => 'kiwi-session',
+            'samesite' => 'none',
+            'secure' => false,
+        ]);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Continuity cookie', $display);
+        self::assertStringContainsString('SameSite=None', $display);
+        self::assertStringContainsString('silently eliminating session continuity', $display);
+    }
+
+    /**
+     * A compiled doctor container with the continuity-cookie config
+     * mutated after the tree ran (the hand-built/stale-config simulation
+     * the fail diagnostics guard against).
+     *
+     * @param array<string, mixed> $cookie
+     */
+    private function doctorWithCookieConfig(array $cookie): CommandTester
+    {
+        // The config tree refuses these pairings; a hand-built or stale
+        // config can still present them, so the command is constructed
+        // directly from a valid processed config with only the cookie
+        // block mutated (the container path would refuse the mutation at
+        // compile time for the wrong reason).
+        $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
+            new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
+            [['secret_key' => str_repeat('a', 32), 'risk' => ['enabled' => true]]],
+        );
+        self::assertIsArray($config);
+        $config['risk']['continuity_cookie'] = array_replace($config['risk']['continuity_cookie'], $cookie);
+        $command = new KiwiCaptchaDoctorCommand(
+            'test',
+            $config,
+            new \KiwiCaptcha\Storage\ArrayStorage(),
+            new \KiwiCaptcha\Config(secretKey: str_repeat('a', 32)),
+            new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+                new \KiwiCaptcha\Verifier(new \KiwiCaptcha\Storage\ArrayStorage()),
+                new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient(),
+                'doctor-test',
+                60,
+                300,
+            ),
+            null,
+            null,
+            null,
+            null,
+        );
+
+        return new CommandTester($command);
+    }
+
     public function testDoctorPassesOnAHostPrefixedCookieBehindTrustedProxies(): void
     {
         // The __Host- prefixed name forces the Secure flag regardless

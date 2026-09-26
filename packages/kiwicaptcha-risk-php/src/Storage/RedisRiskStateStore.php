@@ -107,8 +107,46 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
         }
-        if ($outcomeTtlSecs < 1) {
-            throw new \InvalidArgumentException('outcomeTtlSecs must be >= 1');
+        // The configuration invariants live at the lowest public API
+        // boundary, not only in the Symfony bundle: a standalone caller
+        // must never be able to build a store that writes a persistent
+        // risk hash (TTL 0/negative), an invalid `SET ... EX 0`, an
+        // immediately-deleted record, or nonsensical epoch/hysteresis
+        // behaviour. The bundle's tree gives the friendlier first error;
+        // this constructor is the security validation every caller gets.
+        foreach ([
+            'stateTtlSecs' => $stateTtlSecs,
+            'sessionTtlSecs' => $sessionTtlSecs,
+            'principalTtlSecs' => $principalTtlSecs,
+            'dedupeTtlSecs' => $dedupeTtlSecs,
+            'outcomeTtlSecs' => $outcomeTtlSecs,
+            'sourceEpochSecs' => $sourceEpochSecs,
+            'subnetEpochSecs' => $subnetEpochSecs,
+            'hysteresisMs' => $hysteresisMs,
+        ] as $knob => $value) {
+            if ($value < 1) {
+                throw new \InvalidArgumentException(sprintf(
+                    '%s must be >= 1 (got %d): a non-positive TTL/epoch/hysteresis window would write persistent or immediately-expired risk state',
+                    $knob,
+                    $value,
+                ));
+            }
+        }
+        if (\count($saturations) !== \count(self::DEFAULT_SATURATIONS)) {
+            throw new \InvalidArgumentException(sprintf(
+                'saturations must carry exactly %d entries (got %d)',
+                \count(self::DEFAULT_SATURATIONS),
+                \count($saturations),
+            ));
+        }
+        foreach ($saturations as $key => $value) {
+            if (!\is_int($value) || $value < 1) {
+                throw new \InvalidArgumentException(sprintf(
+                    'saturations[%s] must be a positive integer (got %s)',
+                    (string) $key,
+                    var_export($value, true),
+                ));
+            }
         }
         $this->rawNamespace = $namespace;
         $this->namespaceVersion = $namespaceKeyVersion;

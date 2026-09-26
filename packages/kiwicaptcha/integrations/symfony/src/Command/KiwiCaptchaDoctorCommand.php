@@ -526,9 +526,24 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
         $cookie = $this->config['risk']['continuity_cookie'] ?? [];
         $name = (string) ($cookie['name'] ?? '');
+        $path = (string) ($cookie['path'] ?? '/');
+        $sameSite = (string) ($cookie['samesite'] ?? 'strict');
         $secure = $cookie['secure'] ?? null;
         if (str_starts_with($name, '__Host-')) {
-            return ['PASS', 'the __Host- prefixed name forces the Secure flag regardless of the request scheme (TLS-terminating proxies cannot drop it)'];
+            // The prefix's browser contract is Secure + Path=/ + no
+            // Domain. The configuration tree refuses a non-/ path and
+            // the cookie class enforces the rest; the doctor reports it
+            // loudly when an older or hand-edited config slips through,
+            // because a dropped cookie silently kills session
+            // continuity.
+            if ($path !== '/') {
+                return ['FAIL', sprintf('continuity_cookie "%s" uses the __Host- prefix with path "%s": browsers require path "/" for the prefix and refuse the cookie otherwise, silently eliminating session continuity', $name, $path)];
+            }
+
+            return ['PASS', 'the __Host- prefixed name forces the Secure flag regardless of the request scheme (TLS-terminating proxies cannot drop it) and uses the prefix-required path /'];
+        }
+        if ($sameSite === 'none' && $secure !== true) {
+            return ['FAIL', sprintf('continuity_cookie "%s" sets SameSite=None without an explicit Secure flag: modern browsers reject such a cookie, silently eliminating session continuity — set secure: true or use a __Host- prefixed name', $name)];
         }
         if ($secure === true) {
             return ['PASS', 'Secure flag configured explicitly'];

@@ -1177,9 +1177,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setPublic(true));
             // The risk state store is self-contained in the package (the
             // canonical risk-v1 Lua ships at resources/risk-v1.lua). The
-            // session TTL comes from the continuity-cookie lifetime: a
-            // session signal must never outlive the cookie that carries
-            // it.
+            // server-side session-state TTL comes from
+            // risk.session_state_ttl_secs, never from the browser cookie
+            // lifetime: continuity_cookie.ttl_secs may legitimately be 0
+            // (a session cookie with no Max-Age), while Redis security
+            // state must always carry a positive bounded expiry. Wiring
+            // the cookie lifetime here produced SET ... EX 0 (rejected by
+            // Redis) or persistent risk hashes (the Lua skip-on-zero
+            // path).
             // The store receives the RAW namespace and the configured key
             // version: the package derives the encoded {kiwi:<ns>} tag
             // internally through the one shared deployment derivation, so
@@ -1193,7 +1198,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $riskConfig['state_ttl_secs'],
             ]))
                 ->setArgument('$principalTtlSecs', $riskConfig['principal_ttl_secs'])
-                ->setArgument('$sessionTtlSecs', $riskConfig['continuity_cookie']['ttl_secs'])
+                ->setArgument('$sessionTtlSecs', $riskConfig['session_state_ttl_secs'])
                 ->setArgument('$dedupeTtlSecs', $riskConfig['dedupe_ttl_secs'])
                 ->setArgument('$hysteresisMs', $riskConfig['hysteresis_ms'])
                 ->setArgument('$saturations', $riskConfig['saturations'])

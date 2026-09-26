@@ -468,48 +468,88 @@ function kiwiClientIp(): string
     return (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
 }
 
+const KIWI_RATE_LIMIT_ALLOWED = 'allowed';
+const KIWI_RATE_LIMIT_LIMITED = 'limited';
+const KIWI_RATE_LIMIT_INDETERMINATE = 'indeterminate';
+
+/**
+ * The privacy-preserving limiter pseudonym: an HMAC under a
+ * PURPOSE-SEPARATED rate-limit key derived from the deployment master
+ * secret (never the challenge-signing key directly), over a labelled
+ * canonical IP plus a coarse epoch. Neither the raw textual IP nor its
+ * packed bytes ever appears in the Redis key, matching the bundle's
+ * IssuanceRateLimiter derivation. The epoch rotates hourly and the
+ * limiter checks the current and previous epochs together, so a
+ * boundary can not double the budget.
+ */
+function kiwiRateLimitPseudonym(string $masterSecret, string $ip, int $epoch): string
+{
+    $rateKey = hash_hmac('sha256', 'kiwi-deploy-rate-limit-v1', $masterSecret, true);
+
+    return hash_hmac('sha256', 'kiwi:rl:issuance:v1|'.$epoch.'|'.$ip, $rateKey);
+}
+
 /**
  * The per-client-IP fixed-window issuance limiter, on the same Redis
- * the storage uses: one INCR per challenge request under
- * kiwi:rl:issuance:<ip>, and the 60-second window is armed exactly
- * when the counter is new (INCR result 1 -> EXPIRE 60). The key
- * namespace is deliberately distinct from the challenge-storage
- * prefix. A limiter budget of 0 disables the limiter. A Redis error
- * while limiting is logged and treated as allowed: the issuance path
- * below fails closed on the same store, so the limiter never turns a
- * reachable store into a client outage.
+ * the storage uses: an INCR per challenge request under the pseudonym
+ * key {kiwi:rl}:issuance:v1:<pseudonym> (the raw IP never appears; see
+ * kiwiRateLimitPseudonym), and the 60-second window is armed exactly
+ * when the counter is new (INCR result 1 -> EXPIRE 60). The union of
+ * the current and previous epoch counters keeps the budget meaningful
+ * across the hourly pseudonym rotation. A limiter budget of 0 disables
+ * the limiter.
  *
- * @return bool whether the client is within its window budget
+ * Failure policy: a Redis error leaves the decision INDETERMINATE and
+ * /challenge answers a retryable 503. An explicitly configured abuse
+ * limit must not silently become unlimited issuance when the limiter
+ * alone cannot run (an ACL or script error can break EVAL while the
+ * storage command families still work, so the storage's own failure
+ * mode is not a substitute). KIWI_RATE_LIMIT_FAIL_OPEN=1 is the
+ * deliberately named demo-only opt-in that logs and allows instead;
+ * the default is fail-closed.
+ *
+ * @return string one of KIWI_RATE_LIMIT_ALLOWED / LIMITED / INDETERMINATE
  */
-function kiwiIssuanceAllowed(string $redisUrl, string $ip, int $perMinute): bool
+function kiwiIssuanceAllowed(string $redisUrl, string $ip, int $perMinute, string $masterSecret): string
 {
     if ($perMinute < 1) {
-        return true;
+        return KIWI_RATE_LIMIT_ALLOWED;
     }
-    $key = 'kiwi:rl:issuance:'.$ip;
+    $epoch = intdiv(time(), 3600);
+    $currentKey = '{kiwi:rl}:issuance:v1:'.kiwiRateLimitPseudonym($masterSecret, $ip, $epoch);
+    $previousKey = '{kiwi:rl}:issuance:v1:'.kiwiRateLimitPseudonym($masterSecret, $ip, $epoch - 1);
     // One script both increments and arms the window: a split INCR and
     // EXPIRE can leave a counter without an expiry when the process or
     // connection dies between them, and every later request would feed
     // a never-resetting counter that throttles the address forever.
     // The script arms the sixty-second window exactly when the counter
-    // is minted, atomically.
+    // is minted, atomically, and sums the previous epoch's counter so
+    // the hourly pseudonym rotation cannot reset the budget. Both keys
+    // share the {kiwi:rl} hash tag, so the two-key script is Cluster
+    // safe.
     $window = <<<'LUA'
 local n = redis.call('INCR', KEYS[1])
 if n == 1 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 end
-return n
+local previous = tonumber(redis.call('GET', KEYS[2])) or 0
+return n + previous
 LUA;
     try {
         $client = kiwiRedisClient($redisUrl);
-        $count = (int) $client->eval($window, 1, $key, 60);
+        $count = (int) $client->eval($window, 2, $currentKey, $previousKey, 60);
     } catch (\Throwable $e) {
         error_log(sprintf('kiwicaptcha deploy: issuance limiter unavailable: %s', $e->getMessage()));
+        if (getenv('KIWI_RATE_LIMIT_FAIL_OPEN') === '1') {
+            error_log('kiwicaptcha deploy: KIWI_RATE_LIMIT_FAIL_OPEN=1 — allowing issuance despite the unavailable limiter (demo opt-in)');
 
-        return true;
+            return KIWI_RATE_LIMIT_ALLOWED;
+        }
+
+        return KIWI_RATE_LIMIT_INDETERMINATE;
     }
 
-    return $count <= $perMinute;
+    return $count <= $perMinute ? KIWI_RATE_LIMIT_ALLOWED : KIWI_RATE_LIMIT_LIMITED;
 }
 
 /**
@@ -576,8 +616,14 @@ function kiwiChallenge(): void
     // IP before any issuance work runs: the socket peer is the only
     // identity input (the deployment trusts no forwarding header), so
     // a burst burns only its own window.
-    if (!kiwiIssuanceAllowed($deployment['redisUrl'], kiwiClientIp(), (int) $deployment['issuancePerMinute'])) {
+    $limit = kiwiIssuanceAllowed($deployment['redisUrl'], kiwiClientIp(), (int) $deployment['issuancePerMinute'], $deployment['secret']);
+    if ($limit === KIWI_RATE_LIMIT_LIMITED) {
         kiwiError('RATE_LIMITED', 'Too many challenge requests from this address. Try again later.', 429);
+
+        return;
+    }
+    if ($limit === KIWI_RATE_LIMIT_INDETERMINATE) {
+        kiwiError('RATE_LIMIT_UNAVAILABLE', 'The issuance rate limiter is unavailable. Try again shortly.', 503);
 
         return;
     }

@@ -491,6 +491,11 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue(1800)
                             ->min(60)
                         ->end()
+                        ->integerNode('session_state_ttl_secs')
+                            ->info('SERVER-SIDE risk session/state retention in seconds (default 1800, min 60): the TTL of the session pseudonym\'s risk state and of the first-seen session context/TLS records. Deliberately separate from continuity_cookie.ttl_secs: the browser cookie may legitimately be a session cookie (ttl_secs 0), while Redis security state must always carry a positive bounded expiry. Never derive this from the cookie lifetime.')
+                            ->defaultValue(1800)
+                            ->min(60)
+                        ->end()
                         ->integerNode('principal_ttl_secs')
                             ->info('TTL of the principal counter in seconds (default 86400). The bundle never records a principal itself — when a PrincipalResolverInterface service is wired, the RESOLVED principal of the current request flows through pre-issue, post-solve and every feedback signal (HMAC-pseudonymized before storage); apps that want principal reputation but feed no principal feedback keep the counter dormant under this TTL.')
                             ->defaultValue(86400)
@@ -904,7 +909,7 @@ final class Configuration implements ConfigurationInterface
                                     ->cannotBeEmpty()
                                 ->end()
                                 ->integerNode('ttl_secs')
-                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie).")
+                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie, no Max-Age). This is the BROWSER cookie lifetime only: the server-side risk-state TTL is risk.session_state_ttl_secs and is always positive.")
                                     ->defaultValue(1800)
                                     ->min(0)
                                 ->end()
@@ -923,6 +928,24 @@ final class Configuration implements ConfigurationInterface
                                     ->values([true, false, null])
                                     ->defaultNull()
                                 ->end()
+                            ->end()
+                            ->validate()
+                                ->ifTrue(static fn (array $c): bool => str_starts_with((string) ($c['name'] ?? ''), '__Host-') && (string) ($c['path'] ?? '/') !== '/')
+                                ->thenInvalid('risk.continuity_cookie: a __Host- prefixed name requires path: / — browsers refuse a __Host- cookie with any other path, silently eliminating session continuity')
+                            ->end()
+                            ->validate()
+                                ->ifTrue(static function (array $c): bool {
+                                    if ((string) ($c['samesite'] ?? 'strict') !== 'none') {
+                                        return false;
+                                    }
+                                    // Effective Secure: explicit true, or the
+                                    // __Host- prefix (whose browser contract
+                                    // forces Secure regardless of the
+                                    // configured/derived flag).
+                                    return ($c['secure'] ?? null) !== true
+                                        && !str_starts_with((string) ($c['name'] ?? ''), '__Host-');
+                                })
+                                ->thenInvalid('risk.continuity_cookie: samesite: none requires an effectively Secure cookie (secure: true, or a __Host- prefixed name) — modern browsers reject a SameSite=None cookie without Secure')
                             ->end()
                         ->end()
                         ->scalarNode('region')

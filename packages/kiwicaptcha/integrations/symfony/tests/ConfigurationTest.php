@@ -40,6 +40,53 @@ final class ConfigurationTest extends TestCase
         return ProtectionProfileDefaults::finalize($processed, [$config]);
     }
 
+    public function testSessionStateTtlDefaultsTo1800AndRequiresSixty(): void
+    {
+        $processed = $this->process();
+        self::assertSame(
+            1800,
+            $processed['risk']['session_state_ttl_secs'],
+            'the SERVER-SIDE session-state TTL defaults to 1800 and is independent of the browser cookie lifetime',
+        );
+        self::assertSame(1800, $processed['risk']['continuity_cookie']['ttl_secs'], 'the cookie lifetime keeps its own default');
+
+        $withZeroCookie = $this->process([
+            'risk' => ['continuity_cookie' => ['ttl_secs' => 0], 'session_state_ttl_secs' => 120],
+        ]);
+        self::assertSame(0, $withZeroCookie['risk']['continuity_cookie']['ttl_secs'], 'a session cookie (ttl 0) stays allowed');
+        self::assertSame(120, $withZeroCookie['risk']['session_state_ttl_secs'], 'the Redis state TTL remains positive and separate');
+
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['risk' => ['session_state_ttl_secs' => 59]]);
+    }
+
+    public function testAHostPrefixedContinuityCookieRequiresTheRootPath(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessageMatches('/__Host- prefixed name requires path/');
+
+        $this->process(['risk' => ['continuity_cookie' => ['name' => '__Host-kiwi-session', 'path' => '/sub']]]);
+    }
+
+    public function testSameSiteNoneRequiresAnEffectivelySecureCookie(): void
+    {
+        // SameSite=None on a non-__Host- name without an explicit secure
+        // flag is refused: modern browsers reject the cookie and session
+        // continuity silently disappears.
+        try {
+            $this->process(['risk' => ['continuity_cookie' => ['name' => 'kiwi-session', 'samesite' => 'none']]]);
+            self::fail('SameSite=None without an effective Secure flag must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('samesite: none requires an effectively Secure cookie', $e->getMessage());
+        }
+
+        $secure = $this->process(['risk' => ['continuity_cookie' => ['name' => 'kiwi-session', 'samesite' => 'none', 'secure' => true]]]);
+        self::assertSame('none', $secure['risk']['continuity_cookie']['samesite'], 'SameSite=None with secure: true is accepted');
+
+        $hostPrefixed = $this->process(['risk' => ['continuity_cookie' => ['name' => '__Host-kiwi-session', 'samesite' => 'none']]]);
+        self::assertSame('none', $hostPrefixed['risk']['continuity_cookie']['samesite'], 'the __Host- prefix forces Secure, so SameSite=None is accepted');
+    }
+
     public function testDifficultyBits21IsRejectedByTheTree(): void
     {
         $this->expectException(InvalidConfigurationException::class);

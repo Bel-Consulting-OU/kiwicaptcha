@@ -45,6 +45,24 @@ final class ContinuityCookie
         if ($this->ttlSecs < 0) {
             throw new \InvalidArgumentException('Continuity cookie TTL must be >= 0');
         }
+        // The browser contract of the __Host- prefix: Secure, no Domain
+        // and Path=/. Secure is forced in cookie(); the path is refused
+        // here, because a __Host- cookie with any other path is dropped
+        // by browsers and session continuity silently disappears.
+        if (str_starts_with($this->name, '__Host-') && $this->path !== '/') {
+            throw new \InvalidArgumentException(
+                'A __Host- prefixed continuity cookie requires path "/" (browsers refuse any other path)'
+            );
+        }
+        // SameSite=None is only meaningful on a Secure cookie; modern
+        // browsers reject it otherwise (the cookie is dropped, not
+        // weakened). The __Host- prefix forces Secure, so it satisfies
+        // the requirement too.
+        if ($this->sameSite === 'none' && $this->secure !== true && !str_starts_with($this->name, '__Host-')) {
+            throw new \InvalidArgumentException(
+                'Continuity cookie SameSite=None requires an effectively Secure cookie (secure: true, or a __Host- prefixed name)'
+            );
+        }
     }
 
     /**

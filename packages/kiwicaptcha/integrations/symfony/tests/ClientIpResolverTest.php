@@ -319,4 +319,48 @@ final class ClientIpResolverTest extends TestCase
         self::assertSame('203.0.113.66', $ip);
         Request::setTrustedProxies([], -1);
     }
+
+    public function testAForLessNearestElementTerminatesTheForwardedChain(): void
+    {
+        // The nearest element must carry exactly one for= before the walk
+        // may move past it. An element that carries other parameters only
+        // (the common `proto=https` a proxy appends) has no node identity
+        // at all: promoting the earlier attacker-controlled for= to the
+        // nearest hop is exactly the spoof this parse refuses.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+        $cases = [
+            // The nearest element is for-less: the attacker for= must NOT
+            // become the nearest usable hop.
+            'for=203.0.113.66, proto=https',
+            'for=203.0.113.66, by=proxy',
+            'for=203.0.113.66, host=example.com',
+            'proto=https',
+            // A for-less middle element is just as unusable: the chain
+            // cannot be walked through it.
+            'for=203.0.113.66, proto=https, for=10.0.0.8',
+            // Duplicate for= within ONE element is ambiguous (the
+            // comma form is a valid three-hop chain and is covered by the
+            // controls below; the semicolon form is the ambiguous one).
+            'for=203.0.113.66; for=198.51.100.9, for=10.0.0.8',
+            // A malformed parameter and an unterminated quote refuse the
+            // whole header.
+            'for=203.0.113.66, proto, for=10.0.0.8',
+            'for="203.0.113.66, proto=https',
+        ];
+        foreach ($cases as $value) {
+            self::assertSame(
+                '10.1.2.3',
+                $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => $value])),
+                'the header "'.$value.'" has no usable nearest hop: the socket peer wins, never the earlier attacker address',
+            );
+        }
+
+        // Controls: a fully for-bearing chain still resolves, quoted
+        // values parse, and a comma inside a quoted value does not
+        // fabricate an element.
+        self::assertSame('203.0.113.66', $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for="203.0.113.66", for=10.0.0.8'])));
+        self::assertSame('203.0.113.66', $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for=203.0.113.66;proto=https, for=10.0.0.8'])));
+        Request::setTrustedProxies([], -1);
+    }
 }

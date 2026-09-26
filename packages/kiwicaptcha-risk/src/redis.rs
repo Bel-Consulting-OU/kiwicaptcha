@@ -317,6 +317,31 @@ impl RedisRiskStateStore {
         outcome_ttl_secs: u64,
         saturations: [u32; 11],
     ) -> RedisRiskStateStore {
+        // The configuration invariants live at the lowest public API
+        // boundary, not only in the Symfony bundle: a standalone caller
+        // must never be able to build a store that writes a persistent
+        // risk hash (TTL 0), an invalid `SET ... EX 0`, an
+        // immediately-deleted record, or nonsensical epoch/hysteresis
+        // behaviour. The bundle's tree gives the friendlier first error;
+        // this constructor is the security validation every caller gets,
+        // with the identical positivity rules as the PHP store.
+        for (knob, value) in [
+            ("state_ttl_secs", state_ttl_secs),
+            ("dedupe_ttl_secs", dedupe_ttl_secs),
+            ("hysteresis_ms", hysteresis_ms),
+            ("session_ttl_secs", session_ttl_secs),
+            ("principal_ttl_secs", principal_ttl_secs),
+            ("outcome_ttl_secs", outcome_ttl_secs),
+        ] {
+            assert!(
+                value >= 1,
+                "{knob} must be >= 1 (got {value}): a non-positive TTL/epoch/hysteresis window would write persistent or immediately-expired risk state"
+            );
+        }
+        assert!(
+            saturations.iter().all(|saturation| *saturation >= 1),
+            "saturations must all be positive integers"
+        );
         let mut store = RedisRiskStateStore::new(client, namespace);
         store.state_ttl_secs = state_ttl_secs;
         store.dedupe_ttl_secs = dedupe_ttl_secs;
@@ -1060,14 +1085,26 @@ impl RedisRiskStateStore {
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
         use ::redis::Commands;
+        // ONE command: `SET key tag NX EX ttl`. The previous SET NX plus
+        // a separate EXPIRE could be interrupted between the two (process
+        // death, connection drop, command timeout), leaving a first-seen
+        // session record with NO TTL at all — permanently retained
+        // evidence. With the atomic form the lifetime is established by
+        // the write itself, so no interruption can produce a persistent
+        // key. The TTL is validated positive by the constructor.
         let ttl: i64 = self.session_ttl_secs.try_into().unwrap_or(i64::MAX);
         let created_key = key.to_string();
         let existing_key = key.to_string();
         let tag = tag.to_string();
         self.pool.with_connection(&self.client, |conn| {
-            let created: bool = conn.set_nx(created_key.clone(), tag.as_str())?;
-            if created {
-                conn.expire::<_, ()>(created_key, ttl)?;
+            let set: Option<String> = ::redis::cmd("SET")
+                .arg(created_key)
+                .arg(tag.as_str())
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl)
+                .query(conn)?;
+            if set.is_some() {
                 return Ok(Some(tag.clone()));
             }
             let stored: Option<String> = conn.get(existing_key)?;
@@ -2169,6 +2206,71 @@ mod tests {
             assert!(!observed.is_duplicate);
         }
         assert_eq!(store.last_global_level(), 0);
+    }
+
+    /// The shared cross-language store-configuration vectors
+    /// (protocol/risk-v1/fixtures.json -> invalid_store_configuration):
+    /// every vector must be rejected by `with_options` (panic), exactly
+    /// as the PHP `RedisRiskStateStore` constructor throws for the same
+    /// vector. The negative-TTL vector is skipped here because the Rust
+    /// knobs are unsigned and cannot represent it; the PHP suite covers
+    /// it.
+    #[test]
+    fn shared_invalid_store_configuration_vectors_are_rejected() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        ))
+        .expect("the shared fixtures must load");
+        let fixtures: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let section = fixtures
+            .get("invalid_store_configuration")
+            .expect("the shared invalid-configuration vectors must exist");
+        let defaults = &section["defaults"];
+        let default = |key: &str| defaults[key].as_u64().expect("a default");
+
+        for vector in section["vectors"].as_array().expect("vectors") {
+            let knob = vector["knob"].as_str().expect("knob");
+            let value = vector["value"].as_i64().expect("value");
+            if value < 0 {
+                continue; // unsigned in Rust; the PHP suite covers the negative vector
+            }
+            let mut state = default("state_ttl_secs");
+            let mut dedupe = default("dedupe_ttl_secs");
+            let mut hysteresis = default("hysteresis_ms");
+            let mut session = default("session_ttl_secs");
+            let mut principal = default("principal_ttl_secs");
+            let mut outcome = default("outcome_ttl_secs");
+            let mut saturations = DEFAULT_SATURATIONS;
+            match knob {
+                "state_ttl_secs" => state = value as u64,
+                "dedupe_ttl_secs" => dedupe = value as u64,
+                "hysteresis_ms" => hysteresis = value as u64,
+                "session_ttl_secs" => session = value as u64,
+                "principal_ttl_secs" => principal = value as u64,
+                "outcome_ttl_secs" => outcome = value as u64,
+                "saturation_0" => saturations[0] = value as u32,
+                other => panic!("unknown vector knob {other}"),
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                RedisRiskStateStore::with_options(
+                    client(),
+                    &unique_namespace("inv"),
+                    state,
+                    dedupe,
+                    hysteresis,
+                    session,
+                    principal,
+                    outcome,
+                    saturations,
+                );
+            }));
+            assert!(
+                result.is_err(),
+                "the invalid configuration vector {} ({knob}={value}) must be rejected",
+                vector["name"]
+            );
+        }
     }
 
     #[test]

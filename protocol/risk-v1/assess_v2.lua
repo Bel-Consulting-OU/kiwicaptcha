@@ -155,6 +155,16 @@ local function num(v)
     return tonumber(v) or 0
 end
 
+-- The session record TTL is a configuration invariant: the first-seen
+-- session context/TLS records must always carry a positive bounded
+-- expiry, never persist. A non-positive value is refused loudly (the
+-- PHP and Rust store constructors enforce the identical rule before the
+-- script is ever called).
+local session_ttl = tonumber(ARGV[21])
+if session_ttl == nil or session_ttl < 1 then
+    return redis.error_reply('assess_v2: session_ttl_s must be a positive integer (a persistent session record is not admissible)')
+end
+
 -- Distributed clock authority: Redis TIME, not the application clock.
 -- App-node skew can otherwise make pressure decay faster or slower on
 -- different nodes sharing one state namespace.
@@ -457,7 +467,7 @@ local net_rf = sum3(net.rf, net_prev.rf, net_next.rf)
 -- the tags stay ephemeral and session-keyed.
 local existing_ctx = ''
 if ARGV[23] ~= '' then
-    local ok = redis.call('SET', KEYS[11], ARGV[23], 'EX', tonumber(ARGV[21]), 'NX')
+    local ok = redis.call('SET', KEYS[11], ARGV[23], 'EX', session_ttl, 'NX')
     if ok then
         existing_ctx = ARGV[23]
     else
@@ -467,7 +477,7 @@ if ARGV[23] ~= '' then
 end
 local existing_tls = ''
 if ARGV[24] ~= '' then
-    local ok = redis.call('SET', KEYS[12], ARGV[24], 'EX', tonumber(ARGV[21]), 'NX')
+    local ok = redis.call('SET', KEYS[12], ARGV[24], 'EX', session_ttl, 'NX')
     if ok then
         existing_tls = ARGV[24]
     else

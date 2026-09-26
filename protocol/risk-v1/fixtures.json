@@ -1258,5 +1258,26 @@
     ],
     "outcome_ledger_key": "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:outcome:dec-1"
   }
-]
+],
+  "invalid_store_configuration": {
+    "note": "The store-configuration invariants both language boundaries enforce identically: every state/session/principal/dedupe/outcome TTL, epoch window and hysteresis window must be a positive integer (>= 1) and every saturation must be positive. A non-positive value would write a persistent risk hash (the Lua save() zero-skip), issue an invalid `SET ... EX 0`, immediately delete the record, or produce nonsensical epoch behaviour. The PHP RedisRiskStateStore constructor throws InvalidArgumentException and the Rust RedisRiskStateStore::with_options panics for every vector here.",
+    "defaults": {
+      "state_ttl_secs": 1800,
+      "dedupe_ttl_secs": 60,
+      "hysteresis_ms": 60000,
+      "session_ttl_secs": 1800,
+      "principal_ttl_secs": 86400,
+      "outcome_ttl_secs": 86400
+    },
+    "vectors": [
+      {"name": "state_ttl_zero", "knob": "state_ttl_secs", "value": 0},
+      {"name": "state_ttl_negative", "knob": "state_ttl_secs", "value": -1},
+      {"name": "session_ttl_zero", "knob": "session_ttl_secs", "value": 0},
+      {"name": "principal_ttl_zero", "knob": "principal_ttl_secs", "value": 0},
+      {"name": "dedupe_ttl_zero", "knob": "dedupe_ttl_secs", "value": 0},
+      {"name": "outcome_ttl_zero", "knob": "outcome_ttl_secs", "value": 0},
+      {"name": "hysteresis_zero", "knob": "hysteresis_ms", "value": 0},
+      {"name": "saturation_zero", "knob": "saturation_0", "value": 0}
+    ]
+  }
 }

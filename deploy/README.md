@@ -89,14 +89,30 @@ check and pre-cutover verification.
 `POST /challenge` is rate limited per client IP on the same Redis the
 storage uses: a fixed 60-second window with a budget of
 `KIWI_ISSUANCE_PER_MINUTE_PER_IP` challenges (default 30, 0 disables
-the limiter), implemented as one `INCR` under `kiwi:rl:issuance:<ip>`
-with the window armed on the first increment. A request past the
-budget answers 429 with `{"error":{"code":"RATE_LIMITED",...}}` and
-`Cache-Control: no-store`. The client identity is `REMOTE_ADDR`, the
-socket peer: this deployment is single-hop by design and trusts no
-forwarding header, so a proxy in front must be counted at the proxy
-or balanced across several published ports (a fronting proxy would
-otherwise pool all its clients into one window).
+the limiter). The counter key is
+`{kiwi:rl}:issuance:v1:<pseudonym>`: the pseudonym is an HMAC of the
+labelled canonical socket-peer IP under a PURPOSE-SEPARATED
+rate-limit key derived from the master secret, never the raw textual
+IP and never its packed bytes in Redis (the same privacy property the
+bundle's IssuanceRateLimiter holds; the challenge-signing key is not
+used directly). The pseudonym rotates hourly and the limiter checks
+the current and previous epoch together, so the rotation cannot reset
+the budget. A request past the budget answers 429 with
+`{"error":{"code":"RATE_LIMITED",...}}` and `Cache-Control: no-store`.
+The client identity is `REMOTE_ADDR`, the socket peer: this
+deployment is single-hop by design and trusts no forwarding header,
+so a proxy in front must be counted at the proxy or balanced across
+several published ports (a fronting proxy would otherwise pool all
+its clients into one window).
+
+The limiter fails CLOSED: when the configured distributed limiter
+cannot run (Redis unreachable, an ACL or script error that leaves
+`EVAL` denied while storage commands still work), `/challenge` answers
+a retryable 503 with `{"error":{"code":"RATE_LIMIT_UNAVAILABLE",...}}`
+— a deliberately configured abuse limit must not silently become
+unlimited issuance. For demo environments only,
+`KIWI_RATE_LIMIT_FAIL_OPEN=1` restores the old log-and-allow behavior
+explicitly; the default is 0 (fail closed).
 
 Prove the limiter against a running deployment:
 
@@ -178,6 +194,12 @@ Optional:
 - `KIWI_HEALTHZ_MODE` — the `/healthz` round trip: `full` (default,
   write-probe-read-delete) or `probe` (PING only). See the write
   amplification note above.
+- `KIWI_RATE_LIMIT_FAIL_OPEN` — `1` restores the log-and-allow
+  behavior when the issuance limiter itself cannot run (demo
+  environments only). The default (`0`, unset) fails closed: the
+  limiter answers 503 `RATE_LIMIT_UNAVAILABLE` rather than silently
+  disabling the configured abuse limit. See "Issuance rate limiting"
+  above.
 
 ## Security note
 
