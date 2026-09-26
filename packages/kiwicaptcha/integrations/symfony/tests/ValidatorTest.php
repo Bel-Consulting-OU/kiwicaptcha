@@ -771,6 +771,49 @@ final class ValidatorTest extends TestCase
         self::assertSame([RiskEventKind::MalformedToken], $events, 'exactly one malformed event — the branch returns before the failure path feeds again');
     }
 
+    public function testDuplicateForwardingHeadersFailClosedAtTheValidatorBoundary(): void
+    {
+        // The solve/validation path reaches the resolver directly, without
+        // the challenge controller's duplicate-header scan. The resolver
+        // owns the singularity boundary, so a repeated occurrence of an
+        // identity-bearing forwarding header fails closed here exactly as
+        // it does at issuance.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        foreach (['X-Forwarded-For', 'Forwarded'] as $headerName) {
+            $risk = $this->riskStack(1, 'allow', 'allow', false);
+            $request = Request::create('/', 'POST', [], [], [], [
+                'REMOTE_ADDR' => '203.0.113.10',
+                'HTTP_X_FORWARDED_FOR' => '198.51.100.7',
+            ]);
+            if ($headerName === 'Forwarded') {
+                $request->headers->remove('X-Forwarded-For');
+            }
+            $request->headers->set($headerName, ['198.51.100.7', '198.51.100.8']);
+
+            $stack = new RequestStack();
+            $stack->push($request);
+            $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['203.0.113.10'], true);
+            $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway'], clientIpResolver: $resolver);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            $violations = $engine->validate($dto);
+            self::assertCount(1, $violations, sprintf('the duplicate %s header fails closed', $headerName));
+            self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+            $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk['store']->observations);
+            self::assertSame([RiskEventKind::MalformedToken], $events, sprintf('the duplicate %s refusal feeds the malformed-traffic event', $headerName));
+        }
+    }
+
     public function testValidSolveDecrementsTheOutstandingCounter(): void
     {
         $client = new FakePredisClient();

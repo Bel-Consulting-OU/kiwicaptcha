@@ -486,6 +486,7 @@ final class RiskIntegrationTest extends TestCase
         self::assertSame(1, $risk['policy_version'], 'policy_version is the CHALLENGE security-policy epoch — default 1, independent of the risk-v1 contract version ('.RiskPolicy::CONTRACT_VERSION.')');
         self::assertSame(8000, $risk['saturations']['src_fast']);
         self::assertSame(70000, $risk['saturations']['global']);
+        self::assertSame(10000, $risk['saturations']['principal'], 'the principal channel is exposed like the other ten');
         self::assertSame(190, $risk['weights']['source_fast']);
         self::assertSame([1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'], $risk['global_floors']);
         // Spec section 31 defaults.
@@ -2330,12 +2331,13 @@ final class RiskIntegrationTest extends TestCase
     {
         $stack = $this->stack(new FakeRiskStateStore());
         $gateway = $stack['gateway'];
+        $sessionHex = '5ae1a4b8c0d1e2f30011223344556677';
 
-        $receipt = $gateway->sourceRateLimitHit(1, '198.51.100.7', 'sess-1');
+        $receipt = $gateway->sourceRateLimitHit(1, '198.51.100.7', $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        $receipt = $gateway->globalCapacityHit(1, 'sess-1');
+        $receipt = $gateway->globalCapacityHit(1, $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
-        $receipt = $gateway->riskDenied(1, '198.51.100.7', 'sess-1');
+        $receipt = $gateway->riskDenied(1, '198.51.100.7', $sessionHex);
         self::assertInstanceOf(EventReceipt::class, $receipt);
 
         $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
@@ -2350,14 +2352,14 @@ final class RiskIntegrationTest extends TestCase
         // canonical Lua mutates only the global state for event 16).
         $identityFactory = new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET));
         self::assertSame(1, $stack['store']->observations[1]->scope);
-        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
+        self::assertSame($identityFactory->sessionId($sessionHex), $stack['store']->observations[1]->sessionId, 'the session signal is still carried');
         $neutralSource = $identityFactory->sourceId('0.0.0.0', time());
         self::assertSame($neutralSource, $stack['store']->observations[1]->sourceId, 'GlobalCapacityHit must not be attributed to a visitor source');
 
         // The attributed signals carry the real source pseudonym + session.
         $visitorSource = $identityFactory->sourceId('198.51.100.7', time());
         self::assertSame($visitorSource, $stack['store']->observations[0]->sourceId);
-        self::assertSame($identityFactory->sessionId('sess-1'), $stack['store']->observations[0]->sessionId);
+        self::assertSame($identityFactory->sessionId($sessionHex), $stack['store']->observations[0]->sessionId);
         self::assertSame($visitorSource, $stack['store']->observations[2]->sourceId);
 
         // Invalid client IP: nothing to attribute the source signals to.

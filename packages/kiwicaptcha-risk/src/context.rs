@@ -10,7 +10,9 @@ use crate::resources::ResourcePressure;
 pub struct RiskContext<'a> {
     pub scope: u32,
     pub source_ip: IpAddr,
-    /// Raw session cookie value (pseudonymized before storage).
+    /// The decoded 16-byte session cookie value (pseudonymized before
+    /// storage): the browser carries the cookie as 32 lowercase hex chars,
+    /// the caller decodes them.
     pub session_id: Option<&'a [u8]>,
     /// Application principal id bytes (pseudonymized before storage).
     pub principal_id: Option<&'a [u8]>,

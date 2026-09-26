@@ -48,13 +48,13 @@ use Symfony\Component\HttpFoundation\Request;
  * logged and the request proceeds with the socket peer, never a
  * header-derived guess.
  *
- * Duplicate security-singular headers: a request carrying Origin, Forwarded,
- * X-Forwarded-For or X-Real-IP more than once is parser ambiguity: different
- * intermediaries will pick different values, so the header-derived identity
- * is untrustworthy. The challenge controller rejects such a request with 400
- * `DUPLICATE_HEADER` before this resolver is ever consulted; the resolver
- * therefore treats a duplicate as ambiguous, since it is rejected earlier,
- * never silently resolved.
+ * Duplicate forwarding headers: a request carrying Forwarded or
+ * X-Forwarded-For more than once is parser ambiguity: different
+ * intermediaries will pick different values, so the header-derived
+ * identity is untrustworthy. The resolver enforces this boundary itself,
+ * so every caller (including the solve/validation path that reaches the
+ * resolver directly) throws {@see AmbiguousForwardingException} before
+ * parsing anything, unless ambiguity is explicitly allowed.
  *
  * An unparseable/missing socket peer yields the empty string (the callers'
  * existing "no usable risk signal" handling applies).
@@ -110,6 +110,26 @@ final class ClientIpResolver
      */
     public function resolve(Request $request): string
     {
+        // Duplicate forwarding headers are parser ambiguity: one
+        // intermediary trusts the first occurrence, another the last, so
+        // no header-derived identity is trustworthy. The resolver owns
+        // this boundary because the solve/validation path reaches it
+        // without passing the challenge controller's duplicate scan.
+        foreach (['Forwarded', 'X-Forwarded-For'] as $headerName) {
+            if (\count($request->headers->all($headerName)) > 1) {
+                $message = sprintf(
+                    'kiwicaptcha.risk: the %s header appears more than once — the canonical client IP is ambiguous',
+                    $headerName,
+                );
+                if ($this->rejectAmbiguousForwarding) {
+                    throw new AmbiguousForwardingException($message);
+                }
+                $this->logger?->warning($message);
+
+                return (string) $request->server->get('REMOTE_ADDR', '');
+            }
+        }
+
         if ($this->mode === self::MODE_DIRECT) {
             // Socket peer only: forwarding headers are always ignored.
             return (string) $request->server->get('REMOTE_ADDR', '');

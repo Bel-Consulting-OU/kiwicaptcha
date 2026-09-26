@@ -525,6 +525,7 @@ final class Configuration implements ConfigurationInterface
                                 ->integerNode('switch')->defaultValue(10000)->min(1)->end()
                                 ->integerNode('global')->defaultValue(70000)->min(1)->end()
                                 ->integerNode('trust')->defaultValue(10000)->min(1)->end()
+                                ->integerNode('principal')->defaultValue(10000)->min(1)->end()
                             ->end()
                         ->end()
                         ->arrayNode('weights')

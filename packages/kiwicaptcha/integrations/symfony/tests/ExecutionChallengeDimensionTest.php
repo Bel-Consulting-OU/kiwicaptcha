@@ -283,6 +283,25 @@ final class ExecutionChallengeDimensionTest extends TestCase
         return \ord($blob[$pos]);
     }
 
+    public function testPrincipalSaturationReachesTheStoreDefinition(): void
+    {
+        // Every one of the eleven contract saturations is tunable: the
+        // config tree exposes the principal channel too, and a non-default
+        // value lands in the store definition's script argv.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'redis_service' => 'fake_redis',
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'saturations' => ['principal' => 12345],
+            ],
+        ]]);
+        $saturations = $container->getDefinition('kiwi_captcha.risk.store')->getArgument('$saturations');
+        self::assertSame(12345, $saturations['principal']);
+        self::assertSame(10000, $saturations['trust'], 'the untouched channels keep their contract defaults');
+    }
+
     /**
      * A full armed-issuance controller request (the container wiring of
      * {@see self::testArmedIssuanceAndVerificationThroughTheController()},

@@ -46,8 +46,10 @@ jobs:
           WASM_OPT_STRICT: "1"
         run: |
           bash build.sh
-          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build1.sha256
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            shasum -a 256 "assets/$asset"
+          done < release-assets.txt > /tmp/build1.sha256
       - name: second clean strict build (fresh cache + target)
         env:
           WASM_OPT_STRICT: "1"
@@ -56,8 +58,10 @@ jobs:
           rm -rf pkg
           rm -rf "$HOME/.cache/kiwicaptcha-wasm"
           bash build.sh
-          shasum -a 256 assets/kiwicaptcha-wasm.js assets/kiwi-worker.js \
-                 assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css > /tmp/build2.sha256
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            shasum -a 256 "assets/$asset"
+          done < release-assets.txt > /tmp/build2.sha256
       - name: byte-compare the two builds
         run: |
           diff /tmp/build1.sha256 /tmp/build2.sha256

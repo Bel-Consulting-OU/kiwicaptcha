@@ -108,6 +108,22 @@ final class AdaptiveRiskEngine
         private readonly bool $enableGlobalPressure = true,
         private readonly ScopeActionHysteresis $hysteresis = new ScopeActionHysteresis(),
     ) {
+        // The timing configuration is validated at the construction
+        // boundary: a zero epoch divides by zero in the observation
+        // pipeline, and a non-positive TTL expires or persists risk state
+        // immediately. The Redis store enforces the same invariants on
+        // its own copy of these knobs.
+        foreach ([
+            'sourceEpochSecs' => $sourceEpochSecs,
+            'subnetEpochSecs' => $subnetEpochSecs,
+            'stateTtlSecs' => $stateTtlSecs,
+            'principalTtlSecs' => $principalTtlSecs,
+            'dedupeTtlSecs' => $dedupeTtlSecs,
+        ] as $knob => $value) {
+            if ($value < 1) {
+                throw new \InvalidArgumentException(sprintf('%s must be >= 1 (got %d)', $knob, $value));
+            }
+        }
     }
 
     /**

@@ -23,6 +23,15 @@ final class RiskIdentityFactory
         private readonly int $ipv4Prefix = 24,
         private readonly int $ipv6Prefix = 56,
     ) {
+        // A zero epoch window divides by zero in sourceId()/subnetId():
+        // refuse it at construction instead of at request time.
+        if ($sourceEpochSecs < 1 || $subnetEpochSecs < 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'Epoch windows must be >= 1 second (source: %d, subnet: %d)',
+                $sourceEpochSecs,
+                $subnetEpochSecs,
+            ));
+        }
     }
 
     /**
@@ -143,10 +152,26 @@ final class RiskIdentityFactory
         return $this->pseudonym($this->keys->subnet, 'net', $epoch, $this->maskIp($ip, $this->ipv4Prefix, $this->ipv6Prefix));
     }
 
-    /** Session pseudonym: context "sess", no epoch, raw session cookie value. */
+    /**
+     * Session pseudonym: context "sess", no epoch. The material is the
+     * decoded 16-byte session cookie value. The cookie travels as 32
+     * lowercase hex chars (the browser representation) and the HMAC binds
+     * the raw bytes here, so PHP and Rust derive one pseudonym per
+     * browser identity instead of splitting on the representation.
+     *
+     * @throws \InvalidArgumentException when the value is not exactly 32
+     *                                   lowercase hex chars
+     */
     public function sessionId(string $session): string
     {
-        return $this->pseudonym($this->keys->session, 'sess', 0, $session);
+        if (preg_match('/^[0-9a-f]{32}\z/', $session) !== 1) {
+            throw new \InvalidArgumentException(
+                'The session cookie value must be 32 lowercase hex chars (16 raw bytes)'
+            );
+        }
+        $raw = hex2bin($session);
+        \assert(\is_string($raw));
+        return $this->pseudonym($this->keys->session, 'sess', 0, $raw);
     }
 
     /** Principal pseudonym: context "prin", no epoch, app principal id bytes. */

@@ -62,6 +62,39 @@ final class AdaptiveRiskEngineTest extends TestCase
         );
     }
 
+    public function testZeroEpochOrTtlIsRefusedAtConstruction(): void
+    {
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        foreach ([
+            ['sourceEpochSecs', 0],
+            ['subnetEpochSecs', -1],
+            ['stateTtlSecs', 0],
+            ['principalTtlSecs', 0],
+            ['dedupeTtlSecs', -5],
+        ] as [$knob, $value]) {
+            try {
+                $arguments = [
+                    'store' => new class extends RiskStateStoreStub {
+                        public function observe(RiskObservation $observation): SignalVector
+                        {
+                            return SignalVector::fromArray([]);
+                        }
+                    },
+                    'classifier' => new CidrNetworkClassifier([]),
+                    'identityFactory' => new RiskIdentityFactory($keys),
+                    'scorer' => new RiskScorer(),
+                    'policy' => $this->policy(),
+                    'keys' => $keys,
+                    $knob => $value,
+                ];
+                new AdaptiveRiskEngine(...$arguments);
+                self::fail(sprintf('the invalid timing %s=%d must be refused at construction', $knob, $value));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString($knob, $e->getMessage());
+            }
+        }
+    }
+
     private function context(int $scope = 1, RiskEventKind $event = RiskEventKind::PreIssue, ?string $principalId = null): RiskContext
     {
         return new RiskContext(
@@ -331,7 +364,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         $engine->record_feedback(RiskEventKind::RateLimitHit, $this->context(event: RiskEventKind::RateLimitHit), $key);
         $engine->confirmedLegitimate($this->context(event: RiskEventKind::ConfirmedLegitimate), str_repeat('a', 32), $key);
         $engine->confirmedAbuse($this->context(event: RiskEventKind::ConfirmedAbuse), str_repeat('b', 32), $key);
-        $engine->record(RiskEventKind::ExpiredChallenge, 1, '203.0.113.27', 'sess', null);
+        $engine->record(RiskEventKind::ExpiredChallenge, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
 
         self::assertSame([
             $preIssue,
@@ -503,7 +536,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame(RiskEventKind::ProtectedActionFailure, $captured[0]->event, 'feedback must not be rewritten to PreIssue');
 
         // The deprecated alias routes to the same path.
-        $receipt = $engine->record(RiskEventKind::ChallengeIssued, 1, '203.0.113.27', 'sess', null);
+        $receipt = $engine->record(RiskEventKind::ChallengeIssued, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
         self::assertInstanceOf(EventReceipt::class, $receipt);
         self::assertSame(RiskEventKind::ChallengeIssued, $captured[1]->event);
     }
@@ -1066,7 +1099,7 @@ final class AdaptiveRiskEngineTest extends TestCase
             keys: RiskKeys::fromMaster(str_repeat(chr(0x42), 32)),
             calibration: $this->staticCalibration(1),
         );
-        $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', 'sess', null);
+        $engine->record(RiskEventKind::ProtectedActionFailure, 1, '203.0.113.27', '5ae1a4b8c0d1e2f30011223344556677', null);
         $engine->confirmedLegitimate(
             $this->context(event: RiskEventKind::ConfirmedLegitimate),
             str_repeat('a', 32),

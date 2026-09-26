@@ -309,6 +309,17 @@ const EXECUTION_MANIFEST_FILE = process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST
   ? resolve(process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST)
   : join(REPO_ROOT, 'protocol', 'execution-v1.json');
 
+// The physical release-tier ladder is an independent repository
+// authority: the validator always reads the committed
+// protocol/client-release-tiers.json, so an evidence file can never
+// define (and silently shrink) the set of tiers a release must
+// certify. The KIWI_VALIDATOR_TIER_MANIFEST override exists purely as
+// the mutation-suite seam; CI and release invocations never set it.
+const RELEASE_TIERS_FILE = process.env.KIWI_VALIDATOR_TIER_MANIFEST
+  ? resolve(process.env.KIWI_VALIDATOR_TIER_MANIFEST)
+  : join(REPO_ROOT, 'protocol', 'client-release-tiers.json');
+const RELEASE_TIERS_SCHEMA = 'kiwicaptcha.client-release-tiers/1';
+
 const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/2';
 const RELEASE_STATUSES = ['lab', 'physical'];
 const DEVICE_KINDS = ['lab', 'physical'];
@@ -349,7 +360,38 @@ function parseEvidenceTime(label, value, reasons) {
     reasons.push(`${label} ${JSON.stringify(value)} is not a canonical UTC RFC3339 timestamp (expected YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.sssZ, with a zero UTC offset)`);
     return NaN;
   }
-  const ms = Date.parse(value);
+  // Calendar round-trip: Date.parse normalizes impossible components
+  // (Feb 30 becomes Mar 2, hour 24 becomes the next day, second 60 the
+  // next minute), so the written components are reconstructed as UTC and
+  // compared back. Anything that does not round-trip is a forged or
+  // corrupted record, never a different but valid instant.
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/);
+  if (!match) {
+    reasons.push(`${label} ${JSON.stringify(value)} is not a canonical UTC RFC3339 timestamp`);
+    return NaN;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? '';
+  const millis = fraction === '' ? 0 : Math.floor(Number(`0.${fraction}`) * 1000);
+  const constructed = new Date(Date.UTC(year, month - 1, day, hour, minute, second, millis));
+  if (
+    constructed.getUTCFullYear() !== year ||
+    constructed.getUTCMonth() + 1 !== month ||
+    constructed.getUTCDate() !== day ||
+    constructed.getUTCHours() !== hour ||
+    constructed.getUTCMinutes() !== minute ||
+    constructed.getUTCSeconds() !== second ||
+    constructed.getUTCMilliseconds() !== millis
+  ) {
+    reasons.push(`${label} ${JSON.stringify(value)} is not a real calendar instant (an impossible date or time component is normalized by Date.parse, never accepted as evidence)`);
+    return NaN;
+  }
+  const ms = constructed.getTime();
   if (Number.isNaN(ms)) {
     reasons.push(`${label} ${JSON.stringify(value)} is not a valid calendar instant`);
     return NaN;
@@ -358,6 +400,52 @@ function parseEvidenceTime(label, value, reasons) {
     reasons.push(`${label} ${value} is in the future beyond the 5-minute clock-skew allowance`);
   }
   return ms;
+}
+
+/**
+ * The independent physical-tier support ladder
+ * (protocol/client-release-tiers.json, overridable only through the
+ * KIWI_VALIDATOR_TIER_MANIFEST mutation seam). Returns the required
+ * tier list, or null when the manifest itself is unusable (the reasons
+ * carry the failures).
+ */
+function readRequiredPhysicalTiers(reasons) {
+  let raw;
+  try {
+    raw = readFileSync(RELEASE_TIERS_FILE, 'utf8');
+  } catch (e) {
+    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: cannot read (${e.message})`);
+    return null;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: invalid JSON (${e.message})`);
+    return null;
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.schema !== RELEASE_TIERS_SCHEMA) {
+    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: schema must be ${RELEASE_TIERS_SCHEMA}`);
+    return null;
+  }
+  const tiers = doc.required_physical_tiers;
+  if (!Array.isArray(tiers) || tiers.length === 0) {
+    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers must be a non-empty array`);
+    return null;
+  }
+  const seen = new Set();
+  for (const tier of tiers) {
+    if (typeof tier !== 'string' || !tier.length) {
+      reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers entries must be non-empty tier keys`);
+      return null;
+    }
+    if (seen.has(tier)) {
+      reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers repeats tier ${tier}`);
+      return null;
+    }
+    seen.add(tier);
+  }
+  return tiers;
 }
 
 /**
@@ -692,16 +780,16 @@ function main() {
     reasons.push(`budget file ${budgetsPath}: failureRateBudgets must be an object { default: 0..1, "<mode>": 0..1 } (per-mode failure-rate limits; every mode except sha20 inherits default)`);
   } else {
     const frbKeys = Object.keys(failureRateBudgets);
-    if (typeof failureRateBudgets.default !== 'number' || !(failureRateBudgets.default > 0 && failureRateBudgets.default <= 1)) {
-      reasons.push(`budget file ${budgetsPath}: failureRateBudgets.default ${JSON.stringify(failureRateBudgets.default)} is not a rate in (0, 1]`);
+    if (typeof failureRateBudgets.default !== 'number' || !(failureRateBudgets.default >= 0 && failureRateBudgets.default <= 1)) {
+      reasons.push(`budget file ${budgetsPath}: failureRateBudgets.default ${JSON.stringify(failureRateBudgets.default)} is not a rate in [0, 1] (zero allows a strict no-failure budget)`);
     }
     for (const key of frbKeys) {
       if (key !== 'default' && !Object.prototype.hasOwnProperty.call(difficultyProfiles, key)) {
         reasons.push(`budget file ${budgetsPath}: failureRateBudgets names unknown mode ${JSON.stringify(key)} (only "default" or harness difficulties such as sha20 may carry a rate)`);
       }
       const v = failureRateBudgets[key];
-      if (typeof v !== 'number' || !(v > 0 && v <= 1)) {
-        reasons.push(`budget file ${budgetsPath}: failureRateBudgets[${JSON.stringify(key)}] ${JSON.stringify(v)} is not a rate in (0, 1]`);
+      if (typeof v !== 'number' || !(v >= 0 && v <= 1)) {
+        reasons.push(`budget file ${budgetsPath}: failureRateBudgets[${JSON.stringify(key)}] ${JSON.stringify(v)} is not a rate in [0, 1] (zero allows a strict no-failure budget)`);
       }
     }
   }
@@ -873,6 +961,41 @@ function main() {
       ? qualification.pending_release_tiers.filter((t) => typeof t === 'string' && tierNames.includes(t))
       : [];
   const releaseTierSet = new Set(releaseTiers);
+  // The independent ladder: a physical qualification (or any --release
+  // run) must partition the product's required physical tiers exactly.
+  // pending_release_tiers must be present even when empty, so deleting
+  // the pending list cannot silently drop the mobile release blockers
+  // and the evidence file never defines the set of evidence that must
+  // exist.
+  const requiredPhysicalTiers = readRequiredPhysicalTiers(reasons);
+  if (requiredPhysicalTiers !== null && (releaseMode || physicalClaim)) {
+    for (const tier of requiredPhysicalTiers) {
+      if (!tierNames.includes(tier)) {
+        reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required tier ${tier} is not a harness tier`);
+      }
+    }
+    const declaredRelease = new Set(
+      qualification && Array.isArray(qualification.release_tiers) ? qualification.release_tiers : [],
+    );
+    const declaredPending = new Set(
+      qualification && Array.isArray(qualification.pending_release_tiers)
+        ? qualification.pending_release_tiers
+        : [],
+    );
+    if (!qualification || qualification.pending_release_tiers === undefined) {
+      reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers is missing — the independent ladder (protocol/client-release-tiers.json) requires the field present even when empty, so a pending release blocker can never be deleted away`);
+    }
+    for (const tier of requiredPhysicalTiers) {
+      if (!declaredRelease.has(tier) && !declaredPending.has(tier)) {
+        reasons.push(`budget file ${budgetsPath}: required physical tier ${tier} (protocol/client-release-tiers.json) is declared neither release_tiers nor pending_release_tiers`);
+      }
+    }
+    for (const tier of new Set([...declaredRelease, ...declaredPending])) {
+      if (!requiredPhysicalTiers.includes(tier)) {
+        reasons.push(`budget file ${budgetsPath}: tier ${tier} is not a required physical tier in protocol/client-release-tiers.json (the ladder manifest owns the tier set)`);
+      }
+    }
+  }
   const certTiers = releaseMode || physicalClaim ? [...new Set([...budgetTiers, ...releaseTiers])] : [...budgetTiers];
   if (releaseMode || physicalClaim) {
     for (const t of releaseTiers) {

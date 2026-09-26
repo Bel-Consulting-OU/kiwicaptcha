@@ -1065,6 +1065,12 @@ jobs:
         run: vendor/bin/phpunit
 
   risk-parity:
+    # Protocol parity, not score parity: the shared fixture hash covers the
+    # contract scores, the HKDF identity keys, canonical IP encoding and
+    # IPv4-mapped normalization, subnet masking, the ephemeral pseudonyms
+    # (session included, from the decoded cookie bytes) and the deployment
+    # namespace derivation, so a representation split between the two
+    # implementations fails here.
     name: Risk parity (Rust == PHP)
     runs-on: ubuntu-latest
     steps:
@@ -1083,13 +1089,13 @@ jobs:
         uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
         with:
           working-directory: packages/kiwicaptcha-risk-php
-      - name: PHP fixture hash
+      - name: PHP protocol parity hash
         working-directory: packages/kiwicaptcha-risk-php
         run: php tools/fixture_hash.php
-      - name: Rust fixture hash
+      - name: Rust protocol parity hash
         working-directory: packages/kiwicaptcha-risk
         run: cargo run --example fixture_hash
-      - name: assert identical hashes
+      - name: assert identical protocol parity hashes
         working-directory: packages/kiwicaptcha-risk
         run: |
           PHP_HASH=$(cd ../kiwicaptcha-risk-php && php tools/fixture_hash.php)
@@ -1252,9 +1258,10 @@ jobs:
           grep -q 'packages/kiwicaptcha' README.md || { echo "README lost the package references" >&2; exit 1; }
           grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
           grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml || { echo "Cargo package name wrong" >&2; exit 1; }
-          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css; do
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
             test -f "packages/kiwicaptcha-wasm/assets/$asset" || { echo "missing release asset $asset" >&2; exit 1; }
-          done
+          done < packages/kiwicaptcha-wasm/release-assets.txt
           test -f tests/browser/compat-capabilities.json || { echo "missing capability matrix" >&2; exit 1; }
           # The packages/ hierarchy is the only source root — top-level
           # mirrors must never reappear (they diverged in
@@ -1419,6 +1426,12 @@ jobs:
         run: bash tools/ci/release-governance-fixture.sh
       - name: version prose lint (stale execution-version/bypass claims)
         run: bash tools/ci/version-prose-lint.sh
+      - name: latency comparator unit fixtures (known answers)
+        # The paired base/head comparator is a performance oracle: its
+        # extracted AWK carries deterministic fixtures (nearest-rank p90,
+        # confident regression, ambiguous/non-blocking, noisy window,
+        # missing measurements) so the gate itself stays tested.
+        run: bash tools/ci/latency-compare-test.sh
 
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
@@ -1632,7 +1645,11 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-a
-          ls assets/ && cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css /tmp/repro-a/
+          ls assets/
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            cp "assets/$asset" /tmp/repro-a/
+          done < release-assets.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-a
@@ -1665,7 +1682,10 @@ jobs:
         run: |
           bash build.sh
           mkdir -p /tmp/repro-b
-          cp assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/widget-driver.js assets/widget-risk.js assets/widget-telemetry.js assets/widget-locales.js assets/widget-compat.js assets/widget.css /tmp/repro-b/
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            cp "assets/$asset" /tmp/repro-b/
+          done < release-assets.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
         with:
           name: repro-b
@@ -1690,10 +1710,11 @@ jobs:
       - name: byte-compare the independent artifacts
         run: |
           set -euo pipefail
-          for asset in kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css; do
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
             cmp "/tmp/repro-a/$asset" "/tmp/repro-b/$asset" || { echo "independent builds differ on $asset" >&2; exit 1; }
             shasum -a 256 "/tmp/repro-a/$asset"
-          done
+          done < packages/kiwicaptcha-wasm/release-assets.txt
           echo "two INDEPENDENT runners produced byte-identical assets"
 
   symfony-assets:
@@ -1718,11 +1739,12 @@ jobs:
         # the canonical wasm assets.
         run: |
           set -euo pipefail
-          for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css kiwicaptcha-wasm.js execution-interpreter.js; do
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/resources/$f" \
               || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh"; exit 1; }
-          done
+          done < packages/kiwicaptcha-wasm/release-assets.txt
           echo "core crate resources byte-identical to the canonical assets"
       - name: bundle copies must be byte-identical to the canonical assets
         # The bundle's public copies must be byte-identical to the
@@ -1731,11 +1753,12 @@ jobs:
         # cmp on every push.
         run: |
           set -euo pipefail
-          for f in widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js kiwicaptcha-wasm.js widget.css execution-interpreter.js; do
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
             cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
               "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
               || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh"; exit 1; }
-          done
+          done < packages/kiwicaptcha-wasm/release-assets.txt
           echo "Symfony widget assets byte-identical to the canonical build"
       - name: worker source is generated into the glue and the worker asset (no manual drift)
         # The worker solver source (the tail of assets/kiwi-worker.js) is

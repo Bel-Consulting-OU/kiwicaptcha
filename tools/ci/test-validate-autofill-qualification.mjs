@@ -224,6 +224,45 @@ expect('mismatched product display name', withRow(goodMatrix(), 0, { product: 'C
   expect('registry bad platform class', goodMatrix(), { contains: ['is not one of'] }, ['--registry', registryPath]);
 }
 
+// ── Structural ids, offsets and universal pass semantics. ───────────
+
+expect('trailing-hyphen surface id', withRow(goodMatrix(), 0, { surface: 'chrome-builtin-autofill-' }), { contains: ['must be a kebab-case id'] });
+expect('double-hyphen surface id', withRow(goodMatrix(), 0, { surface: 'chrome--builtin' }), { contains: ['must be a kebab-case id'] });
+expect('offset-less date-time', withRow(goodMatrix(), 0, { tested_at: '2026-01-02T03:04:05' }), { contains: ['not a strict ISO-8601 date'] });
+expect('offset-carrying date-time', withRow(goodMatrix(), 0, { tested_at: iso(-HOUR_MS).replace('Z', '+00:00') }), { code: 0 });
+expect('impossible calendar date (2025-02-29)', withRow(goodMatrix(), 0, { tested_at: '2025-02-29T00:00:00Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('impossible calendar date (2026-02-30)', withRow(goodMatrix(), 0, { tested_at: '2026-02-30T00:00:00Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('impossible calendar date (2026-09-31)', withRow(goodMatrix(), 0, { tested_at: '2026-09-31T00:00:00Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('hour 24', withRow(goodMatrix(), 0, { tested_at: '2026-09-26T24:00:00Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('minute 60', withRow(goodMatrix(), 0, { tested_at: '2026-09-26T10:60:00Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('second 60', withRow(goodMatrix(), 0, { tested_at: '2026-09-26T10:00:60Z' }), { contains: ['not a strict ISO-8601 date'] });
+expect('one minute of future clock skew is tolerated', withRow(goodMatrix(), 0, { tested_at: iso(60 * 1000) }), { code: 0 });
+expect('ten minutes of future time is rejected', withRow(goodMatrix(), 0, { tested_at: iso(10 * 60 * 1000) }), { contains: ['materially in the future'] });
+
+if (ADVISORY.length > 0) {
+  {
+    const matrix = goodMatrix();
+    matrix.rows.push(goodRow(ADVISORY[0], { version: 'TBD' }));
+    expect('advisory pass with placeholder version', matrix, { contains: ['placeholder version'] });
+  }
+  {
+    const matrix = goodMatrix();
+    matrix.rows.push(goodRow(ADVISORY[0], { tested_at: null }));
+    expect('advisory pass without a tested_at date', matrix, { contains: ['without a tested_at date'] });
+  }
+}
+
+{
+  cases++;
+  const { code, output } = runValidator(writeFixture('badWindowDays', goodMatrix()), ['--window-days', '90junk']);
+  if (code !== 1 || !output.includes('window-days needs a positive integer')) {
+    failures++;
+    process.stderr.write(`FAIL window-days junk rejected: exit ${code}\n${output}\n`);
+  } else {
+    process.stdout.write('ok window-days junk rejected\n');
+  }
+}
+
 // ── Window tuning and the committed fail-closed matrix. ─────────────
 
 expect('window-days override accepts an older pass', withRow(goodMatrix(), 0, { tested_at: iso(-100 * DAY_MS) }), { code: 0 }, ['--window-days', '200']);

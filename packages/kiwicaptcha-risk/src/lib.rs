@@ -93,6 +93,11 @@ pub enum RiskError {
     /// requires).
     #[error("confirmed outcomes must be recorded via confirmed_legitimate/confirmed_abuse (record_feedback takes non-confirmation events only)")]
     ConfirmationApiRequired,
+    /// An engine timing parameter is invalid: every epoch window and TTL
+    /// must be at least one second. A zero epoch divides by zero in the
+    /// observation pipeline.
+    #[error("{0} must be >= 1 (got {1})")]
+    InvalidTiming(&'static str, u64),
 }
 
 /// The risk model generation implemented by this package.
@@ -394,6 +399,69 @@ impl ProcessEmergencyCap {
 /// `impl SessionTlsTagStore for MyStore {}`) to opt in — the default
 /// methods then provide the neutral v2 behavior. The built-in Redis store
 /// implements the real record surfaces.
+/// The engine timing configuration: epoch windows and TTLs, validated
+/// once at construction so no delayed division-by-zero or
+/// immediately-expired/persistent state can be configured. The contract
+/// defaults are 900 s epochs, 1800 s session TTL, 86400 s principal TTL
+/// and 60 s dedupe TTL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiskTimingConfig {
+    pub source_epoch_secs: u64,
+    pub subnet_epoch_secs: u64,
+    pub session_ttl_secs: u64,
+    pub principal_ttl_secs: u64,
+    pub dedupe_ttl_secs: u64,
+}
+
+impl Default for RiskTimingConfig {
+    fn default() -> Self {
+        RiskTimingConfig {
+            source_epoch_secs: 900,
+            subnet_epoch_secs: 900,
+            session_ttl_secs: 1800,
+            principal_ttl_secs: 86400,
+            dedupe_ttl_secs: 60,
+        }
+    }
+}
+
+impl RiskTimingConfig {
+    /// Builds a validated timing configuration. Every parameter must be
+    /// at least 1: a zero epoch divides by zero in the observation
+    /// pipeline and a zero TTL expires or persists risk state
+    /// immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidTiming`] names the first parameter below one.
+    pub fn new(
+        source_epoch_secs: u64,
+        subnet_epoch_secs: u64,
+        session_ttl_secs: u64,
+        principal_ttl_secs: u64,
+        dedupe_ttl_secs: u64,
+    ) -> Result<RiskTimingConfig, RiskError> {
+        for (name, value) in [
+            ("source_epoch_secs", source_epoch_secs),
+            ("subnet_epoch_secs", subnet_epoch_secs),
+            ("session_ttl_secs", session_ttl_secs),
+            ("principal_ttl_secs", principal_ttl_secs),
+            ("dedupe_ttl_secs", dedupe_ttl_secs),
+        ] {
+            if value < 1 {
+                return Err(RiskError::InvalidTiming(name, value));
+            }
+        }
+        Ok(RiskTimingConfig {
+            source_epoch_secs,
+            subnet_epoch_secs,
+            session_ttl_secs,
+            principal_ttl_secs,
+            dedupe_ttl_secs,
+        })
+    }
+}
+
 pub struct RiskEngine<
     S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore,
     N: NetworkClassifier,
@@ -406,11 +474,9 @@ pub struct RiskEngine<
     keys: RiskKeys,
     identity: RiskIdentityFactory,
     breaker: breaker::CircuitBreaker,
-    pub source_epoch_secs: u64,
-    pub subnet_epoch_secs: u64,
-    pub session_ttl_secs: u64,
-    pub principal_ttl_secs: u64,
-    pub dedupe_ttl_secs: u64,
+    /// Validated timing configuration: private, so a caller cannot set a
+    /// zero epoch after construction (use [`RiskEngine::with_timing`]).
+    timing: RiskTimingConfig,
     pub saturations: Saturations,
     limiter: ProcessEmergencyCap,
     calibration: Option<Arc<dyn CalibrationStore>>,
@@ -441,11 +507,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             identity: RiskIdentityFactory::new(keys.clone()),
             keys,
             breaker: breaker::CircuitBreaker::default(),
-            source_epoch_secs: 900,
-            subnet_epoch_secs: 900,
-            session_ttl_secs: 1800,
-            principal_ttl_secs: 86400,
-            dedupe_ttl_secs: 60,
+            timing: RiskTimingConfig::default(),
             saturations: Saturations::default(),
             limiter: ProcessEmergencyCap::default(),
             calibration: None,
@@ -480,6 +542,27 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S, N> {
         self.enable_global_pressure = enable;
         self
+    }
+
+    /// Applies a validated timing configuration and keeps the identity
+    /// factory's epoch windows in sync with it, so the engine and the
+    /// pseudonym epoch boundaries can never disagree. Build the argument
+    /// with [`RiskTimingConfig::new`], which rejects zero windows and
+    /// TTLs.
+    pub fn with_timing(mut self, timing: RiskTimingConfig) -> Self {
+        self.identity = RiskIdentityFactory::with_epochs(
+            self.keys.clone(),
+            timing.source_epoch_secs as i64,
+            timing.subnet_epoch_secs as i64,
+        )
+        .expect("RiskTimingConfig validated both epoch windows");
+        self.timing = timing;
+        self
+    }
+
+    /// The validated timing configuration (a copy).
+    pub fn timing(&self) -> RiskTimingConfig {
+        self.timing
     }
 
     /// Attaches an outcome-feedback calibration store: every decision
@@ -1236,8 +1319,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
     ) -> Result<RiskObservation, RiskError> {
         let now_secs = (now_ms / 1000) as i64;
-        let src_epoch = now_secs / self.source_epoch_secs as i64;
-        let net_epoch = now_secs / self.subnet_epoch_secs as i64;
+        let src_epoch = now_secs / self.timing.source_epoch_secs as i64;
+        let net_epoch = now_secs / self.timing.subnet_epoch_secs as i64;
         let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
         let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
         // Canonical idempotency normalization shared with PHP: verbatim keys
@@ -1454,6 +1537,33 @@ mod tests {
 
     fn keys() -> RiskKeys {
         RiskKeys::from_master(&[0x42; 32])
+    }
+
+    #[test]
+    fn timing_config_validates_windows_and_ttls() {
+        assert!(matches!(
+            RiskTimingConfig::new(0, 900, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("source_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 0, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("subnet_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 0, 86400, 60),
+            Err(RiskError::InvalidTiming("session_ttl_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 0, 60),
+            Err(RiskError::InvalidTiming("principal_ttl_secs", 0))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 86400, 0),
+            Err(RiskError::InvalidTiming("dedupe_ttl_secs", 0))
+        ));
+        let ok = RiskTimingConfig::new(60, 120, 1800, 86400, 60).unwrap();
+        assert_eq!(ok.source_epoch_secs, 60);
+        assert_eq!(ok.subnet_epoch_secs, 120);
     }
 
     fn classifier() -> CidrNetworkClassifier {
@@ -1899,7 +2009,8 @@ mod tests {
     #[test]
     fn v2_session_client_context_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"session-bytes";
+        // A 16-byte session material: the decoded-cookie contract length.
+        let session: &[u8] = &[0x31u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -1956,7 +2067,7 @@ mod tests {
         let no_tag = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"session-bytes"),
+                    session_id: Some(&[0x51u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, None),
@@ -1973,7 +2084,7 @@ mod tests {
     #[test]
     fn v2_tls_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"tls-session-bytes";
+        let session: &[u8] = &[0x32u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -2023,7 +2134,7 @@ mod tests {
     #[test]
     fn v2_absent_or_overbound_tls_tag_is_neutral() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = b"tls-absent-session";
+        let session: &[u8] = &[0x33u8; 16];
 
         let first = engine
             .assess_pre_issue_v2(
@@ -2061,7 +2172,7 @@ mod tests {
         let first_overbound = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"tls-overbound-session"),
+                    session_id: Some(&[0x52u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, Some(overbound.as_str())),
@@ -2076,7 +2187,7 @@ mod tests {
         let changed_overbound = engine
             .assess_pre_issue_v2(
                 RiskContext {
-                    session_id: Some(b"tls-overbound-session"),
+                    session_id: Some(&[0x52u8; 16]),
                     ..context()
                 },
                 &v2_context(false, None, Some("z".repeat(65).as_str())),
@@ -2262,7 +2373,7 @@ mod tests {
             register_calls.clone(),
         );
         let engine = RiskEngine::new(store, classifier(), policy(), keys());
-        let session: [u8; 22] = *b"established-session-id";
+        let session: [u8; 16] = [0x34u8; 16];
 
         // Prime: the first assessment records the session tag records and
         // registers its own decision atomically.
@@ -2915,7 +3026,7 @@ mod tests {
         let sess_ctx = RiskContext::new(
             1,
             "203.0.113.27".parse().unwrap(),
-            Some(b"sess"),
+            Some(&[0x35u8; 16]),
             Some(b"principal-1"),
             RiskEventKind::ConfirmedAbuse,
             NetworkFlags::default(),
@@ -2942,7 +3053,7 @@ mod tests {
                 &keys().session,
                 b"sess",
                 0,
-                b"sess"
+                &[0x35u8; 16]
             ))
         );
         assert_eq!(

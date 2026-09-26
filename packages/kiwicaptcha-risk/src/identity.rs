@@ -14,6 +14,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::keys::RiskKeys;
+use crate::RiskError;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -129,15 +130,32 @@ impl RiskIdentityFactory {
 
     /// Builds a factory with explicit epoch windows (tests and alternate
     /// deployments); the network masks stay at the contract defaults.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidTiming`] when either window is below one
+    /// second: a zero window divides by zero in `source_id`/`subnet_id`.
     pub fn with_epochs(
         keys: RiskKeys,
         source_epoch_secs: i64,
         subnet_epoch_secs: i64,
-    ) -> RiskIdentityFactory {
+    ) -> Result<RiskIdentityFactory, RiskError> {
+        if source_epoch_secs < 1 {
+            return Err(RiskError::InvalidTiming(
+                "source_epoch_secs",
+                source_epoch_secs.max(0) as u64,
+            ));
+        }
+        if subnet_epoch_secs < 1 {
+            return Err(RiskError::InvalidTiming(
+                "subnet_epoch_secs",
+                subnet_epoch_secs.max(0) as u64,
+            ));
+        }
         let mut factory = RiskIdentityFactory::new(keys);
         factory.source_epoch_secs = source_epoch_secs;
         factory.subnet_epoch_secs = subnet_epoch_secs;
-        factory
+        Ok(factory)
     }
 
     /// Source pseudonym (hex) for the current epoch at `now_secs`.
@@ -173,7 +191,16 @@ impl RiskIdentityFactory {
     }
 
     /// Session pseudonym (context `b"sess"`, no epoch): 16 raw bytes.
+    ///
+    /// The material is the decoded 16-byte session cookie value: the
+    /// browser carries the cookie as 32 lowercase hex chars and the caller
+    /// decodes them before this call, matching the PHP derivation.
     pub fn session_id(&self, raw: &[u8]) -> [u8; 16] {
+        assert_eq!(
+            raw.len(),
+            16,
+            "session material must be the 16 decoded session-cookie bytes"
+        );
         pseudonym(&self.keys.session, b"sess", 0, raw)
     }
 
@@ -332,9 +359,10 @@ mod tests {
         assert_eq!(factory.subnet_id(ip, 7 * 900 + 42), net_cur);
 
         // Session/principal are epoch-free raw pseudonyms.
+        let session_raw = [0x5au8; 16];
         assert_eq!(
-            factory.session_id(b"raw"),
-            pseudonym(&keys.session, b"sess", 0, b"raw")
+            factory.session_id(&session_raw),
+            pseudonym(&keys.session, b"sess", 0, &session_raw)
         );
         assert_eq!(
             factory.principal_id(b"raw"),
@@ -343,9 +371,22 @@ mod tests {
     }
 
     #[test]
+    fn with_epochs_rejects_zero_windows() {
+        let keys = RiskKeys::from_master(&[0x42; 32]);
+        assert!(matches!(
+            RiskIdentityFactory::with_epochs(keys.clone(), 0, 900),
+            Err(RiskError::InvalidTiming("source_epoch_secs", 0))
+        ));
+        assert!(matches!(
+            RiskIdentityFactory::with_epochs(keys, 900, 0),
+            Err(RiskError::InvalidTiming("subnet_epoch_secs", 0))
+        ));
+    }
+
+    #[test]
     fn factory_with_epochs_changes_windows() {
         let keys = RiskKeys::from_master(&[0x42; 32]);
-        let factory = RiskIdentityFactory::with_epochs(keys, 60, 120);
+        let factory = RiskIdentityFactory::with_epochs(keys, 60, 120).unwrap();
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         // now_secs 125: source epoch 125/60 = 2, subnet epoch 125/120 = 1.
         assert_eq!(
@@ -356,5 +397,58 @@ mod tests {
             factory.subnet_id(ip, 125),
             factory.subnet_id_for_epoch(ip, 1)
         );
+    }
+
+    #[test]
+    fn golden_identity_vectors_match_the_shared_fixture() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/risk-v1/fixtures.json"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let vectors = &doc["identity_vectors"];
+        let master = vectors["master_key"].as_str().unwrap().as_bytes();
+        let factory = RiskIdentityFactory::new(RiskKeys::from_master(master));
+
+        // The session vector pins the representation contract: the HMAC
+        // binds the decoded 16 bytes, never the ASCII hex representation.
+        let cookie_hex = vectors["session"]["cookie_hex"].as_str().unwrap();
+        let raw = hex::decode(cookie_hex).unwrap();
+        assert_eq!(
+            vectors["session"]["cookie_raw_hex"].as_str().unwrap(),
+            cookie_hex,
+            "the fixture states both representations of the same 16 bytes"
+        );
+        assert_eq!(
+            hex::encode(factory.session_id(&raw)),
+            vectors["session"]["expected_session_id"].as_str().unwrap()
+        );
+
+        let principal = vectors["principal"]["material_utf8"].as_str().unwrap();
+        assert_eq!(
+            hex::encode(factory.principal_id(principal.as_bytes())),
+            vectors["principal"]["expected_id"].as_str().unwrap()
+        );
+
+        let ip: IpAddr = vectors["source"]["ip"].as_str().unwrap().parse().unwrap();
+        let epoch = vectors["source"]["epoch"].as_i64().unwrap();
+        assert_eq!(
+            factory.source_id_for_epoch(ip, epoch),
+            vectors["source"]["expected_id"].as_str().unwrap()
+        );
+        let net_ip: IpAddr = vectors["subnet"]["ip"].as_str().unwrap().parse().unwrap();
+        let net_epoch = vectors["subnet"]["epoch"].as_i64().unwrap();
+        assert_eq!(
+            factory.subnet_id_for_epoch(net_ip, net_epoch),
+            vectors["subnet"]["expected_id"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "16 decoded session-cookie bytes")]
+    fn session_material_length_is_enforced() {
+        let factory = RiskIdentityFactory::new(RiskKeys::from_master(&[0x42; 32]));
+        let _ = factory.session_id(b"raw");
     }
 }

@@ -29,6 +29,13 @@ name: Latency regression (self-hosted base/head)
 #     all three); the comparator reports each side's per-percentile
 #     distribution and the paired per-repeat deltas (median and p90),
 #     the paired per-repeat deltas rather than only a median sign.
+#   * The comparator is a tested oracle: tools/ci/latency-compare.sh and
+#     .awk carry deterministic fixtures (tools/ci/latency-compare-test.sh),
+#     one indexing convention, a nearest-rank p90, and a strict sample
+#     completeness check (every requested mode yields exactly the
+#     configured repeat count on both sides). Only confident
+#     regressions block; over-threshold signals without paired agreement
+#     are recorded as ambiguous for review.
 #   * The host state (machine identity, CPU governor, load, PHP and
 #     Redis versions) is recorded to the evidence directory and the
 #     whole evidence bundle is uploaded as an artifact.
@@ -215,6 +222,14 @@ jobs:
             done
           done
       - name: compare base vs head (paired distributions, balanced order)
+        # The comparator lives in tools/ci/latency-compare.sh (with
+        # tools/ci/latency-compare.awk) and is itself tested by
+        # tools/ci/latency-compare-test.sh against deterministic
+        # fixtures: every requested mode must produce exactly the
+        # configured repeats on both sides, a confident regression fails
+        # the step, and an over-threshold signal without
+        # paired-distribution agreement is recorded as ambiguous and
+        # does not block (only confident regressions block).
         run: |
           set -euo pipefail
           repeats="${LATENCY_REGRESSION_REPEATS:-6}"
@@ -222,143 +237,16 @@ jobs:
           rel_max="${LATENCY_REGRESSION_MAX_REL_PCT:-20}"
           abs_max="${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}"
           spread_max="${LATENCY_REGRESSION_MAX_SPREAD:-10}"
-          failed=0
-          ambiguous=0
-          for mode in $modes; do
-            : >"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
-            for ((repeat = 1; repeat <= repeats; repeat++)); do
-              for side in base head; do
-                log="$RUNNER_TEMP/kiwi-latency/$side/$mode-$repeat.log"
-                if [ ! -s "$log" ]; then
-                  echo "missing benchmark log for $side/$mode repeat $repeat" >&2
-                  exit 1
-                fi
-                if grep -q 'no Redis answers' "$log"; then
-                  echo "$mode: Redis unavailable — $side repeat $repeat skipped (loud note only)"
-                  continue
-                fi
-                # One perf-bench line per mode: issuance p50 p95 p90
-                # then verification p50 p95 p90 on the same line (the
-                # phase summaries are separated by their sample-count
-                # segments, so each phase is extracted on its own).
-                issue="$(sed -n 's/.*issuance p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms p90 \([0-9.]*\) ms.*/\1 \2 \3/p' "$log")"
-                verify="$(sed -n 's/.*verification p50 \([0-9.]*\) ms p95 \([0-9.]*\) ms p90 \([0-9.]*\) ms.*/\1 \2 \3/p' "$log")"
-                if [ -z "$issue" ] || [ -z "$verify" ]; then
-                  echo "no perf-bench measurement line in $log (hard error or missing workload):" >&2
-                  cat "$log" >&2
-                  exit 1
-                fi
-                read -r i50 i95 i90 <<<"$issue"
-                read -r v50 v95 v90 <<<"$verify"
-                # columns: 1=mode 2=side 3=repeat 4=i50 5=i90 6=i95 7=v50 8=v90 9=v95
-                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$mode" "$side" "$repeat" "$i50" "$i90" "$i95" "$v50" "$v90" "$v95" >>"$RUNNER_TEMP/kiwi-latency/$mode.tsv"
-              done
-            done
-            echo "=== mode $mode ==="
-            for metric in 1 2 3 4 5 6; do
-              case "$metric" in
-                1) name="issue p50"; col=4; p50c=4; p95c=6 ;;
-                2) name="issue p90"; col=5; p50c=4; p95c=6 ;;
-                3) name="issue p95"; col=6; p50c=4; p95c=6 ;;
-                4) name="verify p50"; col=7; p50c=7; p95c=9 ;;
-                5) name="verify p90"; col=8; p50c=7; p95c=9 ;;
-                6) name="verify p95"; col=9; p50c=7; p95c=9 ;;
-              esac
-              tsv="$RUNNER_TEMP/kiwi-latency/$mode.tsv"
-              # Per-side per-percentile distribution: the median across
-              # the repeats of that side's per-run percentile.
-              b_med="$(awk -F '\t' -v c="$col" '$2 == "base" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
-              h_med="$(awk -F '\t' -v c="$col" '$2 == "head" { print $c }' "$tsv" | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else print (a[NR / 2] + a[NR / 2 + 1]) / 2 }')"
-              if [ -z "$b_med" ] || [ -z "$h_med" ]; then
-                echo "$mode $name: no paired samples — skipped"
-                continue
-              fi
-              # Paired per-repeat deltas (head - base), with the base
-              # value of the same repeat: the balanced balanced alternating order makes
-              # repeat i the same thermal/host window for both sides.
-              pair_stats="$(awk -F '\t' -v c="$col" -v rm="$rel_max" -v am="$abs_max" '
-                $2 == "base" { bb[$3] = $c }
-                $2 == "head" { hh[$3] = $c }
-                # Insertion sort: mawk (the ubuntu default awk) has no
-                # asort, and the comparator must run on the plain runner.
-                function sort_num(a, n,   i, j, key) {
-                  for (i = 2; i <= n; i++) {
-                    key = a[i]
-                    for (j = i - 1; j >= 1 && a[j] > key; j--) a[j + 1] = a[j]
-                    a[j + 1] = key
-                  }
-                }
-                END {
-                  n = 0
-                  for (r in hh) if (r in bb) {
-                    d = hh[r] - bb[r]
-                    deltas[n] = d
-                    if (bb[r] > 0) rels[n] = d / bb[r] * 100
-                    n++
-                  }
-                  if (n < 2) { print "n<2 0 0 0 0"; exit }
-                  # median of the paired deltas and of the relative deltas
-                  sort_num(deltas, n)
-                  sort_num(rels, n)
-                  med = (n % 2) ? deltas[(n + 1) / 2] : (deltas[n / 2] + deltas[n / 2 + 1]) / 2
-                  relmed = (n % 2) ? rels[(n + 1) / 2] : (rels[n / 2] + rels[n / 2 + 1]) / 2
-                  # p90 of the paired deltas: the broad distribution
-                  # shift, so one slow pair cannot trip the gate and a
-                  # wide shift cannot hide in the median alone.
-                  idx = int(0.9 * n); if (idx < 1) idx = 1; if (idx > n) idx = n
-                  p90 = deltas[idx]
-                  # paired-sign agreement: count pairs contradicting the
-                  # median delta sign
-                  contra = 0
-                  for (i = 0; i < n; i++) if (deltas[i] != 0 && med != 0 && ((deltas[i] > 0) != (med > 0))) contra++
-                  printf "%d %.4f %.1f %.4f %d\n", n, med, relmed, p90, contra
-                }' "$tsv")"
-              read -r pairs p_med p_relmed p_p90 p_contra <<<"$pair_stats"
-              # Within-run spread bound: any base/head run whose p95/p50
-              # ratio for this phase exceeds the bound marks the window
-              # noisy — a noisy window cannot produce a trustworthy
-              # comparison.
-              noisy="$(awk -F '\t' -v p="$p50c" -v q="$p95c" -v smax="$spread_max" '
-                ($2 == "base" || $2 == "head") && $p > 0 && $q / $p > smax { bad = 1; print "noisy"; exit }
-                END { if (!bad) print "quiet" }' "$tsv")"
-              [ -z "$noisy" ] && noisy="quiet"
-              absd="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { printf "%.4f", h - b }')"
-              rel="$(awk -v b="$b_med" -v h="$h_med" 'BEGIN { if (b > 0) printf "%.1f", (h - b) / b * 100; else print "inf" }')"
-              agreement="$([ "$p_contra" = "0" ] && echo agree || echo "disagree:$p_contra")"
-              echo "$mode $name: base median ${b_med} ms, head median ${h_med} ms, delta ${absd} ms (${rel}%); paired n=${pairs} median delta ${p_med} ms / ${p_relmed}%, paired p90 delta ${p_p90} ms, agreement ${agreement}, window ${noisy}"
-              # The gate: the side medians AND the paired median must
-              # exceed both thresholds, the paired p90 delta must also
-              # exceed the practical bound (a distribution-wide shift,
-              # not one slow pair), and no pair may contradict the sign.
-              over="$(awk -v r="$rel" -v rm="$rel_max" -v a="$absd" -v am="$abs_max" -v pr="$p_relmed" -v pm="$p_med" -v pp90="$p_p90" '
-                BEGIN {
-                  median_over = (r >= rm && a >= am) ? 1 : 0
-                  paired_over = (pr >= rm && pm >= am) ? 1 : 0
-                  # the broad distribution shift: the 90th percentile of
-                  # the paired deltas also clears the absolute bound
-                  broad = (pp90 >= am) ? 1 : 0
-                  print (median_over && paired_over && broad) ? 1 : 0
-                }')"
-              if [ "$over" = "1" ]; then
-                if [ "$agreement" = "agree" ] && [ "$noisy" = "quiet" ]; then
-                  echo "REGRESSION: $mode $name head is slower by $absd ms ($rel%); paired median ${p_med} ms, paired p90 ${p_p90} ms — over the ${rel_max}% / ${abs_max} ms thresholds with paired-distribution agreement" >&2
-                  failed=1
-                else
-                  echo "SIGNAL BUT AMBIGUOUS: $mode $name delta $absd ms ($rel%) exceeds the thresholds but agreement=$agreement window=$noisy — re-run on the quiet runner before concluding" >&2
-                  ambiguous=1
-                fi
-              fi
-            done
-          done
-          if [ "$failed" -eq 1 ]; then
-            echo "latency-regression: FAILED — confident regression(s) above" >&2
-            exit 1
+          bash tools/ci/latency-compare.sh \
+            "$RUNNER_TEMP/kiwi-latency" "$repeats" "$modes" "$rel_max" "$abs_max" "$spread_max"
+          if [ -f "$RUNNER_TEMP/kiwi-latency/ambiguous" ]; then
+            {
+              echo "Latency regression: ambiguous"
+              echo ""
+              echo "An over-threshold signal without paired-distribution agreement was recorded."
+              echo "It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence."
+            } >>"$GITHUB_STEP_SUMMARY"
           fi
-          if [ "$ambiguous" -eq 1 ]; then
-            echo "latency-regression: AMBIGUOUS — signals over threshold without paired-distribution agreement; re-run on the quiet runner" >&2
-            exit 1
-          fi
-          echo "latency-regression: PASS — no phase exceeds the ${rel_max}% / ${abs_max} ms thresholds with paired-distribution agreement"
       - name: upload the latency evidence (logs + host state)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

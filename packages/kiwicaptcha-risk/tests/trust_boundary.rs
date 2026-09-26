@@ -99,6 +99,19 @@ fn random_value(state: &mut u64, prefix: &str) -> Option<Vec<u8>> {
     )
 }
 
+/// Session material is exactly the decoded 16-byte cookie value (the
+/// pseudonym contract enforces the length), or None.
+fn random_session(state: &mut u64) -> Option<[u8; 16]> {
+    if common::lcg_next(state).is_multiple_of(4) {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for byte in out.iter_mut() {
+        *byte = (common::lcg_next(state) % 256) as u8;
+    }
+    Some(out)
+}
+
 fn context<'a>(
     scope: u32,
     ip: IpAddr,
@@ -146,7 +159,7 @@ fn client_supplied_identity_fields_never_lower_the_score() {
     for i in 0..ITERATIONS {
         let scope = 1 + (common::lcg_next(&mut state) % 3) as u32;
         let ip = random_ip(&mut state);
-        let session = random_value(&mut state, "sess");
+        let session = random_session(&mut state);
         let principal = random_value(&mut state, "prin");
         let idem = random_value(&mut state, "idem");
 
@@ -175,7 +188,12 @@ fn client_supplied_identity_fields_never_lower_the_score() {
             .expect("baseline assessment");
         let varied = varied_engine
             .assess_pre_issue(
-                context(scope, ip, session.as_deref(), principal.as_deref()),
+                context(
+                    scope,
+                    ip,
+                    session.as_ref().map(|s| s.as_slice()),
+                    principal.as_deref(),
+                ),
                 idem.as_ref()
                     .map(|v| String::from_utf8(v.clone()).expect("utf8")),
             )

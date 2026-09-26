@@ -1,0 +1,11 @@
+{
+  "schema": "kiwicaptcha.client-release-tiers/1",
+  "generated": "2026-09-26",
+  "note": "The independent physical-tier support ladder for the client release claim, owned by the product rather than by any single evidence file. A qualification that claims physical status (or any --release run) must partition this exact set: qualification.release_tiers (certified with device evidence) and qualification.pending_release_tiers (declared for measurement, release-blocking until evidence lands) are disjoint, their union equals required_physical_tiers, and pending_release_tiers must be present even when empty. An evidence file therefore cannot shrink the ladder by deleting the pending list or by omitting a tier.",
+  "required_physical_tiers": [
+    "mainstream-desktop",
+    "current-iphone",
+    "mid-android",
+    "low-android"
+  ]
+}

@@ -1279,5 +1279,28 @@
       {"name": "hysteresis_zero", "knob": "hysteresis_ms", "value": 0},
       {"name": "saturation_zero", "knob": "saturation_0", "value": 0}
     ]
+  },
+  "identity_vectors": {
+    "note": "The canonical ephemeral-identity derivations shared by the PHP and Rust engines (README item 8). master_key is a 32-byte ASCII test master; both sides derive the per-context HKDF-SHA256 keys from it. The session vector pins the representation contract: cookie_hex is the browser representation (32 lowercase hex chars) and cookie_raw_hex is the decoded 16-byte material the HMAC must bind, so an implementation that HMACs the ASCII hex bytes derives a different expected_session_id and fails. expected_session_id is the first 16 bytes of HMAC-SHA256(session key, \"kiwi-risk-id-v1\\0sess\\0\" + epoch 0 big-endian + cookie_raw_hex bytes), hex-encoded.",
+    "master_key": "0123456789abcdef0123456789abcdef",
+    "session": {
+      "cookie_hex": "5ae1a4b8c0d1e2f30011223344556677",
+      "cookie_raw_hex": "5ae1a4b8c0d1e2f30011223344556677",
+      "expected_session_id": "43248f0c5a95b9f183940f7af43f5161"
+    },
+    "principal": {
+      "material_utf8": "principal-42",
+      "expected_id": "83df3fc18cbcb30a3dca26d12ee95b05"
+    },
+    "source": {
+      "ip": "203.0.113.27",
+      "epoch": 1700000000,
+      "expected_id": "06bb7418c1364ffac3fdbae6333d6bfa"
+    },
+    "subnet": {
+      "ip": "203.0.113.27",
+      "epoch": 1700000000,
+      "expected_id": "2e857abbd6138664831e7e8d6caef168"
+    }
   }
 }

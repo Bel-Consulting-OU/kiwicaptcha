@@ -33,8 +33,9 @@
  *             platform class for a known surface (and be one of
  *             desktop|windows|macos|ios|android in every case)
  *   status    pass | fail | blocked | manual_pending
- *   tested_at null for a non-pass row, or a strict ISO-8601 date for a
- *             pass row
+ *   tested_at null for a non-pass row, or a strict ISO-8601 date (or a
+ *             date-time that carries a UTC designator or numeric
+ *             offset) for a pass row
  *   product   optional display name; when present for a known id it
  *             must equal the registry's product
  *
@@ -52,11 +53,17 @@
  *      platform class;
  *   5. every REQUIRED surface (registry required=true) has exactly one
  *      row with status "pass";
- *   6. every required pass row records an exact, non-placeholder
- *      version;
- *   7. every required pass row records a strict ISO-8601 tested_at
- *      that is neither materially in the future nor older than the
- *      qualification window (90 days by default).
+ *   6. every pass row records an exact, non-placeholder version — the
+ *      meaning of "pass" is universal, so an advisory row cannot claim
+ *      a pass on placeholder evidence;
+ *   7. every pass row records a real, non-future tested_at: a strict
+ *      ISO-8601 date with calendar round-trip (Feb 30, hour 24 and
+ *      second 60 are rejected, never normalized), and any time-of-day
+ *      carries a UTC designator or numeric offset, never the runner's
+ *      local timezone;
+ *   8. every required pass row's tested_at is within the qualification
+ *      window (90 days by default) and no more than five minutes ahead
+ *      of the validator clock.
  *
  * Rows whose surface id is not in the registry, or whose registry
  * entry is advisory (required=false), are printed as notes but never
@@ -78,13 +85,14 @@ const REGISTRY_SCHEMA = 'kiwicaptcha.autofill-surfaces/1';
 const QUALIFICATION_WINDOW_DAYS = 90;
 /**
  * A qualification date more than this far ahead of now is rejected as
- * materially in the future: clock skew between the recording host and
- * the validator cannot exceed a day.
+ * materially in the future: the same narrow five-minute clock-skew
+ * allowance the performance evidence uses, so a skewed or forged
+ * record can never buy qualification time.
  */
-const FUTURE_SKEW_MS = 86400000;
+const FUTURE_SKEW_MS = 5 * 60 * 1000;
 const PLATFORM_CLASSES = ['desktop', 'windows', 'macos', 'ios', 'android'];
 const STATUSES = ['pass', 'fail', 'blocked', 'manual_pending'];
-const SURFACE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+const SURFACE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /**
  * Version placeholders that never record a qualification, matched
  * case-insensitively against the trimmed value of a pass row. The
@@ -92,11 +100,14 @@ const SURFACE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
  */
 const VERSION_PLACEHOLDER_PATTERN = /^(current|tbd|tba|unknown|blank|n\/?a|none|null|pending|unversioned|-+)?$/i;
 /**
- * A strict ISO-8601 calendar date or date-time, nothing else: Date.parse
- * alone accepts loose spellings (slashes, bare years) that cannot be
- * trusted as qualification evidence.
+ * A strict ISO-8601 calendar date, or a date-time that MUST carry a UTC
+ * designator or numeric offset: an offset-less date-time would be parsed
+ * in the validator runner's local timezone, never as qualification
+ * evidence. The written calendar components are round-tripped below, so
+ * an impossible date (2025-02-29, 2026-02-30, hour 24, minute 60,
+ * second 60) is rejected instead of being normalized by Date.parse.
  */
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2}))?$/;
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY = resolve(SCRIPT_DIR, '..', '..', 'tests', 'browser', 'qualification', 'surfaces.json');
@@ -119,7 +130,10 @@ function parseArgs(argv) {
     }
     if (arg === '--window-days') {
       const raw = argv[++i];
-      const parsed = Number.parseInt(raw ?? '', 10);
+      if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) {
+        throw new Error(`--window-days needs a positive integer, got ${JSON.stringify(raw)}`);
+      }
+      const parsed = Number.parseInt(raw, 10);
       if (!Number.isInteger(parsed) || parsed < 1) {
         throw new Error(`--window-days needs a positive integer, got ${JSON.stringify(raw)}`);
       }
@@ -194,8 +208,49 @@ function loadRegistry(path, reasons) {
   return byId;
 }
 
+/**
+ * The written calendar components of a strict ISO value, or null when
+ * the shape does not match. The round-trip in isIsoDate() compares these
+ * against the UTC construction, so Date.parse normalization (Feb 30 to
+ * Mar 2, hour 24 to the next day, second 60 to the next minute) can
+ * never turn an impossible timestamp into evidence.
+ */
+function parseCalendarComponents(value) {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?)?/,
+  );
+  if (!match) return null;
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: match[4] === undefined ? null : Number(match[4]),
+    minute: match[5] === undefined ? null : Number(match[5]),
+    second: match[6] === undefined ? null : Number(match[6]),
+    fraction: match[7] ?? '',
+  };
+}
+
 function isIsoDate(value) {
   if (typeof value !== 'string' || !ISO_DATE_PATTERN.test(value)) return false;
+  const c = parseCalendarComponents(value);
+  if (c === null) return false;
+  const hh = c.hour ?? 0;
+  const mm = c.minute ?? 0;
+  const ss = c.second ?? 0;
+  const ms = c.fraction === '' ? 0 : Math.floor(Number(`0.${c.fraction}`) * 1000);
+  const constructed = new Date(Date.UTC(c.year, c.month - 1, c.day, hh, mm, ss, ms));
+  if (
+    constructed.getUTCFullYear() !== c.year ||
+    constructed.getUTCMonth() + 1 !== c.month ||
+    constructed.getUTCDate() !== c.day ||
+    constructed.getUTCHours() !== hh ||
+    constructed.getUTCMinutes() !== mm ||
+    constructed.getUTCSeconds() !== ss ||
+    constructed.getUTCMilliseconds() !== ms
+  ) {
+    return false;
+  }
   return !Number.isNaN(Date.parse(value));
 }
 
@@ -291,11 +346,26 @@ function main() {
       reasons.push(`${where} status ${JSON.stringify(row.status)} is not one of ${STATUSES.join('|')}`);
       continue;
     }
-    if (row.tested_at !== null && row.tested_at !== undefined && !isIsoDate(row.tested_at)) {
-      reasons.push(`${where} tested_at ${JSON.stringify(row.tested_at)} is not a strict ISO-8601 date`);
-    }
     if (row.version !== null && typeof row.version !== 'string') {
       reasons.push(`${where} version ${JSON.stringify(row.version)} must be a string or null`);
+    }
+
+    // The meaning of "pass" is universal: whether a row must exist and
+    // pass depends on the registry's required flag, but ANY pass row —
+    // required or advisory — must carry a real exact version and a real,
+    // non-future timestamp. An advisory row cannot claim a pass on
+    // placeholder evidence.
+    if (row.status === 'pass') {
+      if (isVersionPlaceholder(row.version)) {
+        reasons.push(`${where} is marked pass with a placeholder version ${JSON.stringify(row.version ?? null)}; an exact tested version is required`);
+      }
+      if (typeof row.tested_at !== 'string' || row.tested_at.trim() === '') {
+        reasons.push(`${where} is marked pass without a tested_at date`);
+      } else if (!isIsoDate(row.tested_at)) {
+        reasons.push(`${where} tested_at ${JSON.stringify(row.tested_at)} is not a strict ISO-8601 date or offset-carrying date-time`);
+      } else if (Date.parse(row.tested_at) - now > FUTURE_SKEW_MS) {
+        reasons.push(`${where} tested_at ${row.tested_at} is materially in the future (more than five minutes ahead of the validator clock)`);
+      }
     }
   }
 
@@ -320,27 +390,13 @@ function main() {
       );
       continue;
     }
-    // A pass row must record an exact version and a fresh, real date.
-    if (surface.exact_version && isVersionPlaceholder(row.version)) {
-      reasons.push(
-        `required surface ${id} is marked pass with a placeholder version ${JSON.stringify(row.version ?? null)}; an exact tested version is required`,
-      );
-    }
-    if (typeof row.tested_at !== 'string' || row.tested_at.trim() === '') {
-      reasons.push(`required surface ${id} is marked pass without a tested_at date`);
-      continue;
-    }
-    if (!isIsoDate(row.tested_at)) {
-      reasons.push(`required surface ${id} tested_at ${JSON.stringify(row.tested_at)} is not a strict ISO-8601 date`);
+    // The universal pass-row evidence checks (exact version, real
+    // non-future timestamp) ran in the row loop; the required gate adds
+    // the qualification window.
+    if (typeof row.tested_at !== 'string' || row.tested_at.trim() === '' || !isIsoDate(row.tested_at)) {
       continue;
     }
     const testedMs = Date.parse(row.tested_at);
-    if (testedMs - now > FUTURE_SKEW_MS) {
-      reasons.push(
-        `required surface ${id} tested_at ${row.tested_at} is materially in the future (more than a day ahead of the validator clock)`,
-      );
-      continue;
-    }
     const ageMs = now - testedMs;
     if (ageMs > windowMs) {
       reasons.push(

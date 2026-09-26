@@ -105,8 +105,8 @@ final class MetricsRedactionTest extends TestCase
         };
 
         [, $gateway] = $this->stack($logger);
-        $decision = $gateway->preIssue('login', '198.51.100.7', 'session-cookie-value');
-        $gateway->challengeIssued('login', '198.51.100.7', 'session-cookie-value', $decision->decisionId);
+        $decision = $gateway->preIssue('login', '198.51.100.7', '5ae1a4b8c0d1e2f30011223344556677');
+        $gateway->challengeIssued('login', '198.51.100.7', '5ae1a4b8c0d1e2f30011223344556677', $decision->decisionId);
 
         self::assertNotEmpty($logger->contexts, 'the gateway must have logged decisions');
         foreach ($logger->contexts as $context) {
