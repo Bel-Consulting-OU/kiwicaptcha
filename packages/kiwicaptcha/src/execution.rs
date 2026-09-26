@@ -2175,7 +2175,7 @@ pub mod fixtures {
     /// traversal, fragments, clone and reparent, event ordering).
     /// Extending this solver to that grammar must fail until those
     /// semantics are implemented, so the future gate is real
-    /// semantics, never a shadow-model fix.
+    /// semantics, never a shadow model.
     pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
         assert!(
             (1..=255).contains(&observed_height),

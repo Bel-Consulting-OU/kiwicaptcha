@@ -446,9 +446,9 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
   });
 
-  test('audit-1 watchdog: a HELD risk-module asset ends in the controlled worker-unavailable state, never a SHA downgrade', async ({ page }) => {
+  test('watchdog: a HELD risk-module asset ends in the controlled worker-unavailable state, never a SHA downgrade', async ({ page }) => {
     // The lazy widget-risk.js module is required for the argon2id solve
-    // tier (audit finding 1 keeps the required loads fail-closed). A
+    // tier (the required loads stay fail-closed). A
     // hung risk asset must not stall the widget forever: the module
     // watchdog bounds the wait and the flow enters the controlled
     // kiwi:worker-unavailable state — one argon2id request, no
@@ -478,7 +478,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     }
   });
 
-  test('audit-1 required chunk absent: an execution-armed challenge whose risk module cannot load mints no token (execution-unavailable)', async ({ page }) => {
+  test('required chunk absent: an execution-armed challenge whose risk module cannot load mints no token (execution-unavailable)', async ({ page }) => {
     // The ExecutionChallengeV1 runner lives in the lazy widget-risk.js
     // module: a files-tier page whose risk asset 404s through the
     // bounded retries must fail closed at the execution step — the

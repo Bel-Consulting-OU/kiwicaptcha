@@ -11,7 +11,7 @@ use PHPUnit\Framework\TestCase;
 final class ProcessEmergencyCapTest extends TestCase
 {
     /**
-     * The pre-audit burst tests construct with warmupRampSecs: 0 (ramp
+     * The burst tests construct with warmupRampSecs: 0 (ramp
      * disabled) so they pin the FULL-cap window semantics; the ramp's own
      * behavior is covered by the testWarmup* cases below.
      */

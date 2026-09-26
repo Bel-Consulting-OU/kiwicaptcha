@@ -81,7 +81,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body.honeypot).toBeUndefined();
   });
 
-  test('audit-1 coarse context: the files-tier opt-in never fetches the risk module before issuance, and client_context still rides the request', async ({ page }) => {
+  test('coarse context: the files-tier opt-in never fetches the risk module before issuance, and client_context still rides the request', async ({ page }) => {
     // The coarse client-context descriptor moved into the eager core:
     // with data-kiwi-risk-context="coarse" the files-tier widget must
     // send the challenge request immediately — no data-kiwi-risk-src
@@ -89,7 +89,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     // the request body still carries the coarse descriptor. The module
     // is fetched exactly once after issuance: a glue-less files page
     // dispatches its SHA-256 solve to the worker at the solve phase
-    // (audit finding 1 keeps every required module load post-issuance).
+    // (every required module load stays post-issuance).
     const riskRequests = [];
     page.on('request', (req) => {
       if (req.url().includes('/assets/risk.')) riskRequests.push(req.url());

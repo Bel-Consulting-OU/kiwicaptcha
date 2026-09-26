@@ -1255,8 +1255,8 @@ final class ValidatorTest extends TestCase
     {
         // A chain-opening validation exercises the stage-2 lookup AND the
         // chain creation — both must thread the already-resolved canonical
-        // binding, never re-consult the authority (the pre-fix flow called
-        // it twice on this path).
+        // binding and never re-consult the authority, so the authority is
+        // consulted once on this path.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
         $risk = $this->riskStack(1, 'allow', 'allow', false, null, $resolver);
         $risk['store']->setVector(SignalVector::fromArray(self::ARGON32_VECTOR));
@@ -4396,7 +4396,7 @@ final class ValidatorTest extends TestCase
         self::assertSame($nonceS, $chainService->requirementFor($chainId)?->stage2Nonce, 'the exact stage-2 nonce is preserved');
 
         // A stale pass is S's persisted nonce disposition (injected
-        // directly — the record the pre-fix path could leave behind).
+        // directly — the stale record a pass-only path can leave behind).
         $this->injectDispositionRecord($store, $nonceS, $this->completeDispositionRecord());
 
         // The submission (and replay) of S answers the terminal Deny —

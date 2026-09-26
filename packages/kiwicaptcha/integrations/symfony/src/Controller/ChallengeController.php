@@ -526,7 +526,7 @@ final class ChallengeController
     }
 
     /**
-     * The protocol-v3 emission gate implements the audit's two-phase
+     * The protocol-v3 emission gate implements the two-phase
      * rollout invariant: the decoy (protocol v3) is armed only when the
      * operator's writer switch (risk.decoy_v3_enabled) is true. The
      * confirmed central security-policy floor

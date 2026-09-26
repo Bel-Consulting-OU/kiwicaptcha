@@ -693,7 +693,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
         }
     }
     let execution_present = record.execution_program.is_some();
-    // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
+    // The exact armed/unarmed equivalence contract: the
     // signed commitment is the exact mirror of the stored program.
     // A hand-rolled record that carries a program without the commitment
     // triplet, a commitment without the program, or a program whose hash

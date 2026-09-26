@@ -12,11 +12,11 @@ import { test, expect } from '@playwright/test';
 // flight keeps running to completion in the background and keeps calling
 // setProgress() for every chunk after the destroy. The race is a
 // race on CI where those queued progress writes landed on a destroyed —
-// but still in-DOM — widget. The fix: setProgress() no-ops when the
+// but still in-DOM — widget. The invariant: setProgress() no-ops when the
 // widget is destroyed, the same dataset flag destroy sets first, so a
 // stale solve can never paint progress into a dead widget.
 //
-// This spec pins that fix with a deterministic reproduction of the race,
+// This spec pins that invariant with a deterministic reproduction of the race,
 // not a broad lifecycle sweep. The deterministic core is an event-loop
 // ordering argument, not a timing bet:
 //
@@ -56,11 +56,10 @@ import { test, expect } from '@playwright/test';
 // hard-codes the asset bytes). Iterations are fully cleaned up per
 // cycle: observers disconnected, container removed from the DOM. The
 // cycle count is parameterized (60 by default; the env knob
-// KIWI_DESTROY_RACE_ITERATIONS overrides it) because the pre-fix failure
-// is statistical per iteration — one stale chunk write fails the whole
-// test, and with the fix in place zero writes ever occur, so the fixed
-// driver passes 60/60 iterations on every run while a reverted driver
-// fails the run with overwhelming probability (a mid-solve destroy has
+// KIWI_DESTROY_RACE_ITERATIONS overrides it) because one stale chunk
+// write fails the whole test, while the conforming driver performs zero
+// writes, so it passes 60/60 iterations on every run and a non-conforming
+// driver fails the run with overwhelming probability (a mid-solve destroy has
 // multiple queued chunks behind it, so a single iteration already
 // catches the regression in ~97% of cases and 60 independent iterations
 // make a clean miss practically impossible).
@@ -78,7 +77,7 @@ const MULTI_BATCH_SIZE = 5;
 const MULTI_MAX_ATTEMPTS = MULTI_ITERATIONS + 40;
 const MULTI_WIDGETS = 2;
 
-test.describe('Audit finding 6: destroy mid-solve — no progress write, no state mutation, no event, no error after destruction', () => {
+test.describe('destroy mid-solve: no progress write, no state mutation, no event, no error after destruction', () => {
   test('the destroyed widget stays exactly as destroy left it while the background solve finishes', async ({ page }) => {
     test.setTimeout(480_000);
 
@@ -362,7 +361,7 @@ test.describe('Audit finding 6: destroy mid-solve — no progress write, no stat
     // port is shared with other lanes on this machine, and a foreign
     // teardown can briefly take the server down mid-run; the driver's
     // designed bounded retry absorbs exactly that, the iteration still
-    // reaches a provable mid-solve destroy, and every audit-6 invariant
+    // reaches a provable mid-solve destroy, and every post-destroy invariant
     // above stays strict. Anything else — a driver console.error(), an
     // uncaught rejection, any other failed resource — fails the test.
     const refusedNoise = 'Failed to load resource: net::ERR_CONNECTION_REFUSED';

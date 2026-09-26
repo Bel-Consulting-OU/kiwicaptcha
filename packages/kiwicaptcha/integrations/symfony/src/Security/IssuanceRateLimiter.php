@@ -20,7 +20,7 @@ use Psr\Cache\CacheItemPoolInterface;
  * Three backends, in priority order:
  *
  *  1. Redis (atomic, cross-worker): when a Redis client is available, a
- *     single Lua script implements the audit's atomic sliding window for both
+ *     single Lua script implements the atomic sliding window for both
  *     the per-client ZSET and the deployment-global ZSET. `TIME` (the Redis
  *     server clock) drives the window, so all PHP-FPM workers share one
  *     consistent window and the enforcement is an exact gate. Redis is the

@@ -96,7 +96,7 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     });
     const body = await verified.json();
     // The provider error code is surfaced in the failure message so a
-    // first-attempt failure is diagnosable (the audit's request: never
+    // first-attempt failure is diagnosable (the requirement: never
     // assert success without the response's error details).
     expect(body.success, `siteverify must succeed — full response: ${JSON.stringify(body)}`).toBe(true);
     expect(body.action, 'the response action must come from SERVER state, never the request').toBe('checkout');

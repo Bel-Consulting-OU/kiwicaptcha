@@ -5001,7 +5001,7 @@ fn delete_if_pending_is_the_atomic_tri_state() {
 #[test]
 fn delete_if_pending_race_never_erases_committed_evidence() {
     // The check-then-delete window the fused transition closes, run as a real barrier
-    // race in the audit's shape: thread A (the cheap-failing verifier)
+    // race: thread A (the cheap-failing verifier)
     // pauses right before its cleanup while thread B consumes + commits
     // Valid; A then resumes. The barrier enforces B's ordering, and the
     // stagger after B's completion varies the gap (0..400 µs) so the
@@ -5950,7 +5950,7 @@ fn resume_releases_the_claim_on_an_early_return() {
 }
 #[test]
 fn resume_commit_wait_shortfall_never_returns_valid() {
-    // The audit's failover sequence: the recovery's commit lands but
+    // The failover sequence: the recovery's commit lands but
     // its verified WAIT shortfalls (standalone Redis acks nothing).
     // The recovered success was NOT proven durable, so the resume
     // must fail closed (the fence on the reread shortfalls too ->
@@ -6110,7 +6110,7 @@ fn resume_commit_requires_current_claim_ownership() {
     // The claim is a fencing precondition: a commit whose caller no
     // longer holds the claim is refused before any write, so a stale
     // owner whose claim expired mid-derive can never mutate the
-    // record (the audit's stale-vs-new-owner scenario).
+    // record (the stale-vs-new-owner scenario).
     let Some(url) = redis_url() else { return };
     let prefix = format!("kiwitest:resume-owner:{}:", std::process::id());
     let issued = issue_challenge(

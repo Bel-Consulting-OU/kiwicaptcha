@@ -354,7 +354,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     const box = await page.locator('[data-kiwi-retry]').boundingBox();
     expect(box.width).toBeGreaterThanOrEqual(24);
     expect(box.height).toBeGreaterThanOrEqual(24);
-    // The audit's 32px recommendation for an accessibility/security control.
+    // The 32px target for an accessibility/security control.
     expect(box.height).toBeGreaterThanOrEqual(32);
   });
 

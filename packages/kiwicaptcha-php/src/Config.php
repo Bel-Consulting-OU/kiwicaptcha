@@ -353,7 +353,7 @@ final class Config
      *
      * The shape is the full constructor field set in declaration order,
      * so var_dump/print_r shows the complete configuration with only the
-     * secret values replaced — the audit-mandated printability fix for
+     * secret values replaced — the printability rule for
      * the secret-bearing configuration object.
      *
      * @return array<string, mixed>

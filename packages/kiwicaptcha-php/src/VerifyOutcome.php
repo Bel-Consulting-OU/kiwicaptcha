@@ -136,7 +136,7 @@ final class VerifyOutcome
      * The exact server-issued name the challenge response carried, taken
      * from the verified record: the consuming validator must compare the
      * submitted form field against this authenticated name and never
-     * reconstruct it from the nonce (the audit's "no second nonce-hash
+     * reconstruct it from the nonce (the "no second nonce-hash
      * scheme"). Populated on fresh derivations and stored-result replays
      * alike. Null when no decoy was armed (the surface disabled) and on
      * every non-valid outcome.

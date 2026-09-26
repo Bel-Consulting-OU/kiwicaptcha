@@ -310,7 +310,7 @@ final class RealRedisAdversarialChainFaultInjectionTest extends TestCase
         self::assertNull($store->obligationChainId($obligationId), 'the genuine flow passes and clears the obligation');
 
         // A legacy malformed record (a forged nonce written around the
-        // boundary, as if from a pre-fix server) still fails closed on
+        // boundary, as if from an older server) still fails closed on
         // read, and the create-or-get refuses without healing: corrupt
         // state is preserved, only missing/expired state repairs.
         $legacyObligationId = $service->obligationIdFor('login', 'txn-legacy', 1);

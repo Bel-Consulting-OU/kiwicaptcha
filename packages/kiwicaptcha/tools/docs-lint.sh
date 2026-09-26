@@ -33,7 +33,9 @@
 # marker); unrelated repository root files are never scanned.
 # Checks: em-dash density, sentence length, all-caps prose, filler
 # vocabulary, 'never/not' contrast saturation, bold-emphasis density,
-# nested parentheses, and duplicate sentences across the scanned files.
+# nested parentheses, remediation-history wording (change words, change
+# numbers, or review identifiers), and duplicate sentences across the
+# scanned files.
 
 set -u
 
@@ -216,7 +218,7 @@ BEGIN {
   max_bold = max_bold + 0
   n_al = split(allowlist, AL, " ")
   n_em = 0; n_long = 0; n_caps = 0; n_fill = 0
-  n_contrast = 0; n_bold = 0; n_nest = 0
+  n_contrast = 0; n_bold = 0; n_nest = 0; n_hist = 0
   pbold = 0
   pbuf = ""; pline = 0
 }
@@ -315,6 +317,34 @@ function check_para(  t, s, k, ns, wc, n, i, tok, core, after, lw, m) {
     n_fill++
     s = substr(s, RSTART + RLENGTH)
   }
+  # Remediation-history wording is banned from prose: the change
+  # vocabulary (change, changes, changing), a numbered change, a
+  # historical passive, or a review identifier. Descriptions state the
+  # current contract; they never narrate what an earlier revision
+  # corrected. Hyphenated forms matter, so the boundary class excludes
+  # only letters, digits and underscore.
+  s = lw
+  while (match(s, /(^|[^a-z0-9_])(fix|fixes|fixing)([^a-z0-9_]|$)/)) {
+    m = substr(s, RSTART, RLENGTH)
+    gsub(/^[^A-Za-z]+|[^A-Za-z]+$/, "", m)
+    printf "%s:%d: hist-ref: '%s'\n", file, pline, m
+    n_hist++
+    s = substr(s, RSTART + RLENGTH)
+  }
+  s = lw
+  while (match(s, /(^|[^a-z0-9_])((was|were|gets|get|been) fixed|fixed (the|this|that|a|an) )/)) {
+    printf "%s:%d: hist-ref: 'fixed'\n", file, pline
+    n_hist++
+    s = substr(s, RSTART + RLENGTH)
+  }
+  s = lw
+  while (match(s, /(^|[^a-z0-9_])(audit's|pre-audit|audit[ -](finding|findings|round|rounds|item|items|fix|fixes|id|ids|number|no)|audit[- ]*[^a-z0-9_][0-9]+)([^a-z0-9_]|$)/)) {
+    m = substr(s, RSTART, RLENGTH)
+    gsub(/^[^A-Za-z]+|[^A-Za-z]+$/, "", m)
+    printf "%s:%d: hist-ref: '%s'\n", file, pline, m
+    n_hist++
+    s = substr(s, RSTART + RLENGTH)
+  }
   s = t
   n = gsub(/— never |, not |— and not | is not /, "", s)
   if (n > max_contrast) {
@@ -352,7 +382,7 @@ function flush() {
 }
 END {
   flush()
-  if (mode != "dup") print "SUMMARY\t" file "\t" n_em "\t" n_long "\t" n_caps "\t" n_fill "\t" n_contrast "\t" n_bold "\t" n_nest
+  if (mode != "dup") print "SUMMARY\t" file "\t" n_em "\t" n_long "\t" n_caps "\t" n_fill "\t" n_contrast "\t" n_bold "\t" n_nest "\t" n_hist
 }
 CHECKSEOF
 
@@ -561,11 +591,11 @@ function rel(p) {
 }
 $1 == "SUMMARY" {
   em = $3 + 0; lg = $4 + 0; cp = $5 + 0; fl = $6 + 0
-  ct = $7 + 0; bd = $8 + 0; ns = $9 + 0
-  cnt[$2] = em + lg + cp + fl + ct + bd + ns
-  det[$2] = sprintf("em-dash %d, long-sentence %d, all-caps %d, filler %d, contrast %d, bold %d, nested-parens %d", em, lg, cp, fl, ct, bd, ns)
+  ct = $7 + 0; bd = $8 + 0; ns = $9 + 0; hs = $10 + 0
+  cnt[$2] = em + lg + cp + fl + ct + bd + ns + hs
+  det[$2] = sprintf("em-dash %d, long-sentence %d, all-caps %d, filler %d, contrast %d, bold %d, nested-parens %d, history-ref %d", em, lg, cp, fl, ct, bd, ns, hs)
   nfiles++
-  tot += em + lg + cp + fl + ct + bd + ns
+  tot += em + lg + cp + fl + ct + bd + ns + hs
 }
 $1 == "DUPSUMMARY" {
   dup[$2] = $3 + 0

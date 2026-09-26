@@ -550,7 +550,7 @@ final class VerifierGateTest extends TestCase
     public function testCancelledArgonRecordInProcessEndToEndNeverAcquiresAdmission(): void
     {
         // The in-process (ArrayStorage) variant of the cancelled-Argon
-        // admission fix: a real issued-and-solved Argon challenge
+        // admission rule: a real issued-and-solved Argon challenge
         // cancelled through the cancellation endpoint resolves to
         // RecordNotFound without ever touching the Argon admission
         // gate.

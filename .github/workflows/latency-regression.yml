@@ -14,7 +14,7 @@ name: Latency regression (self-hosted base/head)
 # "latest" label). The machine must run the pinned PHP patch version
 # and Redis on loopback (KC_REDIS_URL, default redis://127.0.0.1:6399).
 #
-# Methodology (the order-bias fixes):
+# Methodology (the order-bias controls):
 #   * Balanced pair order: repeat 1 runs base then head, repeat 2 runs
 #     head then base, and so on (abba), so thermal drift, CPU-frequency
 #     changes, filesystem/cache warming and background-host drift are

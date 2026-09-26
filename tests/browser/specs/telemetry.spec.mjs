@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// Audit finding 1: an enabled telemetry mode (data-kiwi-telemetry="full"
+// The lazy telemetry contract: an enabled telemetry mode (data-kiwi-telemetry="full"
 // or "minimal" on the container) starts the lazy widget-telemetry.js
 // module load opportunistically at init, but the challenge flow never
 // awaits it. The session attaches only when the module registers before
@@ -31,7 +31,7 @@ function tokenTelemetry(token) {
   return JSON.parse(parts[3]);
 }
 
-test.describe('Lazy telemetry module acquisition (audit finding 1)', () => {
+test.describe('Lazy telemetry module acquisition', () => {
   test('an enabled mode never gates the challenge request: the POST fires while the module request is held, and the late module is refused for this generation', async ({ page }) => {
     const held = [];
     await page.route('**/assets/telemetry*.js', async (route) => {

@@ -208,9 +208,9 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
 
     // The bounded loader: the initial attempt plus two retries, then
     // the degrade-to-English path, never a translation gate. The
-    // retries outlive the (ungated) solve — audit finding 1 removed the
-    // settle gate, so the flow no longer waits for the module's bounded
-    // attempts to exhaust; the count settles shortly after the solve.
+    // retries outlive the (ungated) solve: the flow never waits for the
+    // module's bounded attempts to exhaust, so the count settles shortly
+    // after the solve.
     await expect.poll(() => hits, 'the missing module must repeat through the bounded retries').toBe(3);
     await expect(widget).toHaveAttribute('lang', 'en');
     await expect(widget).toHaveAttribute('aria-label', EN.label);
@@ -250,9 +250,9 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
 
     // The bounded loader: the initial attempt plus two retries, then
     // the degrade-to-English path, never a translation gate. The
-    // retries outlive the (ungated) solve — audit finding 1 removed the
-    // settle gate, so the flow no longer waits for the module's bounded
-    // attempts to exhaust; the count settles shortly after the solve.
+    // retries outlive the (ungated) solve: the flow never waits for the
+    // module's bounded attempts to exhaust, so the count settles shortly
+    // after the solve.
     await expect.poll(() => hits, 'each SRI refusal must repeat through the bounded retries').toBe(3);
     await expect(widget).toHaveAttribute('lang', 'en');
     await expect(widget).toHaveAttribute('aria-label', EN.label);
@@ -402,7 +402,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(result.body.ok, `the German re-solve must verify (got ${result.body.code})`).toBe(true);
   });
 
-  // ── Audit finding 1: the challenge flow is never gated on the pack ──
+  // ── The challenge flow is never gated on the pack ──
   // The locale settlement is a pure language swap that repaints the
   // current view. The first run() proceeds immediately with the English
   // fallback; a late pack (the held route below) must switch the text
@@ -415,7 +415,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     badgeWorking: 'Traitement',
   };
 
-  test('audit-1 locale: the challenge POST fires while the locale request is held (issuance never waits for the pack)', async ({ page }) => {
+  test('locale pack: the challenge POST fires while the locale request is held (issuance never waits for the pack)', async ({ page }) => {
     const held = [];
     await page.route('**/assets/locales*.js', async (route) => {
       held.push(route);
@@ -450,7 +450,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(result.body.ok, `the French solve must verify (got ${result.body.code})`).toBe(true);
   });
 
-  test('audit-1 locale: released while solving, the pack switches the text language and data-state stays solving', async ({ page }) => {
+  test('locale pack: released while solving, the pack switches the text language and data-state stays solving', async ({ page }) => {
     // A files-mode argon2id challenge needs the lazy widget-risk.js
     // module for its worker solve tier; holding the risk asset parks
     // the widget in the solving state for a deterministic window (the
@@ -511,7 +511,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(result.body.ok, `the delayed-French argon solve must verify (got ${result.body.code})`).toBe(true);
   });
 
-  test('audit-1 locale: released after verified, the pack localizes the success strings and the token stays byte-identical', async ({ page }) => {
+  test('locale pack: released after verified, the pack localizes the success strings and the token stays byte-identical', async ({ page }) => {
     const held = [];
     await page.route('**/assets/locales*.js', async (route) => {
       held.push(route);
@@ -545,7 +545,7 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(after, 'getResponse must stay byte-identical after the settlement').toBe(tokenBefore);
   });
 
-  test('audit-1 locale: released after terminal failure, the pack localizes the error text and the Retry button still re-solves', async ({ page }) => {
+  test('locale pack: released after terminal failure, the pack localizes the error text and the Retry button still re-solves', async ({ page }) => {
     const held = [];
     await page.route('**/assets/locales*.js', async (route) => {
       held.push(route);

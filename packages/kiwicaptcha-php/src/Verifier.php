@@ -891,8 +891,8 @@ final class Verifier
         //     record resolves through the identical consumed-record
         //     resolution the consume-returned envelope uses via
         //     {@see self::resolveConsumedRecord()}, again with no slot
-        //     burned, from the envelope that rode on the snapshot (the
-        //     single-snapshot fix removed the earlier second GET). A backend failure
+        //     burned, from the envelope that rode on the snapshot (a
+        //     single snapshot performs exactly one GET). A backend failure
         //     on the retained read maps exactly like the find() failure:
         //     the retryable StorageUnavailable, never a new error class.
         //     A pending record falls through to the legacy admission ->
@@ -1906,7 +1906,7 @@ final class Verifier
         if ($record->decoyField !== null && !Config::isValidDecoyFieldName($record->decoyField)) {
             return false;
         }
-        // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix:
+        // The exact armed/unarmed equivalence contract:
         // signed commitment absent <=> stored program absent, signed
         // commitment present <=> stored program present, and
         // SHA256(stored program) == the signed commitment (constant

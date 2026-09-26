@@ -23,7 +23,7 @@ use PHPUnit\Framework\TestCase;
  * to the next band only at enter = upper + 10 and de-escalates only
  * below exit = lower − 10, staying in the current band in between.
  * Fresh scopes and the hard actions (StepUp/Deny) use the plain
- * mapping. (The audit's 49/51 example falls entirely inside the Allow
+ * mapping. (The canonical 49/51 example falls entirely inside the Allow
  * band [0,150), so the equivalent boundary-oscillation test uses
  * 449/451 at the 450 edge.)
  */
@@ -63,7 +63,7 @@ final class ScopeActionHysteresisTest extends TestCase
     {
         $policy = $this->policy();
         $h = new ScopeActionHysteresis();
-        // The audit's exact example: 49/51/49/51 — entirely inside the
+        // The canonical example: 49/51/49/51 — entirely inside the
         // Allow band [0,150): no flip-flop possible, always Allow.
         $actions = [];
         foreach ([49, 51, 49, 51] as $i => $score) {

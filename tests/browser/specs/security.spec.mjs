@@ -561,7 +561,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // lives in the standalone asset, which the driver no longer embeds.
     expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(1);
     // The only hard-coded algorithm assignment in the entire file is the
-    // audit-#62 profile normalization itself (pinned by both assertions
+    // profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"\) algorithm = "sha256";/);

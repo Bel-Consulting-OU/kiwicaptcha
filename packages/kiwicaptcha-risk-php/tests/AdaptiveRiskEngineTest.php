@@ -1240,7 +1240,7 @@ final class AdaptiveRiskEngineTest extends TestCase
         self::assertSame([], $client->hgetall("{kiwi:{$ns2}}:cal:1:{$hour}"), 'a status-2 outcome never reaches the calibration buckets');
     }
 
-    // ── Degraded paths never touch the state backend (fix-parity seam) ──
+    // ── Degraded paths never touch the state backend (degraded-path seam) ──
 
     private function exhaustedLimiter(): ProcessEmergencyCap
     {

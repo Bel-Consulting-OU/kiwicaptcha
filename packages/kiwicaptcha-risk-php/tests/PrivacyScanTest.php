@@ -96,7 +96,7 @@ final class PrivacyScanTest extends TestCase
         // scan below covers it too. Write the two entry shapes the
         // controller now produces: a pseudonym entry (the remoteip and the
         // request binding stored only as purpose-separated keyed HMACs —
-        // the audit's privacy fix) and a deliberately leaky control entry
+        // the privacy redaction) and a deliberately leaky control entry
         // carrying the raw address and raw binding, to prove the scan
         // actually covers the idempotency namespace and would catch a
         // regression.

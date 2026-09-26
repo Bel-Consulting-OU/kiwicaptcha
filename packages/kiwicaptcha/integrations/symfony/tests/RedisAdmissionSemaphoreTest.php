@@ -17,7 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Redis-backed Argon2id admission gate — the audit's tokenized-lease design.
+ * Redis-backed Argon2id admission gate — the tokenized-lease design.
  *
  * Each acquire() mints a unique lease token stored as a sorted-set member
  * scored at its expiry; release() removes exactly that token. Expired leases

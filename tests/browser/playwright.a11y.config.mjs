@@ -38,7 +38,7 @@ import { defineConfig } from '@playwright/test';
 // request, and destroy or reset during the pending fetch leaves the
 // settled language to the current generation only. The destroy-race
 // suite (destroy-race.spec.mjs) drives the post-destroy progress-write
-// regression (audit finding 6) on every engine: a SHA-256 challenge at
+// regression on every engine: a SHA-256 challenge at
 // the maximum ceiling (?bits=20), destroyed from a MutationObserver the
 // instant the first mid-solve progress tick lands (a microtask before
 // the next solver chunk, so the destroy provably lands mid-computation),

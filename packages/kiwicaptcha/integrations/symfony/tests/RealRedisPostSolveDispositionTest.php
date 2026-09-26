@@ -576,7 +576,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         $nonce = bin2hex(random_bytes(16));
         self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null)[0]);
 
-        // The audit's exact shape: an unexpected state with the current
+        // The canonical shape: an unexpected state with the current
         // nonce as stage2Nonce. A narrow Lua predicate would let it
         // through; the canonical schema predicate refuses it.
         $corrupt = [

@@ -1423,7 +1423,7 @@ jobs:
   doc-hygiene:
     # Static-doc hygiene gate: production source, browser release assets,
     # public READMEs and the workflows themselves must never carry
-    # internal-history commentary (audit IDs, round labels, severity
+    # internal-history commentary (review identifiers, round labels, severity
     # tags, behavior-history narration, or references to the wrong
     # upstream product). Changelogs and release notes are the designated
     # home for history and are excluded from the scan; an informational
@@ -1445,7 +1445,7 @@ jobs:
           set -euo pipefail
           # Production source, browser release assets, public READMEs and
           # the workflows themselves must not carry internal-history
-          # commentary (audit IDs, round labels, severity tags,
+          # commentary (review identifiers, round labels, severity tags,
           # behavior-history narration, or references to the wrong
           # upstream product). Changelogs and release notes are the
           # designated home for history; an informational step surfaces
@@ -2112,8 +2112,8 @@ jobs:
         run: php tests/CrossLanguageVerify.php
 
   release-validator-mutation-suite:
-    # Adversarial mutation corpus of the release-baseline validator
-    # (audit finding 10): the ordinary "Performance budgets" check
+    # Adversarial mutation corpus of the release-baseline validator:
+    # the ordinary "Performance budgets" check
     # runs the validator against the committed lab baseline, which
     # only proves today's real file is accepted/rejected as expected.
     # This self-contained node job generates temporary budget/baseline

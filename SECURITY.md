@@ -2,14 +2,14 @@
 
 ## Supported versions
 
-Security fixes are released for the **latest minor of every supported major line** of each artifact:
+Security patches are released for the **latest minor of every supported major line** of each artifact:
 
 | Artifact | Supported lines |
 |---|---|
 | `kiwicaptcha` (Rust core) | latest `1.x` (currently `1.7.0`). |
 | `kiwicaptcha-php` | latest `1.x`. |
-| `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
-| `kiwicaptcha-risk-php` | latest `0.1.x`, pre-1.0: fixes land on `0.1`. |
+| `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: patches land on `0.1`. |
+| `kiwicaptcha-risk-php` | latest `0.1.x`, pre-1.0: patches land on `0.1`. |
 | `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r2` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
@@ -18,7 +18,7 @@ Repository release tags and artifact versions are independent. For example, a re
 Advisories always name the **artifact and its version** (e.g. `kiwicaptcha (Rust core) 1.7.0`), never a bare repository tag.
 
 Users are expected to run the newest supported release.
-When a vulnerability is fixed, the fix is backported to all supported lines; unsupported lines receive no fixes and should be upgraded or removed.
+When a vulnerability is patched, the patch is backported to all supported lines; unsupported lines receive no patches and should be upgraded or removed.
 
 ## Reporting a vulnerability
 

@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn oscillating_score_produces_stable_action() {
-        // The audit's exact example: 49/51/49/51 — entirely inside the
+        // The canonical example: 49/51/49/51 — entirely inside the
         // Allow band [0,150): no flip-flop possible, always Allow.
         let h = ScopeActionHysteresis::new();
         for (i, score) in [49u16, 51, 49, 51].iter().enumerate() {

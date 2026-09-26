@@ -332,8 +332,7 @@ impl RiskPolicy {
     /// global floor, then hard overrides with reasons.
     ///
     /// Convenience wrapper without the scope-action hysteresis map (the
-    /// plain band mapping — byte-identical with the pre-audit-#95
-    /// behavior); the engine uses
+    /// plain band mapping); the engine uses
     /// [`RiskPolicy::decide_with_hysteresis`].
     #[allow(clippy::too_many_arguments)]
     pub fn decide(

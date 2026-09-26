@@ -1324,7 +1324,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // VerifyOutcome::decoyField(), the authenticated server-issued
         // name of the verified record's challenge — the exact value the
         // challenge response carried (armed issuance, protocol v3). It
-        // is never reconstructed from the nonce (the audit's "no second
+        // is never reconstructed from the nonce (the "no second
         // nonce-hash scheme"). Only that exact field is inspected: any
         // other name is ignored, since a decoy name is server-issued and
         // a mismatched name is not this challenge's decoy. When the

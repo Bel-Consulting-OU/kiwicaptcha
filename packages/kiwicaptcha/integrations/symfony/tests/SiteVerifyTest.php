@@ -158,7 +158,7 @@ final class SiteVerifyTest extends TestCase
      */
     public function testSecurityContextDigestRotationInvalidatesTheIdempotencyNamespace(): void
     {
-        // The audit's idempotency rotation contract: the backend identity
+        // The idempotency rotation contract: the backend identity
         // binds the static deployment security-context digest (issuer,
         // region, keyring/revocation state), so a cached provider result
         // can never outlive the security context that produced it. After
