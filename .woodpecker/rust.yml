@@ -1,0 +1,46 @@
+# Woodpecker CI: the Rust core lanes (mirrors the GitHub jobs rust,
+# package-cargo, quick-start and rust-redis-verify). A separate workflow
+# file: cargo builds write target/ inside the shared workspace, so the
+# two steps run ordered in this workflow and never alongside another
+# lane's cargo invocation.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: rust-workspace
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        rustup component add rustfmt clippy || true
+        rustup target add wasm32-unknown-unknown || true
+        cargo fmt --check
+        cargo clippy --workspace --all-targets -- -D warnings
+        cargo test --workspace
+        cargo test -p kiwicaptcha --example quickstart
+        cargo package --locked --manifest-path packages/kiwicaptcha/Cargo.toml
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-wasm
+        cargo build --target wasm32-unknown-unknown
+      - |
+        set -euo pipefail
+        cargo install cargo-audit --version 0.22.2 --locked
+        cargo audit
+
+  - name: rust-redis-verify
+    image: rust:1.96
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        cargo test --features redis --test redis_verify

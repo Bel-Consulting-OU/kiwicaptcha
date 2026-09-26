@@ -1,0 +1,118 @@
+# Woodpecker CI: the repository contract and every lint (mirrors the
+# GitHub jobs repo-sanity, release-contract, doc-hygiene and
+# workflow-lint). This workflow only reads the tree, so it is a separate
+# workflow file: Woodpecker runs separate workflows on independent
+# clones, and a workflow whose steps carry no depends_on runs its steps
+# in order.
+#
+# The actionlint binary is fetched from its versioned release and
+# verified against the published sha256, the same pinned-tool shape the
+# primary pipeline uses.
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  # ── Repository contract + every lint (docs lint included) ─────────
+  - name: lint-repo
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash git gawk ripgrep coreutils
+      - |
+        set -euo pipefail
+        KIWI_HDR='# KiwiCaptcha'
+        APEX_HDR='# ApexM''ail'
+        grep -q "^$KIWI_HDR" README.md
+        ! grep -q "^$APEX_HDR" README.md
+        grep -q 'packages/kiwicaptcha' README.md
+        grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json
+        grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml
+        while IFS= read -r asset; do
+          [ -n "$asset" ] || continue
+          test -f "packages/kiwicaptcha-wasm/assets/$asset"
+        done < packages/kiwicaptcha-wasm/release-assets.txt
+        test -f tests/browser/compat-capabilities.json
+        for d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do
+          test ! -d "$d"
+        done
+        echo "product identity OK"
+      - |
+        set -euo pipefail
+        cmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \
+          packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md
+        echo "accessibility documents byte-identical"
+      - sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
+      - sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
+      - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
+      - |
+        set -euo pipefail
+        base="${CI_COMMIT_BEFORE_SHA:-}"
+        if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+          if [ "${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "${CI_COMMIT_TARGET_SHA:-}" ]; then
+            base="$CI_COMMIT_TARGET_SHA"
+          else
+            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+        fi
+        [ -n "$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }
+        git cat-file -e "$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null \
+          || { echo "no baseline file at $base" >&2; exit 1; }
+        git show "$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+        while IFS= read -r entry; do
+          entry="${entry#"${entry%%[![:space:]]*}"}"
+          entry="${entry%%#*}"
+          entry="${entry%"${entry##*[![:space:]]}"}"
+          [ -n "$entry" ] || continue
+          if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
+            echo "stale adoption manifest entry: $entry already has a baseline row" >&2
+            exit 1
+          fi
+        done < packages/kiwicaptcha/tools/docs-lint-adopted.txt
+        bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
+      - bash tools/ci/version-prose-lint.sh
+      - bash tools/ci/release-asset-contract.sh
+      - bash tools/ci/protocol-manifest-check.sh
+      - bash tools/ci/release-governance-fixture.sh
+      - |
+        set -euo pipefail
+        for f in risk-v1.lua calibration.lua confirm.lua correction.lua \
+                  outcome_confirm.lua outcome_correct.lua outcome_register.lua \
+                  register_decision.lua sampling_metrics.lua; do
+          test -f "protocol/risk-v1/$f"
+          test -f "packages/kiwicaptcha-risk/resources/$f"
+          test -f "packages/kiwicaptcha-risk-php/resources/$f"
+          cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk/resources/$f"
+          cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk-php/resources/$f"
+        done
+        echo "all canonical Lua copies byte-identical"
+      - |
+        set -euo pipefail
+        PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
+        if rg -n -i \
+          --glob '!CHANGELOG*' \
+          --glob '!**/CHANGELOG*' \
+          --glob '!**/vendor/**' \
+          --glob '!**/node_modules/**' \
+          --glob '!**/target/**' \
+          "$PATTERN" \
+          packages tests README.md SECURITY.md .github/workflows .woodpecker; then
+          echo "internal-history commentary found in product source/docs" >&2
+          exit 1
+        fi
+        echo "doc hygiene OK"
+
+  - name: lint-workflow
+    image: alpine:3.20
+    commands:
+      - apk add --no-cache bash curl tar
+      - |
+        set -euo pipefail
+        ACTIONLINT_VERSION=1.7.12
+        # sha256 of the linux amd64 release tarball, from the release's
+        # checksums file (actionlint_1.7.12_checksums.txt).
+        ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        cd /tmp
+        curl -sSfLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+        echo "${ACTIONLINT_SHA256}  actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
+        tar -xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
+        /tmp/actionlint -version
+        /tmp/actionlint -color=never

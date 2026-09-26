@@ -144,6 +144,15 @@ final class DerivedKeys
      */
     public static function fromMaster(string $master, ?string $tenantId = null): self
     {
+        // The derivation boundary carries the entropy invariant too: the
+        // supported Config path already requires 16 bytes, and a direct
+        // caller with a shorter secret must not derive usable keys.
+        if (\strlen($master) < 16) {
+            throw new \InvalidArgumentException(sprintf(
+                'The master secret must be at least 16 bytes (got %d)',
+                \strlen($master),
+            ));
+        }
         // The structurally unambiguous encoding (see the $cache docblock):
         // the presence tag distinguishes a null tenant from an empty-string
         // tenant (different derivations — global root vs the

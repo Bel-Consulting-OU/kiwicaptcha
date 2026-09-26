@@ -8,6 +8,8 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
+use crate::RiskError;
+
 /// The five 32-byte keys derived from a master secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskKeys {
@@ -29,9 +31,38 @@ impl RiskKeys {
     pub const INFO_PRINCIPAL: &'static [u8] = b"principal";
     pub const INFO_EVENT: &'static [u8] = b"event";
 
+    /// The minimum master-secret length: the same 16-byte core contract
+    /// the PHP `RiskKeys::fromMaster` enforces.
+    pub const MIN_MASTER_BYTES: usize = 16;
+
+    /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
+    /// 32-byte output per info), refusing a master shorter than the
+    /// 16-byte minimum at the derivation boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::InvalidMasterLength`] when `master` is shorter than
+    /// 16 bytes.
+    pub fn try_from_master(master: &[u8]) -> Result<RiskKeys, RiskError> {
+        if master.len() < Self::MIN_MASTER_BYTES {
+            return Err(RiskError::InvalidMasterLength(master.len()));
+        }
+        Ok(Self::derive(master))
+    }
+
     /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the master is shorter than the 16-byte minimum; use
+    /// [`RiskKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &[u8]) -> RiskKeys {
+        Self::try_from_master(master)
+            .expect("the risk master secret must be at least 16 bytes; use try_from_master for a fallible path")
+    }
+
+    fn derive(master: &[u8]) -> RiskKeys {
         let hk = Hkdf::<Sha256>::new(Some(Self::SALT), master);
         let mut source = [0u8; 32];
         let mut subnet = [0u8; 32];
@@ -67,6 +98,19 @@ mod tests {
     /// sha256 over 0x42 repeated 32 times, 32 bytes, info and
     /// 'kiwicaptcha-risk-v1'. The Rust `Hkdf::<Sha256>` derivation must
     /// reproduce these exactly.
+    #[test]
+    fn try_from_master_refuses_short_secrets() {
+        assert!(matches!(
+            RiskKeys::try_from_master(&[]),
+            Err(RiskError::InvalidMasterLength(0))
+        ));
+        assert!(matches!(
+            RiskKeys::try_from_master(&[0x42; 15]),
+            Err(RiskError::InvalidMasterLength(15))
+        ));
+        assert!(RiskKeys::try_from_master(&[0x42; 16]).is_ok());
+    }
+
     #[test]
     fn hkdf_keys_match_php_parity_anchors() {
         let master = [0x42u8; 32];

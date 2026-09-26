@@ -43,6 +43,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// the master secret, never from this string.
 pub const HKDF_DEPLOY_SALT: &[u8] = b"kiwicaptcha/deploy-salt/v1";
 
+/// The minimum master-secret length at the derivation boundary: the same
+/// 16-byte core Config contract PHP enforces.
+pub const MIN_MASTER_BYTES: usize = 16;
+
+/// The derivation boundary refused the master secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedKeysError {
+    /// The master secret is shorter than [`MIN_MASTER_BYTES`].
+    MasterTooShort {
+        /// The supplied length in bytes.
+        got: usize,
+    },
+}
+
+impl fmt::Display for DerivedKeysError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DerivedKeysError::MasterTooShort { got } => write!(
+                f,
+                "the master secret must be at least {MIN_MASTER_BYTES} bytes (got {got})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DerivedKeysError {}
+
 /// Process-wide count of `DerivedKeys::from_master` invocations. A cheap
 /// (one relaxed atomic) observability seam proving the per-kid derivation
 /// cache works: production verifiers route every signature / IP-binding
@@ -95,6 +122,23 @@ impl fmt::Debug for DerivedKeys {
 }
 
 impl DerivedKeys {
+    /// Derives the purpose keys, refusing a master shorter than the
+    /// minimum length at the derivation boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedKeysError::MasterTooShort`] when `master` is shorter
+    /// than [`MIN_MASTER_BYTES`].
+    pub fn try_from_master(
+        master: &str,
+        tenant: Option<&str>,
+    ) -> Result<DerivedKeys, DerivedKeysError> {
+        if master.len() < MIN_MASTER_BYTES {
+            return Err(DerivedKeysError::MasterTooShort { got: master.len() });
+        }
+        Ok(Self::derive(master, tenant))
+    }
+
     /// Derive the three purpose keys from the master secret.
     ///
     /// - `master` — the deployment master secret (the HMAC secret key).
@@ -103,7 +147,18 @@ impl DerivedKeys {
     ///   (`"kiwi/v2/tenant/" + tenant_id`), so tenants of a shared master
     ///   secret cannot forge each other's challenges, binding tags, or
     ///   result tokens.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the master is shorter than [`MIN_MASTER_BYTES`]; use
+    /// [`DerivedKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &str, tenant: Option<&str>) -> DerivedKeys {
+        Self::try_from_master(master, tenant).expect(
+            "the master secret must be at least 16 bytes; use try_from_master for a fallible path",
+        )
+    }
+
+    fn derive(master: &str, tenant: Option<&str>) -> DerivedKeys {
         FROM_MASTER_CALLS.fetch_add(1, Ordering::Relaxed);
         let prk = Hkdf::<Sha256>::new(Some(HKDF_DEPLOY_SALT), master.as_bytes());
         match tenant {
@@ -220,6 +275,19 @@ mod tests {
         assert_ne!(t1.challenge_key(), global.challenge_key());
         assert_ne!(t1.ip_bind_key(), global.ip_bind_key());
         assert_ne!(t1.result_key(), global.result_key());
+    }
+
+    #[test]
+    fn try_from_master_refuses_short_secrets() {
+        assert_eq!(
+            DerivedKeys::try_from_master("", None).unwrap_err(),
+            DerivedKeysError::MasterTooShort { got: 0 }
+        );
+        assert_eq!(
+            DerivedKeys::try_from_master(&"s".repeat(15), None).unwrap_err(),
+            DerivedKeysError::MasterTooShort { got: 15 }
+        );
+        assert!(DerivedKeys::try_from_master(&"s".repeat(16), None).is_ok());
     }
 
     #[test]

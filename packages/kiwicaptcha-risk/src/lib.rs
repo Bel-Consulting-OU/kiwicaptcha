@@ -98,6 +98,10 @@ pub enum RiskError {
     /// observation pipeline.
     #[error("{0} must be >= 1 (got {1})")]
     InvalidTiming(&'static str, u64),
+    /// The risk master secret is shorter than the 16-byte minimum: an
+    /// empty or tiny master deterministically derives predictable keys.
+    #[error("the risk master secret must be at least 16 bytes (got {0})")]
+    InvalidMasterLength(usize),
 }
 
 /// The risk model generation implemented by this package.

@@ -46,6 +46,19 @@ final class RiskKeysTest extends TestCase
         self::assertCount(5, array_unique([$keys->source, $keys->subnet, $keys->session, $keys->principal, $keys->event]));
     }
 
+    public function testShortMasterIsRefusedAtTheDerivationBoundary(): void
+    {
+        foreach (['', 'tiny', str_repeat(chr(0x42), 15)] as $master) {
+            try {
+                RiskKeys::fromMaster($master);
+                self::fail(sprintf('the %d-byte master must be refused', strlen($master)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+        self::assertInstanceOf(RiskKeys::class, RiskKeys::fromMaster(str_repeat(chr(0x42), 16)));
+    }
+
     public function testDifferentMasterDerivesDifferentKeys(): void
     {
         $a = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));

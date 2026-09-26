@@ -1,0 +1,86 @@
+# Woodpecker CI: the risk lanes (mirrors the GitHub jobs risk-php,
+# risk-rust and risk-parity). A separate workflow file: the parity step
+# installs both a composer vendor tree and a Rust toolchain into the
+# shared workspace, so it must not race the PHP or Rust lanes.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: risk-php
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp
+      - |
+        set -euo pipefail
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-risk-php
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit
+
+  - name: risk-rust
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        rustup component add rustfmt clippy || true
+        cd packages/kiwicaptcha-risk
+        cargo fmt --check
+        cargo clippy --all-targets -- -D warnings
+        cargo test
+
+  - name: risk-parity
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev unzip git curl
+        docker-php-ext-install -j"$(nproc)" gmp
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        # rustup-init is fetched from its versioned dist path and verified
+        # against the published sha256 before it runs, never piped from
+        # the network into a shell.
+        cd /tmp
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+        sha256sum -c rustup-init.sha256
+        chmod +x rustup-init
+        ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
+        . "$HOME/.cargo/env"
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-risk-php
+        composer install --no-interaction --prefer-dist
+        PHP_HASH="$(php tools/fixture_hash.php)"
+        cd ../kiwicaptcha-risk
+        RUST_HASH="$(cargo run --quiet --example fixture_hash)"
+        echo "php=$PHP_HASH rust=$RUST_HASH"
+        test "$PHP_HASH" = "$RUST_HASH"
+        echo "risk protocol parity hashes identical"

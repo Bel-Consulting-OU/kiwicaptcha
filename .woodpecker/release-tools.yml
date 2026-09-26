@@ -1,0 +1,59 @@
+# Woodpecker CI: the release-evidence tool lanes (mirrors the GitHub
+# jobs release-validator-mutation-suite and the gating validator part of
+# perf-budget). A separate workflow file: the perf step installs two
+# composer vendor trees and a Node toolchain, so it must not race
+# another lane in the shared workspace.
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: validator-mutation-suites
+    image: node:22-alpine
+    commands:
+      - apk add --no-cache bash git
+      - node tools/ci/test-validate-release-baseline.mjs
+      - node tools/ci/test-validate-autofill-qualification.mjs
+      - bash tools/ci/latency-compare-test.sh
+
+  - name: perf-budget
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev unzip git brotli curl
+        docker-php-ext-install -j"$(nproc)" gmp
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+        # The Node runtime is fetched from its versioned dist path and
+        # verified against the published SHASUMS256.txt entry.
+        NODE_VERSION=v22.14.0
+        cd /tmp
+        curl -sSfO "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"
+        curl -sSfO "https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt"
+        grep "node-${NODE_VERSION}-linux-x64.tar.xz\$" SHASUMS256.txt | sha256sum -c -
+        tar -xJf "node-${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1
+      - |
+        set -euo pipefail
+        (cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)
+        (cd packages/kiwicaptcha-risk-php && composer install --no-interaction --prefer-dist)
+        bash packages/kiwicaptcha/tools/perf-budget.sh
+        if ! node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json; then
+          echo "gate_failed" > /tmp/kiwicaptcha-release-baseline-gate-failed
+        fi
+      - |
+        set -euo pipefail
+        php packages/kiwicaptcha/tools/perf-bench.php || true
+        php packages/kiwicaptcha/tools/perf-bench.php --redis || true
+        php packages/kiwicaptcha/tools/perf-bench.php --argon || true
+        php packages/kiwicaptcha/tools/perf-bench-risk.php || true
+        php packages/kiwicaptcha/tools/perf-wait.php || true
+        if [ -f /tmp/kiwicaptcha-release-baseline-gate-failed ]; then
+          echo "release-baseline validator refused the committed evidence (see above)" >&2
+          exit 1
+        fi
+        echo "perf budgets + validator OK"

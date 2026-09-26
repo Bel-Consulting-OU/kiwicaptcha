@@ -16,12 +16,19 @@ name: Public install smoke
 # live (steps 4/5) it fails at the configuration assertion, which is
 # the expected honest state of a proof that cannot pass yet. The jobs
 # run only on workflow_dispatch with the exact versions to smoke, so a
-# failed proof is always attributable to a version pair. The HTTP
-# issue -> solve -> verify round trip of step 6 additionally needs a
-# served page with the widget (the recipe's starter template and a
-# headless browser); it remains a manual step of step 6 until this
-# smoke grows that lane, and the checklist keeps step 6 open until it
-# passes.
+# failed proof is always attributable to a version pair. The cargo
+# lane pins the exact version (=X.Y.Z), then reads cargo metadata back
+# and requires the resolved package to carry that exact version with a
+# crates.io registry source and no path/git replacement, for both
+# published crates (kiwicaptcha and kiwicaptcha-risk).
+#
+# The composer lane now completes step 6 machine-side: it writes the
+# documented minimum configuration against a real Redis service,
+# requires kiwicaptcha:doctor to exit cleanly, serves the application,
+# and drives a headless browser through issue -> solve -> verify on the
+# demo form (the token is solved in the browser and verified
+# server-side), then repeats the boot/doctor/page path after
+# uninstall -> reinstall -> update.
 on:
   workflow_dispatch:
     inputs:
@@ -31,6 +38,9 @@ on:
       rust_version:
         description: Exact kiwicaptcha crate version to add from crates.io (e.g. 1.7.0)
         required: true
+      risk_rust_version:
+        description: Exact kiwicaptcha-risk crate version to add from crates.io (e.g. 0.1.0)
+        required: true
 
 permissions:
   contents: read
@@ -39,7 +49,12 @@ jobs:
   composer-smoke:
     name: public composer smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
         with:
@@ -81,37 +96,30 @@ jobs:
       - name: the application boots (console about)
         working-directory: kiwi-smoke
         run: php bin/console about
-      - name: kiwicaptcha:doctor run, output recorded (missing-config notes tolerated)
-        # Honest variant of the doctor check: a smoke application has
-        # no production wiring (no Redis, no sitekeys, no public
-        # origin), so the doctor legitimately reports check-level
-        # failures that a configured deployment must resolve. The
-        # smoke's job is to prove the command boots from the public
-        # install, so the output is recorded and a hard error (the
-        # command itself crashing, an unknown command, a fatal) fails
-        # the step, while check-level failures caused by the missing
-        # config are logged as the expected smoke outcome. The
-        # documented env seed KIWI_SECRET_KEY is set so the secret
-        # check has a real value to evaluate.
+      - name: write the documented minimum configuration (secret, public URL, Redis DSN)
+        # The quick start's verified flow: protection_profile, the 32-byte
+        # secret, the public base URL and the Redis DSN. The Redis service
+        # above provides the atomic backend the doctor checks.
         working-directory: kiwi-smoke
         env:
-          KIWI_SECRET_KEY: "0123456789abcdef0123456789abcdef"
+          KIWI_SECRET_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         run: |
-          set -u
-          php bin/console kiwicaptcha:doctor > doctor.out 2>&1
-          code=$?
-          set -e
-          cat doctor.out
-          if [ "$code" -eq 0 ]; then
-            echo "doctor: exit 0 (clean)"
-            exit 0
-          fi
-          if grep -Eq 'Command "kiwicaptcha:doctor" is not defined|In [A-Za-z_]+\.php line [0-9]+|Uncaught |Fatal error|is not registered' doctor.out; then
-            echo "doctor: HARD ERROR — the doctor itself crashed instead of reporting check statuses" >&2
-            exit 1
-          fi
-          echo "doctor: exit $code with check-level failures — recorded above; a smoke app without production wiring legitimately fails checks, so only hard errors fail this step"
-          exit 0
+          set -euo pipefail
+          {
+            echo "KIWI_SECRET_KEY=${KIWI_SECRET_KEY}"
+            echo "KIWI_PUBLIC_URL=http://127.0.0.1:8000"
+            echo "KIWI_REDIS_DSN=redis://127.0.0.1:6379/0"
+          } >> .env.local
+          cat .env.local
+      - name: kiwicaptcha:doctor must exit cleanly on the documented minimum
+        # The configured state is the documented minimum, so every check
+        # the doctor runs must now pass: a check-level failure is a real
+        # failure of the public instructions, never a tolerated outcome.
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          php bin/console kiwicaptcha:doctor
+          echo "doctor: exit 0 (clean) on the documented minimum configuration"
       - name: the Flex recipe delivered the starter config and the routes
         # The recipe is part of the public instructions (checklist steps
         # 4-5): it writes the starter configuration and registers the
@@ -125,6 +133,144 @@ jobs:
           php bin/console debug:router | grep -q kiwicaptcha \
             || { echo "the recipe's kiwicaptcha routes are missing"; exit 1; }
           echo "recipe config + routes present"
+      - name: add the demo page (form widget) to the smoke application
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          mkdir -p src/Form src/Controller templates
+          cat > src/Form/CaptchaDemoType.php <<'PHP'
+          <?php
+
+          namespace App\Form;
+
+          use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
+          use Symfony\Component\Form\AbstractType;
+          use Symfony\Component\Form\FormBuilderInterface;
+
+          final class CaptchaDemoType extends AbstractType
+          {
+              public function buildForm(FormBuilderInterface $builder, array $options): void
+              {
+                  $builder->add('captcha', KiwiCaptchaType::class, ['scope' => 'login']);
+              }
+          }
+          PHP
+          cat > src/Form/CaptchaDemoInput.php <<'PHP'
+          <?php
+
+          namespace App\Form;
+
+          use Symfony\Component\Validator\Constraints as Assert;
+
+          final class CaptchaDemoInput
+          {
+              #[Assert\NotBlank]
+              public ?string $captcha = null;
+          }
+          PHP
+          cat > src/Controller/CaptchaDemoController.php <<'PHP'
+          <?php
+
+          namespace App\Controller;
+
+          use App\Form\CaptchaDemoInput;
+          use App\Form\CaptchaDemoType;
+          use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+          use Symfony\Component\HttpFoundation\Request;
+          use Symfony\Component\HttpFoundation\Response;
+          use Symfony\Component\Routing\Attribute\Route;
+
+          final class CaptchaDemoController extends AbstractController
+          {
+              #[Route('/captcha-demo', name: 'captcha_demo', methods: ['GET', 'POST'])]
+              public function __invoke(Request $request): Response
+              {
+                  $form = $this->createForm(CaptchaDemoType::class, new CaptchaDemoInput());
+                  $form->handleRequest($request);
+                  $result = null;
+                  if ($form->isSubmitted()) {
+                      $result = json_encode([
+                          'ok' => $form->isValid(),
+                          'errors' => array_map(
+                              static fn ($violation): string => (string) $violation->getMessage(),
+                              iterator_to_array($form->getErrors(true)),
+                          ),
+                      ], JSON_THROW_ON_ERROR);
+                  }
+
+                  return $this->render('captcha_demo.html.twig', ['form' => $form, 'result' => $result]);
+              }
+          }
+          PHP
+          cat > templates/captcha_demo.html.twig <<'TWIG'
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><title>KiwiCaptcha smoke</title></head>
+          <body{% if result %} data-result="{{ result|e('html_attr') }}"{% endif %}>
+          {{ form_start(form) }}
+          {{ form_widget(form) }}
+          <button id="demo-submit" type="submit">Verify</button>
+          {{ form_end(form) }}
+          </body>
+          </html>
+          TWIG
+          cat > config/packages/kiwicaptcha_widget.yaml <<'YAML'
+          twig:
+              form_themes:
+                  - '@KiwiCaptcha/form_div_layout.html.twig'
+          YAML
+          php bin/console cache:clear
+          php bin/console debug:router | grep -q captcha_demo
+          echo "demo page wired"
+      - name: start the application server
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          symfony serve --no-tls --port=8000 --daemon
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then
+              echo "application server answering on 127.0.0.1:8000"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "application server did not answer in 60 s" >&2
+          exit 1
+      - name: issue, solve and verify in a real browser
+        # The whole public journey: the page renders the widget, the widget
+        # posts its challenge, solves it in the browser, writes the hidden
+        # token, and the form submit verifies the token server-side. Any
+        # step failing means a new external user cannot reach a working
+        # CAPTCHA, which is exactly what this proof exists to catch.
+        working-directory: kiwi-smoke
+        run: |
+          set -euo pipefail
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund playwright@1.62.1 > /dev/null
+          npx playwright install --with-deps chromium > /dev/null
+          cat > e2e.mjs <<'JS'
+          import { chromium } from 'playwright';
+
+          const base = 'http://127.0.0.1:8000';
+          const browser = await chromium.launch();
+          const page = await browser.newPage();
+          page.on('console', (message) => console.log('[browser]', message.type(), message.text()));
+          await page.goto(`${base}/captcha-demo`, { waitUntil: 'load' });
+          await page.waitForSelector('.kiwi-widget[data-state="verified"]', { timeout: 180000 });
+          const token = await page.locator('input[data-kiwi-token]').first().inputValue();
+          if (!token) {
+            throw new Error('the widget reached verified without writing a token');
+          }
+          await page.click('#demo-submit');
+          await page.waitForFunction(() => document.body.dataset.result !== undefined, { timeout: 60000 });
+          const result = JSON.parse(await page.evaluate(() => document.body.dataset.result));
+          if (result.ok !== true) {
+            throw new Error(`server-side verification refused the token: ${JSON.stringify(result)}`);
+          }
+          console.log(`issue -> solve -> verify OK (token bytes: ${token.length})`);
+          await browser.close();
+          JS
+          node e2e.mjs
       - name: uninstall -> reinstall -> update cycle
         # The remaining composer half of checklist step 6: a published
         # package must survive removal, a fresh require and an update
@@ -137,9 +283,12 @@ jobs:
           composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
           composer require "bel-consulting/kiwicaptcha-symfony:$BUNDLE_VERSION" --no-interaction --no-progress
           php bin/console about
+          php bin/console kiwicaptcha:doctor
           composer update bel-consulting/kiwicaptcha-symfony --no-interaction --no-progress
           php bin/console about
-          echo "uninstall -> reinstall -> update cycle OK"
+          php bin/console kiwicaptcha:doctor
+          curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null
+          echo "uninstall -> reinstall -> update cycle OK (boot, doctor and demo page after each step)"
 
       - name: the installed bundle ships its own assets (no repository file)
         # The installed package must be self-contained: the widget
@@ -158,9 +307,17 @@ jobs:
           echo "bundle assets present in the installed package"
 
   cargo-smoke:
-    name: public cargo smoke
+    name: public cargo smoke (${{ matrix.crate }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: kiwicaptcha
+            version: ${{ inputs.rust_version }}
+          - crate: kiwicaptcha-risk
+            version: ${{ inputs.risk_rust_version }}
     steps:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
         with:
@@ -170,16 +327,39 @@ jobs:
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/kiwi-cargo-smoke"
           cargo init --name kiwi-cargo-smoke "$RUNNER_TEMP/kiwi-cargo-smoke"
-      - name: add kiwicaptcha from crates.io and check (no path, no git source)
+      - name: add the exact crates.io version (=) and check (no path, no git source)
         env:
-          RUST_VERSION: ${{ inputs.rust_version }}
+          CRATE: ${{ matrix.crate }}
+          RUST_VERSION: ${{ matrix.version }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/kiwi-cargo-smoke"
-          cargo add "kiwicaptcha@$RUST_VERSION"
+          # `=X.Y.Z` is the only requirement that cannot resolve to a
+          # newer compatible release: a caret requirement would accept
+          # 1.7.1 for a requested 1.7.0 and the smoke would still pass.
+          cargo add "$CRATE@=$RUST_VERSION"
           cargo check
-          # The resolution must come from the public registry alone:
-          # the empty temp crate has no path or git override, so the
-          # lockfile entry can only have been fetched from crates.io.
-          cargo tree -p kiwicaptcha --depth 0
-          echo "cargo smoke: kiwicaptcha@$RUST_VERSION resolved and checked from crates.io"
+          cargo tree -p "$CRATE" --depth 0
+          # Read the resolution back: exactly one package of that name,
+          # the requested version, a crates.io registry source, and no
+          # path/git replacement (a replacement has source null).
+          cargo metadata --format-version 1 > "$RUNNER_TEMP/kiwi-cargo-smoke/meta.json"
+          python3 - "$CRATE" "$RUST_VERSION" "$RUNNER_TEMP/kiwi-cargo-smoke/meta.json" <<'PY'
+          import json
+          import sys
+
+          crate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]
+          meta = json.load(open(path))
+          named = [p for p in meta['packages'] if p['name'] == crate]
+          exact = [p for p in named if p['version'] == want]
+          assert len(exact) == 1, (
+              f'{crate}@{want} must resolve to exactly one package, got '
+              f'{[p["version"] for p in named]}'
+          )
+          source = exact[0].get('source') or ''
+          assert source.startswith('registry+') and 'crates.io' in source, (
+              f'{crate}@{want} resolved from {source!r}, not the crates.io registry'
+          )
+          print(f'cargo smoke: verified {crate}@{want} from {source}')
+          PY
+          echo "cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io"

@@ -1,0 +1,43 @@
+# Woodpecker CI: the Symfony bundle lane (mirrors the GitHub jobs
+# symfony and symfony-matrix). A separate workflow file: its composer
+# installs and its three framework-band updates rewrite the symfony
+# vendor tree, so it must never share a workspace with another lane.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: symfony-bundle
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        pecl install redis && docker-php-ext-enable redis
+      - |
+        set -euo pipefail
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha/integrations/symfony
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit
+        composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
+        vendor/bin/phpunit
+        composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
+        vendor/bin/phpunit

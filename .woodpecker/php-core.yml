@@ -1,0 +1,122 @@
+# Woodpecker CI: the PHP core lanes (mirrors the GitHub jobs
+# composer-contracts, php, php-matrix, php-no-gmp, php-core-real-redis
+# and phpredis-siteverify). A separate workflow file: every step here
+# runs composer installs inside the shared workspace, so the steps must
+# not race a parallel lane. The workflow carries no depends_on, which
+# keeps its steps ordered.
+#
+# The composer installer is verified against the published sha384
+# signature before it runs, never piped straight from the network.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: composer-contracts
+    image: composer:2.9
+    commands:
+      - |
+        set -euo pipefail
+        composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha-php
+        composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha-risk-php
+        composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha/integrations/symfony
+        (cd packages/kiwicaptcha-php && bash ../kiwicaptcha/tools/check-psr4.sh)
+
+  # ── PHP core matrix ───────────────────────────────────────────────
+  - name: php-core
+    image: php:8.3-cli
+    commands:
+      - &php_extensions |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+      - &composer_install |
+        set -euo pipefail
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - &php_core_suite |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer validate --strict
+        bash ../kiwicaptcha/tools/check-psr4.sh
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit
+
+  - name: php-core-8.1
+    image: php:8.1-cli
+    commands:
+      - *php_extensions
+      - *composer_install
+      - *php_core_suite
+
+  - name: php-core-8.5
+    image: php:8.5-cli
+    commands:
+      - *php_extensions
+      - *composer_install
+      - *php_core_suite
+
+  - name: php-core-no-gmp
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq unzip git
+      - *composer_install
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer validate --strict
+        composer install --no-interaction --prefer-dist
+        php ../../tools/ci/no-gmp-verify.php
+
+  - name: php-core-real-redis
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
+        docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
+      - *composer_install
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        (cd ../kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)
+        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+
+  - name: phpredis-siteverify
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        pecl install redis && docker-php-ext-enable redis
+      - *composer_install
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha/integrations/symfony
+        composer install --no-interaction --prefer-dist
+        php -r 'if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";'
+        vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"

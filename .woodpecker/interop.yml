@@ -1,0 +1,123 @@
+# Woodpecker CI: the cross-language PHP <-> Rust interop path (mirrors
+# the GitHub job cross-language). This is the ONE workflow that
+# deliberately keeps step-level depends_on: the records it writes into
+# .ci-cross-language/ must survive from the PHP issuer to the Rust
+# verifier to the Rust issuer and back to the PHP verifier, and every
+# step reuses the vendor tree an earlier step installed. The chain is
+# fully modelled here, and no other workflow touches this directory.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: cross-language-php-issue
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+        mkdir -p .ci-cross-language
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        KC_PHP_RECORD=../../.ci-cross-language/php-sha.json KC_PHP_ALGO=sha256 php tests/CrossLanguageIssue.php
+        KC_PHP_RECORD=../../.ci-cross-language/php-argon.json KC_PHP_ALGO=argon2id php tests/CrossLanguageIssue.php
+        KC_PHP_RECORD=../../.ci-cross-language/php-rsw.json KC_PHP_ALGO=rsw php tests/CrossLanguageIssue.php
+      - |
+        set -euo pipefail
+        test -s .ci-cross-language/php-sha.json
+        test -s .ci-cross-language/php-argon.json
+        test -s .ci-cross-language/php-rsw.json
+
+  - name: cross-language-rust-verify
+    image: php:8.3-cli
+    depends_on: [cross-language-php-issue]
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+      - |
+        set -euo pipefail
+        cd /tmp
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+        sha256sum -c rustup-init.sha256
+        chmod +x rustup-init
+        ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
+        . "$HOME/.cargo/env"
+      - |
+        set -euo pipefail
+        KC_PHP_RECORD=.ci-cross-language/php-sha.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+        KC_PHP_RECORD=.ci-cross-language/php-argon.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+        KC_PHP_RSW_RECORD=.ci-cross-language/php-rsw.json cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture
+
+  - name: cross-language-rust-issue-and-redis
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+    depends_on: [cross-language-rust-verify]
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+      - |
+        set -euo pipefail
+        cd /tmp
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+        curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+        sha256sum -c rustup-init.sha256
+        chmod +x rustup-init
+        ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
+        . "$HOME/.cargo/env"
+      - |
+        set -euo pipefail
+        KC_RUST_RECORD=.ci-cross-language/rust-sha.json cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+        KC_RUST_RECORD=.ci-cross-language/rust-argon.json KC_RUST_ALGO=argon2id cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+        KC_RUST_RSW_RECORD=.ci-cross-language/rust-rsw.json cargo test --test cross_language rust_issues_rsw_record_for_php -- --nocapture
+        KC_RUST_RECORD=.ci-cross-language/rust-v4.json KC_RUST_ALGO=sha256 cargo test --features redis --test cross_language rust_issues_v4_execution_record_for_php -- --nocapture
+        cargo test --features redis --test cross_language redis_runtime_state_interop_with_php -- --nocapture
+        cargo test --features redis --test cross_language redis_v3_decoy_interop_with_php -- --nocapture
+        cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
+        cargo test --features redis --test cross_language redis_rsw_interop_with_php -- --nocapture
+
+  - name: cross-language-php-verify
+    image: php:8.3-cli
+    depends_on: [cross-language-rust-issue-and-redis]
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        KC_RUST_RECORD=../../.ci-cross-language/rust-sha.json php tests/CrossLanguageVerify.php
+        KC_RUST_RECORD=../../.ci-cross-language/rust-argon.json php tests/CrossLanguageVerify.php
+        KC_RUST_RECORD=../../.ci-cross-language/rust-rsw.json php tests/CrossLanguageVerify.php
+        KC_RUST_RECORD=../../.ci-cross-language/rust-v4.json php tests/CrossLanguageVerify.php
+        KC_RUST_RECORD=../../.ci-cross-language/rust-v4.json KC_RUST_EXPECT_TAMPER=1 php tests/CrossLanguageVerify.php
