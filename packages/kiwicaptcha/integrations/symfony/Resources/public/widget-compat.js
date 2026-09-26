@@ -166,18 +166,49 @@
       errorCallback: cb("error-callback")
     };
   }
+  // Owned provider-control bindings. BUTTON and INPUT controls render
+  // into a Kiwi-owned adjacent holder (an INPUT is void and a BUTTON is
+  // interactive, so the widget and its native Retry button can never be
+  // nested inside them); the control keeps its label and semantics.
+  // compatResolveId() resolves through this table and remove() removes
+  // the holder plus the owned activation listener.
+  var compatControlByElement = new WeakMap();
+  var compatControlById = {};
+  function compatIsControl(el) {
+    return !!el && (el.tagName === "BUTTON" || el.tagName === "INPUT");
+  }
+  function compatIsInvisibleControl(el, params) {
+    if (compatIsControl(el)) return true;
+    if (el && el.getAttribute && el.getAttribute("data-size") === "invisible") return true;
+    if (params && params.size === "invisible") return true;
+    return false;
+  }
+  function compatForgetControl(entry) {
+    if (!entry) return;
+    if (entry.el) compatControlByElement.delete(entry.el);
+    if (entry.id && compatControlById[entry.id] === entry) delete compatControlById[entry.id];
+  }
+  function compatBindActivation(el, id) {
+    var entry = compatControlByElement.get(el);
+    if (!entry || entry.id !== id || entry.activationHandler) return;
+    entry.activationHandler = function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      core.execute(entry.id);
+    };
+    el.addEventListener("click", entry.activationHandler);
+  }
   function compatRender(target, params) {
     // grecaptcha.render("id", ...) / render(selector, ...) resolve
     // through the same target resolver as the native API and return a
     // working widget id.
     var el = core.resolveTarget(target);
     if (!el || el.nodeType !== 1) return 0;
-    // Re-rendering an already-rendered container must be idempotent —
-    // the existing widget instance is returned instead of
-    // double-initializing the same container (a second solve on the
-    // same element would race the first). initWidget keys the instance
-    // on the CONTAINER (el.dataset.kiwiInstance); the inner
-    // [data-kiwi-widget] markup carries no instance id of its own.
+    // Idempotent re-render: the owned table first, then the render
+    // container's own instance marker; the existing instance is
+    // returned instead of double-initializing (a second solve on the
+    // same element would race the first).
+    var boundEntry = compatControlByElement.get(el);
+    if (boundEntry && core.record(boundEntry.id)) return boundEntry.id;
     if (el.dataset.kiwiInstance && core.record(el.dataset.kiwiInstance)) {
       return el.dataset.kiwiInstance;
     }
@@ -185,43 +216,69 @@
     if (existingWidget && existingWidget.dataset.kiwiInstance && core.record(existingWidget.dataset.kiwiInstance)) {
       return existingWidget.dataset.kiwiInstance;
     }
-    if (!el.querySelector("[data-kiwi-widget]")) {
-      if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
-        // Invisible-style controls keep their label; the widget is
-        // appended (reCAPTCHA renders inside the control the same way).
-        el.insertAdjacentHTML("beforeend", compatMarkup());
+    var isControl = compatIsControl(el);
+    var invisibleControl = compatIsInvisibleControl(el, params);
+    var renderTarget = el;
+    var holder = null;
+    if (isControl) {
+      // Kiwi-owned and adjacent; the control keeps its original markup.
+      var priorEntry = compatControlByElement.get(el);
+      if (priorEntry && priorEntry.holder && priorEntry.holder.parentNode) {
+        holder = priorEntry.holder;
       } else {
-        el.innerHTML = compatMarkup();
+        holder = document.createElement("div");
+        holder.className = "kiwi-compat-holder";
+        holder.setAttribute("data-kiwi-compat-holder", "");
+        if (el.parentNode) el.parentNode.insertBefore(holder, el.nextSibling);
       }
+      renderTarget = holder;
+      if (!renderTarget.querySelector("[data-kiwi-widget]")) renderTarget.innerHTML = compatMarkup();
+    } else if (!el.querySelector("[data-kiwi-widget]")) {
+      el.innerHTML = compatMarkup();
     }
-    // Pass through explicit Kiwi overrides (e.g.
-    // data-kiwi-endpoint="/challenge?ttl=2") from the incumbent
-    // container onto the rendered widget container; the endpoint
-    // defaults to the bundle's same-origin prefix so a migrated page
-    // needs NO endpoint configuration.
-    var inner = el.querySelector(".kiwi-container");
+    // Explicit Kiwi overrides ride from the incumbent container onto the
+    // rendered one; the endpoint defaults to the bundle's same-origin
+    // prefix, so a migrated page needs no endpoint configuration.
+    var inner = renderTarget.querySelector(".kiwi-container");
     if (inner) {
-      ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src", "data-kiwi-locales-src", "data-kiwi-locales-integrity"].forEach(function (attr) {
+      ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src", "data-kiwi-locales-src", "data-kiwi-locales-integrity", "data-kiwi-telemetry"].forEach(function (attr) {
         if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
       });
       if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
-      // The driver reads module attrs from the rendered container AND
-      // its own element; mirror the loader-issued locales attrs onto
-      // the element when the page left them unset.
-      if (compatLocalesSrc && !el.hasAttribute("data-kiwi-locales-src")) {
-        el.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
-        el.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
+      // Mirror the loader-issued locales attrs when the page left them unset.
+      if (compatLocalesSrc && !renderTarget.hasAttribute("data-kiwi-locales-src")) {
+        renderTarget.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
+        renderTarget.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
       }
-      // The driver reads the endpoint from the rendered container AND
-      // from its own ancestor chain — mirror the default onto the
-      // incumbent container so a page with NO explicit endpoint uses
-      // the bundle's same-origin prefix (the one-line migration
-      // contract relies on this default).
-      if (!el.hasAttribute("data-kiwi-endpoint")) el.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+      // The mirrored default is what the one-line migration contract relies on.
+      if (!renderTarget.hasAttribute("data-kiwi-endpoint")) renderTarget.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
     }
     var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
     var cbs = compatReadCallbacks(el, params);
-    var id = core.render(el, {
+    var responseFieldName = (params && params["response-field"] === false)
+      || el.getAttribute("data-response-field") === "false"
+      ? false
+      : ((params && typeof params["response-field-name"] === "string" && params["response-field-name"])
+        || el.getAttribute("data-response-field-name") || COMPAT_FIELD);
+    // The incumbent renders its response field at render time (empty
+    // until solved), so a pre-activation submit serializes the empty
+    // provider field; the driver fills this same input.
+    if (typeof responseFieldName === "string" && responseFieldName) {
+      var tokenHost = (renderTarget.querySelector("[data-kiwi-token]") || {}).parentNode;
+      var aliasExists = false;
+      var hostInputs = tokenHost ? tokenHost.querySelectorAll("input") : [];
+      for (var hi = 0; hi < hostInputs.length; hi++) {
+        if (hostInputs[hi].name === responseFieldName) { aliasExists = true; break; }
+      }
+      if (tokenHost && !aliasExists) {
+        var aliasInput = document.createElement("input");
+        aliasInput.type = "hidden";
+        aliasInput.name = responseFieldName;
+        aliasInput.value = "";
+        tokenHost.appendChild(aliasInput);
+      }
+    }
+    var id = core.render(renderTarget, {
       scope: sitekey || "login",
       callback: cbs.callback,
       expiredCallback: cbs.expiredCallback,
@@ -231,11 +288,7 @@
       // provider-named field. response-field=false keeps the internal
       // Kiwi token field and SKIPS the provider alias input;
       // response-field-name overrides the alias name.
-      responseField: (params && params["response-field"] === false)
-        || el.getAttribute("data-response-field") === "false"
-        ? false
-        : ((params && typeof params["response-field-name"] === "string" && params["response-field-name"])
-          || el.getAttribute("data-response-field-name") || COMPAT_FIELD),
+      responseField: responseFieldName,
       // grecaptcha.render(el, {lang: "de"}) or data-kiwi-lang on the
       // incumbent container.
       lang: (params && typeof params.lang === "string" && params.lang)
@@ -255,14 +308,45 @@
         || (compatLoader && compatLoader.language) || undefined,
       // Explicit-execution mode: params.execution="execute" or
       // data-execution="execute" on the container defers the challenge
-      // until execute() (params win over the attribute).
+      // until execute() (params win over the attribute). An
+      // invisible-class control (BUTTON, INPUT, data-size="invisible")
+      // defaults to "execute" so the challenge starts only when the
+      // control is activated, exactly like the incumbent invisible
+      // reCAPTCHA, never at page render.
       execution: (params && typeof params.execution === "string")
         ? params.execution
-        : (el.getAttribute("data-execution") === "execute" ? "execute" : undefined),
+        : (el.getAttribute("data-execution") === "execute"
+          ? "execute"
+          : (invisibleControl ? "execute" : undefined)),
       sitekey: sitekey || undefined
     });
-    if (id && !kiwiCompatFirstId) kiwiCompatFirstId = id;
+    if (id) {
+      if (isControl) {
+        var entry = compatControlByElement.get(el);
+        if (!entry) {
+          entry = { el: el, id: null, holder: holder, activationHandler: null };
+          compatControlByElement.set(el, entry);
+        }
+        entry.id = id;
+        entry.holder = holder;
+        compatControlById[id] = entry;
+      }
+      if (!kiwiCompatFirstId) kiwiCompatFirstId = id;
+    } else if (isControl) {
+      // A failed render leaves no orphan holder or binding behind.
+      if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+      compatForgetControl(compatControlByElement.get(el));
+    }
     return id || 0;
+  }
+  // The single implicit-render entry point: idempotent render plus the
+  // owned activation listener exactly once. Invisible-class controls
+  // activate execute() on click; a container only renders.
+  function compatRenderAndBind(el) {
+    if (!el || el.nodeType !== 1) return 0;
+    var id = compatRender(el);
+    if (id && compatIsInvisibleControl(el, null)) compatBindActivation(el, id);
+    return id;
   }
   // hCaptcha async execute() rejects with a stable error-code STRING
   // (network-error | challenge-error | internal-error) that migrated
@@ -400,12 +484,15 @@
   }
   function compatResolveId(idOrEl) {
     // An OMITTED id targets the first created widget (the incumbent
-    // providers' documented default); an element resolves to its
-    // rendered widget instance (the element's own data-kiwi-instance is
-    // the widget id in compat mode, where the container carries it).
+    // providers' documented default); an element resolves through the
+    // owned control table first (buttons and inputs render into an
+    // adjacent holder, so their widget never lives inside them), then
+    // through the container's own instance marker.
     if (idOrEl === undefined || idOrEl === null) return kiwiCompatFirstId;
     if (typeof idOrEl === "string" && core.record(idOrEl)) return idOrEl;
     if (idOrEl && idOrEl.nodeType === 1) {
+      var entry = compatControlByElement.get(idOrEl);
+      if (entry && core.record(entry.id)) return entry.id;
       if (idOrEl.dataset && idOrEl.dataset.kiwiInstance && core.record(idOrEl.dataset.kiwiInstance)) {
         return idOrEl.dataset.kiwiInstance;
       }
@@ -428,7 +515,18 @@
     execute: compatExecute,
     remove: function (idOrEl) {
       var id = compatResolveId(idOrEl);
-      if (id) core.remove(id);
+      if (!id) return;
+      var entry = compatControlById[id] || null;
+      if (entry && entry.el && entry.activationHandler) {
+        try { entry.el.removeEventListener("click", entry.activationHandler); } catch (e) {}
+        entry.activationHandler = null;
+      }
+      core.remove(id);
+      // core.remove() takes the rendered container out; the holder the
+      // compat layer owns leaves with it, while the provider control
+      // itself stays exactly where the page put it.
+      if (entry && entry.holder && entry.holder.parentNode) entry.holder.parentNode.removeChild(entry.holder);
+      compatForgetControl(entry);
     },
     // Turnstile's ready() + isExpired() lifecycle surface.
     ready: function (fn) {
@@ -489,33 +587,29 @@
     // first paint through the external /api.js path.
     var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
     for (var ci = 0; ci < compatContainers.length; ci++) {
-      var el = compatContainers[ci];
-      var wid = compatRender(el);
-      // Invisible-style controls (buttons / inputs / data-size="invisible"):
-      // clicking the control triggers execute() — the incumbent pattern.
-      if (wid && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("data-size") === "invisible")) {
-        (function (id, node) {
-          node.addEventListener("click", function (ev) {
-            ev.preventDefault();
-            core.execute(id);
-          });
-        })(wid, el);
-      }
+      // One implicit-render path for every container class: render
+      // idempotently and attach the owned activation listener exactly
+      // once for invisible-class controls, so a click triggers
+      // execute() — the incumbent pattern.
+      compatRenderAndBind(compatContainers[ci]);
     }
   });
-  // Dynamic implicit-render convenience: a .g-recaptcha node inserted
-  // later is auto-rendered — NEVER in explicit mode: render=explicit
-  // means the application controls rendering (Google's documented
-  // contract), so a later container must stay untouched until an
-  // explicit grecaptcha.render() call.
+  // Dynamic implicit rendering (never in render=explicit mode, where
+  // the application owns rendering). The whole added subtree is
+  // traversed, not just the top-level node, so a framework inserting
+  // <section><div class="g-recaptcha">…</div></section> renders the
+  // nested container and a late invisible control is bound too.
   if (compat === "recaptcha" && compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
     new MutationObserver(function (mutations) {
       for (var m = 0; m < mutations.length; m++) {
         var nodes = mutations[m].addedNodes;
         for (var n = 0; n < nodes.length; n++) {
           var node = nodes[n];
-          if (node && node.nodeType === 1 && node.matches && node.matches(COMPAT_SELECTOR) && !node.querySelector("[data-kiwi-widget]")) {
-            compatRender(node);
+          if (!node || node.nodeType !== 1) continue;
+          if (node.matches && node.matches(COMPAT_SELECTOR)) compatRenderAndBind(node);
+          if (node.querySelectorAll) {
+            var nested = node.querySelectorAll(COMPAT_SELECTOR);
+            for (var q = 0; q < nested.length; q++) compatRenderAndBind(nested[q]);
           }
         }
       }

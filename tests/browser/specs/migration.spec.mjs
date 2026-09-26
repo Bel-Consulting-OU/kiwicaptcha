@@ -487,15 +487,6 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     expect(gone).toBe(true);
   });
 
-  test('invisible reCAPTCHA: the control click triggers execute + data-callback', async ({ page }) => {
-    await page.goto('/migration/recaptcha-invisible.html');
-    const button = page.locator('button.g-recaptcha');
-    await expect(button.locator('[data-kiwi-widget]')).toBeVisible();
-    await button.click();
-    const token = await waitVerified(page);
-    await expect(page.locator('#out')).toHaveText('cb:' + token.slice(0, 8));
-  });
-
   test('hCaptcha: implicit render + h-captcha-response alias + callbacks', async ({ page }) => {
     await page.goto('/migration/hcaptcha.html');
     await expect(page.locator('.h-captcha [data-kiwi-widget]')).toBeVisible();

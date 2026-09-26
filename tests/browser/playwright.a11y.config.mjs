@@ -49,7 +49,7 @@ import { defineConfig } from '@playwright/test';
 // torture cases stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp|locale-csp|destroy-race)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp|locale-csp|destroy-race|compat-controls)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },

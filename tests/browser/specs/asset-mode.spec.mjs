@@ -365,6 +365,66 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect((await resp.json()).ok, 'the in-page fallback solve must verify').toBe(true);
   });
 
+  test('a transient risk-module outage is recoverable: reset retries the module and solves', async ({ page }) => {
+    // The first sequence fails every risk-module attempt (the loader's
+    // three tries), so the argon2id worker tier enters its controlled
+    // unavailable state. Memoizing that failure would poison the module
+    // kind for the rest of the page lifetime; the settled promise must
+    // be retired (success is cached by the module registry) with only a
+    // short failure backoff that an explicit reset clears.
+    let failing = true;
+    let served = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+        return;
+      }
+      served++;
+      await route.continue();
+    });
+    await page.goto('/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
+
+    // The network recovers; the user-driven retry (the native Retry
+    // button, i.e. reset) must start a fresh attempt.
+    failing = false;
+    await page.locator('[data-kiwi-retry]').click();
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    expect(served, 'the recovered reset must load the module again').toBeGreaterThan(0);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+  });
+
+  test('two simultaneous recoveries share one module request sequence', async ({ page }) => {
+    // The recovery attempt stays coalesced: two widgets reset in the
+    // same task must join the first in-flight load instead of starting
+    // two sequences.
+    let failing = true;
+    let served = 0;
+    await page.route('**/assets/risk*.js', async (route) => {
+      if (failing) {
+        await route.fulfill({ status: 404, contentType: 'application/javascript', body: 'not found' });
+        return;
+      }
+      served++;
+      await route.continue();
+    });
+    await page.goto('/?assets=files&algorithm=argon2id&widgets=2');
+    await expect(page.locator('[data-kiwi-widget][data-state="kiwi:worker-unavailable"]')).toHaveCount(2, { timeout: 60_000 });
+
+    failing = false;
+    await page.evaluate(() => {
+      document.querySelectorAll('[data-kiwi-widget]').forEach((widget) => {
+        const id = widget.dataset.kiwiInstance;
+        if (id) window.KiwiCaptcha.reset(id);
+      });
+    });
+    await expect(page.locator('[data-kiwi-widget][data-state="done"]')).toHaveCount(2, { timeout: 120_000 });
+    expect(served, 'the two recovery attempts must share one load (one request, not two)').toBe(1);
+  });
+
   test('a SHA challenge whose risk module cannot load still solves in-page (the worker tier is never a SHA gate)', async ({ page }) => {
     // The lazy widget-risk.js module is required for the argon2id solve
     // tier, but a SHA-256 challenge must never hard-fail on it: the

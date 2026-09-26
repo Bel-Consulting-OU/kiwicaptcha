@@ -539,6 +539,12 @@
   }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
+    // A fresh initialization (render, reset or the native Retry button)
+    // is a user-driven retry: it clears the transient module-failure
+    // backoff so a recovered network can load the lazy modules again.
+    // The backoff itself only throttles automatic retries within one
+    // load; a terminal failure is never memoized as the module answer.
+    kiwiModuleFailedAt = {};
     options = options || {};
     // The response-field alias name is page-author controlled, so only
     // the bounded field-name shape reaches the alias writer — anything
@@ -611,20 +617,6 @@
     // hide it from assistive technology, defensively.
     var iconSvg = W.querySelector(".kiwi-icon-wrapper svg");
     if (iconSvg) { iconSvg.setAttribute("aria-hidden", "true"); iconSvg.setAttribute("focusable", "false"); }
-    // The wink is an SVG SMIL <animate>: CSS animation:none cannot stop
-    // SMIL, so reduced-motion users get the element REMOVED on init, and
-    // a matchMedia change listener also removes it when the OS setting
-    // flips (a removed wink stays removed).
-    if (iconSvg && window.matchMedia) {
-      var reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-      function kiwiRemoveWink() {
-        var smilWink = iconSvg.querySelector("animate");
-        if (smilWink) smilWink.remove();
-        if (reducedMotionQuery.removeEventListener) reducedMotionQuery.removeEventListener("change", kiwiRemoveWink);
-      }
-      if (reducedMotionQuery.matches) kiwiRemoveWink();
-      else if (reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener("change", kiwiRemoveWink);
-    }
     var retryEl = W.querySelector("[data-kiwi-retry]") || createRetryButton(W, kiwiWidgetPack.retryButton);
     // Privacy-aware telemetry (widget-local, mode-gated): the session
     // machinery lives in the lazy widget-telemetry.js module; an "off"
@@ -1559,7 +1551,19 @@
     return new Promise(function (resolve, reject) {
       var W = r.W;
       var settled = false;
+      // Settlement retires this promise's own cancellation hook from the
+      // current record (nulling the list when it empties): a widget that
+      // completes and stays verified must not retain every settled
+      // execute() closure until the next reset or destroy.
+      var removeCancelHook = function () {
+        var cur = kiwiWidgets[id];
+        if (!cur || !cur.pendingExecute) return;
+        var hookIndex = cur.pendingExecute.indexOf(onCancel);
+        if (hookIndex !== -1) cur.pendingExecute.splice(hookIndex, 1);
+        if (cur.pendingExecute.length === 0) cur.pendingExecute = null;
+      };
       var detach = function () {
+        removeCancelHook();
         if (W) {
           W.removeEventListener("kiwi:verified", onVerified);
           W.removeEventListener("kiwi:error", onError);
@@ -1654,7 +1658,14 @@
   // armed response's worker/execution paths) are awaited; the
   // opportunistic loads never gate the challenge request.
   var kiwiModuleApis = {};
+  // In-flight deduplication only: an entry lives while a load is in
+  // flight and is retired on settlement. A terminal failure is never
+  // memoized as the answer; it records a short backoff instead, so a
+  // transient outage cannot poison the module kind for the rest of the
+  // page lifetime.
   var kiwiModuleLoads = {};
+  var kiwiModuleFailedAt = {};
+  var KIWI_MODULE_FAILURE_BACKOFF_MS = 5000;
   function kiwiModuleApi(kind) {
     return kiwiModuleApis[kind] || null;
   }
@@ -1683,14 +1694,23 @@
       var attempt = 0;
       var settled = false;
       var watchdog = null;
+      var script = null;
+      function dropScript() {
+        // A failed or refused script node never stays in the document:
+        // the next attempt appends a fresh node, and a settled failure
+        // leaves no dead element behind for the page to carry.
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+        script = null;
+      }
       function finish(api) {
         if (settled) return;
         settled = true;
         if (watchdog) clearTimeout(watchdog);
+        if (!api) dropScript();
         resolve(api || null);
       }
       function tryInject() {
-        var script = document.createElement("script");
+        script = document.createElement("script");
         script.src = attrs.src;
         script.integrity = attrs.integrity;
         script.setAttribute("data-kiwi-module", kind);
@@ -1704,6 +1724,7 @@
           finish(api);
         };
         script.onerror = function () {
+          dropScript();
           if (attempt < KIWI_MODULE_ATTEMPTS - 1) {
             attempt++;
             setTimeout(tryInject, 250 * attempt);
@@ -1727,10 +1748,27 @@
   function kiwiEnsureModule(kind, container, W) {
     var api = kiwiModuleApis[kind];
     if (api) return Promise.resolve(api);
+    var failedAt = kiwiModuleFailedAt[kind];
+    if (failedAt !== undefined) {
+      // The short backoff throttles automatic retries only; a successful
+      // registration or an explicit reset clears it.
+      if (Date.now() - failedAt < KIWI_MODULE_FAILURE_BACKOFF_MS) return Promise.resolve(null);
+      delete kiwiModuleFailedAt[kind];
+    }
     if (!kiwiModuleLoads[kind]) {
       var attrs = kiwiModuleAssetAttrs(kind, container, W);
       if (!attrs) return Promise.resolve(null);
-      kiwiModuleLoads[kind] = kiwiLoadModuleAsset(kind, attrs);
+      var load = kiwiLoadModuleAsset(kind, attrs);
+      kiwiModuleLoads[kind] = load;
+      load.then(function (loaded) {
+        // Retire the settled promise: successful registrations are
+        // cached by kiwiModuleApis (the module's own registry entry),
+        // while a terminal failure is remembered only as the backoff
+        // timestamp so the next attempt is a real retry.
+        if (kiwiModuleLoads[kind] === load) delete kiwiModuleLoads[kind];
+        if (loaded) delete kiwiModuleFailedAt[kind];
+        else kiwiModuleFailedAt[kind] = Date.now();
+      });
     }
     return kiwiModuleLoads[kind];
   }

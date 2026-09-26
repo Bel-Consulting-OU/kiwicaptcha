@@ -237,7 +237,7 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-97,316 bytes raw, 29,138 bytes gzip and 24,571 bytes brotli, against
+99,187 bytes raw, 29,747 bytes gzip and 25,026 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
@@ -247,8 +247,8 @@ widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
 widget-locales.js copy (the lazy non-default locale packs) is 13,395
 bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
-16,384 / 6,000 / 5,000; every widget-compat.js copy is 28,103 bytes
-raw, 8,478 bytes gzip and 7,275 bytes brotli against caps of
+16,384 / 6,000 / 5,000; every widget-compat.js copy is 32,644 bytes
+raw, 10,061 bytes gzip and 8,683 bytes brotli against caps of
 32,768 / 12,000 / 10,000; every execution-interpreter copy
 (execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
 33,039 bytes raw, 9,998 bytes gzip and 8,675 bytes brotli, against
@@ -324,16 +324,13 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 97,316 bytes
-raw, 29,138 gzip and 24,571 brotli (the record's
+any memory-hard challenge — is the eager core alone: 99,187 bytes
+raw, 29,747 gzip and 25,026 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
-numbers are inside the **sub-30 KB compressed** target: the
-audit-5 comment-prose compaction restored the compressed headroom,
-and the gzip figure now sits at 90% of its 30,720-byte cap (the
-compaction removed shipped prose only — code bytes are untouched,
-and the audit-1 acquisition rework's semantic view model and eager
-coarse client-context descriptor stay in the core); the raw 160,000
-cap is carried forward unchanged.
+figure sits at 96.8% of its 30,720-byte cap after the provider-control
+architecture and lazy-module recovery work added core code (the cap is
+unchanged and still enforced, and the raw 160,000 cap keeps large
+headroom); the compressed caps remain the ordinary-bootstrap target.
 
 The driver surface is now five files with one eager core (the
 record's budget rows, equality-gated):
