@@ -59,8 +59,10 @@ final class RiskStoreConfigInvariantsTest extends TestCase
                 'outcomeTtlSecs' => $defaults['outcome_ttl_secs'],
             ];
             if ($knob === 'saturation_0') {
+                // Lua argv slot 0 is src_fast, exactly as the Rust vector
+                // mutates saturations[0].
                 $saturations = RedisRiskStateStore::DEFAULT_SATURATIONS;
-                $saturations[0] = $value;
+                $saturations['src_fast'] = $value;
                 $arguments['saturations'] = $saturations;
             } else {
                 $arguments[$paramByKnob[$knob] ?? $knob] = $value;
@@ -84,5 +86,32 @@ final class RiskStoreConfigInvariantsTest extends TestCase
             namespace: 'inv-ok'.bin2hex(random_bytes(4)),
         );
         self::assertInstanceOf(RedisRiskStateStore::class, $store);
+    }
+
+    public function testAPartialSaturationMapIsAcceptedAndOverlaidOnTheDefaults(): void
+    {
+        // The Symfony bundle wires only the channels its tree exposes, so a
+        // partial map must stay valid: every read overlays it on
+        // the contract defaults.
+        $store = new RedisRiskStateStore(
+            RedisRiskStateStore::createClient('redis://127.0.0.1:6399'),
+            saturations: ['global' => 12345],
+            namespace: 'inv-partial'.bin2hex(random_bytes(4)),
+        );
+        self::assertInstanceOf(RedisRiskStateStore::class, $store);
+    }
+
+    public function testAnUnknownSaturationKeyIsRefused(): void
+    {
+        // An unknown key would be silently ignored by the overlay, so it is
+        // refused instead of pretending to tune a channel that does not
+        // exist.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('unknown key');
+        new RedisRiskStateStore(
+            RedisRiskStateStore::createClient('redis://127.0.0.1:6399'),
+            saturations: ['principal_typo' => 10000],
+            namespace: 'inv-unknown'.bin2hex(random_bytes(4)),
+        );
     }
 }

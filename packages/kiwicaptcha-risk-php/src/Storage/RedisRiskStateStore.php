@@ -84,7 +84,13 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      *                                  tag internally, so an encoded
      *                                  value is never passed here.
      * @param int      $hysteresisMs    global level hysteresis window
-     * @param array<string, int> $saturations raw saturation values keyed src_fast..principal (Lua argv order)
+     * @param array<string, int> $saturations raw saturation values keyed by the
+     *                                  src_fast..principal channel names (Lua
+     *                                  argv order). A partial map is overlaid
+     *                                  on {@see self::DEFAULT_SATURATIONS}, so
+     *                                  an omitted channel keeps its contract
+     *                                  default; an unknown key is refused
+     *                                  because it would be silently ignored.
      * @param int      $namespaceKeyVersion the key-version contract
      *                                  ({@see DeploymentNamespace::VERSION_LEGACY}
      *                                  or
@@ -132,14 +138,18 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
                 ));
             }
         }
-        if (\count($saturations) !== \count(self::DEFAULT_SATURATIONS)) {
-            throw new \InvalidArgumentException(sprintf(
-                'saturations must carry exactly %d entries (got %d)',
-                \count(self::DEFAULT_SATURATIONS),
-                \count($saturations),
-            ));
-        }
+        // The saturation map is deliberately allowed to be partial: every
+        // read path overlays it on the contract defaults (the Symfony bundle
+        // only exposes the channels it tunes), so an omitted channel keeps
+        // its contract default. An unknown key, however, would be silently
+        // dropped by that overlay and must be refused instead.
         foreach ($saturations as $key => $value) {
+            if (!\is_string($key) || !\array_key_exists($key, self::DEFAULT_SATURATIONS)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'saturations must be keyed by the known channel names src_fast..principal (unknown key %s)',
+                    var_export($key, true),
+                ));
+            }
             if (!\is_int($value) || $value < 1) {
                 throw new \InvalidArgumentException(sprintf(
                     'saturations[%s] must be a positive integer (got %s)',
