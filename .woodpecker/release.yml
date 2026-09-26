@@ -1,0 +1,122 @@
+# Woodpecker CI: the release gate and strict build (mirrors the GitHub
+# workflow release, gate-and-build, for v* tags). The publishing half
+# (attest-and-publish) stays on GitHub: its build-provenance
+# attestation is GitHub-OIDC-specific and has no Woodpecker equivalent,
+# so this lane reproduces every gate and the strict build, records the
+# release manifest, and fails closed exactly like the primary lane.
+#
+# The tag-ruleset preflight reads the repository ruleset through the
+# GitHub API; provide a token as the Woodpecker secret `github_token`.
+when:
+  - event: [tag]
+
+steps:
+  - name: preflight-tag-ruleset
+    image: alpine:3.20
+    environment:
+      GH_TOKEN:
+        from_secret: github_token
+      GITHUB_REPOSITORY: ${CI_REPO}
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash curl github-cli
+        ruleset_id="20868582"
+        if ! ruleset_json="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"; then
+          echo "refusing to release: cannot read the v* tag ruleset $ruleset_id (ruleset preflight fails closed on 403/404/unreadable)" >&2
+          exit 1
+        fi
+        printf '%s\n' "$ruleset_json" | bash "$CI_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$ruleset_id"
+
+  - name: gate-authorization
+    image: alpine:3.20
+    environment:
+      GH_TOKEN:
+        from_secret: github_token
+      GITHUB_REPOSITORY: ${CI_REPO}
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash curl github-cli git
+        tag="${CI_COMMIT_TAG:?a tag event is required}"
+        if gh release view "$tag" >/dev/null 2>&1; then
+          echo "refusing to publish: release $tag already exists (releases are immutable)" >&2
+          exit 1
+        fi
+        echo "release $tag does not exist yet"
+      - |
+        set -euo pipefail
+        # The GitHub gate proves exact-tag CI and authorized-HEAD
+        # equality through the Actions API; on Woodpecker the tag
+        # pipeline itself is the exact-tag CI run, and the annotated
+        # signed tag check is portable.
+        git fetch --tags --force >/dev/null 2>&1 || true
+        test "$(git cat-file -t "$CI_COMMIT_TAG")" = "tag" \
+          || { echo "refusing to release: $CI_COMMIT_TAG must be an annotated tag" >&2; exit 1; }
+        echo "$CI_COMMIT_TAG is an annotated tag at $(git rev-parse "$CI_COMMIT_TAG^{commit}")"
+
+  - name: strict-build
+    image: rust:1.96
+    environment:
+      WASM_OPT_STRICT: '1'
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq git nodejs npm
+        rustup target add wasm32-unknown-unknown
+        cd packages/kiwicaptcha-wasm
+        bash build.sh
+
+  - name: committed-bytes-equal
+    image: alpine:3.20
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git
+        cd packages/kiwicaptcha-wasm
+        git diff --exit-code -- \
+          assets/kiwicaptcha-wasm.js \
+          assets/kiwi-worker.js \
+          assets/execution-interpreter.js \
+          assets/widget-driver.js \
+          assets/widget-risk.js \
+          assets/widget-telemetry.js \
+          assets/widget-locales.js \
+          assets/widget-compat.js \
+          assets/widget.css
+        echo "strict rebuild == committed/browser-tested assets"
+
+  - name: release-manifest
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq git nodejs npm
+        cd packages/kiwicaptcha-wasm
+        ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+
+  - name: release-asset-contract
+    image: alpine:3.20
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git grep
+        bash "$CI_WORKSPACE/tools/ci/release-asset-contract.sh"
+
+  - name: release-baseline-gate
+    image: node:22-alpine
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git
+        node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
+
+  - name: autofill-qualification-gate
+    image: node:22-alpine
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git
+        node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json

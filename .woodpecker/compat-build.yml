@@ -1,0 +1,74 @@
+# Woodpecker CI: the build-reproducibility and generated-asset lanes
+# (mirrors the GitHub jobs build-reproducibility, build-repro-a/b and
+# the independent build-repro-compare, plus symfony-assets).
+#
+# Two clean isolated strict builds run in one step with fresh caches
+# between them (the twin-build form of the GitHub build-reproducibility
+# workflow); the independent-runner comparison of the two GitHub build
+# jobs is reproduced as a byte-compare over the same canonical
+# release-assets.txt manifest within that step, since Woodpecker steps
+# share only the workspace and not scratch filesystems. The
+# generated-copy parity and the worker-glue drift check close the
+# asset-integrity surface.
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: symfony-assets-parity
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        while IFS= read -r f; do
+          [ -n "$f" ] || continue
+          cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
+            "packages/kiwicaptcha/resources/$f" \
+            || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh" >&2; exit 1; }
+        done < packages/kiwicaptcha-wasm/release-assets.txt
+        while IFS= read -r f; do
+          [ -n "$f" ] || continue
+          cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
+            "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
+            || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh" >&2; exit 1; }
+        done < packages/kiwicaptcha-wasm/release-assets.txt
+        echo "generated copies byte-identical to the canonical assets"
+      - |
+        set -euo pipefail
+        cargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check
+
+  - name: build-reproducibility
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq git nodejs npm
+        rustup target add wasm32-unknown-unknown
+        cd packages/kiwicaptcha-wasm
+        # First clean strict build.
+        bash build.sh
+        mkdir -p "$CI_WORKSPACE/.ci-build-repro/repro-a"
+        while IFS= read -r asset; do
+          [ -n "$asset" ] || continue
+          cp "assets/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-a/"
+        done < release-assets.txt
+        # Second clean strict build with fresh cache and target.
+        cargo clean
+        rm -rf pkg
+        rm -rf "$HOME/.cache/kiwicaptcha-wasm"
+        bash build.sh
+        mkdir -p "$CI_WORKSPACE/.ci-build-repro/repro-b"
+        while IFS= read -r asset; do
+          [ -n "$asset" ] || continue
+          cp "assets/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-b/"
+        done < release-assets.txt
+        # Byte-compare the two builds over the canonical manifest.
+        while IFS= read -r asset; do
+          [ -n "$asset" ] || continue
+          cmp "$CI_WORKSPACE/.ci-build-repro/repro-a/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-b/$asset" \
+            || { echo "independent builds differ on $asset" >&2; exit 1; }
+          sha256sum "$CI_WORKSPACE/.ci-build-repro/repro-a/$asset"
+        done < release-assets.txt
+        rm -rf "$CI_WORKSPACE/.ci-build-repro"
+        echo "two clean isolated strict builds produce identical asset hashes"

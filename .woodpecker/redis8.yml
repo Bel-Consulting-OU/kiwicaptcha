@@ -1,0 +1,98 @@
+# Woodpecker CI: Redis 8 compatibility (mirrors the GitHub job
+# redis-compat, non-gating there and here). The four suites cover the
+# risk Rust crate, the risk PHP package, the PHP core fault/topology
+# suites and the Symfony RealRedis filter against a Redis 8 server.
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:8-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: risk-rust-redis8
+    image: rust:1.96
+    failure: ignore
+    environment:
+      RISK_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        cd packages/kiwicaptcha-risk
+        cargo test
+
+  - name: risk-php-redis8
+    image: php:8.3-cli
+    failure: ignore
+    environment:
+      RISK_REDIS_URL: tcp://redis:6379
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-risk-php
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit
+
+  - name: php-core-redis8
+    image: php:8.3-cli
+    failure: ignore
+    environment:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
+        docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha-php
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+
+  - name: symfony-redis8
+    image: php:8.3-cli
+    failure: ignore
+    environment:
+      KC_REDIS_URL: tcp://redis:6379
+      TEST_REDIS_URL: tcp://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        cd packages/kiwicaptcha/integrations/symfony
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"

@@ -1,0 +1,88 @@
+# Woodpecker CI: the package-readiness lanes (mirrors the GitHub jobs
+# package-cargo, package-composer and n1-compat). The cargo lane proves
+# the risk crate ships its Lua resource and builds outside the monorepo,
+# runs the quick start, and packages the core crate with the lockfile;
+# the composer lane proves a clean-room install outside the monorepo;
+# the n1 lane proves the frozen previous release still interoperates.
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: package-cargo
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq && apt-get install -y -qq git
+        cd packages/kiwicaptcha-risk
+        cargo package --list | grep -q 'resources/risk-v1.lua' || { echo 'resources/risk-v1.lua missing from the .crate'; exit 1; }
+      - |
+        set -euo pipefail
+        rm -rf "$CI_WORKSPACE/.ci-crate-check"
+        mkdir -p "$CI_WORKSPACE/.ci-crate-check"
+        cp -r packages/kiwicaptcha-risk "$CI_WORKSPACE/.ci-crate-check/"
+        cd "$CI_WORKSPACE/.ci-crate-check/kiwicaptcha-risk"
+        rm -rf target
+        # Point the versioned dependency at the local core (as crates.io
+        # resolution would once kiwicaptcha 1.7.0 is published). The
+        # include_str!("../resources/risk-v1.lua") must resolve here.
+        sed -i 's|path = "../kiwicaptcha"|path = "'"$CI_WORKSPACE"'/packages/kiwicaptcha"|' Cargo.toml
+        cargo check
+      - |
+        set -euo pipefail
+        cargo test -p kiwicaptcha --example quickstart
+      - |
+        set -euo pipefail
+        cargo package --locked
+
+  - name: package-composer
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq unzip git
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        clean="$CI_WORKSPACE/.ci-composer-clean"
+        rm -rf "$clean"
+        mkdir -p "$clean/packages"
+        cp -r packages/kiwicaptcha-php "$clean/packages/"
+        cp -r packages/kiwicaptcha-risk-php "$clean/packages/"
+        rm -rf "$clean"/packages/*/vendor "$clean"/packages/*/composer.lock
+        cd "$clean"
+        composer init --no-interaction --name=ci/smoke
+        composer config repositories.php '{"type": "path", "url": "'"$clean"'/packages/kiwicaptcha-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-php": "1.0.0"}}}'
+        composer config repositories.risk '{"type": "path", "url": "'"$clean"'/packages/kiwicaptcha-risk-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-risk-php": "0.1.0"}}}'
+        composer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist
+        test -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \
+          || { echo 'risk-v1.lua not shipped in the published package'; exit 1; }
+        php -r 'require "vendor/autoload.php"; $s = new KiwiCaptcha\Risk\Storage\RedisRiskStateStore(new Predis\Client(), "smoke"); echo "OK\n";'
+        rm -rf "$clean"
+
+  - name: n1-compat
+    image: php:8.3-cli
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
+        git -C "$CI_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
+        bash tools/ci/n1-compat.sh /tmp/kiwi-n1
+        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1

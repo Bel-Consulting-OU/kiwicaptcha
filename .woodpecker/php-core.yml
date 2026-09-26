@@ -1,9 +1,9 @@
 # Woodpecker CI: the PHP core lanes (mirrors the GitHub jobs
-# composer-contracts, php, php-matrix, php-no-gmp, php-core-real-redis
-# and phpredis-siteverify). A separate workflow file: every step here
-# runs composer installs inside the shared workspace, so the steps must
-# not race a parallel lane. The workflow carries no depends_on, which
-# keeps its steps ordered.
+# composer-contracts, php (the 8.1-8.5 supported matrix), php-nightly,
+# php-no-gmp, php-core-real-redis and phpredis-siteverify). A separate
+# workflow file: every step here runs composer installs inside the
+# shared workspace, so the steps must not race a parallel lane. The
+# workflow carries no depends_on, which keeps its steps ordered.
 #
 # The composer installer is verified against the published sha384
 # signature before it runs, never piped straight from the network.
@@ -27,9 +27,9 @@ steps:
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha/integrations/symfony
         (cd packages/kiwicaptcha-php && bash ../kiwicaptcha/tools/check-psr4.sh)
 
-  # ── PHP core matrix ───────────────────────────────────────────────
-  - name: php-core
-    image: php:8.3-cli
+  # ── PHP core supported matrix: 8.1, 8.2, 8.3, 8.4, 8.5 ────────────
+  - name: php-core-8.1
+    image: php:8.1-cli
     commands:
       - &php_extensions |
         set -euo pipefail
@@ -50,10 +50,32 @@ steps:
         composer validate --strict
         bash ../kiwicaptcha/tools/check-psr4.sh
         composer install --no-interaction --prefer-dist
+        for i in 1 2 3 4 5; do
+          if composer audit --locked; then
+            break
+          fi
+          echo "composer audit attempt $i failed — retrying in 30s" >&2
+          sleep 30
+        done
+        composer audit --locked
         vendor/bin/phpunit
 
-  - name: php-core-8.1
-    image: php:8.1-cli
+  - name: php-core-8.2
+    image: php:8.2-cli
+    commands:
+      - *php_extensions
+      - *composer_install
+      - *php_core_suite
+
+  - name: php-core-8.3
+    image: php:8.3-cli
+    commands:
+      - *php_extensions
+      - *composer_install
+      - *php_core_suite
+
+  - name: php-core-8.4
+    image: php:8.4-cli
     commands:
       - *php_extensions
       - *composer_install
@@ -61,6 +83,17 @@ steps:
 
   - name: php-core-8.5
     image: php:8.5-cli
+    commands:
+      - *php_extensions
+      - *composer_install
+      - *php_core_suite
+
+  # Non-gating parity with the GitHub php-nightly lane (continue-on-error):
+  # the 8.6 nightly image exercises the next PHP release while a nightly
+  # regression never blocks the pipeline.
+  - name: php-nightly-8.6
+    image: php:8.6-cli
+    failure: ignore
     commands:
       - *php_extensions
       - *composer_install

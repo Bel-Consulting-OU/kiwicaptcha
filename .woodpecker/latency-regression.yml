@@ -1,0 +1,78 @@
+# Woodpecker CI: the manual base/head latency regression (mirrors
+# .github/workflows/latency-regression.yml). Manual event only: the
+# comparator is meaningful on a quiet, dedicated host, never on a
+# busy shared agent. Set LATENCY_BASE_REF (default head~1; pass the
+# previous release tag for a release regression pass) and
+# LATENCY_REDIS_URL when the redis mode is requested. Cross-step
+# evidence lives under .ci-run-tmp/ in the shared workspace. The
+# comparator itself is tools/ci/latency-compare.sh with its
+# deterministic fixtures; only confident regressions block.
+when:
+- event:
+  - manual
+services:
+  redis:
+    image: redis:7-alpine
+steps:
+- name: resolve-the-base-ref-(previous-release-commit-by-ref)
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - "set -euo pipefail\nbase=\"${LATENCY_BASE_REF:-head~1}\"\ngit fetch origin \"$base\" --tags 2>/dev/null || true\nif ! git rev-parse --verify -q \"$base\" >/dev/null 2>&1; then\n  echo \"base ref $base does not resolve\" >&2\n  exit 1\nfi\necho \"$base\" > .ci-run-tmp/base-ref\n"
+- name: check-out-the-base-tree-(same-session,-same-host)
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - 'set -euo pipefail
+
+    git worktree add --detach base "$BASE_REF"
+
+    git -C base rev-parse head
+
+    '
+- name: composer-install-(head-tree)
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - composer install --no-interaction --prefer-dist
+- name: composer-install-(base-tree)
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - composer install --no-interaction --prefer-dist
+- name: record-the-host-state-(machine-identity,-governor,-load,-ver
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - "set -euo pipefail\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\"\nevidence=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt\"\n{\n  echo \"captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"head_sha=$(git rev-parse HEAD)\"\n  echo \"base_ref=$BASE_REF\"\n  echo \"uname=$(uname -a)\"\n  echo \"nproc=$(nproc 2>/dev/null || true)\"\n  echo \"php=$(php -r 'echo PHP_VERSION;')\"\n  if command -v redis-cli >/dev/null 2>&1; then\n    echo \"redis=$(redis-cli -u \"$KC_REDIS_URL\" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\\r')\"\n  fi\n  if [ -r /proc/cpuinfo ]; then\n    echo \"cpu_model=$(awk -F: '/model name/ { gsub(/^ +/, \"\", $2); print $2; exit }' /proc/cpuinfo)\"\n  fi\n  if command -v lscpu >/dev/null 2>&1; then\n    lscpu | sed -n 's/^ *\\(Model name\\|CPU(s)\\|CPU max MHz\\|CPU min MHz\\|Thread(s) per core\\|Core(s) per socket\\): */lscpu_\\1=/p'\n  fi\n  for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do\n    [ -r \"$cpu\" ] || continue\n    echo \"$cpu=$(cat \"$cpu\")\"\n  done\n  echo \"uptime=$(uptime 2>/dev/null || true)\"\n  echo \"loadavg=$(cat /proc/loadavg 2>/dev/null || true)\"\n} | tee \"$evidence\"\n"
+- name: host-warm-up-runs-(both-trees,-discarded;-settles-governor,-
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - "set -euo pipefail\nfor _ in 1 2; do\n  for root in \"$CI_WORKSPACE/base\" \"$CI_WORKSPACE\"; do\n    (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true\n  done\ndone\necho \"warm-up runs done (base and head, two interleaved passes)\"\n"
+- name: balanced-repeated-benchmark-runs-(balanced-alternating-order
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - "set -euo pipefail\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nif (( repeats < 2 || repeats % 2 != 0 )); then\n  echo \"LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $repeats)\" >&2\n  exit 1\nfi\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head\"\nfor mode in $modes; do\n  case \"$mode\" in\n    array) flags=() ;;\n    redis) flags=(--redis) ;;\n    argon) flags=(--argon) ;;\n    *) echo \"unknown LATENCY_REGRESSION_MODES entry: $mode\" >&2; exit 1 ;;\n  esac\n  for ((repeat = 1; repeat <= repeats; repeat++)); do\n    if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi\n    for side in \"${order[@]}\"; do\n      if [ \"$side\" = base ]; then\n        root=\"$CI_WORKSPACE/base\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base/$mode-$repeat.log\"\n      else\n        root=\"$CI_WORKSPACE\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head/$mode-$repeat.log\"\n      fi\n      (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php \"${flags[@]}\") >\"$out\" 2>&1 || true\n      echo \"$side $mode repeat $repeat (order $repeat%2): $(sed -n 's/perf-bench: \\(SHA-256 [a-z]*\\|Argon2id admission\\) issuance.*/bench line recorded/p' \"$out\" || true)\"\n    done\n  done\ndone\n"
+- name: compare-base-vs-head-(paired-distributions,-balanced-order)
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - "set -euo pipefail\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nrel_max=\"${LATENCY_REGRESSION_MAX_REL_PCT:-20}\"\nabs_max=\"${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}\"\nspread_max=\"${LATENCY_REGRESSION_MAX_SPREAD:-10}\"\nbash tools/ci/latency-compare.sh \\\n  \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\" \"$repeats\" \"$modes\" \"$rel_max\" \"$abs_max\" \"$spread_max\"\nif [ -f \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/ambiguous\" ]; then\n  {\n    echo \"Latency regression: ambiguous\"\n    echo \"\"\n    echo \"An over-threshold signal without paired-distribution agreement was recorded.\"\n    echo \"It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence.\"\n  } >>\"$CI_WORKSPACE/.ci-run-tmp/step-summary.txt\"\nfi\n"
+- name: reverse-order-validation-note
+  image: php:8.3-cli
+  commands:
+  - set -euo pipefail
+  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - 'echo "reverse-order probe: dispatch with base_ref newer than the head commit; expect PASS"
+
+    '

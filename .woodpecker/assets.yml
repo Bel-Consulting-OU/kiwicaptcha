@@ -1,0 +1,44 @@
+# Woodpecker CI: the asset-refresh lanes (mirrors the GitHub workflows
+# regenerate-assets and sync-assets). Manual event only, exactly like
+# the primary lanes: a strict build on the release platform, then the
+# refreshed copies staged under .ci-asset-refresh/ for review. The
+# refresh commit/PR stays a maintainer action in Woodpecker (the GitHub
+# lane opens the PR with a token this secondary pipeline does not
+# carry), so the lane proves the build and reports the diff instead.
+when:
+  - event: [manual]
+
+steps:
+  - name: regenerate-strict-build
+    image: rust:1.96
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq git nodejs npm
+        rustup target add wasm32-unknown-unknown
+        cd packages/kiwicaptcha-wasm
+        bash build.sh
+        echo "strict deterministic build complete on the release platform"
+
+  - name: refresh-generated-copies
+    image: alpine:3.20
+    depends_on: [regenerate-strict-build]
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git coreutils
+        mkdir -p .ci-asset-refresh/packages/kiwicaptcha-wasm/assets \
+          .ci-asset-refresh/packages/kiwicaptcha/resources \
+          .ci-asset-refresh/packages/kiwicaptcha/integrations/symfony/Resources/public
+        while IFS= read -r asset; do
+          [ -n "$asset" ] || continue
+          cp "packages/kiwicaptcha-wasm/assets/$asset" .ci-asset-refresh/packages/kiwicaptcha-wasm/assets/
+          cp "packages/kiwicaptcha/resources/$asset" .ci-asset-refresh/packages/kiwicaptcha/resources/
+          cp "packages/kiwicaptcha/integrations/symfony/Resources/public/$asset" .ci-asset-refresh/packages/kiwicaptcha/integrations/symfony/Resources/public/
+        done < packages/kiwicaptcha-wasm/release-assets.txt
+        echo "refreshed copies staged under .ci-asset-refresh/"
+      - |
+        set -euo pipefail
+        git status --porcelain -- packages/kiwicaptcha-wasm/assets packages/kiwicaptcha/resources packages/kiwicaptcha/integrations/symfony/Resources/public | tee .ci-asset-refresh/diff.txt
+        test -s .ci-asset-refresh/diff.txt || echo "no generated-copy drift in this build"

@@ -1,0 +1,51 @@
+# Woodpecker CI: the manual hard-ratchet performance benchmark (mirrors
+# the GitHub job perf-latency-quiet). Manual event only, exactly like
+# the primary lane: the ratchet is meaningful on a quiet, dedicated
+# host. The fenced Redis service feeds the --redis modes; the preflight
+# proves reachability before the first hard-ratchet gate.
+when:
+  - event: [manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6399 --save "" --appendonly no
+
+steps:
+  - name: perf-latency-quiet
+    image: php:8.3-cli
+    environment:
+      KC_REDIS_URL: redis://redis:6399
+    commands:
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
+        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+        rm -f /tmp/composer-setup.php
+      - |
+        set -euo pipefail
+        (cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)
+        (cd packages/kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)
+      - |
+        set -euo pipefail
+        php -r '
+          require "packages/kiwicaptcha-php/vendor/autoload.php";
+          $url = getenv("KC_REDIS_URL") ?: "redis://redis:6399";
+          $client = new Predis\Client($url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
+          $client->ping();
+          echo "manual-benchmark preflight: Redis answers at $url\n";
+        '
+      - php packages/kiwicaptcha/tools/perf-bench.php
+      - php packages/kiwicaptcha/tools/perf-bench.php --redis
+      - php packages/kiwicaptcha/tools/perf-bench.php --argon
+      - php packages/kiwicaptcha/tools/perf-bench-risk.php
+      - php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+      - php packages/kiwicaptcha/tools/perf-wait.php
+      - php packages/kiwicaptcha/tools/perf-wait-replica.php
