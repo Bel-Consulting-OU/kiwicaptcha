@@ -9,15 +9,15 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 102117,
-      "brotli_bytes": 25781,
+      "raw_bytes": 92600,
+      "brotli_bytes": 23109,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 30600,
-      "gzip_bytes_zlib13": 30600
+      "gzip_bytes_zlib12": 27251,
+      "gzip_bytes_zlib13": 27251
     },
     "widget_worker": {
       "raw_bytes": 141542,
@@ -89,15 +89,15 @@
       "gzip_bytes_zlib13": 1229
     },
     "widget_compat": {
-      "raw_bytes": 32504,
-      "brotli_bytes": 8374,
+      "raw_bytes": 31586,
+      "brotli_bytes": 8095,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,
       "brotli_cap_bytes": 10000,
       "copies_identical": true,
       "note": "The compatibility-loader module (widget-compat.js), three byte-identical copies. Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 9668,
-      "gzip_bytes_zlib13": 9668
+      "gzip_bytes_zlib12": 9304,
+      "gzip_bytes_zlib13": 9304
     },
     "widget_locales": {
       "raw_bytes": 13395,

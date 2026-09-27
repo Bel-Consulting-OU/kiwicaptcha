@@ -36,11 +36,16 @@ import {
   buildMeasurementContext,
   currentReleaseMeasurementContext,
   currentReleaseMeasurementFields,
+  measurementFieldDifferences,
+  readHarnessMeasurementFacts,
+  runMeasurementFields,
+  sha256Hex,
 } from '../client-perf/measurement-context.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 const VALIDATOR = join(SCRIPT_DIR, 'validate-release-baseline.mjs');
+const MERGE_CELLS = join(REPO_ROOT, 'tools', 'client-perf', 'merge-cells.mjs');
 const HARNESS_FILE = join(REPO_ROOT, 'tools', 'client-perf', 'client-perf.mjs');
 const BUDGETS_SRC = join(REPO_ROOT, 'tools', 'client-perf', 'release-budgets.json');
 const LEGACY_BASELINE_SRC = join(REPO_ROOT, 'tools', 'client-perf', 'results', 'baseline.json');
@@ -100,6 +105,13 @@ const ARGON_BITS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'argon bits def
 const { tiers: TIERS, difficulties: DIFFICULTIES } = harnessFacts(HARNESS_SOURCE);
 const CACHE_STATES = ['cold', 'warm'];
 const RELEASE_TIER = 'mainstream-desktop';
+
+// The shared measurement-context authority of the current tree (the
+// suite's run fixtures record these exact facts, so a run built by
+// runFixture() is a run "carrying all recorded facts equal to current").
+const FACTS = readHarnessMeasurementFacts();
+const HARNESS_REL_PATH = 'tools/client-perf/client-perf.mjs';
+const HARNESS_SOURCE_SHA256 = sha256Hex(HARNESS_SOURCE);
 
 // The live execution-grammar authority (audit finding 1): the suite
 // reads the manifest maximum exactly like the validator, so every
@@ -438,6 +450,100 @@ function physicalPayload(deviceIndexes) {
   payload.physical_results = deviceIndexes;
   return payload;
 }
+
+// ── Run-derived-provenance fixtures (re-audit) ──────────────────────
+// A synthetic schema-3 run whose recorded facts equal the current
+// release facts by construction: schema, harness path + recorder source
+// sha256, recorded execution manifest schema and maximum, options and
+// the fixed-work envelope, the current difficulty table, one recorded
+// tier definition (the shape every per-tier physical run has) and the
+// current clientAssets block, with per-mode result rows for every
+// difficulty of the tier. mutate() lets a case make one recorded fact
+// differ from current (or remove it).
+
+function runFixture(mutate) {
+  const sd = FACTS.solverDefaults;
+  const payload = {
+    schema: SCHEMA,
+    generated_at: nowIso(),
+    harness: HARNESS_REL_PATH,
+    harnessSha256: HARNESS_SOURCE_SHA256,
+    clientAssets: canonicalClientAssets(),
+    completion: { status: 'completed', marker: COMPLETION_MARKER },
+    methodology: {
+      execution: { manifestSchema: 'kiwicaptcha.execution-v1/1', maxVersion: EXECUTION_MAX_VERSION },
+      fixedWork: {
+        shaHashes: sd.shaFixedWork,
+        shaTargetBits: sd.shaTargetBits,
+        argonDerivations: sd.argonFixedWork,
+        argonEnvelope: { mKib: sd.argonMKib, t: sd.argonT, p: sd.argonP },
+      },
+    },
+    tiers: { [RELEASE_TIER]: clone(FACTS.tiers[RELEASE_TIER]) },
+    difficulties: clone(FACTS.difficulties),
+    options: {
+      reps: sd.reps,
+      argonReps: sd.argonReps,
+      cache: sd.cache,
+      assets: sd.assets,
+      argonBits: sd.argonBits,
+      argonMKib: sd.argonMKib,
+      multiWidget: false,
+      multiWidgetReps: 3,
+      seed: 1,
+      shaFixedWork: sd.shaFixedWork,
+      argonFixedWork: sd.argonFixedWork,
+    },
+    results: {},
+  };
+  for (const [difficulty, profile] of Object.entries(DIFFICULTIES)) {
+    for (const cache of CACHE_STATES) {
+      for (const mode of profile.assetModes) {
+        const n = difficulty === 'sha20' ? 100 : profile.isArgon ? ARGON_REPS_DEFAULT : SHA_REPS_DEFAULT;
+        const samples = Array.from({ length: n }, () => {
+          const sample = healthySample();
+          if (profile.dimension === 'execution') sample.executionVersion = EXECUTION_MAX_VERSION;
+          return sample;
+        });
+        payload.results[`${RELEASE_TIER}:${difficulty}:${cache}:${mode}`] = modeRow(null, RELEASE_TIER, difficulty, cache, mode, samples);
+      }
+    }
+  }
+  if (mutate) mutate(payload);
+  return payload;
+}
+
+function runMergeCells(runs, tier = RELEASE_TIER) {
+  const stamp = `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  const filePaths = runs.map((run, i) => {
+    const p = join(tmpBase, `merge-run-${stamp}-${i}.json`);
+    writeFileSync(p, JSON.stringify(run));
+    return p;
+  });
+  const args = [MERGE_CELLS, '--physical-index', '--source', 'physical', '--device-id', 'dev-merge-test', '--tier', tier];
+  for (const p of filePaths) args.push('--run', p);
+  // The per-mode index carries full repetitions (sha20 at 100 samples),
+  // so the child's stdout can exceed spawnSync's 1 MiB default.
+  const res = spawnSync(process.execPath, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return { ...res, filePaths };
+}
+
+/** In-process check: fn() throws (or returns) on failure, no subprocess. */
+function selfCheck(label, fn) {
+  cases += 1;
+  try {
+    fn();
+    console.log(`PASS  ${label}`);
+  } catch (e) {
+    failures += 1;
+    console.log(`FAIL  ${label}`);
+    console.log(`      ${e.message}`);
+  }
+}
+
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
 
 /** Result-row keys whose difficulty is an execution-dimension profile. */
 function executionRowKeys(results) {
@@ -1504,6 +1610,293 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
     ['physical_results["dev-a"]', 'measurement_context.schema', 'is not kiwicaptcha.measurement-context/1'],
   );
 }
+
+// ── Run-derived measurement provenance (re-audit) ───────────────────
+// The minting rewrite: merge-cells stamps a device only from the facts
+// the RUN FILE records and the validator demands the current release
+// context. These cases prove (a) a run whose recorded solver options /
+// fixed-work facts / difficulty table / client assets / recorder
+// identity differ from current is refused at merge time, (b) the
+// validator rejects a device whose context was minted from such a run
+// even though the top-level clientAssets are current, (c) a run
+// carrying all recorded facts equal to current is accepted end-to-end
+// (merge-cells -> validator), and the self-check that the old
+// current-tree-minted-but-run-different scenario can no longer produce
+// the current context.
+
+// (c) A full-recorded-facts run is stamped, and the emitted device
+// index passes the validator's physical-evidence contract in CI mode.
+{
+  const res = runMergeCells([runFixture()]);
+  check('run provenance (c): run with every recorded fact equal to current is stamped by merge-cells', res, {
+    status: 0,
+    mustInclude: ['"measurement_context"'],
+  });
+  const mergedIndex = JSON.parse(res.stdout).physical_results['dev-merge-test'];
+  assert(
+    mergedIndex.measurement_context.sha256 === currentReleaseMeasurementContext().sha256,
+    `merge stamped ${JSON.stringify(mergedIndex.measurement_context)} instead of the current release context`,
+  );
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-merge-test')] });
+  pass(
+    'run provenance (c): the merge-emitted per-device index is accepted by the validator (CI mode)',
+    runValidator(physicalPayload({ 'dev-merge-test': mergedIndex }), budgets, false),
+  );
+}
+
+// (c) The recorded object harness-identity form (harness: { path,
+// sha256 }) is an accepted shape.
+{
+  const run = runFixture((p) => {
+    delete p.harnessSha256;
+    p.harness = { path: HARNESS_REL_PATH, sha256: HARNESS_SOURCE_SHA256 };
+  });
+  pass('run provenance (c): harness object identity { path, sha256 } is accepted', runMergeCells([run]));
+}
+
+// (a) Missing recorder identity: refused with the exact reason.
+{
+  const run = runFixture((p) => {
+    delete p.harnessSha256;
+  });
+  reject('run provenance (a): a run recording no harness source sha256 is refused at merge time', runMergeCells([run]), [
+    'cannot be bound to a release measurement context from its own recorded facts',
+    'records no harness source sha256',
+  ]);
+}
+
+// (a) Different recorder source (the audit's core false-provenance
+// scenario: same recorded options/assets, recorded by another harness).
+{
+  const run = runFixture((p) => {
+    p.harnessSha256 = 'f'.repeat(64);
+  });
+  reject('run provenance (a): a run recorded by a different harness source is refused at merge time', runMergeCells([run]), [
+    'recorded measurement facts differ from the current release facts',
+    'harness.sourceSha256',
+  ]);
+}
+
+// (a) Different recorded solver option.
+{
+  const run = runFixture((p) => {
+    p.options.reps += 1;
+  });
+  reject('run provenance (a): a run with a different recorded solver option is refused at merge time', runMergeCells([run]), [
+    'recorded measurement facts differ from the current release facts',
+    'solver.reps',
+  ]);
+}
+
+// (a) Different recorded fixed-work fact.
+{
+  const run = runFixture((p) => {
+    p.methodology.fixedWork.shaTargetBits = FACTS.solverDefaults.shaTargetBits + 1;
+  });
+  reject('run provenance (a): a run with a different recorded fixed-work target is refused at merge time', runMergeCells([run]), [
+    'recorded measurement facts differ from the current release facts',
+    'solver.shaTargetBits',
+  ]);
+}
+
+// (a) Different recorded difficulty definition.
+{
+  const run = runFixture((p) => {
+    p.difficulties.sha16 = { ...p.difficulties.sha16, label: 'SHA-256, 17 leading zero bits' };
+  });
+  reject('run provenance (a): a run with a different recorded difficulty definition is refused at merge time', runMergeCells([run]), [
+    'recorded measurement facts differ from the current release facts',
+    'difficulties.sha16.label',
+  ]);
+}
+
+// (a) Different recorded difficulty query (the fixture arm the run
+// actually measured).
+{
+  const run = runFixture((p) => {
+    p.difficulties.rsw75k = { ...p.difficulties.rsw75k, query: '?algorithm=rsw&rsw_t=76000' };
+  });
+  reject('run provenance (a): a run with a different recorded difficulty query is refused at merge time', runMergeCells([run]), [
+    'recorded measurement facts differ from the current release facts',
+    'difficulties.rsw75k.query',
+  ]);
+}
+
+// (a) Different recorded client assets: the asset guard refuses before
+// any repetition is indexed.
+{
+  const run = runFixture((p) => {
+    const driver = p.clientAssets['widget-driver.js'];
+    p.clientAssets['widget-driver.js'] = { bytes: driver.bytes + 1, sha256: driver.sha256 };
+  });
+  reject('run provenance (a): a run recorded against different client assets is refused at merge time', runMergeCells([run]), [
+    'was not measured against the current canonical client asset set',
+    'client asset widget-driver.js does not match current bytes',
+  ]);
+}
+
+// (a) Multiple runs feeding one device with disagreeing recorded facts:
+// refused naming the disagreement between the runs (checked before the
+// per-run current comparison, so the multi-run class has its own
+// reason).
+{
+  const first = runFixture();
+  const second = runFixture((p) => {
+    p.difficulties.sha18 = { ...p.difficulties.sha18, dimension: 'rsw' };
+  });
+  reject('run provenance (a): runs disagreeing on their recorded facts are refused for one device', runMergeCells([first, second]), [
+    'recorded measurement facts disagree with those of',
+    'difficulties.sha18.dimension',
+  ]);
+}
+
+// (a) A result row whose difficulty the run's recorded table does not
+// define is refused even when the recorded table equals current.
+{
+  const run = runFixture((p) => {
+    p.results[`${RELEASE_TIER}:sha22:cold:inline`] = modeRow(null, RELEASE_TIER, 'sha16', 'cold', 'inline', [healthySample()]);
+  });
+  reject('run provenance (a): a row for a difficulty the recorded table does not define is refused', runMergeCells([run]), [
+    'run records rows for difficulty sha22 that its recorded difficulty table does not define',
+  ]);
+}
+
+// (a) A recorded tier definition that differs from the current harness
+// definition is refused entry by entry (the tier table is verified,
+// not part of the hash: per-tier runs legitimately record one tier).
+{
+  const run = runFixture((p) => {
+    p.tiers['low-android'] = { ...clone(FACTS.tiers['low-android']), cpuThrottle: 9 };
+  });
+  reject('run provenance (a): a recorded tier definition differing from current is refused', runMergeCells([run]), [
+    'recorded tier low-android cpuThrottle 9 differs from the current harness cpuThrottle 6',
+  ]);
+}
+
+// (b) The validator rejects a device whose context was minted from a
+// run with a different recorded difficulty table even though the
+// top-level clientAssets block is current: the run-derived context is
+// not the current release context.
+{
+  const run = runFixture((p) => {
+    p.difficulties.sha16 = { ...p.difficulties.sha16, label: 'SHA-256, 17 leading zero bits' };
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(fields && reasons.length === 0, `fixture regression: run fields not built (${reasons.join('; ')})`);
+  const index = deviceIndex('dev-a');
+  index.measurement_context = buildMeasurementContext(fields);
+  const payload = physicalPayload({ 'dev-a': index });
+  payload.clientAssets = canonicalClientAssets(); // top-level identity is CURRENT
+  reject(
+    'run provenance (b): a device context minted from a run with a different recorded difficulty table rejects though top-level clientAssets are current',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-a')] }), false),
+    ['physical_results["dev-a"]', 'is not the current release measurement context'],
+  );
+}
+
+// Self-check: the exact "current-tree-minted but run-different" scenario
+// the re-audit calls false provenance. The old minting substituted the
+// CURRENT tree's harness source sha256 and difficulty table into the
+// run's fields (reconstructed below as oldStyle) and thus produced the
+// current context for a run recorded under different facts. The
+// recorded-only minting must produce a different context for the same
+// run, and merge-cells must refuse it.
+selfCheck('provenance self-check: current-tree-minted but run-different context is no longer produced (recorded-only fields differ)', () => {
+  const currentFields = currentReleaseMeasurementFields();
+  const currentCtx = buildMeasurementContext(currentFields);
+  const run = runFixture((p) => {
+    p.harnessSha256 = 'f'.repeat(64);
+    p.difficulties.sha16 = { ...p.difficulties.sha16, label: 'SHA-256, 17 leading zero bits' };
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(fields && reasons.length === 0, `run fields not built (${reasons.join('; ')})`);
+  const runCtx = buildMeasurementContext(fields);
+  assert(runCtx.sha256 !== currentCtx.sha256, 'the run-derived context must differ from the current release context');
+  assert(
+    measurementFieldDifferences(fields, currentFields).some((r) => r.startsWith('harness.sourceSha256')),
+    'the difference report must name harness.sourceSha256',
+  );
+  assert(
+    measurementFieldDifferences(fields, currentFields).some((r) => r.startsWith('difficulties.sha16.label')),
+    'the difference report must name the recorded difficulty label',
+  );
+  // Reconstruct the old minting: substitute the current tree's harness
+  // source hash and the current difficulty table for the run's recorded
+  // facts — the old code did exactly this and WOULD have bound this run
+  // to the current context.
+  const oldStyle = clone(fields);
+  oldStyle.harness.sourceSha256 = currentFields.harness.sourceSha256;
+  oldStyle.difficulties = clone(currentFields.difficulties);
+  const falseCtx = buildMeasurementContext(oldStyle);
+  assert(
+    falseCtx.sha256 === currentCtx.sha256,
+    'the old current-tree minting did not reproduce the current context (fixture premise broken)',
+  );
+  assert(runCtx.sha256 !== falseCtx.sha256, 'the recorded-only context must differ from the current-tree-minted context');
+});
+
+// Self-check: the pristine run's recorded-only fields produce exactly
+// the current release context (full recorded/current field equality).
+selfCheck('provenance self-check: a run with all recorded facts equal to current produces the current context', () => {
+  const { fields, reasons } = runMeasurementFields(runFixture());
+  assert(fields && reasons.length === 0, `run fields not built (${reasons.join('; ')})`);
+  assert(
+    measurementFieldDifferences(fields, currentReleaseMeasurementFields()).length === 0,
+    'recorded facts differ from current for the pristine fixture',
+  );
+  assert(
+    buildMeasurementContext(fields).sha256 === currentReleaseMeasurementContext().sha256,
+    'the recorded-only context does not equal the current release context',
+  );
+});
+
+// Self-check: every class of recorded-fact mutation changes the
+// run-derived context (no current-tree substitution can mask it).
+selfCheck('provenance self-check: solver, difficulty, manifest and client-asset mutations each change the run-derived context', () => {
+  const currentCtx = currentReleaseMeasurementContext();
+  const mutations = [
+    (p) => {
+      p.options.argonReps += 1;
+    },
+    (p) => {
+      p.difficulties.execchain = { ...p.difficulties.execchain, assetModes: ['inline'] };
+    },
+    (p) => {
+      const asset = p.clientAssets['widget.css'];
+      p.clientAssets['widget.css'] = { bytes: asset.bytes + 1, sha256: asset.sha256 };
+    },
+    (p) => {
+      p.methodology.execution.manifestSchema = 'kiwicaptcha.execution-v9/1';
+    },
+  ];
+  for (const [i, mutate] of mutations.entries()) {
+    const { fields, reasons } = runMeasurementFields(runFixture(mutate));
+    assert(fields && reasons.length === 0, `run fields not built for mutation ${i} (${reasons.join('; ')})`);
+    assert(
+      buildMeasurementContext(fields).sha256 !== currentCtx.sha256,
+      `mutation ${i} did not change the run-derived context`,
+    );
+  }
+});
+
+// Self-check: missing recorded facts are refused with the exact reason
+// and no field is ever substituted from the current tree.
+selfCheck('provenance self-check: missing recorded facts are refused with exact reasons (no current-tree fallback)', () => {
+  const run = runFixture((p) => {
+    delete p.harnessSha256;
+    delete p.methodology.fixedWork;
+    delete p.options.cache;
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(fields === null, 'fields must be null when a recorded fact is missing');
+  for (const expected of [
+    'records no harness source sha256',
+    'records no methodology.fixedWork block',
+    'run payload option cache undefined is not a non-empty string',
+  ]) {
+    assert(reasons.some((r) => r.includes(expected)), `missing reason ${JSON.stringify(expected)} in ${JSON.stringify(reasons)}`);
+  }
+});
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
 process.exit(failures === 0 ? 0 : 1);

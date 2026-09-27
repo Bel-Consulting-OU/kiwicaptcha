@@ -1,12 +1,8 @@
 (function () {
   // ── widget-compat.js: the incumbent compatibility loader ───────────
-  // Delivered INSIDE the /api.js response (glue + driver + this module,
-  // split at /*KIWI_COMPAT_SPLIT*/), so it runs only on the compat route.
-  // Loaded as .../api.js?compat=recaptcha|hcaptcha|turnstile, it renders
-  // the incumbent containers, installs the provider global and keeps the
-  // provider-named response field in sync with the Kiwi token.
-  // The script URL carries the loader parameters (?compat= / render= /
-  // onload= / hl=); the core closure is reached through the bridge.
+  // Runs only on the compat route (delivered inside /api.js after the
+  // /*KIWI_COMPAT_SPLIT*/ marker): renders the incumbent containers,
+  // installs the provider global, mirrors the provider response field.
   var K = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
   if (!K || !K.core) return;
   var core = K.core;
@@ -240,10 +236,7 @@
     } else if (!el.querySelector("[data-kiwi-widget]")) {
       el.innerHTML = compatMarkup();
     }
-    // The supported configuration list is copied onto the exact
-    // renderTarget handed to core.render: the driver consults W and its
-    // .kiwi-container ancestor, and the markup's nested container is not
-    // that ancestor.
+    // Copy supported config onto the exact renderTarget core.render reads.
     if (core.copySupportedConfiguration) core.copySupportedConfiguration(el, renderTarget);
     compatApplyDescriptorAssets(renderTarget);
     if (compatLocalesSrc && !renderTarget.hasAttribute("data-kiwi-locales-src")) {
@@ -287,11 +280,8 @@
       callback: cbs.callback,
       expiredCallback: cbs.expiredCallback,
       errorCallback: cbs.errorCallback,
-      // Turnstile's configurable response field (response-field-name /
-      // params["response-field-name"]) — the default stays the
-      // provider-named field. response-field=false keeps the internal
-      // Kiwi token field and SKIPS the provider alias input;
-      // response-field-name overrides the alias name.
+      // Turnstile's response-field-name override; false keeps only the
+      // internal token field.
       responseField: responseFieldName,
       // grecaptcha.render(el, {lang: "de"}) or data-kiwi-lang on the
       // incumbent container.
@@ -303,20 +293,12 @@
         || el.getAttribute("data-action") || undefined,
       cData: (params && typeof params.cData === "string" && params.cData)
         || el.getAttribute("data-cdata") || undefined,
-      // Turnstile language + the public sitekey (server-owned scope
-      // resolution). The loader's own hl= parameter (parsed by the
-      // core from this script's URL) is the lowest-precedence language
-      // fallback, exactly where the historical driver consulted it.
+      // language: params/attribute, then the loader's own hl= fallback.
       language: (params && typeof params.language === "string" && params.language)
         || el.getAttribute("data-language")
         || (compatLoader && compatLoader.language) || undefined,
-      // Explicit-execution mode: params.execution="execute" or
-      // data-execution="execute" on the container defers the challenge
-      // until execute() (params win over the attribute). An
-      // invisible-class control (BUTTON, INPUT, data-size="invisible")
-      // defaults to "execute" so the challenge starts only when the
-      // control is activated, exactly like the incumbent invisible
-      // reCAPTCHA, never at page render.
+      // Explicit-execution mode: params/data-execution="execute", or an
+      // invisible-class control (BUTTON/INPUT/data-size=invisible).
       execution: (params && typeof params.execution === "string")
         ? params.execution
         : (el.getAttribute("data-execution") === "execute"
@@ -346,14 +328,9 @@
     }
     return id || 0;
   }
-  // hCaptcha async execute() rejects with a stable error-code STRING
-  // (network-error | challenge-error | internal-error) that migrated
-  // applications branch on. The message text is the stable signal because
-  // fail() forwards e.message into a fresh Error: transport failures
-  // (aborted fetches, fetch TypeErrors, non-2xx responses) are
-  // "network-error"; solve failures (malformed, downgraded, exhausted)
-  // are "challenge-error"; everything else is "internal-error". The bare
-  // non-async execute keeps rejecting with Error objects.
+  // hCaptcha async execute() rejects with a stable error-code STRING:
+  // transport failures are "network-error", solve failures
+  // "challenge-error", everything else "internal-error".
   function kiwiHcaptchaErrorCode(err) {
     var name = err && err.name;
     if (name === "AbortError" || name === "TypeError") return "network-error";
@@ -506,22 +483,44 @@
     }
   };
   // Merge into an existing provider global instead of skipping it: a
-  // pre-seeded object keeps its own properties, gains the Kiwi API, and
-  // a recognized queued ready() shim (callbacks parked in an own array
-  // property) is drained once the glue is ready.
+  // pre-seeded object keeps its own properties and gains the Kiwi API.
+  // Ready callbacks queued before the loader (own array properties, or
+  // the conventional ___grecaptcha_cfg pre-loader queues) drain once,
+  // in order, after the glue is ready.
   var COMPAT_QUEUE_KEYS = ["_", "q", "queue", "_q", "_ready", "readyQueue"];
+  function compatDrainQueue(q, queued) {
+    if (Object.prototype.toString.call(q) !== "[object Array]") return;
+    for (var i = 0; i < q.length; i++) {
+      if (typeof q[i] === "function" && queued.indexOf(q[i]) === -1) queued.push(q[i]);
+    }
+    try { q.length = 0; } catch (e) {}
+  }
+  // The conventional reCAPTCHA pre-loader contract: ready callbacks are
+  // parked as arrays on the global configuration object before the real
+  // grecaptcha exists. Only the queue arrays are drained; the config
+  // object and its unknown fields stay untouched. The documented shape
+  // is an array of callbacks under ___grecaptcha_cfg (cfg.ready); the
+  // loader's fns/onload arrays and clients.af.ready are recognized too.
+  function compatCollectPreloader(queued) {
+    var cfg = window.___grecaptcha_cfg;
+    if (!cfg || (typeof cfg !== "object" && typeof cfg !== "function")) return;
+    compatDrainQueue(cfg.ready, queued);
+    compatDrainQueue(cfg.fns, queued);
+    compatDrainQueue(cfg.onload, queued);
+    var clients = cfg.clients;
+    if (clients && typeof clients === "object") {
+      compatDrainQueue(clients.ready, queued);
+      var af = clients.af;
+      if (af && typeof af === "object") compatDrainQueue(af.ready, queued);
+    }
+  }
   function compatMountGlobal(name, api) {
     var existing = window[name];
     var queued = [];
+    if (compat === "recaptcha" && name === "grecaptcha") compatCollectPreloader(queued);
     if (existing && (typeof existing === "object" || typeof existing === "function")) {
       for (var i = 0; i < COMPAT_QUEUE_KEYS.length; i++) {
-        var q = existing[COMPAT_QUEUE_KEYS[i]];
-        if (Object.prototype.toString.call(q) === "[object Array]") {
-          for (var j = 0; j < q.length; j++) {
-            if (typeof q[j] === "function") queued.push(q[j]);
-          }
-          try { q.length = 0; } catch (e) {}
-        }
+        compatDrainQueue(existing[COMPAT_QUEUE_KEYS[i]], queued);
       }
       Object.assign(existing, api);
       window[name] = existing;
@@ -563,16 +562,9 @@
     compatMountGlobal("turnstile", compatApi);
   }
   compatInjectCss();
-  // render=explicit suppresses automatic rendering — the application
-  // calls render() itself (the documented explicit pattern); onload=<fn>
-  // runs after the loader glue is ready so an immediate explicit Argon
-  // render can never race the glue bootstrap.
-  // The compat readiness gate: implicit renders happen after the
-  // loader-glue bootstrap, so an immediate execute()/getResponse() must
-  // await the registration. An execute racing the registration would
-  // resolve a widget-less target ("missing-captcha" / "invalid-captcha-
-  // id") instead of the real network outcome — the lifecycle race the
-  // browser suite exercises with the challenge endpoint down.
+  // render=explicit suppresses automatic rendering; onload=<fn> runs
+  // after the glue is ready. The readiness gate also queues an immediate
+  // execute()/getResponse() behind the registration.
   var kiwiCompatReady = (kiwiCompatGlueReady || Promise.resolve()).then(function () {
     if (compatOnloadName) {
       var onloadFn = window[compatOnloadName];
@@ -619,22 +611,20 @@
       }
     }
   }
-  // Dynamic implicit rendering (never in explicit mode): the whole
-  // added subtree is traversed, so nested containers and late controls
-  // render and bind. Removals tear down detached provider controls.
+  // Dynamic implicit rendering (never in explicit mode): the whole added
+  // subtree is traversed for every provider, so nested containers and
+  // late controls render and bind. Removals tear down detached controls.
   if (compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
     new MutationObserver(function (mutations) {
       for (var m = 0; m < mutations.length; m++) {
-        if (compat === "recaptcha") {
-          var nodes = mutations[m].addedNodes;
-          for (var n = 0; n < nodes.length; n++) {
-            var node = nodes[n];
-            if (!node || node.nodeType !== 1) continue;
-            if (node.matches && node.matches(COMPAT_SELECTOR)) compatRender(node, null, true);
-            if (node.querySelectorAll) {
-              var nested = node.querySelectorAll(COMPAT_SELECTOR);
-              for (var q = 0; q < nested.length; q++) compatRender(nested[q], null, true);
-            }
+        var nodes = mutations[m].addedNodes;
+        for (var n = 0; n < nodes.length; n++) {
+          var node = nodes[n];
+          if (!node || node.nodeType !== 1) continue;
+          if (node.matches && node.matches(COMPAT_SELECTOR)) compatRender(node, null, true);
+          if (node.querySelectorAll) {
+            var nested = node.querySelectorAll(COMPAT_SELECTOR);
+            for (var q = 0; q < nested.length; q++) compatRender(nested[q], null, true);
           }
         }
         compatCollectRemovals(mutations[m].removedNodes);

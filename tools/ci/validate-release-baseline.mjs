@@ -226,20 +226,24 @@
  *      measured. Every physical device evidence object in
  *      payload.physical_results must therefore carry
  *      measurement_context { schema, sha256 } — the release measurement
- *      context the device's rows were recorded against, built by the
- *      shared measurement-context module over the canonical clientAssets
- *      set, the harness schema and source hash, the execution manifest
- *      maximum, the solver configuration (reps/argonReps/cache/assets/
- *      argonBits/argonMKib and the always-applied fixed-work options)
- *      and the harness difficulty definitions. The validator builds the
- *      CURRENT release measurement context from the current tree and
- *      demands measurement_context.sha256 (and therefore the client
- *      asset identity inside it) equal it. A device object without a
- *      context, with a malformed one, or with a different one (older
- *      client bytes, an older harness, a different solver configuration)
- *      is a hard reason naming the device, in CI mode and release mode
- *      alike: physical qualification can never be silently re-bound to
- *      client bytes the device did not measure.
+ *      context the device's rows were recorded against. That context is
+ *      minted by merge-cells --physical-index FROM THE RUN'S RECORDED
+ *      FACTS ONLY (the run's recorded harness path + harness source
+ *      sha256, schema, execution manifest schema + maximum, solver
+ *      options + fixed-work facts, difficulty definitions and client
+ *      assets) and is stamped only when every recorded fact equals the
+ *      current release fact. The validator builds the CURRENT release
+ *      measurement context from the current tree (canonical clientAssets
+ *      set, current harness schema and source hash, current execution
+ *      manifest schema and maximum, canonical solver configuration,
+ *      current difficulty definitions) and demands
+ *      measurement_context.sha256 (and therefore the client asset
+ *      identity inside it) equal it. A device object without a context,
+ *      with a malformed one, or with a different one (older client
+ *      bytes, an older harness, a different execution manifest or solver
+ *      configuration) is a hard reason naming the device, in CI mode and
+ *      release mode alike: physical qualification can never be silently
+ *      re-bound to client bytes the device did not measure.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -274,10 +278,13 @@
  *     must equal the device's qualified tier.
  *   - measurement context: every device evidence object must carry
  *     measurement_context { schema, sha256 } equal to the CURRENT
- *     release measurement context (rule 12): a device measured against
- *     other client bytes, harness, execution ceiling or solver
- *     configuration is a hard reason naming the device, so a refreshed
- *     top-level identity can never inherit the device's old rows.
+ *     release measurement context (rule 12): the context is minted from
+ *     the run's recorded facts and the merge refuses any run whose
+ *     recorded facts differ from the current release facts, so a device
+ *     measured against other client bytes, harness, execution manifest,
+ *     solver configuration or difficulty definitions is a hard reason
+ *     naming the device, and a refreshed top-level identity can never
+ *     inherit the device's old rows.
  *   - per-device coverage (the RELEASE invariant): every registered
  *     physical device x every released difficulty x cold/warm x every
  *     required asset mode has its own evidence row. A device missing
@@ -1310,12 +1317,13 @@ function main() {
     // The current release measurement context (rule 12): built from the
     // current tree by the shared measurement-context module (canonical
     // clientAssets set, current harness schema and source hash, current
-    // execution manifest maximum, canonical solver configuration,
-    // harness difficulty definitions). Every physical device evidence
-    // object must carry the context its rows were recorded against, and
-    // that context must equal this one — otherwise the device's rows
-    // would be certified under client bytes/configuration the device
-    // never measured.
+    // execution manifest schema and maximum, canonical solver
+    // configuration, current difficulty definitions). Every physical
+    // device evidence object must carry the context its rows were
+    // recorded against — minted by merge-cells from the run's recorded
+    // facts — and that context must equal this one, otherwise the
+    // device's rows would be certified under client bytes/configuration
+    // the device never measured.
     let currentMeasurementContext;
     try {
       currentMeasurementContext = currentReleaseMeasurementContext();
@@ -1349,7 +1357,7 @@ function main() {
         if (typeof deviceContext.sha256 !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(deviceContext.sha256)) {
           reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context.sha256 ${JSON.stringify(deviceContext.sha256)} is not a full 64-hex SHA-256 release measurement context identity`);
         } else if (deviceContext.sha256 !== currentMeasurementContext.sha256) {
-          reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context sha256 ${deviceContext.sha256} is not the current release measurement context ${currentMeasurementContext.sha256} (the device's evidence was measured against a different client asset set, harness, execution manifest or solver configuration; a physical claim can never be re-bound to client bytes the device did not measure)`);
+          reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context sha256 ${deviceContext.sha256} is not the current release measurement context ${currentMeasurementContext.sha256} (the device's evidence was measured against a different client asset set, harness, execution manifest, solver configuration or difficulty definitions; a physical claim can never be re-bound to client bytes the device did not measure)`);
         }
       }
       const dev = deviceById.get(deviceId);

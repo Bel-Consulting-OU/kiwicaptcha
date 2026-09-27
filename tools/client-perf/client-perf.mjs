@@ -124,6 +124,7 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
@@ -1894,6 +1895,11 @@ function buildPayload(opts, ctx, completion) {
     generated_at: new Date().toISOString(),
     started_at: ctx.startedAt,
     harness: 'tools/client-perf/client-perf.mjs',
+    // The recorder's own source identity: the release measurement context
+    // binds every physical device to the exact recorder revision that
+    // produced its repetitions, so the validator can refuse a run whose
+    // harness source differs from the current one.
+    harnessSha256: createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex'),
     chromium: ctx.chromiumVersion,
     environment: environment(),
     clientAssets: clientAssets(),

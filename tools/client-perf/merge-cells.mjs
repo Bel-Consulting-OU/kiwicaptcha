@@ -80,16 +80,24 @@
  * Measurement-context binding (physical qualification): every
  * --physical-index run is additionally bound to the release measurement
  * context the shared measurement-context module defines ({ schema,
- * sha256 } over the canonical clientAssets set, the harness schema and
- * source hash, the execution manifest maximum, the solver configuration
- * actually used — reps/argonReps/cache/assets/argonBits/argonMKib plus
- * the always-applied fixed-work options — and the harness difficulty
- * definitions). The context is BUILT FROM THE RUN'S RECORDED VALUES
- * (run.clientAssets, run.schema, run.options, the run-recorded
- * execution maximum and difficulty definitions), never from the current
- * tree; a run whose recorded values are not the current release
- * context, or whose recorded difficulty definitions disagree with the
- * current harness constants, is refused with the naming detail. The
+ * sha256 } over the run's recorded harness identity — payload.harness
+ * plus the recorded harness source sha256 — the recorded execution
+ * manifest schema and maximum, the recorded solver configuration
+ * (payload.options plus the always-applied fixed-work facts recorded in
+ * payload.methodology.fixedWork), the run's recorded difficulty
+ * definitions and the run's recorded clientAssets). The context is
+ * BUILT FROM THE RUN'S RECORDED VALUES ONLY, never from the current
+ * tree: a run that lacks a required recorded fact (no harness source
+ * sha256, no options, no fixed-work envelope, no execution maximum, no
+ * difficulty table, no clientAssets) is refused with the exact reason,
+ * and a run whose recorded facts differ from the current release facts
+ * is refused naming every differing field. The current tree is
+ * consulted only for the comparison side and to verify the run's
+ * recorded tier table entry by entry; when several --run files feed one
+ * device, their recorded field sets must agree with each other as well,
+ * or the later run is refused naming the disagreement. For an accepted
+ * run the recorded field set equals the current release field set, so
+ * the context the device is stamped with is the run's own context. The
  * emitted device evidence object then carries the one context shared by
  * its runs:
  *   { "physical_results": { "<device-id>": {
@@ -103,10 +111,10 @@ import { readFileSync } from 'node:fs';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
 import {
   buildMeasurementContext,
-  canonicalJson,
   currentReleaseMeasurementFields,
+  measurementFieldDifferences,
   readHarnessMeasurementFacts,
-  recordedDifficultyMismatches,
+  recordedTierMismatches,
   runMeasurementFields,
 } from './measurement-context.mjs';
 
@@ -209,44 +217,56 @@ for (const { runPath, payload } of runPayloads) {
   }
 }
 
-const firstPayload = runPayloads[0].payload;
-const contextFields = [
-  ['harness schema', (p) => p.schema],
-  ['Argon bits', (p) => (p.options || {}).argonBits],
-  ['Argon memory KiB', (p) => (p.options || {}).argonMKib],
-  ['execution maximum version', (p) => (p.options || {}).executionMaxVersion],
-  ['difficulty definitions', (p) => JSON.stringify(p.difficulties || null)],
-  ['asset mode', (p) => (p.options || {}).assets],
-];
-const mergeContextValues = new Map(
-  contextFields.map(([label, pick]) => [label, pick(firstPayload)]),
-);
-for (const { runPath, payload } of runPayloads.slice(1)) {
-  for (const [label, pick] of contextFields) {
-    const a = mergeContextValues.get(label);
-    const b = pick(payload);
-    if (JSON.stringify(a) !== JSON.stringify(b)) {
-      throw new Error(
-        `cannot merge performance runs measured against different client assets: ${runPath} ${label} ${JSON.stringify(b)} differs from ${JSON.stringify(a)} of ${runPayloads[0].runPath}`
-      );
+// The legacy run-combination guard for the LAB merged mode (no device
+// stamp): every run fed into one merged result must carry the same
+// schema, Argon parameters, execution ceiling, difficulty table and
+// asset mode. The --physical-index path below does not use this guard:
+// it compares the runs' full recorded field sets (a superset of these
+// fields) against each other and against the current release facts, so
+// its refusal reasons are exact.
+if (!physicalIndex) {
+  const firstPayload = runPayloads[0].payload;
+  const contextFields = [
+    ['harness schema', (p) => p.schema],
+    ['Argon bits', (p) => (p.options || {}).argonBits],
+    ['Argon memory KiB', (p) => (p.options || {}).argonMKib],
+    ['execution maximum version', (p) => (p.options || {}).executionMaxVersion],
+    ['difficulty definitions', (p) => JSON.stringify(p.difficulties || null)],
+    ['asset mode', (p) => (p.options || {}).assets],
+  ];
+  const mergeContextValues = new Map(
+    contextFields.map(([label, pick]) => [label, pick(firstPayload)]),
+  );
+  for (const { runPath, payload } of runPayloads.slice(1)) {
+    for (const [label, pick] of contextFields) {
+      const a = mergeContextValues.get(label);
+      const b = pick(payload);
+      if (JSON.stringify(a) !== JSON.stringify(b)) {
+        throw new Error(
+          `cannot merge performance runs measured against different client assets: ${runPath} ${label} ${JSON.stringify(b)} differs from ${JSON.stringify(a)} of ${runPayloads[0].runPath}`
+        );
+      }
     }
   }
 }
 
 // ── Measurement-context binding (physical evidence) ─────────────────
-// Every run that feeds a physical device index must carry the CURRENT
-// release measurement context. The context is built FROM THE RUN'S
-// RECORDED VALUES — clientAssets, schema, options, the recorded
-// execution maximum and the run's recorded difficulty definitions —
-// never from the current tree; the shared builder then compares that
-// run-derived sha256 with the current release context, and a mismatch
-// is refused naming the run and the differing component. A run can
-// therefore never be stamped with a fresh identity it was not measured
-// against, and the emitted device evidence object carries the one
-// context its rows were recorded under. The recorded difficulty
-// definitions must also still equal the current harness constants: a
-// run recorded under different definitions would otherwise be
-// re-labelled by the merge.
+// Every run that feeds a physical device index is bound from ITS OWN
+// RECORDED FACTS: runMeasurementFields(payload) reads only the run file
+// (harness path + recorded harness source sha256, schema, recorded
+// execution manifest schema and maximum, recorded options and
+// fixed-work envelope, recorded difficulty table, recorded client
+// assets). The current tree is consulted only for the comparison side
+// and for the per-entry tier check. A run that lacks a required
+// recorded fact is refused with the exact reason; a run whose recorded
+// facts differ from the current release facts is refused naming every
+// differing field; and when several runs feed one device their recorded
+// field sets must agree with each other or the later run is refused
+// naming the disagreement. For an accepted run the recorded fields
+// equal the current release fields, so the device is stamped with the
+// run's own context — a run recorded under different bytes, harness,
+// manifest, solver configuration or difficulty definitions can never be
+// stamped with the current identity.
 let deviceMeasurementContext = null;
 if (physicalIndex) {
   let facts;
@@ -260,37 +280,70 @@ if (physicalIndex) {
     console.error(`merge-cells: cannot build the current release measurement context: ${e.message}`);
     process.exit(1);
   }
+  let deviceFields = null;
+  let firstRunPath = null;
   for (const { runPath, payload } of runPayloads) {
-    let fields;
-    try {
-      fields = runMeasurementFields(payload, facts);
-    } catch (e) {
+    // 1. The run's own recorded facts. A missing or malformed recorded
+    // fact refuses the run: the current tree is never substituted for
+    // something the run did not record.
+    const { fields, reasons: recordedReasons } = runMeasurementFields(payload);
+    if (!fields) {
       throw new Error(
-        `cannot merge performance runs measured against different client assets: ${runPath} cannot be bound to a release measurement context (${e.message})`
+        `cannot merge performance runs measured against different client assets: ${runPath} cannot be bound to a release measurement context from its own recorded facts\n${recordedReasons.map((r) => `  - ${r}`).join('\n')}`
       );
     }
-    const difficultyMismatches = recordedDifficultyMismatches(payload, facts);
-    if (difficultyMismatches.length) {
-      const detail = difficultyMismatches.map((r) => `  - ${r}`).join('\n');
+    // 2. Multiple runs feeding one device must record one context.
+    if (deviceFields !== null) {
+      const runDifferences = measurementFieldDifferences(fields, deviceFields);
+      if (runDifferences.length) {
+        throw new Error(
+          `cannot merge performance runs measured against different client assets: ${runPath} recorded measurement facts disagree with those of ${firstRunPath} (every run feeding one device must share one measurement context)\n${runDifferences.map((r) => `  - ${r}`).join('\n')}`
+        );
+      }
+    }
+    // 3. Every recorded fact must equal the current release fact.
+    const differences = measurementFieldDifferences(fields, currentFields);
+    if (differences.length) {
       throw new Error(
-        `cannot merge performance runs measured against different client assets: ${runPath} recorded difficulty definitions do not match the current harness constants\n${detail}`
+        `cannot merge performance runs measured against different client assets: ${runPath} recorded measurement facts differ from the current release facts\n${differences.map((r) => `  - ${r}`).join('\n')}`
       );
     }
-    const context = buildMeasurementContext(fields);
-    if (context.sha256 !== currentContext.sha256) {
-      const differing = ['harness', 'execution', 'solver', 'difficulties', 'clientAssets'].filter(
-        (component) => canonicalJson(fields[component]) !== canonicalJson(currentFields[component])
-      );
+    // 4. The recorded tier table is verified entry by entry (a run
+    // records only the tiers it executed), and every result row the
+    // merge could emit must be defined by the run's recorded tables.
+    const rowReasons = new Set();
+    for (const key of Object.keys(payload.results || {})) {
+      if (key.startsWith('multi-widget')) continue;
+      const parts = key.split(':');
+      if (parts.length !== 4) continue;
+      const [rowTier, rowDifficulty] = parts;
+      if (!Object.prototype.hasOwnProperty.call(payload.difficulties || {}, rowDifficulty)) {
+        rowReasons.add(`run records rows for difficulty ${rowDifficulty} that its recorded difficulty table does not define`);
+      }
+      if (!Object.prototype.hasOwnProperty.call(payload.tiers || {}, rowTier)) {
+        rowReasons.add(`run records rows for tier ${rowTier} that its recorded tier table does not define`);
+      }
+    }
+    const tableReasons = [...recordedTierMismatches(payload.tiers, facts.tiers), ...rowReasons];
+    if (tableReasons.length) {
       throw new Error(
-        `cannot merge performance runs measured against different client assets: ${runPath} measurement context ${context.sha256} is not the current release measurement context ${currentContext.sha256}${differing.length ? ` (differing component(s): ${differing.join(', ')})` : ''}`
+        `cannot merge performance runs measured against different client assets: ${runPath} recorded tier definitions or rows do not match the current harness definitions\n${tableReasons.map((r) => `  - ${r}`).join('\n')}`
       );
     }
-    if (deviceMeasurementContext && context.sha256 !== deviceMeasurementContext.sha256) {
-      throw new Error(
-        `cannot merge performance runs measured against different client assets: ${runPath} measurement context ${context.sha256} differs from ${deviceMeasurementContext.sha256} of an earlier run`
-      );
+    if (deviceFields === null) {
+      firstRunPath = runPath;
+      deviceFields = fields;
     }
-    deviceMeasurementContext = context;
+    deviceMeasurementContext = buildMeasurementContext(fields);
+  }
+  // For an accepted run every recorded fact equals the current release
+  // fact, so the run-derived context must equal the current release
+  // context. A divergence here is an internal error, never a stamp.
+  if (deviceMeasurementContext.sha256 !== currentContext.sha256) {
+    console.error(
+      `merge-cells: internal error: run-derived measurement context ${deviceMeasurementContext.sha256} is not the current release measurement context ${currentContext.sha256}`
+    );
+    process.exit(1);
   }
 }
 
@@ -381,21 +434,20 @@ if (physicalIndex) {
     index[`${tier}:${difficulty}:${cache}:${mode}`] = buildRow(difficulty, cache, aggs, mode);
   }
   console.log(JSON.stringify({ physical_results: { [deviceId]: index } }, null, 2));
-  process.exit(0);
-}
+} else {
+  const budget = {};
+  for (const row of out) {
+    const key = `${row.difficulty}:${row.cache}`;
+    budget[key] = {
+      n: row.reps.length,
+      solveMsP95: row.solveMs && row.solveMs.p95 !== null ? Math.ceil(row.solveMs.p95 * 1.2) : null,
+      pageToVerifiedMsP95: row.pageToVerifiedMs && row.pageToVerifiedMs.p95 !== null ? Math.ceil(row.pageToVerifiedMs.p95 * 1.2) : null,
+      measuredSolveMsP95: row.solveMs && row.solveMs.p95 !== null ? Math.round(row.solveMs.p95 * 10) / 10 : null,
+      measuredPageToVerifiedMsP95: row.pageToVerifiedMs && row.pageToVerifiedMs.p95 !== null ? Math.round(row.pageToVerifiedMs.p95 * 10) / 10 : null,
+      errors: row.errorCount,
+      timedOut: row.timedOutCount,
+    };
+  }
 
-const budget = {};
-for (const row of out) {
-  const key = `${row.difficulty}:${row.cache}`;
-  budget[key] = {
-    n: row.reps.length,
-    solveMsP95: row.solveMs && row.solveMs.p95 !== null ? Math.ceil(row.solveMs.p95 * 1.2) : null,
-    pageToVerifiedMsP95: row.pageToVerifiedMs && row.pageToVerifiedMs.p95 !== null ? Math.ceil(row.pageToVerifiedMs.p95 * 1.2) : null,
-    measuredSolveMsP95: row.solveMs && row.solveMs.p95 !== null ? Math.round(row.solveMs.p95 * 10) / 10 : null,
-    measuredPageToVerifiedMsP95: row.pageToVerifiedMs && row.pageToVerifiedMs.p95 !== null ? Math.round(row.pageToVerifiedMs.p95 * 10) / 10 : null,
-    errors: row.errorCount,
-    timedOut: row.timedOutCount,
-  };
+  console.log(JSON.stringify({ mergedRows: out, budget }, null, 2));
 }
-
-console.log(JSON.stringify({ mergedRows: out, budget }, null, 2));
