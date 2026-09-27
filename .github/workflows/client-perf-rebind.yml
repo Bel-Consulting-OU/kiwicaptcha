@@ -54,6 +54,14 @@ jobs:
           php-version: '8.3'
           extensions: gmp, sodium, mbstring, xml, curl
           coverage: none
+      - name: install the PHP fixture and bundle dependencies
+        # The fixture router requires the PHP core autoloader, and the
+        # compat endpoints load the Symfony bundle when its vendor tree
+        # is present (the browser lane installs both for fidelity).
+        run: |
+          set -euo pipefail
+          composer install --no-interaction --prefer-dist --working-dir=packages/kiwicaptcha-php
+          composer install --no-interaction --prefer-dist --no-scripts --working-dir=packages/kiwicaptcha/integrations/symfony
       - name: install the browser suite dependencies
         run: |
           set -euo pipefail
