@@ -1056,6 +1056,13 @@ final class Issuer
      */
     public static function canonicalIpFamily(string $ip): string
     {
+        // The strict validator is the grammar gate: the platform's
+        // inet_pton accepts some non-canonical IPv4 spellings
+        // (leading-zero forms among them) and normalizes them
+        // inconsistently.
+        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            throw new \InvalidArgumentException('Invalid IP address');
+        }
         $canonical = inet_pton($ip);
         if ($canonical === false) {
             throw new \InvalidArgumentException('Invalid IP address');

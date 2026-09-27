@@ -53,6 +53,16 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /** Default lifetime of the always-on outcome-ledger entries (86400 s). */
     public const DEFAULT_OUTCOME_TTL_SECS = 86400;
 
+    /**
+     * The largest accepted TTL in seconds (10 years). Values above it are
+     * refused at construction: Redis rejects an expire value beyond its
+     * ceiling at request time, and a script that had already written the
+     * hash before the failing EXPIRE would leave it persistent. The Lua
+     * scripts validate the same class of value as the last line of
+     * defense.
+     */
+    public const MAX_TTL_SECS = 315_360_000;
+
     private string $script;
     /** @var array<string, string> cached sha1 of every static script, keyed by the script content */
     private array $scriptShas = [];
@@ -134,6 +144,25 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
                 throw new \InvalidArgumentException(sprintf(
                     '%s must be >= 1 (got %d): a non-positive TTL/epoch/hysteresis window would write persistent or immediately-expired risk state',
                     $knob,
+                    $value,
+                ));
+            }
+        }
+        // TTLs additionally carry the 10-year upper bound. Epoch windows
+        // and the hysteresis window are durations too, but they are not
+        // Redis expire values, so only the five TTLs get the bound.
+        foreach ([
+            'stateTtlSecs' => $stateTtlSecs,
+            'sessionTtlSecs' => $sessionTtlSecs,
+            'principalTtlSecs' => $principalTtlSecs,
+            'dedupeTtlSecs' => $dedupeTtlSecs,
+            'outcomeTtlSecs' => $outcomeTtlSecs,
+        ] as $knob => $value) {
+            if ($value > self::MAX_TTL_SECS) {
+                throw new \InvalidArgumentException(sprintf(
+                    '%s must be <= %d (got %d): Redis rejects a bigger expire value at request time, after the risk hash is already written',
+                    $knob,
+                    self::MAX_TTL_SECS,
                     $value,
                 ));
             }
@@ -237,6 +266,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      */
     public function ledgerKey(string $decisionId): string
     {
+        self::assertKeySafeIdentifier('decisionId', $decisionId);
+
         return "{kiwi:{$this->namespace}}:outcome:{$decisionId}";
     }
 
@@ -281,6 +312,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      */
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
     {
+        self::assertKeySafeIdentifier('sessionId', $sessionId);
         $key = "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
@@ -310,6 +342,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      */
     public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
     {
+        self::assertKeySafeIdentifier('sessionId', $sessionId);
         $key = "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
@@ -550,22 +583,80 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         ?string $principalId,
         string $eventId,
     ): array {
+        self::assertKeySafeIdentifier('sourceIdPrev', $sourceIdPrev);
+        self::assertKeySafeIdentifier('sourceId', $sourceId);
+        self::assertKeySafeIdentifier('sourceIdNext', $sourceIdNext);
+        self::assertKeySafeIdentifier('subnetIdPrev', $subnetIdPrev);
+        self::assertKeySafeIdentifier('subnetId', $subnetId);
+        self::assertKeySafeIdentifier('subnetIdNext', $subnetIdNext);
+        self::assertKeySafeIdentifier('eventId', $eventId);
+        if ($sessionId !== null) {
+            self::assertKeySafeIdentifier('sessionId', $sessionId);
+        }
+        if ($principalId !== null) {
+            self::assertKeySafeIdentifier('principalId', $principalId);
+        }
+
         $tag = '{kiwi:'.DeploymentNamespace::derive($rawNamespace, $namespaceKeyVersion).'}';
         $sessionId ??= str_repeat('0', 32);
         $principalId ??= str_repeat('0', 32);
 
         return [
             "{$tag}:risk:src:{$sourceEpoch}:{$sourceId}",
-            "{$tag}:risk:src:" . ($sourceEpoch - 1) . ":{$sourceIdPrev}",
-            "{$tag}:risk:src:" . ($sourceEpoch + 1) . ":{$sourceIdNext}",
+            "{$tag}:risk:src:" . self::offsetEpoch($sourceEpoch, -1) . ":{$sourceIdPrev}",
+            "{$tag}:risk:src:" . self::offsetEpoch($sourceEpoch, 1) . ":{$sourceIdNext}",
             "{$tag}:risk:net:{$subnetEpoch}:{$subnetId}",
-            "{$tag}:risk:net:" . ($subnetEpoch - 1) . ":{$subnetIdPrev}",
-            "{$tag}:risk:net:" . ($subnetEpoch + 1) . ":{$subnetIdNext}",
+            "{$tag}:risk:net:" . self::offsetEpoch($subnetEpoch, -1) . ":{$subnetIdPrev}",
+            "{$tag}:risk:net:" . self::offsetEpoch($subnetEpoch, 1) . ":{$subnetIdNext}",
             "{$tag}:risk:session:{$sessionId}",
             "{$tag}:risk:principal:{$principalId}",
             "{$tag}:risk:global",
             "{$tag}:risk:dedupe:{$eventId}",
         ];
+    }
+
+    /**
+     * Adds a small epoch offset without leaving the integer range. At the
+     * PHP_INT boundary the neighbouring epoch folds onto the boundary
+     * (the value is astronomically outside any real clock window), so the
+     * key grammar never receives a float in scientific notation. The
+     * RiskObservation constructor refuses boundary epochs for its own
+     * path; this keeps direct keysFor() callers safe too.
+     */
+    private static function offsetEpoch(int $epoch, int $delta): int
+    {
+        if ($delta > 0 && $epoch > PHP_INT_MAX - $delta) {
+            return PHP_INT_MAX;
+        }
+        if ($delta < 0 && $epoch < PHP_INT_MIN - $delta) {
+            return PHP_INT_MIN;
+        }
+
+        return $epoch + $delta;
+    }
+
+    /**
+     * Refuses a caller identifier that would inject key structure or
+     * control bytes into a Redis key. The engines pass 32-char lowercase
+     * hex decision/session pseudonyms; any other value is accepted only
+     * when it carries no control character, ":" or "}" (the key separator
+     * and the hash-tag closing byte). The control class covers ASCII
+     * controls, the encoded C1 range and the Unicode line/paragraph
+     * separators, so a log-facing control scalar is refused too.
+     * Throwing fails closed before any key reaches Redis.
+     */
+    private static function assertKeySafeIdentifier(string $name, string $value): void
+    {
+        if (preg_match('/^[0-9a-f]{32}$/', $value) === 1) {
+            return;
+        }
+        if (preg_match('/[\x00-\x1f\x7f:}]|\xc2[\x80-\x9f]|\xe2\x80[\xa8\xa9]/', $value) === 1) {
+            throw new \InvalidArgumentException(sprintf(
+                '%s must be a 32-char lowercase hex id or free of control characters, ":" and "}" (got 0x%s)',
+                $name,
+                bin2hex($value),
+            ));
+        }
     }
 
     /**

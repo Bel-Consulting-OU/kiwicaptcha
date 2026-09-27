@@ -1676,6 +1676,63 @@ if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|r
     return true;
 }
 
+// Pentest fixture pages (tests/browser/specs/pentest.spec.mjs). The spec
+// may also fulfil the same paths from disk to patch the __DRIVER_SRC__
+// placeholder; this route serves the untouched fixtures directly.
+if (preg_match('~^/pentest/([A-Za-z0-9_.-]+\.html)$~', $path, $m) === 1) {
+    $file = __DIR__.'/pentest/'.$m[1];
+    if (is_file($file)) {
+        $html = file_get_contents($file);
+        // The redirect vector must run with NO Playwright route active:
+        // Chromium denies a redirected loopback fetch when the first hop
+        // was intercepted. The server substitutes the asset placeholders
+        // (the spec's route-fulfilled fixtures still win when active).
+        if (strpos($html, '__DRIVER_SRC__') !== false || strpos($html, '__GLUE_SRC__') !== false) {
+            $driverBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/widget-driver.js');
+            $html = str_replace('__DRIVER_SRC__', '/kiwi-captcha/assets/driver.'.hash('sha256', $driverBody).'.js', $html);
+            $html = str_replace('__GLUE_SRC__', '/kiwicaptcha-wasm.js', $html);
+        }
+        header('Content-Type: text/html');
+        header('Cache-Control: no-store');
+        echo $html;
+
+        return true;
+    }
+}
+
+// Wave-3 redirect vector: a real same-origin 302 to the loopback alias
+// host on the same port (a genuinely cross-origin URL the browser must
+// treat as foreign; page.route cannot intercept a redirected request, so
+// the server serves the target itself). The evil body runs in the Blob
+// worker and announces itself with pentest-runtime-executed.
+if ($path === '/pentest/runtime-redirect.js') {
+    $port = $_SERVER['SERVER_PORT'] ?? '80';
+    header('Location: http://localhost:'.$port.'/pentest/runtime-redirect-evil.js', true, 302);
+    // WebKit requires the redirect response itself to pass the CORS check
+    // before it follows a same-origin -> cross-origin redirect.
+    header('Access-Control-Allow-Origin: *');
+    header('Cache-Control: no-store');
+
+    return true;
+}
+if ($path === '/pentest/runtime-redirect-evil.js') {
+    header('Content-Type: application/javascript; charset=UTF-8');
+    header('Access-Control-Allow-Origin: *');
+    header('Cache-Control: no-store');
+    echo 'var KIWI_WASM_B64 = ""; var __kiwiCaptchaWasm = {};'
+        .'try { self.postMessage({ v: 1, type: "pentest-runtime-executed" }); } catch (e) {}'
+        .'try { self.postMessage({ v: 1, type: "done", counter: 0, buildId: "2026-09-r1" }); } catch (e) {}'
+        .'self.addEventListener("message", function () {'
+        .'  try { self.postMessage({ v: 1, type: "pentest-runtime-executed" }); } catch (e) {}'
+        .'  try { self.postMessage({ v: 1, type: "done", counter: 0, buildId: "2026-09-r1" }); } catch (e) {}'
+        .'});'
+        .'setTimeout(function () {'
+        .'  try { self.postMessage({ v: 1, type: "pentest-runtime-executed" }); } catch (e) {}'
+        .'}, 300);';
+
+    return true;
+}
+
 if ($path === '/' || $path === '/index.html') {
     $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
     $css = file_get_contents($assets.'/widget.css');

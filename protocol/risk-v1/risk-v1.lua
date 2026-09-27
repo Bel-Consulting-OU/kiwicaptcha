@@ -281,17 +281,43 @@ local function apply_principal_event(s, event, scope)
     end
 end
 
+-- ── Every TTL argument is validated here, BEFORE the first write. A
+-- non-positive TTL would make a risk hash persistent (save() skips
+-- EXPIRE on ttl <= 0) or issue an invalid `SET ... EX 0`; a TTL above
+-- the Redis expire ceiling would abort the script after the HSET had
+-- already landed, leaving a persistent risk hash behind. The ceiling
+-- (2147483647 seconds) is the largest expire value every Redis version
+-- accepts. The PHP and Rust store constructors enforce the identical
+-- positive-and-bounded rule at their public boundary.
+local EXPIRY_CEILING_SECS = 2147483647
+
+local function ttl_out_of_bounds(value)
+    if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
+        return true
+    end
+    return value ~= math.floor(value)
+end
+
+local dedupe_ttl = tonumber(ARGV[5])
+local state_ttl = tonumber(ARGV[6])
+local session_ttl = tonumber(ARGV[21])
+local principal_ttl = tonumber(ARGV[22])
+if ttl_out_of_bounds(dedupe_ttl) then
+    return redis.error_reply('risk-v1: dedupe_ttl_s must be a positive integer no greater than 2147483647 (a persistent or immediately-expired risk hash is not admissible)')
+end
+if ttl_out_of_bounds(state_ttl) then
+    return redis.error_reply('risk-v1: state_ttl_s must be a positive integer no greater than 2147483647 (a persistent source/subnet risk hash is not admissible)')
+end
+if ttl_out_of_bounds(session_ttl) then
+    return redis.error_reply('risk-v1: session_ttl_s must be a positive integer no greater than 2147483647 (a persistent session risk hash is not admissible)')
+end
+if ttl_out_of_bounds(principal_ttl) then
+    return redis.error_reply('risk-v1: principal_ttl_s must be a positive integer no greater than 2147483647 (a persistent principal risk hash is not admissible)')
+end
+
 -- ── Dedupe: identical event_id must not double-increment state. On a
 -- duplicate, SKIP the event application but still decay/read/return the
 -- current signals (shared risk-v1 semantics across Rust and PHP).
--- The dedupe window TTL is a configuration invariant (see the
--- ephemeral-TTL guard below): a non-positive value would issue an
--- invalid `SET ... EX 0`.
-local dedupe_ttl = tonumber(ARGV[5])
-if dedupe_ttl == nil or dedupe_ttl < 1 then
-    return redis.error_reply('risk-v1: dedupe_ttl_s must be a positive integer')
-end
-
 local is_duplicate = false
 if ARGV[4] ~= '' then
     if redis.call('GET', KEYS[10]) then
@@ -303,29 +329,13 @@ end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-local state_ttl = tonumber(ARGV[6])
 local has_session = tonumber(ARGV[19]) == 1
 local has_principal = tonumber(ARGV[20]) == 1
 
--- The ephemeral per-identity TTLs are configuration invariants: a
--- non-positive value must never be able to make a risk hash persistent
--- (save() skips EXPIRE on ttl <= 0), yet the zero-skip itself is
--- intentional for the GLOBAL rolling state (KEYS[9], the one no-expiry
--- record, written with ttl 0 below). Refuse a non-positive
--- state/session/principal/dedupe TTL loudly instead of writing
--- persistent identity state; the PHP and Rust store constructors
--- enforce the identical positivity rule at their public boundary.
-local session_ttl = tonumber(ARGV[21])
-if session_ttl == nil or session_ttl < 1 then
-    return redis.error_reply('risk-v1: session_ttl_s must be a positive integer (a persistent session risk hash is not admissible)')
-end
-local principal_ttl = tonumber(ARGV[22])
-if principal_ttl == nil or principal_ttl < 1 then
-    return redis.error_reply('risk-v1: principal_ttl_s must be a positive integer (a persistent principal risk hash is not admissible)')
-end
-if state_ttl == nil or state_ttl < 1 then
-    return redis.error_reply('risk-v1: state_ttl_s must be a positive integer (a persistent source/subnet risk hash is not admissible)')
-end
+-- The zero-skip in save() stays intentional for the GLOBAL rolling state
+-- (KEYS[9], the one no-expiry record, written with ttl 0 below). The
+-- ephemeral per-identity TTLs were already validated above, before the
+-- first write.
 
 -- ── Source: update current epoch, read ±1 for boundary continuity. ──
 local src = read_state(KEYS[1], now)

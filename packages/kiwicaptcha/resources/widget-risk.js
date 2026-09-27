@@ -182,11 +182,20 @@
     kiwiIntegrityWarned = true;
     console.warn("KiwiCaptcha: asset URL carries no integrity digest; loading it unverified");
   }
-  function kiwiVerifyIntegrity(src, integrity) {
+  function kiwiVerifyIntegrity(src, integrity, url) {
     if (!integrity) {
       // An asset URL without an integrity attribute keeps the legacy
-      // unverified contract, but the state is surfaced once per page
-      // instead of passing silently.
+      // unverified contract ONLY on the page's own origin: when the URL
+      // is missing, unparseable or cross-origin, the content is
+      // unverifiable and the check fails closed. The same-origin state
+      // is surfaced once per page instead of passing silently.
+      var resolved = null;
+      if (typeof url === "string" && url !== "") {
+        try { resolved = new URL(url, window.location.href); } catch (e) {}
+      }
+      if (!resolved || resolved.origin !== window.location.origin) {
+        return Promise.resolve({ ok: false, reason: "integrity-unconfigured" });
+      }
       kiwiWarnIntegrityOff();
       return Promise.resolve({ ok: true });
     }
@@ -220,15 +229,24 @@
       var attempt = 0;
       var lastReason = "runtime-unavailable";
       function tryFetch() {
-        fetch(url, { cache: "force-cache", credentials: "same-origin" })
-          .then(function (r) { if (!r.ok) { lastReason = "runtime-fetch-" + r.status; throw new Error("KiwiCaptcha runtime fetch failed"); } return r.text(); })
-          .then(function (src) {
+        // A runtime URL WITHOUT a digest must never follow a redirect:
+        // the requested URL's origin is not the origin of the served
+        // bytes (a same-origin URL can 302 cross-origin). With a digest
+        // the bytes stay SRI-pinned, so redirects are harmless.
+        fetch(url, { cache: "force-cache", credentials: "same-origin", redirect: integrity ? "follow" : "error" })
+          .then(function (r) {
+            if (!r.ok) { lastReason = "runtime-fetch-" + r.status; throw new Error("KiwiCaptcha runtime fetch failed"); }
+            var finalUrl = r.url || url;
+            return r.text().then(function (text) { return { src: text, finalUrl: finalUrl }; });
+          })
+          .then(function (res) {
+            var src = res.src;
             if (src.indexOf("var KIWI_WASM_B64") === -1 || src.indexOf("__kiwiCaptchaWasm") === -1) {
               lastReason = "runtime-malformed";
               throw new Error("KiwiCaptcha runtime asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity).then(function (res) {
-              if (!res.ok) { lastReason = res.reason; throw new Error("KiwiCaptcha runtime integrity failure"); }
+            return kiwiVerifyIntegrity(src, integrity, res.finalUrl).then(function (vres) {
+              if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha runtime integrity failure"); }
               return src;
             });
           })
@@ -249,15 +267,23 @@
       var attempt = 0;
       var lastReason = "worker-unavailable";
       function tryFetch() {
-        fetch(url, { cache: "force-cache", credentials: "same-origin" })
-          .then(function (r) { if (!r.ok) { lastReason = "worker-fetch-" + r.status; throw new Error("KiwiCaptcha worker asset fetch failed"); } return r.text(); })
-          .then(function (src) {
+        // Same transport contract as the runtime glue: a digest-less
+        // worker asset never follows a redirect; with a digest the
+        // fetched bytes are SRI-pinned.
+        fetch(url, { cache: "force-cache", credentials: "same-origin", redirect: integrity ? "follow" : "error" })
+          .then(function (r) {
+            if (!r.ok) { lastReason = "worker-fetch-" + r.status; throw new Error("KiwiCaptcha worker asset fetch failed"); }
+            var finalUrl = r.url || url;
+            return r.text().then(function (text) { return { src: text, finalUrl: finalUrl }; });
+          })
+          .then(function (res) {
+            var src = res.src;
             if (src.indexOf("KiwiCaptcha worker solver") === -1) {
               lastReason = "worker-malformed";
               throw new Error("KiwiCaptcha worker asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity).then(function (res) {
-              if (!res.ok) { lastReason = res.reason; throw new Error("KiwiCaptcha worker integrity failure"); }
+            return kiwiVerifyIntegrity(src, integrity, res.finalUrl).then(function (vres) {
+              if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha worker integrity failure"); }
               return src;
             });
           })
@@ -306,6 +332,15 @@
     var workerIntegrity = container.getAttribute("data-kiwi-worker-integrity");
     var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
     var runtimeIntegrity = container.getAttribute("data-kiwi-runtime-integrity");
+    // An unverified runtime is trusted only on the page's own origin: a
+    // runtime URL without a digest that resolves cross-origin (or does
+    // not parse) is treated as unconfigured, so it is never fetched and
+    // never embedded — the existing refusal/degraded path runs instead.
+    if (runtimeSrc && !runtimeIntegrity) {
+      var resolvedRuntime = null;
+      try { resolvedRuntime = new URL(runtimeSrc, window.location.href); } catch (e) {}
+      if (!resolvedRuntime || resolvedRuntime.origin !== window.location.origin) runtimeSrc = null;
+    }
     // Files-mode worker asset: a versioned worker URL WITH its integrity
     // digest is the theme-emitted lazy worker asset (fetched and
     // preflight-verified below). A worker URL WITHOUT the integrity

@@ -1277,10 +1277,41 @@ mod tests {
         at: i64,
     ) {
         for _ in 0..legit {
-            store.record_at(scope, score, true, at).unwrap();
+            record_retry(store, scope, score, true, at);
         }
         for _ in 0..abuse {
-            store.record_at(scope, score, false, at).unwrap();
+            record_retry(store, scope, score, false, at);
+        }
+    }
+
+    /// Records one increment, retrying a transient reconnect failure.
+    /// A burst of parallel test connections can surface as a local
+    /// would-block on connect; the increment itself is a single
+    /// counter update, so the retry repeats the same operation instead
+    /// of failing the measurement.
+    fn record_retry(
+        store: &RedisCalibrationStore,
+        scope: u32,
+        score: u32,
+        legitimate: bool,
+        at: i64,
+    ) {
+        let mut attempts = 0u32;
+        loop {
+            match store.record_at(scope, score, legitimate, at) {
+                Ok(()) => return,
+                Err(err) => {
+                    attempts += 1;
+                    let transient = matches!(&err, CalibrationError::Backend(message)
+                        if message.contains("Resource temporarily unavailable")
+                            || message.contains("os error 35")
+                            || message.contains("Would block"));
+                    if !transient || attempts >= 5 {
+                        panic!("record_at failed after {attempts} attempt(s): {err:?}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempts)));
+                }
+            }
         }
     }
 

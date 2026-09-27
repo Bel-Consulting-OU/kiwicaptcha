@@ -155,14 +155,43 @@ local function num(v)
     return tonumber(v) or 0
 end
 
--- The session record TTL is a configuration invariant: the first-seen
--- session context/TLS records must always carry a positive bounded
--- expiry, never persist. A non-positive value is refused loudly (the
--- PHP and Rust store constructors enforce the identical rule before the
--- script is ever called).
+-- ── Every TTL argument is validated here, BEFORE the first write. A
+-- non-positive TTL would make a state/session/principal hash or the
+-- outcome ledger persistent (save() skips EXPIRE on ttl <= 0) or issue
+-- an invalid `SET ... EX 0`; a TTL above the Redis expire ceiling would
+-- abort the script after a write had already landed, leaving persistent
+-- state behind. The ceiling (2147483647 seconds) is the largest expire
+-- value every Redis version accepts. The PHP and Rust store
+-- constructors enforce the identical positive-and-bounded rule before
+-- the script is ever called; the outcome TTL is required only when a
+-- registration is requested (ARGV[25] non-empty).
+local EXPIRY_CEILING_SECS = 2147483647
+
+local function ttl_out_of_bounds(value)
+    if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
+        return true
+    end
+    return value ~= math.floor(value)
+end
+
 local session_ttl = tonumber(ARGV[21])
-if session_ttl == nil or session_ttl < 1 then
-    return redis.error_reply('assess_v2: session_ttl_s must be a positive integer (a persistent session record is not admissible)')
+local state_ttl = tonumber(ARGV[6])
+local principal_ttl = tonumber(ARGV[22])
+local dedupe_ttl = tonumber(ARGV[5])
+if ttl_out_of_bounds(session_ttl) then
+    return redis.error_reply('assess_v2: session_ttl_s must be a positive integer no greater than 2147483647 (a persistent session record is not admissible)')
+end
+if ttl_out_of_bounds(state_ttl) then
+    return redis.error_reply('assess_v2: state_ttl_s must be a positive integer no greater than 2147483647 (a persistent source/subnet risk hash is not admissible)')
+end
+if ttl_out_of_bounds(principal_ttl) then
+    return redis.error_reply('assess_v2: principal_ttl_s must be a positive integer no greater than 2147483647 (a persistent principal risk hash is not admissible)')
+end
+if ttl_out_of_bounds(dedupe_ttl) then
+    return redis.error_reply('assess_v2: dedupe_ttl_s must be a positive integer no greater than 2147483647 (a persistent or immediately-expired risk hash is not admissible)')
+end
+if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
+    return redis.error_reply('assess_v2: outcome_ttl_s must be a positive integer no greater than 2147483647 (a persistent outcome ledger is not admissible)')
 end
 
 -- Distributed clock authority: Redis TIME, not the application clock.
@@ -349,13 +378,12 @@ if ARGV[4] ~= '' then
     if redis.call('GET', KEYS[10]) then
         is_duplicate = true
     else
-        redis.call('SET', KEYS[10], '1', 'EX', tonumber(ARGV[5]))
+        redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
     end
 end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-local state_ttl = tonumber(ARGV[6])
 local has_session = tonumber(ARGV[19]) == 1
 local has_principal = tonumber(ARGV[20]) == 1
 
@@ -389,12 +417,12 @@ if has_session and not is_duplicate then
         -- SourceRateLimitHit: session half of the source/session-only rule.
         sess.bad = sess.bad + 3000
     end
-    save(KEYS[7], sess, tonumber(ARGV[21]))
+    save(KEYS[7], sess, session_ttl)
 end
 local prin = read_state(KEYS[8], now)
 if has_principal and not is_duplicate then
     apply_principal_event(prin, event, scope)
-    save(KEYS[8], prin, tonumber(ARGV[22]))
+    save(KEYS[8], prin, principal_ttl)
 end
 
 -- ── Global: rolling (no expiry). The global hash's `scope` field carries

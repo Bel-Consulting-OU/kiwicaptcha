@@ -1440,7 +1440,11 @@ fn simulate_op(
         }
         OP_SHR => u32(operand_int(op, "a") >> (operand_int(op, "b") & 31)).to_string(),
         OP_U8_CREATE => {
-            *u8arr = vec![0u8; operand_int(op, "len") as usize];
+            // The decoder normalizes the wire length to 8..=64; a
+            // hand-built operand can carry any value, so the allocation
+            // is clamped to a bounded size.
+            let len = (operand_int(op, "len") as usize).min(0x1000);
+            *u8arr = vec![0u8; len];
             checksum(u8arr).to_string()
         }
         OP_U8_WRITE => {
@@ -1477,10 +1481,14 @@ fn simulate_op(
         }
         OP_STR_SLICE => {
             let s = operand_bytes(op, "s");
-            let start = operand_int(op, "start") as usize;
+            // A hand-built operand can carry any start or count, so the
+            // window is clamped into the string: the addition
+            // saturates, the end never passes the length, and the end
+            // never falls before the start (a non-inverted range).
+            let start = (operand_int(op, "start") as usize).min(s.len());
             let count = operand_int(op, "count") as usize;
-            let start = start.min(s.len());
-            let end = (start + count).min(s.len());
+            let end = start.saturating_add(count).min(s.len());
+            let end = end.max(start);
             B64.encode(&s[start..end])
         }
         OP_DOM_CREATE => {
@@ -1739,7 +1747,10 @@ fn simulate_op(
             let Some(g) = ctx else {
                 return "0".into();
             };
-            let slot = operand_int(op, "s") as usize;
+            // The decoder normalizes the slot byte modulo 4; a
+            // hand-built operand is masked to the same four-slot
+            // register instead of indexing out of bounds.
+            let slot = (operand_int(op, "s") & 3) as usize;
             let mut entry = g.frags[slot].len() as u64;
             if let Some(node) = cur.as_mut() {
                 if g.nodes.contains_key(&node.id) {
@@ -2108,7 +2119,15 @@ pub mod fixtures {
                 // ancestors up to (excluding) the body.
                 let mut depth = 0usize;
                 let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                // The same bounded step count as the verifier walk, so
+                // a hand-crafted self-referential parent map cannot
+                // spin this synthesizer either.
+                let mut guard = 0usize;
                 while let Some(pid) = cursor {
+                    if guard >= 4096 {
+                        break;
+                    }
+                    guard += 1;
                     depth += 1;
                     cursor = tree_parent.get(&pid).cloned();
                 }
@@ -2307,7 +2326,15 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 // parentElement walk over the program-built tree.
                 let mut depth = 0usize;
                 let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                // The cycle guard: a hand-crafted child record can make
+                // the parent map self-referential, so the walk stops at
+                // a bounded step count instead of spinning forever.
+                let mut guard = 0usize;
                 while let Some(pid) = cursor {
+                    if guard >= 4096 {
+                        return None;
+                    }
+                    guard += 1;
                     depth += 1;
                     cursor = tree_parent.get(&pid).cloned();
                 }

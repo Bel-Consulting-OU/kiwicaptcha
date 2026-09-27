@@ -666,7 +666,17 @@ final class ChallengeController
         // tolerated); an absent header is accepted, since the body still
         // has to parse as a strict JSON object with only the documented
         // fields. The widget sends exactly application/json.
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType !== '' && $contentType !== 'application/json') {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
@@ -2127,7 +2137,17 @@ final class ChallengeController
         }
 
         // Narrow HTTP: the cancellation POST is a JSON document.
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+            return $this->privateJson(
+                ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
+                Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
+            );
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType !== '' && $contentType !== 'application/json') {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],

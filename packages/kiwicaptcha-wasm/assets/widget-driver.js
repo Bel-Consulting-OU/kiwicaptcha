@@ -326,7 +326,10 @@
   // ── Challenge response schema validation ──
   // The same-origin endpoint's bytes are untrusted, so the widget only
   // solves a well-formed issuance: sha256|argon2id|rsw, non-empty
-  // nonce/prefix/salt (base64), targetBits an integer in the issuance
+  // nonce/prefix/salt (base64), the encoded prefix bounded at 4096
+  // characters and the encoded salt at 512 characters (an unbounded
+  // field would let a hostile issuance grind the solver), targetBits an
+  // integer in the issuance
   // ceiling (sha256/rsw 1..20, argon2id 1..10), argon2id parameters in
   // range (t 3..6, p 1, mKib 8*p..65536), ttlSecs 1..300, and for rsw a
   // base64 modulus of exactly 256 bytes with the sequential cost T in
@@ -343,8 +346,8 @@
     // keeps it inside btoa's Latin-1 domain, so the token write can
     // never fail after a full solve.
     if (typeof data.nonce !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(data.nonce)) throw new Error("Challenge malformed");
-    if (typeof data.prefix !== "string" || data.prefix.length < 1) throw new Error("Challenge malformed");
-    if (typeof data.salt !== "string" || data.salt.length < 1) throw new Error("Challenge malformed");
+    if (typeof data.prefix !== "string" || data.prefix.length < 1 || data.prefix.length > 4096) throw new Error("Challenge malformed");
+    if (typeof data.salt !== "string" || data.salt.length < 1 || data.salt.length > 512) throw new Error("Challenge malformed");
     try {
       var saltBytes = b64decode(data.salt);
     } catch (e) {

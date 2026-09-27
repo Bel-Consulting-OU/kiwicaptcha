@@ -237,7 +237,7 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-99,187 bytes raw, 29,747 bytes gzip and 25,026 bytes brotli, against
+99,410 bytes raw, 29,821 bytes gzip and 25,081 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
@@ -247,8 +247,8 @@ widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
 widget-locales.js copy (the lazy non-default locale packs) is 13,395
 bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
-16,384 / 6,000 / 5,000; every widget-compat.js copy is 32,644 bytes
-raw, 10,061 bytes gzip and 8,683 bytes brotli against caps of
+16,384 / 6,000 / 5,000; every widget-compat.js copy is 32,625 bytes
+raw, 10,053 bytes gzip and 8,681 bytes brotli against caps of
 32,768 / 12,000 / 10,000; every execution-interpreter copy
 (execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
 33,039 bytes raw, 9,998 bytes gzip and 8,675 bytes brotli, against
@@ -305,7 +305,7 @@ widget-driver.js to 89,162 raw / 26,788 gzip / 22,684 brotli, caps
 unchanged throughout), and again after the files-tier SHA worker
 dispatch (the glue-less page's SHA-256 solve routes through the worker:
 widget-driver.js at 97,316 raw / 29,138 gzip / 24,571 brotli and
-widget-risk.js at 34,305 raw / 9,983 gzip / 8,587 brotli, caps
+widget-risk.js at 36,285 raw / 10,494 gzip / 9,006 brotli, caps
 unchanged), and the
 challenge-response execution row was re-recorded the same day with
 the audit-3 deterministic largest-wire probe; perf-budget.sh
@@ -324,8 +324,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 99,187 bytes
-raw, 29,747 gzip and 25,026 brotli (the record's
+any memory-hard challenge — is the eager core alone: 99,410 bytes
+raw, 29,821 gzip and 25,081 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits at 96.8% of its 30,720-byte cap after the provider-control
 architecture and lazy-module recovery work added core code (the cap is

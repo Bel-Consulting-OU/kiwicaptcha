@@ -8,7 +8,8 @@ namespace KiwiCaptcha\Risk;
  * Ephemeral identity derivation, byte-identical with the risk-v1 contract.
  *
  * - canonicalIp(): family byte 0x04/0x06 + packed bytes; IPv4-mapped IPv6
- *   (::ffff:a.b.c.d) is normalized to IPv4.
+ *   (::ffff:a.b.c.d) and the deprecated IPv4-compatible 0::/96 form
+ *   (::a.b.c.d, excluding :: and ::1) are normalized to IPv4.
  * - pseudonym(): first 16 bytes of
  *   HMAC-SHA256(key, "kiwi-risk-id-v1\0" || context || "\0" ||
  *                epoch.to_be_bytes() || material)   (epoch big-endian 8 bytes)
@@ -32,18 +33,39 @@ final class RiskIdentityFactory
                 $subnetEpochSecs,
             ));
         }
+        // Out-of-range masks are refused at construction: maskIp() would
+        // otherwise throw at request time, after the caller already built
+        // an engine it cannot use.
+        if ($ipv4Prefix < 0 || $ipv4Prefix > 32) {
+            throw new \InvalidArgumentException(sprintf('ipv4Prefix must be within 0..32 (got %d)', $ipv4Prefix));
+        }
+        if ($ipv6Prefix < 0 || $ipv6Prefix > 128) {
+            throw new \InvalidArgumentException(sprintf('ipv6Prefix must be within 0..128 (got %d)', $ipv6Prefix));
+        }
     }
 
     /**
      * Canonical IP form: family byte (0x04/0x06) + packed bytes.
      *
-     * IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form.
+     * IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form, and
+     * so do the deprecated IPv4-compatible ones (::a.b.c.d), except the
+     * unspecified :: and the loopback ::1.
      *
-     * @throws \InvalidArgumentException on any other length (invalid input)
+     * @throws \InvalidArgumentException on every input that inet_pton
+     *                                   cannot read as an IP address,
+     *                                   including zone ids, leading-zero
+     *                                   octets and null bytes
      */
     public function canonicalIp(string $ip): string
     {
-        $bytes = @inet_pton($ip);
+        if (str_contains($ip, '%') || self::hasLeadingZeroOctet($ip)) {
+            throw new \InvalidArgumentException(sprintf('Invalid IP address: %s', $ip));
+        }
+        try {
+            $bytes = @inet_pton($ip);
+        } catch (\ValueError $e) {
+            throw new \InvalidArgumentException(sprintf('Invalid IP address: %s', $ip), 0, $e);
+        }
         if ($bytes === false) {
             throw new \InvalidArgumentException(sprintf('Invalid IP address: %s', $ip));
         }
@@ -55,9 +77,41 @@ final class RiskIdentityFactory
             if (substr($bytes, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff") {
                 return "\x04" . substr($bytes, 12, 4);
             }
+            $low = substr($bytes, 12, 4);
+            if (substr($bytes, 0, 12) === str_repeat("\x00", 12)
+                && $low !== "\x00\x00\x00\x00"
+                && $low !== "\x00\x00\x00\x01") {
+                return "\x04" . $low;
+            }
             return "\x06" . $bytes;
         }
         throw new \InvalidArgumentException(sprintf('Invalid IP address: %s', $ip));
+    }
+
+    /**
+     * True when the literal carries a dotted-quad with a leading-zero
+     * octet (203.0.113.027, 0177.0.0.1). inet_pton reads those octets as
+     * decimal while other readers treat them as octal, and Rust's
+     * IpAddr rejects them, so the canonical identity would split across
+     * languages; refuse them up front. A single 0 octet stays valid.
+     */
+    private static function hasLeadingZeroOctet(string $ip): bool
+    {
+        if (!str_contains($ip, '.')) {
+            return false;
+        }
+        $colon = strrpos($ip, ':');
+        $quad = $colon === false ? $ip : substr($ip, $colon + 1);
+        if (preg_match('/^[0-9.]+$/', $quad) !== 1) {
+            return false;
+        }
+        foreach (explode('.', $quad) as $octet) {
+            if (strlen($octet) > 1 && $octet[0] === '0') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -106,7 +160,7 @@ final class RiskIdentityFactory
      */
     public function sourceId(string $ip, int $nowSecs): string
     {
-        $epoch = intdiv($nowSecs, $this->sourceEpochSecs);
+        $epoch = self::floorDiv($nowSecs, $this->sourceEpochSecs);
         return $this->sourceIdForEpochIp($ip, $epoch);
     }
 
@@ -116,8 +170,23 @@ final class RiskIdentityFactory
      */
     public function subnetId(string $ip, int $nowSecs): string
     {
-        $epoch = intdiv($nowSecs, $this->subnetEpochSecs);
+        $epoch = self::floorDiv($nowSecs, $this->subnetEpochSecs);
         return $this->subnetIdForEpochIp($ip, $epoch);
+    }
+
+    /**
+     * Floor division for the epoch windows: intdiv truncates toward
+     * zero, so -1 would alias epoch 0 although the contract documents
+     * floor(now / epoch). The non-negative fast path is unchanged.
+     */
+    private static function floorDiv(int $value, int $divisor): int
+    {
+        $quotient = intdiv($value, $divisor);
+        if ($value < 0 && $value % $divisor !== 0) {
+            $quotient--;
+        }
+
+        return $quotient;
     }
 
     /**

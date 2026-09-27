@@ -83,6 +83,13 @@ pub const DEFAULT_SATURATIONS: [u32; 11] = [
 /// [`RedisRiskStateStore::with_options`]).
 pub const DEFAULT_OUTCOME_TTL_SECS: u64 = 86_400;
 
+/// The largest accepted TTL in seconds: 10 years. The bound keeps every
+/// accepted TTL inside the Redis expire range on every deployment (the
+/// Lua scripts validate the same ceiling as the last line of defense)
+/// while a fatter window cannot persist risk state for longer than the
+/// deployment's own retention contract.
+pub const MAX_TTL_SECS: u64 = 315_360_000;
+
 /// Default number of pooled Redis connections.
 pub const DEFAULT_POOL_SIZE: usize = 4;
 
@@ -324,20 +331,26 @@ impl RedisRiskStateStore {
         // immediately-deleted record, or nonsensical epoch/hysteresis
         // behaviour. The bundle's tree gives the friendlier first error;
         // this constructor is the security validation every caller gets,
-        // with the identical positivity rules as the PHP store.
+        // with the identical bounds as the PHP store. TTLs also carry the
+        // 10-year upper bound: a fatter expire value is not representable
+        // on every Redis deployment and would abort the script after its
+        // first write.
         for (knob, value) in [
             ("state_ttl_secs", state_ttl_secs),
             ("dedupe_ttl_secs", dedupe_ttl_secs),
-            ("hysteresis_ms", hysteresis_ms),
             ("session_ttl_secs", session_ttl_secs),
             ("principal_ttl_secs", principal_ttl_secs),
             ("outcome_ttl_secs", outcome_ttl_secs),
         ] {
             assert!(
-                value >= 1,
-                "{knob} must be >= 1 (got {value}): a non-positive TTL/epoch/hysteresis window would write persistent or immediately-expired risk state"
+                (1..=MAX_TTL_SECS).contains(&value),
+                "{knob} must be within 1..={MAX_TTL_SECS} (got {value}): a non-positive TTL would write persistent or immediately-expired risk state and a huge one is rejected by Redis at request time"
             );
         }
+        assert!(
+            hysteresis_ms >= 1,
+            "hysteresis_ms must be >= 1 (got {hysteresis_ms}): a non-positive hysteresis window would write persistent or immediately-expired risk state"
+        );
         assert!(
             saturations.iter().all(|saturation| *saturation >= 1),
             "saturations must all be positive integers"
@@ -474,13 +487,31 @@ impl RedisRiskStateStore {
             .map(hex::encode)
             .unwrap_or_else(|| "0".repeat(32));
 
+        // The ±1 epoch neighbours fold onto the boundary instead of
+        // overflowing: an epoch at the i64 edge is astronomically outside
+        // any real clock window, and the PHP mirror's offsetEpoch applies
+        // the identical clamp, so the key grammar never carries a wrapped
+        // value (debug overflow panics, release silently names another
+        // epoch).
         vec![
             format!("{tag}:risk:src:{source_epoch}:{source_id}"),
-            format!("{tag}:risk:src:{}:{source_id_prev}", source_epoch - 1),
-            format!("{tag}:risk:src:{}:{source_id_next}", source_epoch + 1),
+            format!(
+                "{tag}:risk:src:{}:{source_id_prev}",
+                source_epoch.saturating_sub(1)
+            ),
+            format!(
+                "{tag}:risk:src:{}:{source_id_next}",
+                source_epoch.saturating_add(1)
+            ),
             format!("{tag}:risk:net:{subnet_epoch}:{subnet_id}"),
-            format!("{tag}:risk:net:{}:{subnet_id_prev}", subnet_epoch - 1),
-            format!("{tag}:risk:net:{}:{subnet_id_next}", subnet_epoch + 1),
+            format!(
+                "{tag}:risk:net:{}:{subnet_id_prev}",
+                subnet_epoch.saturating_sub(1)
+            ),
+            format!(
+                "{tag}:risk:net:{}:{subnet_id_next}",
+                subnet_epoch.saturating_add(1)
+            ),
             format!("{tag}:risk:session:{session_id}"),
             format!("{tag}:risk:principal:{principal_id}"),
             format!("{tag}:risk:global"),
@@ -552,31 +583,34 @@ impl RedisRiskStateStore {
             .principal_id
             .map(hex::encode)
             .unwrap_or_else(|| "0".repeat(32));
+        // The same boundary fold as keys_for(): a deserialized
+        // observation can carry any i64, and the ±1 neighbours must never
+        // overflow (the PHP mirror clamps via offsetEpoch).
         vec![
             format!("{}:risk:src:{}:{}", tag, o.source_epoch, o.source_id),
             format!(
                 "{}:risk:src:{}:{}",
                 tag,
-                o.source_epoch - 1,
+                o.source_epoch.saturating_sub(1),
                 o.source_id_prev
             ),
             format!(
                 "{}:risk:src:{}:{}",
                 tag,
-                o.source_epoch + 1,
+                o.source_epoch.saturating_add(1),
                 o.source_id_next
             ),
             format!("{}:risk:net:{}:{}", tag, o.subnet_epoch, o.subnet_id),
             format!(
                 "{}:risk:net:{}:{}",
                 tag,
-                o.subnet_epoch - 1,
+                o.subnet_epoch.saturating_sub(1),
                 o.subnet_id_prev
             ),
             format!(
                 "{}:risk:net:{}:{}",
                 tag,
-                o.subnet_epoch + 1,
+                o.subnet_epoch.saturating_add(1),
                 o.subnet_id_next
             ),
             format!("{tag}:risk:session:{session_id}"),

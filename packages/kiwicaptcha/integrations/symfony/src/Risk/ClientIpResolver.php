@@ -216,7 +216,14 @@ final class ClientIpResolver
      */
     private static function clientFromXForwardedFor(Request $request, array $effectiveTrust): ?string
     {
-        $ips = array_reverse(array_map('trim', explode(',', (string) $request->headers->get('X-Forwarded-For'))));
+        $header = (string) $request->headers->get('X-Forwarded-For');
+        // A raw control byte is never optional whitespace: refuse the
+        // whole header before the split and trim below can launder a
+        // padded value into a valid address.
+        if (preg_match('/[\x00-\x1F\x7F]/', $header) === 1) {
+            return null;
+        }
+        $ips = array_reverse(array_map('trim', explode(',', $header)));
 
         return self::trustedChainClient($ips, $effectiveTrust);
     }
@@ -243,6 +250,11 @@ final class ClientIpResolver
     private static function clientFromForwarded(Request $request, array $effectiveTrust): ?string
     {
         $header = (string) $request->headers->get('Forwarded');
+        // The same raw-control refusal as the X-Forwarded-For parser: a
+        // padded node value must fail closed, never trim into an address.
+        if (preg_match('/[\x00-\x1F\x7F]/', $header) === 1) {
+            return null;
+        }
         if (trim($header) === '') {
             return null;
         }
@@ -505,6 +517,12 @@ final class ClientIpResolver
                     $candidate = implode(':', $parts);
                 }
             }
+        }
+        // The platform's inet_pton accepts some non-canonical IPv4
+        // spellings (leading-zero forms among them) and normalizes them
+        // inconsistently; the strict validator is the grammar gate.
+        if (filter_var($candidate, FILTER_VALIDATE_IP) === false) {
+            return null;
         }
         $packed = @inet_pton($candidate);
         if ($packed === false) {

@@ -1,7 +1,9 @@
 //! Ephemeral identity derivation, byte-identical with the risk-v1 contract.
 //!
 //! - `canonical_ip`: family byte `0x04`/`0x06` + packed bytes; IPv4-mapped
-//!   IPv6 (`::ffff:a.b.c.d`) is normalized to the 4-byte IPv4 form.
+//!   IPv6 (`::ffff:a.b.c.d`) and the deprecated IPv4-compatible `0::/96`
+//!   form (`::a.b.c.d`, excluding `::` and `::1`) are normalized to the
+//!   4-byte IPv4 form.
 //! - `pseudonym`: first 16 bytes of
 //!   `HMAC-SHA256(key, "kiwi-risk-id-v1\0" || context || "\0" ||
 //!    epoch.to_be_bytes() || material)` (epoch big-endian 8 bytes).
@@ -20,7 +22,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Canonical IP form: family byte (`0x04`/`0x06`) + packed bytes.
 ///
-/// IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form.
+/// IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form, and so
+/// do the deprecated IPv4-compatible ones (`::a.b.c.d`), except the
+/// unspecified `::` and the loopback `::1`.
 pub fn canonical_ip(ip: IpAddr) -> Vec<u8> {
     match ip {
         IpAddr::V4(v4) => {
@@ -33,8 +37,10 @@ pub fn canonical_ip(ip: IpAddr) -> Vec<u8> {
             let octets = v6.octets();
             let mapped =
                 octets[..10].iter().all(|b| *b == 0) && octets[10] == 0xff && octets[11] == 0xff;
+            let low = u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+            let compatible = octets[..12].iter().all(|b| *b == 0) && low != 0 && low != 1;
             let mut out = Vec::with_capacity(17);
-            if mapped {
+            if mapped || compatible {
                 out.push(0x04);
                 out.extend_from_slice(&octets[12..]);
             } else {
@@ -158,14 +164,18 @@ impl RiskIdentityFactory {
         Ok(factory)
     }
 
-    /// Source pseudonym (hex) for the current epoch at `now_secs`.
+    /// Source pseudonym (hex) for the current epoch at `now_secs`,
+    /// with floor division so negative times never alias the epoch-0
+    /// bucket.
     pub fn source_id(&self, ip: IpAddr, now_secs: i64) -> String {
-        self.source_id_for_epoch(ip, now_secs / self.source_epoch_secs)
+        self.source_id_for_epoch(ip, now_secs.div_euclid(self.source_epoch_secs))
     }
 
-    /// Subnet pseudonym (hex) for the current epoch at `now_secs`.
+    /// Subnet pseudonym (hex) for the current epoch at `now_secs`,
+    /// with floor division so negative times never alias the epoch-0
+    /// bucket.
     pub fn subnet_id(&self, ip: IpAddr, now_secs: i64) -> String {
-        self.subnet_id_for_epoch(ip, now_secs / self.subnet_epoch_secs)
+        self.subnet_id_for_epoch(ip, now_secs.div_euclid(self.subnet_epoch_secs))
     }
 
     /// Source pseudonym (hex) for an explicit epoch: context `b"src"`,
@@ -234,6 +244,21 @@ mod tests {
     fn canonical_ip_v4_mapped_v6_normalizes_to_v4() {
         let ip: IpAddr = "::ffff:203.0.113.27".parse().unwrap();
         assert_eq!(canonical_ip(ip), vec![0x04, 203, 0, 113, 27]);
+    }
+
+    #[test]
+    fn canonical_ip_v4_compatible_v6_normalizes_to_v4_except_unspecified_and_loopback() {
+        let compat: IpAddr = "::203.0.113.27".parse().unwrap();
+        assert_eq!(canonical_ip(compat), vec![0x04, 203, 0, 113, 27]);
+
+        let mut unspecified = vec![0u8; 17];
+        unspecified[0] = 0x06;
+        assert_eq!(canonical_ip("::".parse().unwrap()), unspecified);
+
+        let mut loopback = vec![0u8; 17];
+        loopback[0] = 0x06;
+        loopback[16] = 1;
+        assert_eq!(canonical_ip("::1".parse().unwrap()), loopback);
     }
 
     #[test]

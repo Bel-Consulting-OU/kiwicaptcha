@@ -71,7 +71,10 @@ final class ContinuityCookie
      */
     public function read(Request $request): ?string
     {
-        $value = $request->cookies->get($this->name);
+        // The raw parameter map, never the typed accessor: an array-shaped
+        // cookie (session[]=x) makes the typed accessor throw, while here
+        // any non-string shape simply reads as absent.
+        $value = $request->cookies->all()[$this->name] ?? null;
         if (!\is_string($value) || preg_match(self::VALUE_PATTERN, $value) !== 1) {
             return null;
         }

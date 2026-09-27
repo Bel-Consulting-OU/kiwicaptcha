@@ -154,11 +154,27 @@
       '<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p><span class="kiwi-timer" data-kiwi-timer></span></div></div>' +
       '<span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span></div></div>';
   }
+  // Callback names resolve via own-property window lookups only: the
+  // platform constructors and code-evaluation entries stay unreachable.
+  var COMPAT_FORBIDDEN_CALLBACKS = {
+    eval: true, Function: true, constructor: true, __proto__: true, prototype: true,
+    setTimeout: true, setInterval: true, setImmediate: true, requestAnimationFrame: true,
+  };
   function compatReadCallbacks(el, params) {
     var cb = function (name) {
       var v = (params && (params[name] !== undefined)) ? params[name]
         : (el.getAttribute("data-" + name.replace(/([A-Z])/g, "-$1").toLowerCase()) || "");
-      return typeof v === "function" ? v : (typeof v === "string" && v ? (window[v] || null) : null);
+      if (typeof v === "function") return v;
+      if (typeof v !== "string" || !v) return null;
+      if (COMPAT_FORBIDDEN_CALLBACKS[v]) return null;
+      if (!Object.prototype.hasOwnProperty.call(window, v)) return null;
+      // A page-defined accessor may throw when read: that must never
+      // abort the implicit-render loop and strand the other widgets.
+      try {
+        return typeof window[v] === "function" ? window[v] : null;
+      } catch (e) {
+        return null;
+      }
     };
     return {
       callback: cb("callback"),
@@ -166,12 +182,9 @@
       errorCallback: cb("error-callback")
     };
   }
-  // Owned provider-control bindings. BUTTON and INPUT controls render
-  // into a Kiwi-owned adjacent holder (an INPUT is void and a BUTTON is
-  // interactive, so the widget and its native Retry button can never be
-  // nested inside them); the control keeps its label and semantics.
-  // compatResolveId() resolves through this table and remove() removes
-  // the holder plus the owned activation listener.
+  // Owned provider-control bindings: button and input controls render
+  // into an adjacent holder, and this table backs resolve/remove and
+  // the owned activation listener.
   var compatControlByElement = new WeakMap();
   var compatControlById = {};
   function compatIsControl(el) {
@@ -203,10 +216,8 @@
     // working widget id.
     var el = core.resolveTarget(target);
     if (!el || el.nodeType !== 1) return 0;
-    // Idempotent re-render: the owned table first, then the render
-    // container's own instance marker; the existing instance is
-    // returned instead of double-initializing (a second solve on the
-    // same element would race the first).
+    // Idempotent re-render, owned table first (a second solve on one
+    // element would race the first).
     var boundEntry = compatControlByElement.get(el);
     if (boundEntry && core.record(boundEntry.id)) return boundEntry.id;
     if (el.dataset.kiwiInstance && core.record(el.dataset.kiwiInstance)) {
@@ -221,7 +232,6 @@
     var renderTarget = el;
     var holder = null;
     if (isControl) {
-      // Kiwi-owned and adjacent; the control keeps its original markup.
       var priorEntry = compatControlByElement.get(el);
       if (priorEntry && priorEntry.holder && priorEntry.holder.parentNode) {
         holder = priorEntry.holder;
@@ -236,21 +246,18 @@
     } else if (!el.querySelector("[data-kiwi-widget]")) {
       el.innerHTML = compatMarkup();
     }
-    // Explicit Kiwi overrides ride from the incumbent container onto the
-    // rendered one; the endpoint defaults to the bundle's same-origin
-    // prefix, so a migrated page needs no endpoint configuration.
+    // Explicit Kiwi overrides ride onto the rendered container; the
+    // endpoint defaults to the same-origin prefix.
     var inner = renderTarget.querySelector(".kiwi-container");
     if (inner) {
       ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src", "data-kiwi-locales-src", "data-kiwi-locales-integrity", "data-kiwi-telemetry"].forEach(function (attr) {
         if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
       });
       if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
-      // Mirror the loader-issued locales attrs when the page left them unset.
       if (compatLocalesSrc && !renderTarget.hasAttribute("data-kiwi-locales-src")) {
         renderTarget.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
         renderTarget.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
       }
-      // The mirrored default is what the one-line migration contract relies on.
       if (!renderTarget.hasAttribute("data-kiwi-endpoint")) renderTarget.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
     }
     var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
@@ -260,23 +267,27 @@
       ? false
       : ((params && typeof params["response-field-name"] === "string" && params["response-field-name"])
         || el.getAttribute("data-response-field-name") || COMPAT_FIELD);
-    // The incumbent renders its response field at render time (empty
-    // until solved), so a pre-activation submit serializes the empty
-    // provider field; the driver fills this same input.
-    if (typeof responseFieldName === "string" && responseFieldName) {
-      var tokenHost = (renderTarget.querySelector("[data-kiwi-token]") || {}).parentNode;
-      var aliasExists = false;
-      var hostInputs = tokenHost ? tokenHost.querySelectorAll("input") : [];
-      for (var hi = 0; hi < hostInputs.length; hi++) {
-        if (hostInputs[hi].name === responseFieldName) { aliasExists = true; break; }
-      }
-      if (tokenHost && !aliasExists) {
-        var aliasInput = document.createElement("input");
-        aliasInput.type = "hidden";
-        aliasInput.name = responseFieldName;
-        aliasInput.value = "";
-        tokenHost.appendChild(aliasInput);
-      }
+    // The incumbent renders its response field at render time; only the
+    // bounded field-name shape reaches this eager alias (other values go
+    // to the driver's own validation), and a hostile page value setter
+    // cannot break the render.
+    if (typeof responseFieldName === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(responseFieldName)) {
+      try {
+        var tokenHost = (renderTarget.querySelector("[data-kiwi-token]") || {}).parentNode;
+        var aliasExists = false;
+        var hostInputs = tokenHost ? tokenHost.querySelectorAll("input") : [];
+        for (var hi = 0; hi < hostInputs.length; hi++) {
+          if (hostInputs[hi].name === responseFieldName) { aliasExists = true; break; }
+        }
+        if (tokenHost && !aliasExists) {
+          var aliasInput = document.createElement("input");
+          aliasInput.type = "hidden";
+          aliasInput.name = responseFieldName;
+          // A fresh input already reads as the empty string (no value
+          // write, which would invoke a page-installed setter).
+          tokenHost.appendChild(aliasInput);
+        }
+      } catch (e) {}
     }
     var id = core.render(renderTarget, {
       scope: sitekey || "login",
@@ -333,15 +344,13 @@
       }
       if (!kiwiCompatFirstId) kiwiCompatFirstId = id;
     } else if (isControl) {
-      // A failed render leaves no orphan holder or binding behind.
-      if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
+        if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
       compatForgetControl(compatControlByElement.get(el));
     }
     return id || 0;
   }
-  // The single implicit-render entry point: idempotent render plus the
-  // owned activation listener exactly once. Invisible-class controls
-  // activate execute() on click; a container only renders.
+  // Implicit-render entry point: idempotent render plus the owned
+  // activation listener once for invisible-class controls.
   function compatRenderAndBind(el) {
     if (!el || el.nodeType !== 1) return 0;
     var id = compatRender(el);
@@ -594,11 +603,9 @@
       compatRenderAndBind(compatContainers[ci]);
     }
   });
-  // Dynamic implicit rendering (never in render=explicit mode, where
-  // the application owns rendering). The whole added subtree is
-  // traversed, not just the top-level node, so a framework inserting
-  // <section><div class="g-recaptcha">…</div></section> renders the
-  // nested container and a late invisible control is bound too.
+  // Dynamic implicit rendering (never in explicit mode): the whole
+  // added subtree is traversed, so nested containers and late controls
+  // render and bind.
   if (compat === "recaptcha" && compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
     new MutationObserver(function (mutations) {
       for (var m = 0; m < mutations.length; m++) {

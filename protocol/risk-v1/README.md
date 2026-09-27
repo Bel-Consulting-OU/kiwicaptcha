@@ -103,8 +103,10 @@ identical in:
    ```
 
    - source material: canonical IP bytes (family byte 0x04/0x06 + packed
-     bytes; IPv4-mapped IPv6 normalized to IPv4); context `b"src"`;
-     epoch = floor(now / 900).
+     bytes; IPv4-mapped IPv6 and the deprecated IPv4-compatible `0::/96`
+     form `::a.b.c.d` — excluding the unspecified `::` and the loopback
+     `::1` — normalized to the 4-byte IPv4 family). The context is
+     `b"src"`; the epoch is floor(now / 900).
    - subnet material: masked canonical network (IPv4 /24, IPv6 /56) in the
      same family+bytes form; context `b"net"`; epoch = floor(now / 900).
    - session: HMAC over the raw 16-byte session cookie value; context

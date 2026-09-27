@@ -163,6 +163,12 @@ impl RswTrapdoor {
 
         let n = BigUint::from_bytes_be(&n_bytes);
         let lambda = BigUint::from_bytes_be(&lambda_bytes);
+        // A zero lambda passes the parity check (it is even) and makes
+        // the consistency spot-check vacuous (base^0 is 1 modulo n), so
+        // it is refused here, before the proof path can divide by zero.
+        if lambda == BigUint::from(0u8) {
+            return Err(RswError::InvalidLambdaTrapdoor);
+        }
         if let Some(factor) = small_prime_factor(&n) {
             return Err(RswError::InvalidModulusSmallFactor(factor));
         }
@@ -234,13 +240,19 @@ impl RswTrapdoor {
 /// concatenated with the nonce bytes, interpreted as a 256-bit
 /// big-endian integer and reduced modulo n. The reduction is a no-op
 /// for a conforming modulus (n is at least 2^2047 and the digest at
-/// most 2^256-1), and it keeps the residue canonical for any n.
+/// most 2^256-1), and it keeps the residue canonical for any nonzero
+/// n. A zero modulus has no canonical residue, so the base is zero
+/// there (fail closed, never a division by zero).
 pub fn derive_base(prefix: &str, nonce: &str, n: &BigUint) -> BigUint {
     let mut hasher = Sha256::new();
     hasher.update(prefix.as_bytes());
     hasher.update(nonce.as_bytes());
     let digest = hasher.finalize();
-    BigUint::from_bytes_be(&digest) % n
+    let value = BigUint::from_bytes_be(&digest);
+    if n == &BigUint::from(0u8) {
+        return BigUint::from(0u8);
+    }
+    value % n
 }
 
 /// The fixed 512-hex wire form of a residue: 256 bytes of big-endian,
@@ -337,6 +349,12 @@ pub fn is_probable_prime(n: &BigUint) -> bool {
 /// guarantees that, and the pass verdict is the strongest consistency
 /// evidence a configuration validator without the primes can hold.
 pub fn trapdoor_consistent(n: &BigUint, lambda: &BigUint) -> bool {
+    // A zero modulus or a zero lambda has no consistent trapdoor and
+    // would panic inside modpow, so both are refused as inconsistent
+    // (fail closed, never a panic).
+    if n == &BigUint::from(0u8) || lambda == &BigUint::from(0u8) {
+        return false;
+    }
     SELFTEST_BASES
         .iter()
         .all(|base| BigUint::from(*base).modpow(lambda, n) == BigUint::from(1u8))

@@ -117,6 +117,31 @@ final class RiskLuaTtlGuardTest extends TestCase
         $this->client->del($keys);
     }
 
+    public function testAssessV2WithoutARegistrationDoesNotRequireTheOutcomeTtl(): void
+    {
+        // ARGV[25] is the registration marker: an absent (falsy) marker
+        // must skip the optional outcome-TTL guard rather than trip it,
+        // so an identity-bearing assessment without a registration still
+        // runs instead of degrading to a zero score.
+        $script = self::assessV2Script();
+        $args = array_fill(0, 24, '0');
+        $args[0] = '1';
+        $args[1] = '1';
+        $args[4] = '60';
+        $args[5] = '1800';
+        $args[6] = '0';
+        $args[18] = '1';
+        $args[19] = '0';
+        $args[20] = '1800';
+        $args[21] = '86400';
+        try {
+            $this->client->eval($script, 0, ...$args);
+            self::addToAssertionCount(1);
+        } catch (\Throwable $e) {
+            self::assertStringNotContainsString('outcome_ttl_s', $e->getMessage());
+        }
+    }
+
     public function testAssessV2RefusesANonPositiveSessionTtl(): void
     {
         $script = self::assessV2Script();

@@ -297,10 +297,15 @@ impl SolutionToken {
             _ => return Err(DecodeError::Malformed),
         }
 
-        // Canonical numeric segments: a leading zero is not part of the
-        // wire language ("0042" is a different, rejected spelling of 42)
-        // except the exact value "0" itself — both implementations
-        // accept exactly one spelling per value.
+        // Canonical numeric segments: only plain digits spell a numeric
+        // segment (the PHP ctype_digit gate), so a sign, space or other
+        // non-digit is refused before the parse. A leading zero is not
+        // part of the wire language ("0042" is a different, rejected
+        // spelling of 42) except the exact value "0" itself; both
+        // implementations accept exactly one spelling per value.
+        if counter_str.is_empty() || !counter_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(DecodeError::InvalidCounter);
+        }
         if counter_str.len() > 1 && counter_str.starts_with('0') {
             return Err(DecodeError::InvalidCounter);
         }
@@ -313,6 +318,12 @@ impl SolutionToken {
         // was not minted by a real solve (matches PHP exactly).
         if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
+        }
+        // The same digit-only gate for the duration segment: a plus
+        // prefixed or otherwise signed spelling is a different wire
+        // token and is refused exactly like the counter.
+        if duration_str.is_empty() || !duration_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(DecodeError::InvalidDuration);
         }
         if duration_str.len() > 1 && duration_str.starts_with('0') {
             return Err(DecodeError::InvalidDuration);

@@ -408,13 +408,18 @@ impl ProcessEmergencyCap {
 /// immediately-expired/persistent state can be configured. The contract
 /// defaults are 900 s epochs, 1800 s session TTL, 86400 s principal TTL
 /// and 60 s dedupe TTL.
+///
+/// The five fields are private and read through the accessors below:
+/// [`RiskTimingConfig::new`] is the only constructor, so a caller can
+/// never assemble an unvalidated configuration and hand it to
+/// [`RiskEngine::with_timing`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RiskTimingConfig {
-    pub source_epoch_secs: u64,
-    pub subnet_epoch_secs: u64,
-    pub session_ttl_secs: u64,
-    pub principal_ttl_secs: u64,
-    pub dedupe_ttl_secs: u64,
+    source_epoch_secs: u64,
+    subnet_epoch_secs: u64,
+    session_ttl_secs: u64,
+    principal_ttl_secs: u64,
+    dedupe_ttl_secs: u64,
 }
 
 impl Default for RiskTimingConfig {
@@ -430,14 +435,22 @@ impl Default for RiskTimingConfig {
 }
 
 impl RiskTimingConfig {
+    /// The largest accepted timing value: one year in seconds. The
+    /// observation pipeline narrows epochs to `i64` seconds, so the
+    /// bound keeps every accepted value representable and refuses
+    /// nonsense configurations instead of wrapping them.
+    pub const MAX_SECS: u64 = 366 * 24 * 60 * 60;
+
     /// Builds a validated timing configuration. Every parameter must be
-    /// at least 1: a zero epoch divides by zero in the observation
-    /// pipeline and a zero TTL expires or persists risk state
-    /// immediately.
+    /// within `1..=MAX_SECS`: a zero epoch divides by zero in the
+    /// observation pipeline, a zero TTL expires or persists risk state
+    /// immediately, and a value beyond the bound would wrap into a
+    /// negative epoch window when narrowed to `i64`.
     ///
     /// # Errors
     ///
-    /// [`RiskError::InvalidTiming`] names the first parameter below one.
+    /// [`RiskError::InvalidTiming`] names the first parameter outside
+    /// the range.
     pub fn new(
         source_epoch_secs: u64,
         subnet_epoch_secs: u64,
@@ -452,7 +465,7 @@ impl RiskTimingConfig {
             ("principal_ttl_secs", principal_ttl_secs),
             ("dedupe_ttl_secs", dedupe_ttl_secs),
         ] {
-            if value < 1 {
+            if !(1..=Self::MAX_SECS).contains(&value) {
                 return Err(RiskError::InvalidTiming(name, value));
             }
         }
@@ -463,6 +476,31 @@ impl RiskTimingConfig {
             principal_ttl_secs,
             dedupe_ttl_secs,
         })
+    }
+
+    /// The source identity epoch window in seconds.
+    pub fn source_epoch_secs(&self) -> u64 {
+        self.source_epoch_secs
+    }
+
+    /// The subnet identity epoch window in seconds.
+    pub fn subnet_epoch_secs(&self) -> u64 {
+        self.subnet_epoch_secs
+    }
+
+    /// The session state lifetime in seconds.
+    pub fn session_ttl_secs(&self) -> u64 {
+        self.session_ttl_secs
+    }
+
+    /// The principal state lifetime in seconds.
+    pub fn principal_ttl_secs(&self) -> u64 {
+        self.principal_ttl_secs
+    }
+
+    /// The dedupe-window lifetime in seconds.
+    pub fn dedupe_ttl_secs(&self) -> u64 {
+        self.dedupe_ttl_secs
     }
 }
 
@@ -556,8 +594,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_timing(mut self, timing: RiskTimingConfig) -> Self {
         self.identity = RiskIdentityFactory::with_epochs(
             self.keys.clone(),
-            timing.source_epoch_secs as i64,
-            timing.subnet_epoch_secs as i64,
+            i64::try_from(timing.source_epoch_secs()).expect("RiskTimingConfig bounded the epoch"),
+            i64::try_from(timing.subnet_epoch_secs()).expect("RiskTimingConfig bounded the epoch"),
         )
         .expect("RiskTimingConfig validated both epoch windows");
         self.timing = timing;
@@ -1323,8 +1361,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
     ) -> Result<RiskObservation, RiskError> {
         let now_secs = (now_ms / 1000) as i64;
-        let src_epoch = now_secs / self.timing.source_epoch_secs as i64;
-        let net_epoch = now_secs / self.timing.subnet_epoch_secs as i64;
+        let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
+        let net_epoch = now_secs.div_euclid(self.timing.subnet_epoch_secs() as i64);
         let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
         let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
         // Canonical idempotency normalization shared with PHP: verbatim keys
@@ -1565,9 +1603,18 @@ mod tests {
             RiskTimingConfig::new(900, 900, 1800, 86400, 0),
             Err(RiskError::InvalidTiming("dedupe_ttl_secs", 0))
         ));
+        assert!(matches!(
+            RiskTimingConfig::new(u64::MAX, 900, 1800, 86400, 60),
+            Err(RiskError::InvalidTiming("source_epoch_secs", u64::MAX))
+        ));
+        assert!(matches!(
+            RiskTimingConfig::new(900, 900, 1800, 86400, u64::MAX),
+            Err(RiskError::InvalidTiming("dedupe_ttl_secs", u64::MAX))
+        ));
         let ok = RiskTimingConfig::new(60, 120, 1800, 86400, 60).unwrap();
         assert_eq!(ok.source_epoch_secs, 60);
         assert_eq!(ok.subnet_epoch_secs, 120);
+        assert_eq!(RiskTimingConfig::MAX_SECS, 31_622_400);
     }
 
     fn classifier() -> CidrNetworkClassifier {

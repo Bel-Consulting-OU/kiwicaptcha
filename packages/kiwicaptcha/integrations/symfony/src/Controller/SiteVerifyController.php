@@ -418,10 +418,19 @@ final class SiteVerifyController
         // Whitespace-only is treated as absent (the provider 'no-ip'
         // semantics); a null remoteip is unchanged.
         if ($remoteIp !== null) {
+            // A raw control byte is never optional whitespace: reject it
+            // before the trim below can launder a padded value into a
+            // valid address.
+            if (preg_match('/[\x00-\x1F\x7F]/', $remoteIp) === 1) {
+                return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+            }
             $remoteIp = trim($remoteIp);
             if ($remoteIp === '') {
                 $remoteIp = null;
-            } elseif (@inet_pton($remoteIp) === false) {
+            } elseif (filter_var($remoteIp, FILTER_VALIDATE_IP) === false) {
+                // The strict validator, not inet_pton: the platform's
+                // inet_pton accepts some non-canonical IPv4 spellings
+                // (leading-zero forms among them).
                 return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
             }
         }
@@ -1660,7 +1669,14 @@ LUA;
         if ($request->query->count() > 0) {
             return null;
         }
-        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        $rawContentType = (string) $request->headers->get('Content-Type', '');
+        // A raw control byte is not optional whitespace: reject it before
+        // the split and trim below can launder a padded value into a
+        // valid media type.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+            return null;
+        }
+        $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
         if ($contentType === 'application/json') {
             // The shared raw-document duplicate-key scanner:
             // {"secret":"A","secret":"B"} is refused, never silently
