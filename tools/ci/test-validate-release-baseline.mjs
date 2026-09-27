@@ -294,7 +294,21 @@ function threePartInsteadOfModes(payload, difficulty, cache) {
  * below, never accidentally by this fixture.
  */
 function legacySchema1Payload() {
-  const payload = clone(JSON.parse(readFileSync(LEGACY_BASELINE_SRC, 'utf8')));
+  // Synthetic healthy measurements in the legacy three-part shape: the
+  // fixture pins the validator's legacy/lab acceptance semantics and
+  // must not inherit whatever the committed baseline currently records
+  // (a fresh re-bind replaces its rows with the recorded run's values).
+  const payload = clone(schema3Payload());
+  payload.schema = 'kiwicaptcha.client-perf/1';
+  delete payload.completion;
+  const merged = {};
+  for (const [key, row] of Object.entries(payload.results)) {
+    const parts = key.split(':');
+    if (parts.length !== 4) continue;
+    const mergedKey = parts.slice(0, 3).join(':');
+    if (!(mergedKey in merged)) merged[mergedKey] = clone(row);
+  }
+  payload.results = merged;
   payload.generated_at = nowIso();
   payload.clientAssets = canonicalClientAssets();
   return payload;
