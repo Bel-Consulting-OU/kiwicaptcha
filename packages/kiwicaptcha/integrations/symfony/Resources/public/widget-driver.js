@@ -34,6 +34,55 @@
   // nonce plus this window, so a retry loop never spams the endpoint.
   var KIWI_CANCEL_COOLDOWN_MS = 5000;
 
+  // ── Supported external configuration attributes ──
+  // The one data-kiwi-* configuration list: the native path reads it
+  // through kiwiConfigValue, compat copies it onto the render target.
+  var KIWI_CONFIG_ATTRS = [
+    "data-kiwi-endpoint",
+    "data-kiwi-scope",
+    "data-kiwi-algorithm",
+    "data-kiwi-request-binding",
+    "data-kiwi-risk-context",
+    "data-kiwi-fetch-timeout-ms",
+    "data-kiwi-chain-ticket",
+    "data-kiwi-worker-src",
+    "data-kiwi-worker-integrity",
+    "data-kiwi-runtime-src",
+    "data-kiwi-runtime-integrity",
+    "data-kiwi-execution-src",
+    "data-kiwi-execution-integrity",
+    "data-kiwi-locales-src",
+    "data-kiwi-locales-integrity",
+    "data-kiwi-risk-src",
+    "data-kiwi-risk-integrity",
+    "data-kiwi-telemetry",
+    "data-kiwi-telemetry-src",
+    "data-kiwi-telemetry-integrity",
+    "data-kiwi-lang",
+  ];
+  // W wins over container; unknown names are refused (one gate).
+  function kiwiConfigValue(W, container, name) {
+    if (KIWI_CONFIG_ATTRS.indexOf(name) === -1) return null;
+    var value = W && W.getAttribute ? W.getAttribute(name) : null;
+    if ((value === null || value === "") && container && container !== W && container.getAttribute) {
+      value = container.getAttribute(name);
+    }
+    return value;
+  }
+  // Copy supported attributes; a value already on target wins.
+  function kiwiCopySupportedConfiguration(source, target) {
+    if (!source || !target || !source.getAttribute || !target.setAttribute) return 0;
+    var copied = 0;
+    for (var i = 0; i < KIWI_CONFIG_ATTRS.length; i++) {
+      var name = KIWI_CONFIG_ATTRS[i];
+      if (source.hasAttribute(name) && !target.hasAttribute(name)) {
+        target.setAttribute(name, source.getAttribute(name));
+        copied++;
+      }
+    }
+    return copied;
+  }
+
   // ── Worker source (argon2id / rsw / glue-less SHA-256) ──
   // The worker runs off the main thread (each 64 MiB hash blocks the UI;
   // a glue-less SHA-256 search would block it for seconds). Its source
@@ -561,10 +610,9 @@
   }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
-    // A fresh initialization (render, reset or Retry) is a user-driven
-    // retry: it clears the transient module-failure backoff. The backoff
-    // throttles automatic retries within one load only.
-    kiwiModuleFailedAt = {};
+    // Automatic initialization (DOM-ready, observer, implicit compat
+    // render) honors the module-failure backoff; only explicit retries
+    // clear it through kiwiClearModuleBackoff.
     options = options || {};
     // The response-field alias name is page-author controlled, so only
     // the bounded field-name shape reaches the alias writer — anything
@@ -613,8 +661,7 @@
     // container -> navigator.language; the untranslated fallback is
     // explicitly lang="en". document.currentScript is NULL during async
     // init, so the attribute is read from the subtree.
-    var kiwiLangAttr = (W.getAttribute ? W.getAttribute("data-kiwi-lang") : null)
-      || (container && container.getAttribute ? container.getAttribute("data-kiwi-lang") : null);
+    var kiwiLangAttr = kiwiConfigValue(W, container, "data-kiwi-lang");
     // Precedence: instance overrides -> provider language (Turnstile
     // language) -> loader hl= -> navigator.language -> English.
     var kiwiProviderLang = options && options.language ? String(options.language) : null;
@@ -647,9 +694,7 @@
     // gate. The session attaches only if the module registers BEFORE
     // this generation's request went out (requestSent); otherwise this
     // generation solves with the empty stub — never a half-session.
-    var telemetryMode = "off";
-    if (W) telemetryMode = W.getAttribute("data-kiwi-telemetry") || telemetryMode;
-    if (container && container !== W) telemetryMode = container.getAttribute("data-kiwi-telemetry") || telemetryMode;
+    var telemetryMode = kiwiConfigValue(W, container, "data-kiwi-telemetry") || "off";
     if (telemetryMode !== "minimal" && telemetryMode !== "full") telemetryMode = "off";
     var requestSent = false;
     var kiwiTelemetrySession = null;
@@ -671,8 +716,7 @@
     // policy. Explicit options.scope beats the container attribute beats
     // the path heuristics.
     var scope = (options && typeof options.scope === "string" && options.scope)
-      || W.getAttribute("data-kiwi-scope")
-      || container.getAttribute("data-kiwi-scope");
+      || kiwiConfigValue(W, container, "data-kiwi-scope");
     if (!scope) {
       scope = "login";
       var p = window.location.pathname.toLowerCase();
@@ -1047,6 +1091,8 @@
         // language/action/cData. The record always carries the INITIAL
         // options; BFCache restore preserves them the same way.
         var preserved = (kiwiWidgets[widgetId] && kiwiWidgets[widgetId].options) || options;
+        // Retry button: explicit retry clears the backoff.
+        kiwiClearModuleBackoff();
         delete W.dataset.kiwiStarted;
         initWidget(W, preserved);
       });
@@ -1073,24 +1119,22 @@
       // worker solve, the files-mode SHA-256 worker solve on a glue-less
       // page, and the armed response's worker/execution paths fail
       // closed on a missing module).
-      var riskApi = kiwiModuleApi("risk");        var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
+      var riskApi = kiwiModuleApi("risk");        var endpoint = kiwiEndpoint(kiwiConfigValue(W, container, "data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection: the client may only choose among the
         // server-offered profiles (sha256 / argon2id / rsw); anything
         // else normalizes to the default, and a solver failure never
         // downgrades a request (failed paths retry the SAME profile).
-        var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
+        var algorithm = kiwiConfigValue(W, container, "data-kiwi-algorithm") || "sha256";
         if (algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw") algorithm = "sha256";
-        var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
+        var requestBinding = kiwiConfigValue(W, container, "data-kiwi-request-binding");
         var reqBody = { scope: scope };
         // EXECUTION CAPABILITY ADVERTISEMENT: when the widget carries the
         // configured interpreter asset (data-kiwi-execution-src +
         // integrity), the driver declares the highest program version it
         // can run via the Kiwi-Execution-Max-Version header (currently 5);
         // the header is ignorable and its absence means version 1.
-        var execSrcAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
-          || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
-        var execIntegrityAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
-          || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
+        var execSrcAttr = kiwiConfigValue(W, container, "data-kiwi-execution-src");
+        var execIntegrityAttr = kiwiConfigValue(W, container, "data-kiwi-execution-integrity");
         var reqHeaders = { "Accept": "application/json", "Content-Type": "application/json" };
         if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "5";
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
@@ -1101,8 +1145,7 @@
         // sent). It is CLEARED after the solve: one-shot, never re-
         // presented by a re-solve.
         var chainTicket = (options && typeof options.chainTicket === "string" && options.chainTicket)
-          || (container.getAttribute ? container.getAttribute("data-kiwi-chain-ticket") : null)
-          || (W.getAttribute ? W.getAttribute("data-kiwi-chain-ticket") : null);
+          || kiwiConfigValue(W, container, "data-kiwi-chain-ticket");
         if (typeof chainTicket === "string" && /^[A-Za-z0-9._:-]{1,256}$/.test(chainTicket)) {
           reqBody.chain_ticket = chainTicket;
         }
@@ -1114,9 +1157,7 @@
         // decoy node, truncated to the server's 256-byte bound) ride the
         // request as probabilistic evidence, never a gate; an absent
         // module degrades to the default no-signal state.
-        var riskContext = null;
-        if (W) riskContext = W.getAttribute("data-kiwi-risk-context") || riskContext;
-        if (container && container !== W) riskContext = container.getAttribute("data-kiwi-risk-context") || riskContext;
+        var riskContext = kiwiConfigValue(W, container, "data-kiwi-risk-context");
         if (riskContext === "coarse") {
           var clientContext = kiwiBuildClientContext();
           if (clientContext) reqBody.client_context = clientContext;
@@ -1143,7 +1184,7 @@
         // (sitekey, action) -> security scope — the client never chooses
         // protected scope names.
         if (options && options.sitekey) reqBody.sitekey = String(options.sitekey);
-        var timeoutAttr = W.getAttribute("data-kiwi-fetch-timeout-ms") || container.getAttribute("data-kiwi-fetch-timeout-ms") || "";
+        var timeoutAttr = kiwiConfigValue(W, container, "data-kiwi-fetch-timeout-ms") || "";
         var fetchTimeoutMs = parseInt(timeoutAttr, 10);
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
         var abortController = new AbortController();
@@ -1509,14 +1550,21 @@
     }
     return target.nodeType === 1 ? target : null;
   }
-  function kiwiRender(target, options) {
+  function kiwiRenderTarget(target, options) {
     var el = kiwiResolveTarget(target);
     if (!el) return 0;
     return initWidget(el, options) || 0;
   }
+  function kiwiRender(target, options) {
+    // Explicit provider re-render: a user-driven retry.
+    kiwiClearModuleBackoff();
+    return kiwiRenderTarget(target, options);
+  }
   function kiwiReset(id) {
     var r = kiwiWidgets[id];
     if (!r) return;
+    // Explicit reset: a user-driven retry.
+    kiwiClearModuleBackoff();
     // Reset is cancellation — the superseded generation's fetch is
     // aborted, its worker terminated, its retry/expiry timers cleared;
     // the new initWidget starts generation +1.
@@ -1685,6 +1733,10 @@
   var kiwiModuleLoads = {};
   var kiwiModuleFailedAt = {};
   var KIWI_MODULE_FAILURE_BACKOFF_MS = 5000;
+  // Explicit retries only.
+  function kiwiClearModuleBackoff() {
+    kiwiModuleFailedAt = {};
+  }
   function kiwiModuleApi(kind) {
     return kiwiModuleApis[kind] || null;
   }
@@ -1698,12 +1750,9 @@
       && ((typeof data.decoy_field === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(data.decoy_field))
         || data.execution_program));
   }
-  function kiwiModuleAttr(kind, el, attr) {
-    return el && el.getAttribute ? el.getAttribute("data-kiwi-" + kind + "-" + attr) : null;
-  }
   function kiwiModuleAssetAttrs(kind, container, W) {
-    var src = kiwiModuleAttr(kind, container, "src") || kiwiModuleAttr(kind, W, "src");
-    var integrity = kiwiModuleAttr(kind, container, "integrity") || kiwiModuleAttr(kind, W, "integrity");
+    var src = kiwiConfigValue(W, container, "data-kiwi-" + kind + "-src");
+    var integrity = kiwiConfigValue(W, container, "data-kiwi-" + kind + "-integrity");
     return (src && integrity) ? { src: src, integrity: integrity } : null;
   }
   var KIWI_MODULE_ATTEMPTS = 3;
@@ -1718,6 +1767,7 @@
       var attempt = 0;
       var settled = false;
       var watchdog = null;
+      var retryTimer = null;
       var script = null;
       function dropScript() {
         // A failed or refused script node never stays in the document.
@@ -1728,16 +1778,20 @@
         if (settled) return;
         settled = true;
         if (watchdog) clearTimeout(watchdog);
+        // Terminal settlement cancels a pending retry script.
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
         if (!api) dropScript();
         resolve(api || null);
       }
       function tryInject() {
+        if (settled) return;
         script = document.createElement("script");
         script.src = attrs.src;
         script.integrity = attrs.integrity;
         script.setAttribute("data-kiwi-module", kind);
         kiwiModuleScriptKinds.set(script, kind);
         script.onload = function () {
+          if (settled) return;
           // The module registers synchronously while its IIFE executes,
           // so the registry entry at the load event is the completion
           // signal; a loaded asset that never registered is refused
@@ -1747,10 +1801,11 @@
           finish(api);
         };
         script.onerror = function () {
+          if (settled) return;
           dropScript();
           if (attempt < KIWI_MODULE_ATTEMPTS - 1) {
             attempt++;
-            setTimeout(tryInject, 250 * attempt);
+            retryTimer = setTimeout(tryInject, 250 * attempt);
             return;
           }
           console.warn("KiwiCaptcha: " + kind + " module asset unavailable (" + attrs.src + ")");
@@ -1882,6 +1937,7 @@
     compatGlue: null,
     core: {
       render: kiwiRender,
+      renderImplicit: kiwiRenderTarget,
       reset: kiwiReset,
       getResponse: kiwiGetResponse,
       execute: kiwiExecute,
@@ -1897,6 +1953,8 @@
       counts: function () {
         return { widgets: Object.keys(kiwiWidgets).length, resetHooks: kiwiResetHooks.length };
       },
+      copySupportedConfiguration: kiwiCopySupportedConfiguration,
+      clearModuleBackoff: kiwiClearModuleBackoff,
       findGlueSource: kiwiFindGlueSource,
       embeddedWorkerSource: kiwiEmbeddedWorkerSource,
       buildClientContext: kiwiBuildClientContext,

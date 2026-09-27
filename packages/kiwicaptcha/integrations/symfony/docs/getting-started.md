@@ -237,6 +237,8 @@ base-uri 'none';
 form-action 'self'
 ```
 
+<!-- The root README mirrors this script-src and style-src pair; update both together. -->
+
 `connect-src 'self'` means even a future JS regression cannot exfiltrate.
 At runtime the driver refuses cross-origin challenge endpoints.
 

@@ -218,7 +218,28 @@
  *      runs in CI mode and in release mode alike, so evidence whose
  *      assets drifted from the tree is rejected on every push and can
  *      never be release-certified.
-
+ *
+ *  12. per-device measurement-context binding (release-evidence
+ *      binding): the top-level clientAssets block proves what the
+ *      aggregate rows describe, but it can be refreshed while a
+ *      physical device's rows still describe bytes the device never
+ *      measured. Every physical device evidence object in
+ *      payload.physical_results must therefore carry
+ *      measurement_context { schema, sha256 } — the release measurement
+ *      context the device's rows were recorded against, built by the
+ *      shared measurement-context module over the canonical clientAssets
+ *      set, the harness schema and source hash, the execution manifest
+ *      maximum, the solver configuration (reps/argonReps/cache/assets/
+ *      argonBits/argonMKib and the always-applied fixed-work options)
+ *      and the harness difficulty definitions. The validator builds the
+ *      CURRENT release measurement context from the current tree and
+ *      demands measurement_context.sha256 (and therefore the client
+ *      asset identity inside it) equal it. A device object without a
+ *      context, with a malformed one, or with a different one (older
+ *      client bytes, an older harness, a different solver configuration)
+ *      is a hard reason naming the device, in CI mode and release mode
+ *      alike: physical qualification can never be silently re-bound to
+ *      client bytes the device did not measure.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -251,6 +272,12 @@
  *     kind:"physical" device; every row must carry source "physical"
  *     and a device_id equal to its index key; every row's cell tier
  *     must equal the device's qualified tier.
+ *   - measurement context: every device evidence object must carry
+ *     measurement_context { schema, sha256 } equal to the CURRENT
+ *     release measurement context (rule 12): a device measured against
+ *     other client bytes, harness, execution ceiling or solver
+ *     configuration is a hard reason naming the device, so a refreshed
+ *     top-level identity can never inherit the device's old rows.
  *   - per-device coverage (the RELEASE invariant): every registered
  *     physical device x every released difficulty x cold/warm x every
  *     required asset mode has its own evidence row. A device missing
@@ -294,6 +321,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from '../client-perf/client-assets.mjs';
+import {
+  MEASUREMENT_CONTEXT_SCHEMA,
+  MEASUREMENT_CONTEXT_SHA256_RE,
+  currentReleaseMeasurementContext,
+} from '../client-perf/measurement-context.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -1275,15 +1307,50 @@ function main() {
     }
     const physicalIndex = physicalIndexOk ? physicalResults : {};
 
+    // The current release measurement context (rule 12): built from the
+    // current tree by the shared measurement-context module (canonical
+    // clientAssets set, current harness schema and source hash, current
+    // execution manifest maximum, canonical solver configuration,
+    // harness difficulty definitions). Every physical device evidence
+    // object must carry the context its rows were recorded against, and
+    // that context must equal this one — otherwise the device's rows
+    // would be certified under client bytes/configuration the device
+    // never measured.
+    let currentMeasurementContext;
+    try {
+      currentMeasurementContext = currentReleaseMeasurementContext();
+    } catch (e) {
+      process.stderr.write(`validate-release-baseline: cannot build the current release measurement context: ${e.message}\n`);
+      process.exit(1);
+    }
+
     // Structural scan of the device index: every index key must name a
     // registered kind:"physical" device; every row must be an object
     // carrying source "physical" and the device_id of its index key
     // (the row-level provenance pair merge-cells stamps); and every
-    // row's cell tier must equal the device's qualified tier.
+    // row's cell tier must equal the device's qualified tier. Each
+    // device evidence object must also carry its measurement_context
+    // (validated before the rows: the key is device metadata, not an
+    // evidence row).
     for (const [deviceId, index] of Object.entries(physicalIndex)) {
       if (!index || typeof index !== 'object' || Array.isArray(index)) {
         reasons.push(`physical_results[${JSON.stringify(deviceId)}] is not an object of result-key -> row entries`);
         continue;
+      }
+      const deviceContext = index.measurement_context;
+      if (deviceContext === undefined || deviceContext === null) {
+        reasons.push(`physical_results[${JSON.stringify(deviceId)}] carries no measurement_context (every physical device's evidence must be bound to the release measurement context it was measured against; physical qualification can never be re-bound to client bytes the device did not measure)`);
+      } else if (!deviceContext || typeof deviceContext !== 'object' || Array.isArray(deviceContext)) {
+        reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context ${JSON.stringify(deviceContext)} is not a { schema: ${JSON.stringify(MEASUREMENT_CONTEXT_SCHEMA)}, sha256: "<64 hex>" } release measurement context`);
+      } else {
+        if (deviceContext.schema !== MEASUREMENT_CONTEXT_SCHEMA) {
+          reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context.schema ${JSON.stringify(deviceContext.schema)} is not ${MEASUREMENT_CONTEXT_SCHEMA}`);
+        }
+        if (typeof deviceContext.sha256 !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(deviceContext.sha256)) {
+          reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context.sha256 ${JSON.stringify(deviceContext.sha256)} is not a full 64-hex SHA-256 release measurement context identity`);
+        } else if (deviceContext.sha256 !== currentMeasurementContext.sha256) {
+          reasons.push(`physical_results[${JSON.stringify(deviceId)}] measurement_context sha256 ${deviceContext.sha256} is not the current release measurement context ${currentMeasurementContext.sha256} (the device's evidence was measured against a different client asset set, harness, execution manifest or solver configuration; a physical claim can never be re-bound to client bytes the device did not measure)`);
+        }
       }
       const dev = deviceById.get(deviceId);
       if (!dev || dev.kind !== 'physical') {
@@ -1291,6 +1358,7 @@ function main() {
       }
       for (const [rowKey, row] of Object.entries(index)) {
         if (rowKey.startsWith('multi-widget')) continue;
+        if (rowKey === 'measurement_context') continue; // device metadata, validated above
         if (!row || typeof row !== 'object' || Array.isArray(row)) {
           reasons.push(`physical_results[${JSON.stringify(deviceId)}] row ${rowKey} is not an object`);
           continue;

@@ -253,6 +253,57 @@ final class SolutionTokenTest extends TestCase
         SolutionToken::decode(base64_encode('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-.1.100.{}'));
     }
 
+    public function testRejectsNonCanonicalNonceTrailingBitsInsideThePayload(): void
+    {
+        // Rust parity: `decode_rejects_noncanonical_nonce_inside_the_payload`
+        // in packages/kiwicaptcha/src/token.rs requires the inner nonce to
+        // decode to 32 bytes and re-encode byte-exact (`B64.decode` then
+        // `B64.encode(&bytes) == nonce`). Its vectors are an unpadded 43-char
+        // nonce (fails the length gate) and a url-safe alphabet swap (fails
+        // the alphabet gate); this test covers the one shape those two miss:
+        // a 43-char segment plus '=' that is shape-valid and strict-decodable
+        // but whose final sextet carries non-zero unused bits. PHP's strict
+        // base64_decode silently drops those bits, so only the canonical
+        // re-encode can reject the spelling — the exact Rust rule.
+        $canonical = self::NONCE;
+        self::assertSame('=', substr($canonical, -1), 'precondition: canonical nonce is padded');
+        self::assertSame('E', $canonical[42], 'precondition: 43rd char is the canonical final sextet');
+
+        // The 43rd character of a 32-byte encoding carries 4 meaningful bits
+        // and 2 unused bits that must be zero: 'E' (=4) is canonical, while
+        // F/G/H (=5/6/7) have identical meaningful bits, decode to the same
+        // 32 bytes, and re-encode to 'E'. Each is a distinct non-canonical
+        // wire spelling PHP must refuse, exactly like Rust.
+        $rejected = 0;
+        foreach (['F', 'G', 'H'] as $final) {
+            $nonce = substr($canonical, 0, 42).$final.'=';
+            self::assertSame(44, \strlen($nonce), 'precondition: 44 chars');
+            self::assertSame(1, preg_match('/^[A-Za-z0-9+\/]{43}=$/', $nonce), 'precondition: shape-valid');
+            $bytes = base64_decode($nonce, true);
+            self::assertNotFalse($bytes, 'precondition: strict decode accepts the spelling');
+            self::assertSame(32, \strlen($bytes));
+            self::assertSame($canonical, base64_encode($bytes), 'precondition: aliases the same 32 bytes');
+
+            try {
+                SolutionToken::decode(base64_encode($nonce.'.1.100.{}'));
+                self::fail("non-canonical nonce ending '$final=' must be rejected");
+            } catch (DecodeError) {
+                ++$rejected;
+            }
+        }
+        self::assertSame(3, $rejected, 'every shape-valid non-canonical nonce must be rejected');
+    }
+
+    public function testAcceptsCanonicalNonceControlForTrailingBits(): void
+    {
+        // The valid control for the trailing-bits matrix: the single
+        // canonical spelling (final sextet 'E', zero unused bits) still
+        // decodes in both implementations; the canonicality gate must not
+        // over-reject it.
+        $token = SolutionToken::decode(base64_encode(self::NONCE.'.1.100.{}'));
+        self::assertSame(self::NONCE, $token->nonce);
+    }
+
     public function testRejectsBase64UrlVariant(): void
     {
         // The same semantic token encoded with the base64url

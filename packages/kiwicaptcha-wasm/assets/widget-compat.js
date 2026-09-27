@@ -1,35 +1,17 @@
 (function () {
   // ── widget-compat.js: the incumbent compatibility loader ───────────
-  // The driver core doubles as the first-party compatibility loader
-  // only in the sense that it detects the loader context; ALL the
-  // incumbent machinery lives in this lazy module, which is delivered
-  // INSIDE the /api.js loader response (glue + widget-driver.js core +
-  // widget-compat.js, concatenated by the bundle's ApiJsController and
-  // split by the /*KIWI_COMPAT_SPLIT*/ marker) — so it executes only on
-  // the compatibility route, never on an ordinary widget page, and the
-  // eager core stays free of the compat surface. When the driver script
-  // itself is loaded as .../api.js?compat=recaptcha (or
-  // hcaptcha/turnstile), this module auto-renders the incumbent
-  // containers (.g-recaptcha/.h-captcha/.cf-turnstile), installs the
-  // provider global, and keeps the provider-named response field in
-  // sync with the same underlying Kiwi solution token. An incumbent
-  // page changes only its provider script URL.
-  //
-  // The module parses its own script URL for the loader parameters
-  // (?compat= / render= / onload= / hl=) — inside the /api.js response
-  // the script element is the api.js element itself, exactly the URL
-  // the historical driver parsed — and calls back into the core through
-  // the bridge (the core closure state is not shared — the bridge is
-  // the module boundary). Executed on a page whose script URL carries
-  // no compat parameter (never the delivered layout), the module stays
-  // inert.
+  // Delivered INSIDE the /api.js response (glue + driver + this module,
+  // split at /*KIWI_COMPAT_SPLIT*/), so it runs only on the compat route.
+  // Loaded as .../api.js?compat=recaptcha|hcaptcha|turnstile, it renders
+  // the incumbent containers, installs the provider global and keeps the
+  // provider-named response field in sync with the Kiwi token.
+  // The script URL carries the loader parameters (?compat= / render= /
+  // onload= / hl=); the core closure is reached through the bridge.
   var K = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
   if (!K || !K.core) return;
   var core = K.core;
 
-  // ONE coherent loader parser — URLSearchParams (no regexes): compat,
-  // render, onload, hl, with callback-identifier validation and locale
-  // normalization.
+  // Loader parser (URLSearchParams): compat, render, onload, hl.
   function parseCompatLoader(scriptUrl) {
     var out = { provider: null, renderMode: "auto", onloadName: null, language: null };
     if (!scriptUrl) return out;
@@ -69,29 +51,26 @@
     compatOnloadName = compatLoader.onloadName;
   } catch (e) {}
   if (!compat || !compatScriptUrl) return;
+  // Route and asset bases derive from the loader's OWN script URL, so a
+  // deployment served under /security/captcha/api.js posts to
+  // /security/captcha/challenge and loads /security/captcha/assets/... .
+  var compatAssetBase = compatScriptUrl.split("?")[0].replace(/[^/]*$/, "");
+  var compatRouteBase = "/";
+  try { compatRouteBase = new URL(compatScriptUrl, document.baseURI).pathname.replace(/[^/]*$/, ""); } catch (e) {}
+  var compatEndpointDefault = compatRouteBase + "challenge";
   // Google's API defaults reset()/getResponse() and invisible execute()
   // to the FIRST CREATED widget when the id is omitted. Track the first
   // successful compat render.
   var kiwiCompatFirstId = null;
-  // The loader's worker glue (the /api.js response is glue + driver +
-  // this module): the worker cannot find the glue in an inline script
-  // element, so the module rebuilds the worker prelude from the glue's
-  // OWN executed constants — the base64 wasm bytes the glue assembly
-  // exposes together with the glue-body string constant it embeds — and
-  // hands the rebuilt text to the core bridge (K.compatGlue), where the
-  // worker path reads it. The bytes come from the SAME api.js response
-  // that executed here; no second network fetch exists for an extension
-  // or proxy to rewrite, and the page never re-downloads the loader.
-  // The b64 constant carries its assembly-stamped digest, verified once
-  // at boot; a mismatch drops the glue so the worker tier fails closed
-  // for want of a verified runtime.
+  // The worker cannot read an inline glue script, so the module rebuilds
+  // the worker prelude from the glue's executed constants (K.compatGlue).
+  // The b64 constant carries its assembly-stamped digest; a mismatch
+  // drops the glue (fail closed).
   var kiwiCompatGlue = null;
   var kiwiCompatGlueReady = null;
   kiwiCompatGlueReady = Promise.resolve().then(function () {
     var W = typeof window !== "undefined" ? window.__kiwiCaptchaWasm : null;
     if (!W || typeof W.wasmB64 !== "string" || typeof W.glueBoot !== "string") return;
-    // The prelude ("var window = self;") comes from the worker
-    // constructor; this text is the glue body it prepends.
     kiwiCompatGlue = "var KIWI_WASM_B64=" + JSON.stringify(W.wasmB64) + ";\n" + W.glueBoot + "\n";
     if (K) K.compatGlue = kiwiCompatGlue;
     var stamp = typeof W.wasmB64Sha256 === "string" && W.wasmB64Sha256.indexOf("sha256-") === 0
@@ -117,33 +96,40 @@
     var link = document.createElement("link");
     link.rel = "stylesheet";
     link.setAttribute("data-kiwi-css", "");
-    var base = compatScriptUrl.split("?")[0];
-    link.href = base.substring(0, base.lastIndexOf("/") + 1) + "widget.css";
+    var base = compatAssetBase;
+    link.href = base + "widget.css";
     document.head.appendChild(link);
   }
-  // The /api.js loader response carries the content-addressed
-  // widget-locales.js descriptor (the server computes the hash and the
-  // SRI digest of the exact module bytes; see ApiJsController). The
-  // compat markup issues it as data-kiwi-locales-src / data-kiwi-
-  // locales-integrity on the rendered container, so the core lazy-
-  // fetches the non-default packs only when the resolved language
-  // needs them. The compat tier embeds its other modules, but locale
-  // strings stay lazy: an English page pays zero bytes for
-  // translations.
+  // The loader's locales descriptor; the core lazily fetches a
+  // non-default pack. English pays zero bytes.
   var compatLocales = (typeof window !== "undefined" && window.__kiwiCaptchaCompatLocales) || null;
   var compatLocalesAttrs = "";
   var compatLocalesSrc = "";
-  // Both marker values are interpolated into markup, so only the bare
-  // hash/digest alphabet passes — anything else falls back to the
-  // no-locale attributes instead of reaching the innerHTML sink.
+  // Only the bare hash/digest alphabet reaches the innerHTML sink.
   if (compatLocales && compatScriptUrl
     && /^[A-Za-z0-9+/=_-]+$/.test(String(compatLocales.hash))
     && /^[A-Za-z0-9+/=_-]+$/.test(String(compatLocales.sri))) {
-    var compatBase = compatScriptUrl.split("?")[0];
-    compatBase = compatBase.substring(0, compatBase.lastIndexOf("/") + 1);
-    compatLocalesSrc = compatBase + 'assets/locales.' + compatLocales.hash + '.js';
+    compatLocalesSrc = compatAssetBase + 'assets/locales.' + compatLocales.hash + '.js';
     compatLocalesAttrs = ' data-kiwi-locales-src="' + compatLocalesSrc + '"'
       + ' data-kiwi-locales-integrity="' + compatLocales.sri + '"';
+  }
+  // The loader's asset descriptor table: locales/telemetry/execution
+  // entries resolve against the loader URL onto the render target as
+  // data-kiwi-<kind>-src / -integrity (page attributes win).
+  var compatDescriptorKinds = ["locales", "telemetry", "execution"];
+  function compatApplyDescriptorAssets(renderTarget) {
+    var table = (typeof window !== "undefined" && window.__kiwiCaptchaCompatAssets) || null;
+    if (!table) return;
+    for (var i = 0; i < compatDescriptorKinds.length; i++) {
+      var kind = compatDescriptorKinds[i];
+      var entry = table[kind];
+      if (!entry || typeof entry.src !== "string" || !entry.src || typeof entry.sri !== "string") continue;
+      if (!/^sha256-[A-Za-z0-9+/=_-]+$/.test(entry.sri)) continue;
+      var srcAttr = "data-kiwi-" + kind + "-src";
+      if (renderTarget.hasAttribute(srcAttr) || renderTarget.hasAttribute("data-kiwi-" + kind + "-integrity")) continue;
+      renderTarget.setAttribute(srcAttr, compatAssetBase + entry.src);
+      renderTarget.setAttribute("data-kiwi-" + kind + "-integrity", entry.sri);
+    }
   }
   function compatMarkup() {
     return '<div class="kiwi-container"' + compatLocalesAttrs + '><input type="hidden" name="kiwi__token" data-kiwi-token value="">' +
@@ -206,16 +192,24 @@
     if (!entry || entry.id !== id || entry.activationHandler) return;
     entry.activationHandler = function (ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
-      core.execute(entry.id);
+      // The click path is fire-and-forget: a rejecting challenge must
+      // surface only through the controlled error lifecycle, never as
+      // an unhandled rejection.
+      Promise.resolve(core.execute(entry.id)).catch(function () {});
     };
     el.addEventListener("click", entry.activationHandler);
   }
-  function compatRender(target, params) {
+  // render(target, params): the one render implementation, shared by the
+  // provider surface, the implicit loop and the delegated paths. The
+  // third argument marks an implicit (non-user) render, which must honor
+  // the module-failure backoff.
+  function compatRender(target, params, implicit) {
     // grecaptcha.render("id", ...) / render(selector, ...) resolve
     // through the same target resolver as the native API and return a
     // working widget id.
     var el = core.resolveTarget(target);
     if (!el || el.nodeType !== 1) return 0;
+    if (!implicit && core.clearModuleBackoff) core.clearModuleBackoff();
     // Idempotent re-render, owned table first (a second solve on one
     // element would race the first).
     var boundEntry = compatControlByElement.get(el);
@@ -246,19 +240,18 @@
     } else if (!el.querySelector("[data-kiwi-widget]")) {
       el.innerHTML = compatMarkup();
     }
-    // Explicit Kiwi overrides ride onto the rendered container; the
-    // endpoint defaults to the same-origin prefix.
-    var inner = renderTarget.querySelector(".kiwi-container");
-    if (inner) {
-      ["data-kiwi-endpoint", "data-kiwi-scope", "data-kiwi-algorithm", "data-kiwi-worker-src", "data-kiwi-locales-src", "data-kiwi-locales-integrity", "data-kiwi-telemetry"].forEach(function (attr) {
-        if (el.hasAttribute(attr) && !inner.hasAttribute(attr)) inner.setAttribute(attr, el.getAttribute(attr));
-      });
-      if (!inner.hasAttribute("data-kiwi-endpoint")) inner.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
-      if (compatLocalesSrc && !renderTarget.hasAttribute("data-kiwi-locales-src")) {
-        renderTarget.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
-        renderTarget.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
-      }
-      if (!renderTarget.hasAttribute("data-kiwi-endpoint")) renderTarget.setAttribute("data-kiwi-endpoint", "/kiwi-captcha/challenge");
+    // The supported configuration list is copied onto the exact
+    // renderTarget handed to core.render: the driver consults W and its
+    // .kiwi-container ancestor, and the markup's nested container is not
+    // that ancestor.
+    if (core.copySupportedConfiguration) core.copySupportedConfiguration(el, renderTarget);
+    compatApplyDescriptorAssets(renderTarget);
+    if (compatLocalesSrc && !renderTarget.hasAttribute("data-kiwi-locales-src")) {
+      renderTarget.setAttribute("data-kiwi-locales-src", compatLocalesSrc);
+      renderTarget.setAttribute("data-kiwi-locales-integrity", compatLocales.sri);
+    }
+    if (!renderTarget.hasAttribute("data-kiwi-endpoint")) {
+      renderTarget.setAttribute("data-kiwi-endpoint", compatEndpointDefault);
     }
     var sitekey = (params && (params.sitekey || params["sitekey"])) || el.getAttribute("data-sitekey") || "";
     var cbs = compatReadCallbacks(el, params);
@@ -289,7 +282,7 @@
         }
       } catch (e) {}
     }
-    var id = core.render(renderTarget, {
+    var id = (implicit && core.renderImplicit ? core.renderImplicit : core.render)(renderTarget, {
       scope: sitekey || "login",
       callback: cbs.callback,
       expiredCallback: cbs.expiredCallback,
@@ -332,7 +325,10 @@
       sitekey: sitekey || undefined
     });
     if (id) {
-      if (isControl) {
+      // Activation ownership is separate from holder ownership: any
+      // invisible-class element owns an activation record, while only a
+      // BUTTON/INPUT control owns the adjacent holder.
+      if (isControl || invisibleControl) {
         var entry = compatControlByElement.get(el);
         if (!entry) {
           entry = { el: el, id: null, holder: holder, activationHandler: null };
@@ -341,6 +337,7 @@
         entry.id = id;
         entry.holder = holder;
         compatControlById[id] = entry;
+        compatBindActivation(el, id);
       }
       if (!kiwiCompatFirstId) kiwiCompatFirstId = id;
     } else if (isControl) {
@@ -349,26 +346,14 @@
     }
     return id || 0;
   }
-  // Implicit-render entry point: idempotent render plus the owned
-  // activation listener once for invisible-class controls.
-  function compatRenderAndBind(el) {
-    if (!el || el.nodeType !== 1) return 0;
-    var id = compatRender(el);
-    if (id && compatIsInvisibleControl(el, null)) compatBindActivation(el, id);
-    return id;
-  }
   // hCaptcha async execute() rejects with a stable error-code STRING
   // (network-error | challenge-error | internal-error) that migrated
-  // applications branch on like the incumbent API. Map the driver's
-  // underlying rejection to that code — the message text is the stable
-  // signal, because fail() forwards e.message into a fresh Error:
-  // transport failures (aborted fetches, fetch TypeErrors, non-2xx
-  // challenge responses) -> "network-error"; challenge-content and
-  // solve failures (malformed challenge payloads, downgraded
-  // challenges, exhausted searches) -> "challenge-error"; everything
-  // else (worker/solver conditions, unknown widget ids) ->
-  // "internal-error". The bare non-async execute keeps rejecting with
-  // Error objects.
+  // applications branch on. The message text is the stable signal because
+  // fail() forwards e.message into a fresh Error: transport failures
+  // (aborted fetches, fetch TypeErrors, non-2xx responses) are
+  // "network-error"; solve failures (malformed, downgraded, exhausted)
+  // are "challenge-error"; everything else is "internal-error". The bare
+  // non-async execute keeps rejecting with Error objects.
   function kiwiHcaptchaErrorCode(err) {
     var name = err && err.name;
     if (name === "AbortError" || name === "TypeError") return "network-error";
@@ -384,13 +369,8 @@
     // execute must observe the rendered widget, not a widget-less
     // page.
     return (kiwiCompatReady || Promise.resolve()).then(function () {
-    // The hCaptcha async mode ({async:true}) is determined BEFORE
-    // argument resolution: the async form normalizes BOTH resolution
-    // failures — "missing-captcha" (no widget exists) and
-    // "invalid-captcha-id" (the target resolves to nothing) — and the
-    // execution outcome ({response, key} / error-code STRING). The
-    // other providers and the bare (non-async) hCaptcha execute keep
-    // Error-object rejections and the v3 sitekey path.
+    // hCaptcha async mode is decided before argument resolution: it
+    // normalizes resolution failures to the incumbent error-code STRING.
     var hcaptchaAsync = compat === "hcaptcha" && opts && opts.async === true;
     var id = null;
     if (arg === undefined || arg === null) {
@@ -401,11 +381,8 @@
       if (hcaptchaAsync && !id) return Promise.reject("missing-captcha");
       if (!id) return Promise.reject(new Error("kiwicaptcha: no widget has been rendered"));
     } else {
-      // Argument resolution order: a widget id, then an element id, then
-      // a selector matching an existing rendered container. Only a string
-      // that matches NONE of those can be a v3-style sitekey — and the
-      // hidden-holder v3 path is reCAPTCHA-only; Turnstile and hCaptcha
-      // reject unresolvable targets instead of fabricating a widget.
+      // Resolution order: widget id, element id, container selector; an
+      // unresolved string is a v3 sitekey only for reCAPTCHA.
       if (typeof arg === "string" && core.record(arg)) {
         id = arg;
       } else {
@@ -424,21 +401,15 @@
         if (targetEl) id = compatResolveId(targetEl);
       }
       if (hcaptchaAsync && !id) {
-        // hCaptcha async rejects an unresolvable target (not a widget
-        // id, element or container selector) with the incumbent's
-        // "invalid-captcha-id" STRING.
+        // The incumbent's "invalid-captcha-id" STRING.
         return Promise.reject("invalid-captcha-id");
       }
     }
     if (id) {
       var execPromise = core.execute(id);
       if (hcaptchaAsync) {
-        // hCaptcha async execute: resolve with the token AND the stable
-        // per-widget response key ({response, key}); the bare non-async
-        // form resolves the token string. Rejections are normalized to
-        // the incumbent's stable error-code STRING (see
-        // kiwiHcaptchaErrorCode) — an Error object is never surfaced
-        // through the async form.
+        // The async form resolves {response, key} and rejects with the
+        // incumbent error-code STRING, never an Error object.
         return execPromise.then(function (token) {
           var rec = core.record(id);
           return { response: token, key: (rec && rec.responseKey) || "" };
@@ -449,10 +420,8 @@
     if (compat !== "recaptcha") {
       return Promise.reject(new Error("kiwicaptcha: execute() target is not a rendered widget id, element, or container selector"));
     }
-    // v3-style execute(sitekey, {action}): map action -> Kiwi scope on a
-    // hidden widget. Honest v3 handling: no fabricated score is ever
-    // produced — the application migrates to Kiwi verification plus the
-    // optional adaptive-risk decision machinery.
+    // v3-style execute(sitekey, {action}) on a hidden widget; no
+    // fabricated score is produced.
     var sitekey = typeof arg === "string" ? arg : "";
     var action = (opts && opts.action) || sitekey || "login";
     var holder = document.createElement("div");
@@ -462,22 +431,15 @@
     inner.setAttribute("data-kiwi-scope", action);
     holder.appendChild(inner);
     document.body.appendChild(holder);
-    // Render through compatRender so the same endpoint/scope/response-
-    // field defaults land on the holder (an explicit native-default
-    // endpoint would 404 on a compat deployment). The REAL sitekey and
-    // the requested action are transmitted INDEPENDENTLY — the action
-    // is never passed as the sitekey, so the server-owned (sitekey,
-    // action) -> scope policy stays connected.
+    // compatRender lands the compat endpoint/scope defaults on the
+    // holder; the real sitekey and the action stay independent.
     var id2 = compatRender(inner, { sitekey: sitekey, action: action });
     if (!id2) {
       if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
       return Promise.reject(new Error("kiwicaptcha: hidden render failed"));
     }
     var p = core.execute(id2);
-    // A long-lived SPA repeatedly calling execute() must not accumulate
-    // hidden DOM, registry entries or reset hooks — the holder is
-    // removed and the widget destroyed on BOTH settlement arms,
-    // including a cancellation rejection.
+    // The hidden holder and widget are removed on both settlement arms.
     var holderDone = function () {
       if (id2 && core.record(id2)) core.remove(id2);
       if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
@@ -492,11 +454,8 @@
     });
   }
   function compatResolveId(idOrEl) {
-    // An OMITTED id targets the first created widget (the incumbent
-    // providers' documented default); an element resolves through the
-    // owned control table first (buttons and inputs render into an
-    // adjacent holder, so their widget never lives inside them), then
-    // through the container's own instance marker.
+    // An omitted id targets the first created widget; an element
+    // resolves through the owned table, then its instance marker.
     if (idOrEl === undefined || idOrEl === null) return kiwiCompatFirstId;
     if (typeof idOrEl === "string" && core.record(idOrEl)) return idOrEl;
     if (idOrEl && idOrEl.nodeType === 1) {
@@ -531,9 +490,8 @@
         entry.activationHandler = null;
       }
       core.remove(id);
-      // core.remove() takes the rendered container out; the holder the
-      // compat layer owns leaves with it, while the provider control
-      // itself stays exactly where the page put it.
+      // The owned holder leaves with the widget; the provider control
+      // itself stays where the page put it.
       if (entry && entry.holder && entry.holder.parentNode) entry.holder.parentNode.removeChild(entry.holder);
       compatForgetControl(entry);
     },
@@ -547,8 +505,38 @@
       return id ? core.isExpired(id) : false;
     }
   };
+  // Merge into an existing provider global instead of skipping it: a
+  // pre-seeded object keeps its own properties, gains the Kiwi API, and
+  // a recognized queued ready() shim (callbacks parked in an own array
+  // property) is drained once the glue is ready.
+  var COMPAT_QUEUE_KEYS = ["_", "q", "queue", "_q", "_ready", "readyQueue"];
+  function compatMountGlobal(name, api) {
+    var existing = window[name];
+    var queued = [];
+    if (existing && (typeof existing === "object" || typeof existing === "function")) {
+      for (var i = 0; i < COMPAT_QUEUE_KEYS.length; i++) {
+        var q = existing[COMPAT_QUEUE_KEYS[i]];
+        if (Object.prototype.toString.call(q) === "[object Array]") {
+          for (var j = 0; j < q.length; j++) {
+            if (typeof q[j] === "function") queued.push(q[j]);
+          }
+          try { q.length = 0; } catch (e) {}
+        }
+      }
+      Object.assign(existing, api);
+      window[name] = existing;
+    } else {
+      window[name] = api;
+    }
+    if (queued.length) {
+      (kiwiCompatGlueReady || Promise.resolve()).then(function () {
+        for (var k = 0; k < queued.length; k++) core.safeCallback(queued[k]);
+      });
+    }
+    return window[name];
+  }
   if (compat === "recaptcha") {
-    window.grecaptcha = window.grecaptcha || Object.assign({}, compatApi, {
+    compatMountGlobal("grecaptcha", Object.assign({}, compatApi, {
       // ready() queues until the compat loader's glue bootstrap
       // resolves — an explicit render() inside ready() that immediately
       // starts an Argon challenge must not race the glue handshake
@@ -558,9 +546,9 @@
         (kiwiCompatGlueReady || Promise.resolve()).then(function () { core.safeCallback(fn); });
       },
       enterprise: undefined
-    });
+    }));
   } else if (compat === "hcaptcha") {
-    window.hcaptcha = window.hcaptcha || Object.assign({}, compatApi, {
+    compatMountGlobal("hcaptcha", Object.assign({}, compatApi, {
       getRespKey: function (idOrEl) {
         // The omitted argument defaults to the FIRST created widget
         // exactly like the shared resolver. The key is the stable
@@ -570,9 +558,9 @@
         var rec = id ? core.record(id) : null;
         return rec ? (rec.responseKey || "") : "";
       }
-    });
+    }));
   } else {
-    window.turnstile = window.turnstile || compatApi;
+    compatMountGlobal("turnstile", compatApi);
   }
   compatInjectCss();
   // render=explicit suppresses automatic rendering — the application
@@ -596,30 +584,61 @@
     // first paint through the external /api.js path.
     var compatContainers = document.querySelectorAll(COMPAT_SELECTOR);
     for (var ci = 0; ci < compatContainers.length; ci++) {
-      // One implicit-render path for every container class: render
-      // idempotently and attach the owned activation listener exactly
-      // once for invisible-class controls, so a click triggers
-      // execute() — the incumbent pattern.
-      compatRenderAndBind(compatContainers[ci]);
+      compatRender(compatContainers[ci], null, true);
     }
   });
-  // Dynamic implicit rendering (never in explicit mode): the whole
-  // added subtree is traversed, so nested containers and late controls
-  // render and bind.
-  if (compat === "recaptcha" && compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
-    new MutationObserver(function (mutations) {
-      for (var m = 0; m < mutations.length; m++) {
-        var nodes = mutations[m].addedNodes;
-        for (var n = 0; n < nodes.length; n++) {
-          var node = nodes[n];
-          if (!node || node.nodeType !== 1) continue;
-          if (node.matches && node.matches(COMPAT_SELECTOR)) compatRenderAndBind(node);
-          if (node.querySelectorAll) {
-            var nested = node.querySelectorAll(COMPAT_SELECTOR);
-            for (var q = 0; q < nested.length; q++) compatRenderAndBind(nested[q]);
-          }
+  // A removed provider element whose widget record survives leaks its
+  // holder and its challenge lifecycle. The connectedness read waits a
+  // microtask, so a same-task reparent (remove + reinsert) keeps the
+  // widget; only a truly detached element is torn down.
+  function compatTeardownIfDetached(el) {
+    Promise.resolve().then(function () {
+      if (el.isConnected) return;
+      var entry = compatControlByElement.get(el);
+      if (!entry) return;
+      if (entry.activationHandler) {
+        try { el.removeEventListener("click", entry.activationHandler); } catch (e) {}
+        entry.activationHandler = null;
+      }
+      if (entry.id && core.record(entry.id)) core.remove(entry.id);
+      if (entry.holder && entry.holder.parentNode) entry.holder.parentNode.removeChild(entry.holder);
+      compatForgetControl(entry);
+    });
+  }
+  function compatCollectRemovals(removed) {
+    if (!removed || !removed.length) return;
+    for (var i = 0; i < removed.length; i++) {
+      var node = removed[i];
+      if (!node || node.nodeType !== 1) continue;
+      if (compatControlByElement.has(node)) compatTeardownIfDetached(node);
+      if (node.querySelectorAll) {
+        var tracked = node.querySelectorAll("button,input,[data-size='invisible'],.g-recaptcha,.h-captcha,.cf-turnstile");
+        for (var j = 0; j < tracked.length; j++) {
+          if (compatControlByElement.has(tracked[j])) compatTeardownIfDetached(tracked[j]);
         }
       }
-    }).observe(document.body, { childList: true, subtree: true });
+    }
+  }
+  // Dynamic implicit rendering (never in explicit mode): the whole
+  // added subtree is traversed, so nested containers and late controls
+  // render and bind. Removals tear down detached provider controls.
+  if (compatRenderMode !== "explicit" && typeof MutationObserver !== "undefined") {
+    new MutationObserver(function (mutations) {
+      for (var m = 0; m < mutations.length; m++) {
+        if (compat === "recaptcha") {
+          var nodes = mutations[m].addedNodes;
+          for (var n = 0; n < nodes.length; n++) {
+            var node = nodes[n];
+            if (!node || node.nodeType !== 1) continue;
+            if (node.matches && node.matches(COMPAT_SELECTOR)) compatRender(node, null, true);
+            if (node.querySelectorAll) {
+              var nested = node.querySelectorAll(COMPAT_SELECTOR);
+              for (var q = 0; q < nested.length; q++) compatRender(nested[q], null, true);
+            }
+          }
+        }
+        compatCollectRemovals(mutations[m].removedNodes);
+      }
+    }).observe(document.body || document.documentElement, { childList: true, subtree: true });
   }
 })();

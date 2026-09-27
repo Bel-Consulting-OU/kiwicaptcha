@@ -335,9 +335,14 @@ solver is a dynamic code-execution operation, so a strict CSP3 policy must
 allow it in `script-src`:
 
 ```
-script-src 'nonce-<nonce>' 'wasm-unsafe-eval';
-style-src 'nonce-<nonce>';
+script-src 'self' 'nonce-<nonce>' 'wasm-unsafe-eval';
+style-src 'self' 'nonce-<nonce>';
 ```
+
+The `'self'` source is required for the same-origin lazy modules (the risk
+runner, locales, telemetry and execution assets) that the widget fetches on
+demand. The root README and the Symfony getting-started guide carry the same
+canonical snippet and must be updated together.
 
 In SHA-256 mode the widget falls back to the pure-JS solver when WASM
 compilation is blocked, making `'wasm-unsafe-eval'` optional there.

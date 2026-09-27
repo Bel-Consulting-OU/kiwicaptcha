@@ -41,6 +41,14 @@ final class ApiJsController
     private const SPLIT = "\n/*KIWI_COMPAT_SPLIT*/\n";
 
     /**
+     * Placeholder for the descriptor table in the cached loader body. The
+     * asset digests come from the asset files and the route-absolute URLs
+     * from the request path, so the cached chunks carry this marker and
+     * every response substitutes the concrete table.
+     */
+    private const ASSET_MARKER = "\n/*KIWI_COMPAT_ASSETS*/\n";
+
+    /**
      * The lazy widget modules that ride the loader response after the
      * driver core: widget-risk.js first, then widget-compat.js. The
      * worker machinery and the armed-evidence runners of widget-risk.js
@@ -51,13 +59,11 @@ final class ApiJsController
      * pages never load the /api.js route, so the modules stay lazy
      * everywhere else.
      *
-     * widget-locales.js is deliberately NOT in this set: the loader is
-     * a mutable asset served to every compat page, and a default-
-     * language page must pay zero bytes for translations. The locales
-     * descriptor below (the content-addressed asset URL parts) rides
-     * the response instead, and the compat markup issues it as
-     * container attributes, so the driver lazy-fetches the module only
-     * when a non-default language is resolved.
+     * The lazy module assets that stay out of the set — widget-locales.js,
+     * widget-telemetry.js and execution-interpreter.js — ride the response
+     * as content-addressed descriptors instead; see the descriptor table
+     * below. A default-language, telemetry-off, execution-unarmed compat
+     * lifecycle then pays zero bytes for them.
      *
      * @return list<string>
      */
@@ -67,33 +73,28 @@ final class ApiJsController
     }
 
     /**
-     * The widget-locales.js descriptor for the compat tier: the module
-     * is never concatenated into the loader (see loaderChunks), so the
-     * rendered compat containers carry its content-addressed URL and
-     * SRI digest as data-kiwi-locales-src / data-kiwi-locales-integrity
-     * instead. The widget-compat.js chunk reads the marker below and
-     * composes the asset URL from its own script URL.
+     * The compat descriptor table: kind => asset file and extension. The
+     * kinds mirror the asset names the AssetController route serves, so
+     * every emitted URL is the exact content-addressed route URL. The
+     * locales entry keeps the compat tier's lazy translation packing. The
+     * telemetry and execution entries carry the modules the compat loader
+     * embeds nowhere, so an armed compat page can fetch them. The runtime
+     * and worker entries are informational in this tier: the loader
+     * embeds the glue and the worker source, so files-mode delivery stays
+     * opt-in.
+     *
+     * @var array<string, array{file: string, ext: string}>
      */
-    private function localesMarker(): string
-    {
-        $path = rtrim($this->assetsDir, '/').'/widget-locales.js';
-        $body = @file_get_contents($path);
-        if ($body === false) {
-            // A missing locales asset must never hash the empty string
-            // (the SRI digest would then pin bytes that exist nowhere and
-            // every lazy locale fetch fails the browser's integrity
-            // check with no server-side signal). Fail loudly at loader
-            // construction with the actionable remedy, the same contract
-            // as KiwiCaptchaRuntime::readAsset().
-            throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
-        }
-        $hash = hash('sha256', $body);
+    private const COMPAT_ASSETS = [
+        'locales' => ['file' => 'widget-locales.js', 'ext' => 'js'],
+        'telemetry' => ['file' => 'widget-telemetry.js', 'ext' => 'js'],
+        'execution' => ['file' => 'execution-interpreter.js', 'ext' => 'js'],
+        'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'ext' => 'js'],
+        'worker' => ['file' => 'kiwi-worker.js', 'ext' => 'js'],
+    ];
 
-        $sri = 'sha256-'.base64_encode(hash('sha256', $body, true));
-
-        return "\n/*KIWI_LOCALES_MARKER*/\n"
-            .'window.__kiwiCaptchaCompatLocales={name:"locales",hash:"'.$hash.'",sri:"'.$sri.'"};'."\n";
-    }
+    /** @var array<string, array{file: string, ext: string, hash: string, sri: string, path: string}>|null in-process descriptor cache */
+    private ?array $descriptors = null;
 
     /** @var string|null in-process cache of the concatenated loader */
     private static ?string $cachedBody = null;
@@ -105,7 +106,11 @@ final class ApiJsController
 
     public function apiJs(Request $request): Response
     {
-        $body = $this->cachedBody();
+        $body = str_replace(
+            self::ASSET_MARKER,
+            $this->compatMarker($this->assetBase($request)),
+            $this->cachedBody(),
+        );
         $etag = '"'.hash('sha256', $body).'"';
 
         // The stable {prefix}/api.js URL is mutable (it changes on every
@@ -155,9 +160,9 @@ final class ApiJsController
             $body = $glue.self::SPLIT;
             foreach ($this->loaderChunks() as $chunk) {
                 if ($chunk === 'widget-compat.js') {
-                    // The locales marker precedes the compat chunk so the
-                    // rendered containers can issue the lazy module URL.
-                    $body .= $this->localesMarker();
+                    // The descriptor table precedes the compat chunk so the
+                    // rendered containers can issue the lazy module URLs.
+                    $body .= self::ASSET_MARKER;
                 }
                 $body .= (string) file_get_contents(rtrim($this->assetsDir, '/').'/'.$chunk)."\n";
             }
@@ -165,5 +170,89 @@ final class ApiJsController
         }
 
         return self::$cachedBody;
+    }
+
+    /**
+     * The route base of the loader script URL, as the request path spells
+     * it: '/security/captcha/api.js' yields '/security/captcha/'. The
+     * empty string when the request path does not identify the loader, so
+     * the descriptor URL falls back to its script-relative form.
+     */
+    private function assetBase(Request $request): string
+    {
+        $suffix = '/api.js';
+        $path = rtrim($request->getPathInfo(), '/');
+        if (!str_ends_with($path, $suffix)) {
+            return '';
+        }
+
+        return substr($path, 0, -\strlen($suffix)).'/';
+    }
+
+    /**
+     * The content-addressed descriptor table, built once from the exact
+     * asset bytes: hash is the full sha256 hex of the served bytes, sri
+     * is the sha256-<base64> digest of the same bytes, and path is the
+     * asset-route suffix. A missing asset fails loudly at loader
+     * construction with the actionable remedy, the same contract as
+     * KiwiCaptchaRuntime::readAsset(): hashing the empty string would
+     * pin bytes that exist nowhere.
+     *
+     * @return array<string, array{file: string, ext: string, hash: string, sri: string, path: string}>
+     */
+    private function descriptors(): array
+    {
+        if ($this->descriptors !== null) {
+            return $this->descriptors;
+        }
+        $descriptors = [];
+        foreach (self::COMPAT_ASSETS as $kind => $spec) {
+            $path = rtrim($this->assetsDir, '/').'/'.$spec['file'];
+            $body = @file_get_contents($path);
+            if ($body === false) {
+                throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
+            }
+            $hash = hash('sha256', $body);
+            $descriptors[$kind] = [
+                'file' => $spec['file'],
+                'ext' => $spec['ext'],
+                'hash' => $hash,
+                'sri' => 'sha256-'.base64_encode(hash('sha256', $body, true)),
+                'path' => 'assets/'.$kind.'.'.$hash.'.'.$spec['ext'],
+            ];
+        }
+
+        return $this->descriptors = $descriptors;
+    }
+
+    /**
+     * The compat bootstrap descriptor block, emitted before the
+     * widget-compat chunk. `window.__kiwiCaptchaCompatAssets` maps every
+     * kind to {name, hash, sri, src, url}: src is the script-relative
+     * content-addressed path the compat markup resolves against its own
+     * script URL, url is the route-absolute form when the request path is
+     * known. The widget consumes the table through the frozen attribute
+     * contract data-kiwi-<kind>-src / data-kiwi-<kind>-integrity, with
+     * locales, telemetry and execution as the required kinds. The
+     * `window.__kiwiCaptchaCompatLocales` alias stays byte-identical for
+     * the widget's existing locales path.
+     */
+    private function compatMarker(string $assetBase): string
+    {
+        $table = [];
+        foreach ($this->descriptors() as $kind => $descriptor) {
+            $table[$kind] = [
+                'name' => $kind,
+                'hash' => $descriptor['hash'],
+                'sri' => $descriptor['sri'],
+                'src' => $descriptor['path'],
+                'url' => $assetBase.$descriptor['path'],
+            ];
+        }
+        $locales = $table['locales'];
+
+        return self::ASSET_MARKER
+            .'window.__kiwiCaptchaCompatAssets='.json_encode($table, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR).';'."\n"
+            .'window.__kiwiCaptchaCompatLocales={name:"locales",hash:"'.$locales['hash'].'",sri:"'.$locales['sri'].'"};'."\n";
     }
 }

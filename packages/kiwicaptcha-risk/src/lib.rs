@@ -311,15 +311,16 @@ impl ProcessEmergencyCap {
     ///
     /// # Panics
     ///
-    /// Panics if `process_per_second < 1` or `warmup_ramp_secs < 0.0`.
+    /// Panics if `process_per_second < 1`, or if `warmup_ramp_secs` is not
+    /// finite (NaN or either infinity) or is negative.
     pub fn with_capacity_and_ramp(
         process_per_second: u64,
         warmup_ramp_secs: f64,
     ) -> ProcessEmergencyCap {
         assert!(process_per_second >= 1, "process_per_second must be >= 1");
         assert!(
-            warmup_ramp_secs >= 0.0,
-            "warmup_ramp_secs must be >= 0 (0 disables the ramp)"
+            warmup_ramp_secs.is_finite() && warmup_ramp_secs >= 0.0,
+            "warmup_ramp_secs must be finite and >= 0 (0 disables the ramp)"
         );
         ProcessEmergencyCap {
             process_per_second,
@@ -2754,6 +2755,47 @@ mod tests {
         assert!(
             !limiter.allow(),
             "the ramp must not lift the cap above process_per_second"
+        );
+    }
+
+    /// A non-finite ramp would turn the cap into permanent floor
+    /// throttling (the elapsed comparison never reaches an infinite
+    /// ramp), so the constructor refuses NaN.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_nan() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::NAN);
+    }
+
+    /// Positive infinity is the permanent-floor case: refused.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_positive_infinity() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::INFINITY);
+    }
+
+    /// Negative infinity is also outside the finite non-negative domain.
+    #[test]
+    #[should_panic(expected = "warmup_ramp_secs must be finite and >= 0")]
+    fn warmup_ramp_rejects_negative_infinity() {
+        let _ = ProcessEmergencyCap::with_capacity_and_ramp(100, f64::NEG_INFINITY);
+    }
+
+    /// Finite ramps still construct and still ramp: a huge finite value
+    /// is the long-ramp control (the floor rate applies at t=0).
+    #[test]
+    fn warmup_ramp_accepts_finite_values() {
+        for ramp in [0.0, 0.3, 10.0, 1.0e9] {
+            let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, ramp);
+            assert_eq!(limiter.warmup_ramp_secs(), ramp, "finite ramp accepted");
+        }
+        let limiter = ProcessEmergencyCap::with_capacity_and_ramp(1000, 1.0e9);
+        for _ in 0..100 {
+            assert!(limiter.allow(), "floor admission");
+        }
+        assert!(
+            !limiter.allow(),
+            "the floor+1th must be denied during the ramp"
         );
     }
 

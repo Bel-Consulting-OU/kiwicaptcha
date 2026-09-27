@@ -323,7 +323,7 @@ final class TwigRuntimeTest extends TestCase
         $risk = (string) file_get_contents(__DIR__.'/../Resources/public/widget-risk.js');
 
         self::assertStringContainsString('data-kiwi-request-binding', $driver, 'the driver reads the server-rendered binding attribute');
-        self::assertStringContainsString('var requestBinding = W.getAttribute("data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute');
+        self::assertStringContainsString('var requestBinding = kiwiConfigValue(W, container, "data-kiwi-request-binding")', $driver, 'the binding variable is assigned ONLY from the container attribute (through the shared supported-configuration reader)');
         self::assertStringNotContainsString('randomUUID', $driver, 'the driver must never generate bindings with crypto.randomUUID');
         // The client-side `CSPRNG` draw of the decoy (honeypot) rendering
         // strategy lives in the lazy widget-risk.js module (a

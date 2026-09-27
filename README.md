@@ -211,10 +211,14 @@ Without a nonce the widget still works under CSP that allows `'unsafe-inline'`, 
 WebAssembly requires `'wasm-unsafe-eval'`.
 WASM compilation is a dynamic code-execution operation, so a strict CSP3 policy must allow it in `script-src`:
 
+<!-- Canonical profile: packages/kiwicaptcha/integrations/symfony/docs/getting-started.md; this snippet mirrors it and both are updated together. -->
+
 ```
-script-src 'nonce-<nonce>' 'wasm-unsafe-eval';
-style-src 'nonce-<nonce>';
+script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval';
+style-src 'self' 'nonce-{NONCE}';
 ```
+
+`'self'` is required for the same-origin lazy runtime and worker modules fetched after the initial widget load.
 
 In SHA-256 mode the widget falls back to the pure-JS solver when WASM compilation is blocked, so `'wasm-unsafe-eval'` is optional there.
 Argon2id mode requires WASM; there is no JS fallback for the memory-hard solver.

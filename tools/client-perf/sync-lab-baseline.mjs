@@ -66,6 +66,17 @@
  * written baseline records canonicalClientAssets() (identical to the
  * runs' blocks).
  *
+ * Physical-context preservation guard: the surgery is LAB data
+ * maintenance and can never touch the preserved physical device
+ * evidence. Every device object of payload.physical_results (including
+ * its measurement_context, when present) is carried through untouched:
+ * the guard serializes the physical_results subtree before and after
+ * the surgery and refuses any difference. A preserved device that
+ * lacks measurement_context stays lacking it — the lab sync never
+ * fabricates or renews a physical measurement context; the release
+ * validator, not the lab surgery, owns whether such a device is
+ * certifiable. Lab data can never renew physical context.
+ *
  * Usage:
  *   node tools/client-perf/sync-lab-baseline.mjs --run results/run-2026-09-03.json \
  *     --run tools/client-perf/results/results-2026-09-04.json [--write]
@@ -143,6 +154,20 @@ const LEGACY_SUMMARY_FIELDS = [
 
 const payload = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'));
 const results = payload.results || {};
+
+// ── Physical-context preservation guard ─────────────────────────────
+// The lab surgery operates on payload.results/difficulties/options/
+// clientAssets only; the physical device evidence index is preserved
+// untouched. The device objects (and their measurement_context field,
+// when present) are serialized before and after the surgery and the
+// guard refuses any difference: lab data can never renew, re-derive or
+// default a physical measurement context, and a preserved device that
+// lacks one must not have one fabricated for it. Only a physical
+// re-recording (merge-cells --physical-index against the current
+// release context) may mint physical context.
+const physicalResultsBefore = JSON.stringify(
+  Object.prototype.hasOwnProperty.call(payload, 'physical_results') ? payload.physical_results : null
+);
 
 // ── Asset-identity guard (audit finding 2, asset bind) ──────────────
 // Every run merged into the baseline must have been measured against
@@ -313,6 +338,21 @@ payload.baseline_of = payload.baseline_of || 'tools/client-perf/results/baseline
 // full per-asset sha256, computed by the shared module (the guard
 // above proved every merged run recorded these exact bytes).
 payload.clientAssets = currentAssets;
+
+// The physical-context preservation guard (see the snapshot above):
+// whatever the surgery did to the lab rows, the preserved physical
+// device evidence subtree — including every measurement_context field —
+// must serialize identically. Anything else means the lab maintenance
+// would have rewritten physical context, which lab data can never do.
+const physicalResultsAfter = JSON.stringify(
+  Object.prototype.hasOwnProperty.call(payload, 'physical_results') ? payload.physical_results : null
+);
+if (physicalResultsAfter !== physicalResultsBefore) {
+  console.error(
+    'sync-lab-baseline refused: the lab surgery would alter the preserved physical device evidence (including measurement_context); lab data can never renew physical context — physical context is minted only by a physical re-recording (merge-cells --physical-index) against the current release context'
+  );
+  process.exit(1);
+}
 
 const out = JSON.stringify(payload, null, 2) + '\n';
 if (write) {

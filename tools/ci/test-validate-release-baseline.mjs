@@ -32,6 +32,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalClientAssets } from '../client-perf/client-assets.mjs';
+import {
+  buildMeasurementContext,
+  currentReleaseMeasurementContext,
+  currentReleaseMeasurementFields,
+} from '../client-perf/measurement-context.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -392,10 +397,13 @@ function deviceRepCount(difficulty) {
  * tier:difficulty:cache:assetMode, exactly the shape merge-cells
  * --physical-index emits. sampleFor(difficulty) lets a mutation make
  * one device unhealthy (failing samples, thin sha20 samples, slow
- * p95s).
+ * p95s). The device evidence object opens with measurement_context,
+ * the release measurement context merge-cells stamps (built from the
+ * shared measurement-context module over the current tree): the
+ * validator demands it on every physical device object.
  */
 function deviceIndex(deviceId, sampleFor = () => healthySample(), countFor = deviceRepCount, tier = RELEASE_TIER) {
-  const index = {};
+  const index = { measurement_context: currentReleaseMeasurementContext() };
   for (const [difficulty, profile] of Object.entries(DIFFICULTIES)) {
     for (const cache of CACHE_STATES) {
       for (const mode of profile.assetModes) {
@@ -406,6 +414,22 @@ function deviceIndex(deviceId, sampleFor = () => healthySample(), countFor = dev
     }
   }
   return index;
+}
+
+/**
+ * A synthetically PREVIOUS release measurement context: the current
+ * field set with one client asset's bytes/hash changed, exactly the
+ * shape a device stamped before a client-asset change carries. A
+ * top-level clientAssets block can be refreshed to the current bytes
+ * while the device still carries this context, which is precisely the
+ * silent re-bind the per-device binding must reject.
+ */
+function previousReleaseMeasurementContext() {
+  const fields = clone(currentReleaseMeasurementFields());
+  const [name, asset] = Object.entries(fields.clientAssets)[0];
+  const flipped = (asset.sha256[0] === 'a' ? 'b' : 'a') + asset.sha256.slice(1);
+  fields.clientAssets[name] = { bytes: asset.bytes + 1, sha256: flipped };
+  return buildMeasurementContext(fields);
 }
 
 function physicalPayload(deviceIndexes) {
@@ -1394,6 +1418,90 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   pass(
     'ladder: fully certified required tiers with an explicit empty pending list are accepted',
     runValidator(payload, budgets, true),
+  );
+}
+
+// ── Per-device measurement-context binding (release-evidence
+//    binding). ──────────────────────────────────────────────────────
+// The top-level clientAssets block can be refreshed to the current
+// bytes while a physical device's rows still describe bytes the device
+// never measured. Every device evidence object must therefore carry
+// measurement_context { schema, sha256 } equal to the current release
+// context; a missing, malformed or previous context is a hard reason
+// naming the device, in CI mode and release mode alike. The fixtures
+// are synthetic (built by the shared measurement-context module over
+// the current tree), never derived from the committed baseline.
+
+// (c) Devices bound to the current release context: accepted.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  pass(
+    'measurement context: device evidence bound to the current release context is accepted (CI mode)',
+    runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false),
+  );
+  const { budgets: ladderBudgets, payload } = fullyCertifiedLadder();
+  pass(
+    'measurement context: device evidence bound to the current release context is accepted (release mode)',
+    runValidator(payload, ladderBudgets, true),
+  );
+}
+
+// (b) A physical device object without measurement_context: the
+//     evidence is not bound to any measurement context.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const index = deviceIndex('dev-a');
+  delete index.measurement_context;
+  const res = runValidator(physicalPayload({ 'dev-a': index }), budgets, false);
+  reject(
+    'measurement context: physical device object missing measurement_context rejects naming the device',
+    res,
+    ['physical_results["dev-a"]', 'carries no measurement_context'],
+  );
+}
+
+// (a) Top-level clientAssets = current, but one device's
+//     measurement_context is a PREVIOUS context (different client
+//     asset bytes/hash): the silent re-bind is rejected naming the
+//     device, in CI mode and release mode alike.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const index = deviceIndex('dev-a');
+  index.measurement_context = previousReleaseMeasurementContext();
+  const payload = physicalPayload({ 'dev-a': index });
+  payload.clientAssets = canonicalClientAssets(); // top-level identity is CURRENT
+  const res = runValidator(payload, budgets, false);
+  reject(
+    'measurement context: current top-level clientAssets + previous device context rejects in CI mode naming the device',
+    res,
+    ['physical_results["dev-a"]', 'is not the current release measurement context'],
+  );
+}
+{
+  const { budgets, payload } = fullyCertifiedLadder();
+  payload.clientAssets = canonicalClientAssets(); // top-level identity is CURRENT
+  const deviceId = `dev-${RELEASE_TIER}`;
+  payload.physical_results[deviceId].measurement_context = previousReleaseMeasurementContext();
+  const res = runValidator(payload, budgets, true);
+  reject(
+    'measurement context: current top-level clientAssets + previous device context rejects in RELEASE mode naming the device',
+    res,
+    [`physical_results["${deviceId}"]`, 'is not the current release measurement context'],
+    ['is not "physical"'],
+  );
+}
+
+// A malformed context (wrong schema tag) is named as such, never
+// silently compared as if it were a valid context.
+{
+  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
+  const index = deviceIndex('dev-a');
+  index.measurement_context = { ...index.measurement_context, schema: 'kiwicaptcha.measurement-context/0' };
+  const res = runValidator(physicalPayload({ 'dev-a': index }), budgets, false);
+  reject(
+    'measurement context: wrong measurement_context schema tag rejects naming the device',
+    res,
+    ['physical_results["dev-a"]', 'measurement_context.schema', 'is not kiwicaptcha.measurement-context/1'],
   );
 }
 

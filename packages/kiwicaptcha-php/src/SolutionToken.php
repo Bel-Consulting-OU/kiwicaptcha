@@ -214,8 +214,18 @@ final class SolutionToken
 
         // The nonce is base64(32 random bytes): exactly 44 chars, standard
         // alphabet with one padding '='. Anything else cannot come from
-        // Issuer::issue().
+        // Issuer::issue(). The shape check alone is not enough: the 43rd
+        // character of a 32-byte encoding carries only 4 meaningful bits,
+        // so a shape-valid spelling whose final sextet has non-zero unused
+        // bits (e.g. 'F' where the canonical char is 'E') decodes to the
+        // same 32 bytes but is not canonical. Mirror the Rust decoder
+        // (token.rs: decode to 32 bytes and re-encode byte-exact), so
+        // exactly one wire spelling per nonce is accepted.
         if (\strlen($nonce) !== 44 || preg_match('/^[A-Za-z0-9+\/]{43}=$/', $nonce) !== 1) {
+            throw DecodeError::malformed();
+        }
+        $nonceBytes = base64_decode($nonce, true);
+        if ($nonceBytes === false || \strlen($nonceBytes) !== 32 || base64_encode($nonceBytes) !== $nonce) {
             throw DecodeError::malformed();
         }
 
