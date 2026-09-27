@@ -1,0 +1,128 @@
+# One-shot client-performance re-record on GitHub-hosted runners.
+#
+# The widget asset bytes changed, so the committed client-performance
+# evidence must be re-bound by a fresh run recorded against the new
+# bytes (the asset-identity contract of tools/client-perf). This
+# workflow is the GitHub-hosted lab lane for that single re-record:
+# every device tier runs its own full matrix job in parallel, the
+# completed per-tier run files are uploaded as evidence, and the
+# desktop run performs the surgical baseline re-bind
+# (sync-lab-baseline.mjs) whose output is uploaded as the
+# rebind-baseline artifact for the maintainer to commit.
+#
+# Dispatch it exactly once: the runs are heavy and the acceptance
+# check is the harness's own fixed-work drift probe, compared against
+# the committed qualification.
+#
+# `--quick` preflights are deliberately absent: the single dispatch
+# performs only the full per-tier matrices.
+name: client-perf rebind (GitHub-hosted, one run)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-perf-rebind
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: measure ${{ matrix.tier }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        tier:
+          - low-android
+          - mid-android
+          - flagship-android
+          - older-iphone
+          - current-iphone
+          - low-desktop
+          - mainstream-desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
+        with:
+          node-version: 22.14.0
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.3'
+          extensions: gmp, sodium, mbstring, xml, curl
+          coverage: none
+      - name: install the browser suite dependencies
+        run: |
+          set -euo pipefail
+          cd tests/browser
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: run the ${{ matrix.tier }} matrix
+        run: |
+          set -euo pipefail
+          node tools/client-perf/client-perf.mjs \
+            --tiers ${{ matrix.tier }} \
+            --out tools/client-perf/results/gh-${{ matrix.tier }}.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: gh-perf-${{ matrix.tier }}
+          path: tools/client-perf/results/gh-${{ matrix.tier }}.json
+          if-no-files-found: error
+
+  rebind:
+    name: rebind the committed baseline from the desktop run
+    needs: [measure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
+        with:
+          node-version: 22.14.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 # v5.0.1 (node24)
+        with:
+          pattern: gh-perf-*
+          path: /tmp/gh-perf
+          merge-multiple: true
+      - name: stage the per-tier evidence
+        run: |
+          set -euo pipefail
+          cp /tmp/gh-perf/gh-*.json tools/client-perf/results/
+          ls -l tools/client-perf/results/gh-*.json
+      - name: verify the desktop run carries the completion marker
+        run: |
+          set -euo pipefail
+          node -e '
+            const run = JSON.parse(require("node:fs").readFileSync("tools/client-perf/results/gh-mainstream-desktop.json", "utf8"));
+            if (!run.completion || run.completion.status !== "completed") {
+              console.error("the desktop run is incomplete:", JSON.stringify(run.completion));
+              process.exit(1);
+            }
+            console.log("desktop run completed; cells:", Object.keys(run.results || {}).length);
+          '
+      - name: surgical baseline re-bind (desktop rows, all difficulties, current bytes)
+        run: |
+          set -euo pipefail
+          node tools/client-perf/sync-lab-baseline.mjs \
+            --run tools/client-perf/results/gh-mainstream-desktop.json \
+            --difficulties sha16,sha18,sha20,argon2id,rsw75k,rsw150k,rsw300k,execvm,execsha18,execargon,execchain,execvminline,execsha18inline \
+            --reps 50 --argon-reps 20 --write
+      - name: report the re-bound desktop rows
+        run: |
+          set -euo pipefail
+          node -e '
+            const payload = JSON.parse(require("node:fs").readFileSync("tools/client-perf/results/baseline.json", "utf8"));
+            const keys = Object.keys(payload.results || {}).filter((k) => k.startsWith("mainstream-desktop:")).sort();
+            for (const k of keys) {
+              const row = payload.results[k];
+              console.log(k, "n=" + ((row.reps || []).length), "solveMs.p95=" + (row.solveMs ? row.solveMs.p95.toFixed(1) : "n/a"));
+            }
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: rebind-baseline
+          path: tools/client-perf/results/baseline.json
+          if-no-files-found: error
