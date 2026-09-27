@@ -883,10 +883,25 @@ final class AdaptiveRiskEngine
      * are not dictionary-recoverable from the Redis dedupe keys. The
      * caller's raw key never appears verbatim in Redis. null/empty gives
      * a fresh random 32-hex id; longer than 4096 bytes throws
-     * InvalidArgumentException. Rust mirrors this exactly.
+     * InvalidArgumentException; a scope outside the u32 wire range throws
+     * (the pack call would truncate it onto another scope's domain). Rust
+     * mirrors this exactly.
      */
     private function normalizeEventId(RiskEventKind $event, int $scope, ?string $input): string
     {
+        // The wire scope is a u32: the dedupe HMAC frames it with
+        // pack('N'), which silently truncates an out-of-u32 PHP int onto
+        // another scope's domain: -1 maps to 0xffffffff and 2^32 maps to
+        // 0. Refusing the range keeps the scope a faithful domain
+        // separator instead of folding distinct scopes together. The
+        // Rust mirror's scope is a u32 and cannot represent the
+        // offending values at all.
+        if ($scope < 0 || $scope > 4294967295) {
+            throw new \InvalidArgumentException(sprintf(
+                'scope must be a canonical u32 within 0..4294967295 (got %d)',
+                $scope,
+            ));
+        }
         if ($input === null || $input === '') {
             return bin2hex(random_bytes(16));
         }

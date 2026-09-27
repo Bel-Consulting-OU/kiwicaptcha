@@ -638,21 +638,24 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     /**
      * Refuses a caller identifier that would inject key structure or
      * control bytes into a Redis key. The engines pass 32-char lowercase
-     * hex decision/session pseudonyms; any other value is accepted only
-     * when it carries no control character, ":" or "}" (the key separator
-     * and the hash-tag closing byte). The control class covers ASCII
-     * controls, the encoded C1 range and the Unicode line/paragraph
-     * separators, so a log-facing control scalar is refused too.
-     * Throwing fails closed before any key reaches Redis.
+     * hex decision/session pseudonyms. Any other value must be a
+     * non-empty, valid UTF-8 string free of control characters. The
+     * refused class covers the ASCII controls, DEL, the encoded C1 range
+     * and the Unicode line/paragraph separators, plus ":" and "}" (the
+     * key separator and the hash-tag closing byte). Invalid UTF-8 — including a lone
+     * raw C1 byte — is refused: it is not a displayable identifier and
+     * its control interpretation is ambiguous. Throwing fails closed
+     * before any key reaches Redis.
      */
     private static function assertKeySafeIdentifier(string $name, string $value): void
     {
         if (preg_match('/^[0-9a-f]{32}$/', $value) === 1) {
             return;
         }
-        if (preg_match('/[\x00-\x1f\x7f:}]|\xc2[\x80-\x9f]|\xe2\x80[\xa8\xa9]/', $value) === 1) {
+        if ($value === '' || preg_match('//u', $value) !== 1
+            || preg_match('/[\x00-\x1f\x7f:}]|\xc2[\x80-\x9f]|\xe2\x80[\xa8\xa9]/', $value) === 1) {
             throw new \InvalidArgumentException(sprintf(
-                '%s must be a 32-char lowercase hex id or free of control characters, ":" and "}" (got 0x%s)',
+                '%s must be a 32-char lowercase hex id or a non-empty UTF-8 value free of control characters, ":" and "}" (got 0x%s)',
                 $name,
                 bin2hex($value),
             ));

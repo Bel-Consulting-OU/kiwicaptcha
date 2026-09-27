@@ -323,6 +323,25 @@
     return url.href;
   }
 
+  // ── Credential-field normalization ──
+  // A type=hidden input's value IDL attribute reflects into its content
+  // attribute, publishing the credential to CSS selectors and DOM
+  // serialization. Every Kiwi credential field is normalized to the
+  // non-reflecting text mode (hidden, display:none), so the credential
+  // lives only in the IDL value and in form data.
+  function kiwiNormalizeField(input) {
+    if (!input || input.tagName !== "INPUT") return input;
+    if (input.getAttribute("type") === "hidden" || input.type === "hidden") {
+      input.type = "text";
+      input.setAttribute("hidden", "");
+      try { input.style.display = "none"; } catch (e) {}
+    }
+    // Even an empty value attribute matches the [value] selector; only
+    // an empty attribute is removed, never a page-preset value.
+    if (input.getAttribute("value") === "") input.removeAttribute("value");
+    return input;
+  }
+
   // ── Challenge response schema validation ──
   // The same-origin endpoint's bytes are untrusted, so the widget only
   // solves a well-formed issuance: sha256|argon2id|rsw, non-empty
@@ -542,11 +561,9 @@
   }
   function initWidget(W, options) {
     if (!W || W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return null;
-    // A fresh initialization (render, reset or the native Retry button)
-    // is a user-driven retry: it clears the transient module-failure
-    // backoff so a recovered network can load the lazy modules again.
-    // The backoff itself only throttles automatic retries within one
-    // load; a terminal failure is never memoized as the module answer.
+    // A fresh initialization (render, reset or Retry) is a user-driven
+    // retry: it clears the transient module-failure backoff. The backoff
+    // throttles automatic retries within one load only.
     kiwiModuleFailedAt = {};
     options = options || {};
     // The response-field alias name is page-author controlled, so only
@@ -614,7 +631,7 @@
     // The accessible group name is the translated label string.
     a11yRoot.setAttribute("aria-label", kiwiWidgetPack.label);
     function kiwiT(key) { return (kiwiWidgetPack[key] !== undefined) ? kiwiWidgetPack[key] : kiwiLocalePacks[kiwiFallbackLang][key] || key; }
-    var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]"), trackEl = W.querySelector(".kiwi-track");
+    var labelEl = W.querySelector("[data-kiwi-label]"), pillEl = W.querySelector("[data-kiwi-badge]"), fillEl = W.querySelector("[data-kiwi-bar]"), hintEl = W.querySelector("[data-kiwi-info]"), countdownEl = W.querySelector("[data-kiwi-timer]"), tokenEl = kiwiNormalizeField(W.querySelector("[data-kiwi-token]") || container.querySelector("[data-kiwi-token]")), trackEl = W.querySelector(".kiwi-track");
     var announcerEl = W.querySelector("[data-kiwi-status]") || createAnnouncer(W);
     // The mascot is decorative next to the already-labelled widget:
     // hide it from assistive technology, defensively.
@@ -785,7 +802,7 @@
         input.name = options.responseField;
         host.insertBefore(input, tokenEl.nextSibling);
       }
-      if (input) input.value = value || "";
+      if (input) { kiwiNormalizeField(input); input.value = value || ""; }
     }
     function clearExpiryTimer() {
       var r = kiwiWidgets[widgetId];
@@ -846,6 +863,7 @@
         input.name = "kiwi_request_binding";
         if (host) host.insertBefore(input, tokenEl.nextSibling);
       }
+      kiwiNormalizeField(input);
       input.value = value || "";
     }
     // Server-issued decoy machinery lives in the lazy widget-risk.js
@@ -1661,11 +1679,9 @@
   // armed response's worker/execution paths) are awaited; the
   // opportunistic loads never gate the challenge request.
   var kiwiModuleApis = {};
-  // In-flight deduplication only: an entry lives while a load is in
-  // flight and is retired on settlement. A terminal failure is never
-  // memoized as the answer; it records a short backoff instead, so a
-  // transient outage cannot poison the module kind for the rest of the
-  // page lifetime.
+  // In-flight deduplication only: a settled promise is retired, and a
+  // terminal failure records a short backoff instead of being memoized
+  // for the page lifetime.
   var kiwiModuleLoads = {};
   var kiwiModuleFailedAt = {};
   var KIWI_MODULE_FAILURE_BACKOFF_MS = 5000;
@@ -1692,6 +1708,11 @@
   }
   var KIWI_MODULE_ATTEMPTS = 3;
   var KIWI_MODULE_TIMEOUT_MS = 10000;
+  // Registration provenance: a loader-issued asset may only register the
+  // kind it was issued for, so a compromised (even SRI-valid) asset of
+  // one kind can never claim another kind's digest-pinned role. Inline
+  // modules keep the legacy contract.
+  var kiwiModuleScriptKinds = new WeakMap();
   function kiwiLoadModuleAsset(kind, attrs) {
     return new Promise(function (resolve) {
       var attempt = 0;
@@ -1699,9 +1720,7 @@
       var watchdog = null;
       var script = null;
       function dropScript() {
-        // A failed or refused script node never stays in the document:
-        // the next attempt appends a fresh node, and a settled failure
-        // leaves no dead element behind for the page to carry.
+        // A failed or refused script node never stays in the document.
         if (script && script.parentNode) script.parentNode.removeChild(script);
         script = null;
       }
@@ -1717,6 +1736,7 @@
         script.src = attrs.src;
         script.integrity = attrs.integrity;
         script.setAttribute("data-kiwi-module", kind);
+        kiwiModuleScriptKinds.set(script, kind);
         script.onload = function () {
           // The module registers synchronously while its IIFE executes,
           // so the registry entry at the load event is the completion
@@ -1764,10 +1784,8 @@
       var load = kiwiLoadModuleAsset(kind, attrs);
       kiwiModuleLoads[kind] = load;
       load.then(function (loaded) {
-        // Retire the settled promise: successful registrations are
-        // cached by kiwiModuleApis (the module's own registry entry),
-        // while a terminal failure is remembered only as the backoff
-        // timestamp so the next attempt is a real retry.
+        // Retire the settled promise: success stays cached by the module
+        // registry, a failure only records the backoff timestamp.
         if (kiwiModuleLoads[kind] === load) delete kiwiModuleLoads[kind];
         if (loaded) delete kiwiModuleFailedAt[kind];
         else kiwiModuleFailedAt[kind] = Date.now();
@@ -1847,6 +1865,13 @@
   kiwiBridge = {
     register: function (kind, api) {
       if (kind && api && typeof api === "object" && !kiwiModuleApis[kind]) {
+        var cs = null;
+        try { cs = document.currentScript; } catch (e) {}
+        var issuedKind = cs ? (kiwiModuleScriptKinds.get(cs) || null) : null;
+        if (issuedKind && issuedKind !== kind) {
+          console.warn("KiwiCaptcha: refused a " + kind + " registration from a " + issuedKind + " module asset");
+          return;
+        }
         kiwiModuleApis[kind] = api;
         // widget-locales.js also registers its packs here (register is
         // the executed signal the asset loader waits for).

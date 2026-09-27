@@ -9,15 +9,15 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 99410,
-      "brotli_bytes": 25081,
+      "raw_bytes": 100575,
+      "brotli_bytes": 25425,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 29821,
-      "gzip_bytes_zlib13": 29821
+      "gzip_bytes_zlib12": 30148,
+      "gzip_bytes_zlib13": 30148
     },
     "widget_worker": {
       "raw_bytes": 141542,

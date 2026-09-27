@@ -425,7 +425,10 @@ impl RiskPolicy {
         if cooldown_until_ms > 0 && now_ms < cooldown_until_ms && global_level >= 4 {
             reasons.push(RiskReason::Cooldown);
             deny = true;
-            retry_after_ms = Some((cooldown_until_ms - now_ms) as u32);
+            // The retry hint is the u32 wire field: saturate at the ceiling
+            // instead of wrapping a long hold into a much earlier retry (the
+            // PHP mirror saturates identically).
+            retry_after_ms = Some((cooldown_until_ms - now_ms).min(u32::MAX as u64) as u32);
         }
 
         if deny {

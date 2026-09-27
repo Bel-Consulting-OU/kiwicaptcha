@@ -1021,8 +1021,10 @@ final class Issuer
      * the challenge nonce. The stored binding is unique per challenge and
      * never a stable identifier that follows the client across requests.
      * IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are normalized to
-     * their 4-byte IPv4 form so both spellings of the same address
-     * produce the same tag. A non-null $tenantId derives K_ip_bind under
+     * their 4-byte IPv4 form. The deprecated IPv4-compatible forms
+     * (`::a.b.c.d`, excluding `::` and `::1`) are normalized the same
+     * way. Every spelling of the same address therefore produces one tag,
+     * in agreement with the risk identity layer and the Rust core. A non-null $tenantId derives K_ip_bind under
      * the per-tenant root, so tenants of a shared master secret cannot
      * forge each other's binding tags; null (the default) keeps the
      * global key, byte-identical to the tenantless tag.
@@ -1045,11 +1047,16 @@ final class Issuer
 
     /**
      * Canonical family byte + packed bytes for an IP: inet_pton() output
-     * (4 or 16 bytes) with IPv4-mapped IPv6 (::ffff:a.b.c.d) normalized to
-     * the 4-byte IPv4 form. Two textual spellings of the same address (e.g.
-     * "2001:db8::1" and "2001:0db8:0:0:0:0:0:1") therefore produce the same
-     * bytes — used by the challenge binding tag AND the rate-limiter
-     * pseudonym so identity is exact.
+     * (4 or 16 bytes) with IPv4-mapped IPv6 (::ffff:a.b.c.d) AND the
+     * deprecated IPv4-compatible IPv6 form (::a.b.c.d, excluding :: and
+     * ::1) normalized to the 4-byte IPv4 form. Two textual spellings of
+     * the same address (e.g. "2001:db8::1" and "2001:0db8:0:0:0:0:0:1")
+     * therefore produce the same bytes — used by the challenge binding
+     * tag AND the rate-limiter pseudonym so identity is exact. This
+     * mirrors the risk identity layer's `RiskIdentityFactory::canonicalIp`
+     * and the Rust core `canonical_ip` byte-for-byte, so the issuance
+     * tag, the siteverify remoteip path and the risk source/subnet
+     * identity always agree on exactly one canonical family per address.
      *
      * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
      *                                   IPv6 address
@@ -1068,9 +1075,16 @@ final class Issuer
             throw new \InvalidArgumentException('Invalid IP address');
         }
         $len = \strlen($canonical);
-        if ($len === 16 && str_starts_with($canonical, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
-            $canonical = substr($canonical, 12);
-            $len = 4;
+        if ($len === 16) {
+            $low = substr($canonical, 12);
+            $mapped = substr($canonical, 0, 12) === "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff";
+            $compatible = substr($canonical, 0, 12) === str_repeat("\x00", 12)
+                && $low !== "\x00\x00\x00\x00"
+                && $low !== "\x00\x00\x00\x01";
+            if ($mapped || $compatible) {
+                $canonical = $low;
+                $len = 4;
+            }
         }
         if ($len !== 4 && $len !== 16) {
             throw new \InvalidArgumentException('Invalid IP address');

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -720,10 +720,11 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 /// `tag` is the hex encoding of `HMAC-SHA256(K_ip_bind, "kiwicaptcha/ip-bind/v2\\0" || nonce ||
 /// "\\0" || family || canonical_ip_bytes)` where `family` is a single byte
 /// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
-/// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
-/// to 4-byte IPv4, and `K_ip_bind` is the `HKDF`-derived IP-binding purpose key
-/// (see [`crate::keys::DerivedKeys`]; never the master secret
-/// itself).
+/// byte sequence with IPv4-mapped (`::ffff:a.b.c.d`) and the deprecated
+/// IPv4-compatible (`::a.b.c.d`, excluding `::` and `::1`) IPv6 addresses
+/// normalized to the 4-byte IPv4 form, and `K_ip_bind` is the `HKDF`-derived
+/// IP-binding purpose key (see [`crate::keys::DerivedKeys`]; never the master
+/// secret itself).
 ///
 /// The tag is **nonce-bound**: the same IP produces a different tag for every
 /// challenge, so the record creates no stable IP-derived identifier. An
@@ -748,6 +749,28 @@ pub fn binding_tag_for_tenant(
     binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, tenant))
 }
 
+/// The IPv4 address an IPv6 spelling denotes when it is an IPv4-mapped
+/// (`::ffff:a.b.c.d`) or the deprecated IPv4-compatible (`::a.b.c.d`)
+/// form. The unspecified `::` and the loopback `::1` are deliberately NOT
+/// treated as IPv4 (they are IPv6 identities in every layer). This
+/// mirrors the risk identity layer's `canonical_ip` byte-for-byte, so the
+/// issuance binding tag, the siteverify remoteip path and the risk
+/// source/subnet identity always agree on exactly one canonical family
+/// per address.
+fn canonical_v4_of(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = v6.octets();
+    let mapped = octets[..10].iter().all(|b| *b == 0) && octets[10] == 0xff && octets[11] == 0xff;
+    let low = u32::from_be_bytes([octets[12], octets[13], octets[14], octets[15]]);
+    let compatible = octets[..12].iter().all(|b| *b == 0) && low != 0 && low != 1;
+    if mapped || compatible {
+        Some(Ipv4Addr::from([
+            octets[12], octets[13], octets[14], octets[15],
+        ]))
+    } else {
+        None
+    }
+}
+
 /// The nonce-bound IP binding tag computed with an already derived
 /// IP-binding key — the cached-`HKDF` seam for the production verifier,
 /// which derives the purpose keys once per key id (see
@@ -761,8 +784,8 @@ pub(crate) fn binding_tag_with_keys(
     let addr: IpAddr = ip.parse().map_err(|_| SignError::InvalidIp)?;
     let (family, canonical_bytes) = match addr {
         IpAddr::V4(v4) => (0x04u8, v4.octets().to_vec()),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(mapped) => (0x04u8, mapped.octets().to_vec()),
+        IpAddr::V6(v6) => match canonical_v4_of(v6) {
+            Some(v4) => (0x04u8, v4.octets().to_vec()),
             None => (0x06u8, v6.octets().to_vec()),
         },
     };

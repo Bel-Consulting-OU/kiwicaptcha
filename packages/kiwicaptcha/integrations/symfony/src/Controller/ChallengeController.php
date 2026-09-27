@@ -669,8 +669,12 @@ final class ChallengeController
         $rawContentType = (string) $request->headers->get('Content-Type', '');
         // A raw control byte is not optional whitespace: reject it before
         // the split and trim below can launder a padded value into a
-        // valid media type.
-        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
                 Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
@@ -1730,10 +1734,14 @@ final class ChallengeController
             // admitted outstanding slot is returned and the reservation
             // released. The mint may have failed before the $challenge
             // variable was assigned; the nullable parameter handles both.
+            // The exception text is internal detail (a backend may name a
+            // filesystem path, a class or a configuration value): it
+            // reaches the server log only, never the response body.
+            $this->logGate('kiwicaptcha: challenge issuance refused with an invalid-argument fault: {message}', ['message' => $e->getMessage()]);
             $this->rollbackUncommittedIssuance($challenge ?? null, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
 
             return $this->privateJson(
-                ['error' => ['code' => 'INVALID_SCOPE', 'message' => $e->getMessage()]],
+                ['error' => ['code' => 'INVALID_SCOPE', 'message' => 'The challenge request carries an invalid scope, binding or metadata value.']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
                 $request,
                 $riskSession,
@@ -2140,8 +2148,12 @@ final class ChallengeController
         $rawContentType = (string) $request->headers->get('Content-Type', '');
         // A raw control byte is not optional whitespace: reject it before
         // the split and trim below can launder a padded value into a
-        // valid media type.
-        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
             return $this->privateJson(
                 ['error' => ['code' => 'UNSUPPORTED_MEDIA_TYPE', 'message' => 'Content-Type must be application/json.']],
                 Response::HTTP_UNSUPPORTED_MEDIA_TYPE,
@@ -3688,40 +3700,6 @@ final class ChallengeController
         } catch (UnknownScopeException) {
             return null;
         }
-    }
-
-    /**
-     * Path canonicality: whether the raw request target is the canonical
-     * path, checked over the raw request URI, never a normalized route.
-     * Rejects any empty segment (`//` and a trailing slash), any dot
-     * segment (`/.`, `/./`, `/..`, `/../`), any percent-encoded byte
-     * (the canonical target is a fixed ASCII path, so `/%76hallenge`,
-     * `%2F`, `%5C` and `%2e%2e` are encoding probes), and any backslash.
-     * Only the path component is inspected; the query string is rejected
-     * separately with a 422.
-     */
-    private function isCanonicalRequestTarget(string $rawRequestUri): bool
-    {
-        $path = $rawRequestUri;
-        $queryPos = strpos($rawRequestUri, '?');
-        if ($queryPos !== false) {
-            $path = substr($rawRequestUri, 0, $queryPos);
-        }
-        if (str_contains($path, '%') || str_contains($path, '\\')) {
-            return false;
-        }
-        // The empty element before a leading slash is the absolute-path
-        // marker, not a segment; every other empty segment (a `//` in the
-        // middle, or the trailing `/` of "/challenge/") is noncanonical.
-        $segments = explode('/', $path);
-        $start = $path !== '' && $path[0] === '/' ? 1 : 0;
-        for ($i = $start, $count = \count($segments); $i < $count; $i++) {
-            if ($segments[$i] === '' || $segments[$i] === '.' || $segments[$i] === '..') {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**

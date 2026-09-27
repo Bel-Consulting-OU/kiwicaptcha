@@ -237,7 +237,7 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-99,410 bytes raw, 29,821 bytes gzip and 25,081 bytes brotli, against
+100,575 bytes raw, 30,148 bytes gzip and 25,425 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
@@ -324,8 +324,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 99,410 bytes
-raw, 29,821 gzip and 25,081 brotli (the record's
+any memory-hard challenge — is the eager core alone: 100,575 bytes
+raw, 30,148 gzip and 25,425 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits at 96.8% of its 30,720-byte cap after the provider-control
 architecture and lazy-module recovery work added core code (the cap is

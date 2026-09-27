@@ -352,6 +352,18 @@ final class SiteVerifyController
 
     public function siteverify(Request $request): Response
     {
+        // Path canonicality: the raw request target must be the canonical
+        // origin-form path (the same shared gate as the native endpoints,
+        // {@see FramingChecksTrait::isCanonicalRequestTarget()}). A
+        // noncanonical target (matrix-parameter segment, trailing dot,
+        // fragment, absolute-form scheme+host, percent-encoded or dot
+        // segment) is a provider bad-request before any handling: an
+        // intermediary that normalizes the target must never create a
+        // second spelling of the endpoint.
+        if (!$this->isCanonicalRequestTarget((string) $request->getRequestUri())) {
+            return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
+        }
+
         if ($this->siteverifySecrets === []) {
             return $this->privateJson(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }
@@ -1672,8 +1684,12 @@ LUA;
         $rawContentType = (string) $request->headers->get('Content-Type', '');
         // A raw control byte is not optional whitespace: reject it before
         // the split and trim below can launder a padded value into a
-        // valid media type.
-        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1) {
+        // valid media type. A comma is the collapsed-duplicate marker
+        // (two occurrences folded into one field value): the split on
+        // ';' below would otherwise accept "application/json; c=1,
+        // text/plain" as application/json while another layer reads a
+        // two-type list. No accepted media type uses a comma parameter.
+        if (preg_match('/[\x00-\x1F\x7F]/', $rawContentType) === 1 || str_contains($rawContentType, ',')) {
             return null;
         }
         $contentType = strtolower(trim(explode(';', $rawContentType, 2)[0]));

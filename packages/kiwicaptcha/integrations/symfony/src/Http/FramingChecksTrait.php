@@ -35,6 +35,66 @@ use Symfony\Component\HttpFoundation\Request;
 trait FramingChecksTrait
 {
     /**
+     * Whether the raw request target is the canonical origin-form path.
+     * False means the caller must refuse the request before any handling.
+     * The caller builds its own response vocabulary.
+     *
+     * The raw target is inspected, never a normalized route. An
+     * intermediary that rewrites or normalizes the target (a matrix
+     * parameter, a trailing dot, a fragment, an absolute-form scheme and
+     * host, or a dot segment) would otherwise let a second spelling of
+     * the target reach the endpoint's state-changing pipeline.
+     *
+     * Rejected shapes:
+     *  - anything without a leading slash: absolute-form, authority-form
+     *    and relative targets.
+     *  - a fragment ("#") anywhere in the target.
+     *  - any byte outside printable ASCII: raw spaces, tabs, CR, LF,
+     *    NUL, DEL, other control bytes and non-ASCII bytes.
+     *  - any percent-encoded byte, backslash or matrix semicolon in the
+     *    path.
+     *  - any empty or dot segment ("//", a trailing slash, "/.", "/..").
+     *  - any segment ending with "." (some intermediaries strip the dot
+     *    and fold "/challenge." onto "/challenge").
+     *
+     * Only the path component is inspected here; a query string is
+     * rejected separately by each endpoint.
+     */
+    private function isCanonicalRequestTarget(string $rawRequestUri): bool
+    {
+        if ($rawRequestUri === '' || $rawRequestUri[0] !== '/') {
+            return false;
+        }
+        if (str_contains($rawRequestUri, '#') || preg_match('/[^\x21-\x7E]/', $rawRequestUri) === 1) {
+            return false;
+        }
+        $path = $rawRequestUri;
+        $queryPos = strpos($rawRequestUri, '?');
+        if ($queryPos !== false) {
+            $path = substr($rawRequestUri, 0, $queryPos);
+        }
+        if (str_contains($path, '%') || str_contains($path, '\\') || str_contains($path, ';')) {
+            return false;
+        }
+        // The empty element before the leading slash is the absolute-path
+        // marker, not a segment (guaranteed present by the check above);
+        // every other empty segment (a `//` in the middle, or the trailing
+        // `/` of "/challenge/") is noncanonical.
+        $segments = explode('/', $path);
+        for ($i = 1, $count = \count($segments); $i < $count; $i++) {
+            $segment = $segments[$i];
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                return false;
+            }
+            if ($segment[\strlen($segment) - 1] === '.') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Whether the request's framing headers are canonical. False means
      * the caller must refuse the request (the caller builds its own
      * response vocabulary).

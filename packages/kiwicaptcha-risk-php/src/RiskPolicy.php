@@ -268,7 +268,11 @@ final class RiskPolicy
         if ($cooldownUntilMs > 0 && $nowMs < $cooldownUntilMs && $globalLevel >= 4) {
             $reasons[] = RiskReason::Cooldown;
             $deny = true;
-            $retryAfterMs = $cooldownUntilMs - $nowMs;
+            // The retry hint is the u32 wire field: saturate instead of
+            // emitting an unbounded value (the Rust mirror saturates the
+            // same way), so a long hold never leaks a wrapped, much
+            // earlier retry.
+            $retryAfterMs = min(4294967295, $cooldownUntilMs - $nowMs);
         }
 
         if ($deny) {
