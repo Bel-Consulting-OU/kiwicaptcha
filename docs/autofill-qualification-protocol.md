@@ -104,13 +104,25 @@ make a native-autofill row `PASS`. Only the manual qualification can.
 Every row carries the surface id (and its product name), the surface
 version, the test date, the result (`PASS`, `FAIL`, `BLOCKED` or
 `AUTOMATED PASS / MANUAL PENDING`) and notes. The page to use is the
-standard autofill test page from the browser suite: a form with real
-autocomplete-semantic fields (email, username, current-password), the
-widget container, and the hidden token input, served over the local
-fixture router. The exact steps per surface are listed in each row.
-The decoy name is read from the challenge response and the server-side
-evidence is read from the fixture's honeypot-check endpoint, exactly
-as the automated suites do.
+standard autofill test page from the browser suite, served as a real
+route by the local fixture router: start it with
+`php -d opcache.jit=off -S 127.0.0.1:8085 router.php` from
+`tests/browser` and open `http://127.0.0.1:8085/autofill-form`. The
+page is the same markup the `autofill-evidence` spec builds in memory:
+a form with real autocomplete-semantic fields (email, username,
+current-password), the widget container, and the hidden token input.
+It arms the authenticated decoy pool by default (`?decoy=pool`, the
+same arm the automated suites use; `?decoyname=<name>` pins the emitted
+name), so the decoy name in the challenge response is the authenticated
+name the server checks. The exact steps per surface are listed in each
+row. After the fill and the form submission, the page's
+`Check serialized form and decoy evidence` button posts the serialized
+form to the fixture's `/honeypot-check` endpoint and prints the
+non-empty fields plus the JSON outcome (`honeypot_hit` and
+`decoy_field`), exactly as the automated suites read it; the raw posted
+form is recorded at `/capture/form`. A `PASS` row requires the decoy
+input to stay empty, `honeypot_hit` to be false, and the challenge
+token to verify.
 
 | Surface id | Required steps | Version | Date | Result | Notes |
 |------------|----------------|---------|------|--------|-------|
