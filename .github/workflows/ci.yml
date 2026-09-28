@@ -1149,7 +1149,7 @@ jobs:
         working-directory: tests/browser
         run: npx playwright test
       - name: adversarial measurement-freeze corpus
-        # Audit findings 1/2: the client-performance experiment is frozen
+        # The client-performance experiment is frozen
         # at startup (immutable snapshot of every benchmark-defining
         # source) and every acceptance mutation that changes an authority
         # — an opcode remap, a trace-name change, a router

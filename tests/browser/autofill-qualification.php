@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 /**
  * The human-openable autofill qualification page of
- * docs/autofill-qualification-protocol.md, served by the fixture router
- * at GET /autofill-form (router.php includes this file only for that
- * route, so this file is deliberately NOT part of the benchmark
- * measurement source set: editing it can never invalidate a client
- * performance recording).
+ * docs/autofill-qualification-protocol.md. The fixture router serves it
+ * at GET /autofill-form and includes this file only for that route.
+ * This file is deliberately not part of the benchmark measurement source
+ * set, so editing it can never invalidate a client performance
+ * recording.
  *
  * The page is the same standard markup the autofill-evidence spec
  * constructs in memory: the widget container, the hidden token input
@@ -17,25 +17,24 @@ declare(strict_types=1);
  * (?decoy=pool; ?decoy=1 serves the unarmed emission and
  * ?decoyname=<name> pins the emitted name, like the other fixtures).
  *
- * The documented manual sequence must be completable literally:
+ * The documented manual sequence must be completable literally.
  *
  *   Run A (negative control): save a profile/login for this URL in the
- *   surface under test, reload, accept the native fill on the real
- *   fields, press Submit. The submit handler serializes the form and
- *   POSTs it to /form-submit with fetch INSTEAD of navigating, so the
- *   page (and its controls) stay alive, exactly as the protocol
- *   document instructs. Press Check to post the serialized form to
- *   /honeypot-check: the decoy input must be empty and honeypot_hit
- *   must be false.
+ *   surface under test, reload, and accept the native fill on the real
+ *   fields. Pressing Submit serializes the form and POSTs it to
+ *   /form-submit with fetch instead of navigating, so the page and its
+ *   controls stay alive, exactly as the protocol document instructs.
+ *   Press Check to post the serialized form to /honeypot-check: the
+ *   decoy input must be empty and honeypot_hit must be false.
  *
  *   Run B (positive control): /honeypot-check consumes the verified
- *   record, so reload for a fresh challenge, press "Fill the
- *   authenticated decoy (positive control)" (it reads the decoy name
- *   from the last /challenge response the page observed and fills
- *   exactly that input through the native value setter), then press
- *   Check: the proof must stay valid and honeypot_hit must be true.
+ *   record, so reload for a fresh challenge first. Press "Fill the
+ *   authenticated decoy (positive control)": it reads the decoy name
+ *   from the last seen /challenge response and fills exactly that input
+ *   through the native value setter. Press Check: the proof must stay
+ *   valid and honeypot_hit must be true.
  *
- * A PASS row must record both controls (the matrix validator requires
+ * A pass row must record both controls (the matrix validator requires
  * controls.negative and controls.positive for every pass row).
  */
 
@@ -69,7 +68,7 @@ decoy name (the decoy name is in the /challenge response) and honeypot_hit must 
 false. Run B (positive control): the check consumes the verified record, so reload
 for a fresh challenge, press the positive-control button to fill exactly the
 authenticated decoy field, then press Check again: the proof must stay valid and
-honeypot_hit must be true. A PASS row records both controls.</p>
+honeypot_hit must be true. A pass row records both controls.</p>
 <form id="f" action="/form-submit" method="post">
   <div class="kiwi-container" id="kiwicaptcha-root"
     data-kiwi-endpoint="'.htmlspecialchars($endpoint, ENT_QUOTES).'" data-kiwi-scope="login">

@@ -23,7 +23,7 @@ if (is_file($symfonyAutoload)) {
     require $symfonyAutoload;
 } else {
     // The immutable client-performance measurement snapshot copies the
-    // bundle SOURCE (not its ~64 MiB vendor), because the fixture's
+    // bundle source (not its ~64 MiB vendor), because the fixture's
     // chained-challenge store implements the bundle's Risk state-store
     // interfaces. Register a PSR-4 fallback for the bundle namespace so
     // those interfaces resolve when the bundle vendor is absent (the
