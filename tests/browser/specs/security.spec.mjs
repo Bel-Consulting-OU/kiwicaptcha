@@ -566,7 +566,9 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"\) algorithm = "sha256";/);
     // The request body algorithm is exactly the attribute-derived variable.
-    expect(src).toMatch(/var algorithm\s*=\s*W\.getAttribute\("data-kiwi-algorithm"\) \|\| container\.getAttribute\("data-kiwi-algorithm"\) \|\| "sha256"/);
+    // The one assignment goes through the shared supported-configuration
+    // reader (attribute-only, never client-synthesized).
+    expect(src).toMatch(/var algorithm\s*=\s*kiwiConfigValue\(W, container, "data-kiwi-algorithm"\) \|\| "sha256"/);
     expect(src).toMatch(/reqBody\.algorithm\s*=\s*algorithm/);
     // Only the three server-offered profiles are selectable — anything
     // else is normalized to the default; the client can never invent
