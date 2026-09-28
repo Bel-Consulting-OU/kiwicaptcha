@@ -24,10 +24,25 @@
  *     that lacks it is REFUSED at merge time (a run whose recorder
  *     identity was never recorded cannot be bound to a context), and
  *     the module states the required field in the refusal reason.
- *   - execution.manifestSchema / execution.maxExecutionVersion —
- *     recorded payload.methodology.execution (manifestSchema and
- *     maxVersion; older payloads may record options.executionMaxVersion
- *     or payload.execution.maxVersion for the ceiling).
+ *   - execution.manifestSchema / execution.manifestSha256 /
+ *     execution.maxExecutionVersion — recorded
+ *     payload.methodology.execution (manifestSchema, the full grammar
+ *     bytes hash and maxVersion; older payloads may record
+ *     options.executionMaxVersion or payload.execution.maxVersion for
+ *     the ceiling). The schema tag and the maximum version alone are
+ *     NOT enough: an opcode remap or trace-name change keeps both and
+ *     must still refuse inherited evidence.
+ *   - sources — the recorded payload.measurementSources block: the
+ *     frozen measurement-source manifest (audit finding 1) and its
+ *     canonical digest. The manifest binds the exact bytes of the
+ *     harness, the asset-fingerprint policy, the fixture workload
+ *     router, the execution manifest, the release asset set, every
+ *     canonical client asset and the PHP core source tree the run
+ *     executed against. The recorded manifest is cross-checked against
+ *     the recorded harness source sha256, the recorded execution
+ *     manifest sha256 and the recorded clientAssets entries, so a run
+ *     cannot claim one population in the manifest and another in its
+ *     other facts.
  *   - solver.* — recorded payload.options (reps, argonReps, cache,
  *     assets, argonBits, argonMKib, shaFixedWork, argonFixedWork) plus
  *     the always-applied fixed-work options recorded in
@@ -82,13 +97,16 @@
  * old evidence under a new identity.
  */
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalClientAssets } from './client-assets.mjs';
+import { canonicalJson, sha256Hex } from './canonical-json.mjs';
+import { snapshotMeasurementSources } from './measurement-sources.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
+
+export { canonicalJson, sha256Hex };
 
 export const HARNESS_FILE = join(REPO_ROOT, 'tools', 'client-perf', 'client-perf.mjs');
 export const EXECUTION_MANIFEST_FILE = join(REPO_ROOT, 'protocol', 'execution-v1.json');
@@ -98,29 +116,6 @@ export const EXECUTION_MANIFEST_SCHEMA = 'kiwicaptcha.execution-v1/1';
 export const MEASUREMENT_CONTEXT_SCHEMA = 'kiwicaptcha.measurement-context/1';
 export const MEASUREMENT_CONTEXT_SHA256_RE = /^[0-9a-f]{64}$/;
 export const HARNESS_SOURCE_SHA256_RE = /^[0-9a-f]{64}$/;
-
-/**
- * Canonical JSON of an arbitrary measurement field: object keys sorted
- * recursively, arrays kept in order, no whitespace. The hash domain is
- * therefore stable across JSON member ordering and machines. An
- * `undefined` member is not representable and throws: a measurement
- * context with a missing field must never hash as if the field were
- * absent.
- */
-export function canonicalJson(value) {
-  if (value === undefined) {
-    throw new Error('measurement-context: undefined is not a representable canonical JSON value (a measurement field is missing); bind the field or refuse the context');
-  }
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v)).join(',')}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
-}
-
-/** SHA-256, lowercase hex. */
-export function sha256Hex(data) {
-  return createHash('sha256').update(data).digest('hex');
-}
 
 /** SHA-256 over the canonical JSON of a measurement field set. */
 export function measurementContextSha256(fields) {
@@ -301,7 +296,13 @@ export function harnessTierDefinitions(source) {
  */
 export function readHarnessMeasurementFacts(source = readFileSync(HARNESS_FILE, 'utf8')) {
   const schema = harnessConst(source, 'schema string', /const SCHEMA = '([^']+)';/);
-  const manifest = JSON.parse(readFileSync(EXECUTION_MANIFEST_FILE, 'utf8'));
+  // The FULL execution manifest bytes are part of the identity (audit
+  // finding 2): the schema tag and the maximum version alone cannot
+  // distinguish an opcode remap, a trace-name change or an opcode-count
+  // change from the grammar the evidence ran. The sha256 of the exact
+  // manifest bytes is bound, and the harness records it per run.
+  const manifestBytes = readFileSync(EXECUTION_MANIFEST_FILE);
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
   if (
     manifest.$schema !== EXECUTION_MANIFEST_SCHEMA ||
     !Number.isInteger(manifest.max_execution_version) ||
@@ -328,6 +329,7 @@ export function readHarnessMeasurementFacts(source = readFileSync(HARNESS_FILE, 
     schema,
     sourceSha256: sha256Hex(source),
     manifestSchema: manifest.$schema,
+    manifestSha256: sha256Hex(manifestBytes),
     maxExecutionVersion: manifest.max_execution_version,
     solverDefaults,
     difficulties: harnessDifficultyDefinitions(source, {
@@ -347,7 +349,7 @@ export function readHarnessMeasurementFacts(source = readFileSync(HARNESS_FILE, 
  * deliberately absent: a run records only the tiers it executed, and
  * tiers are verified per recorded entry instead (recordedTierMismatches).
  */
-function measurementFields({ harnessPath, harnessSchema, harnessSourceSha256, manifestSchema, executionMaxVersion, solver, difficulties, clientAssets }) {
+function measurementFields({ harnessPath, harnessSchema, harnessSourceSha256, manifestSchema, manifestSha256, executionMaxVersion, solver, difficulties, clientAssets, sources }) {
   return {
     context: MEASUREMENT_CONTEXT_SCHEMA,
     harness: {
@@ -358,12 +360,36 @@ function measurementFields({ harnessPath, harnessSchema, harnessSourceSha256, ma
     execution: {
       manifest: EXECUTION_MANIFEST_REL_PATH,
       manifestSchema,
+      manifestSha256,
       maxExecutionVersion: executionMaxVersion,
     },
     solver,
     difficulties,
     clientAssets,
+    // The canonical measurement-source manifest (audit finding 2): the
+    // exact bytes of every benchmark-defining repository input the run
+    // was frozen against (harness, asset policy, fixture workload
+    // router, execution manifest, release asset set, every canonical
+    // asset, the PHP core source tree). The manifest digest is what the
+    // release gate binds, so a change to any one of those files — an
+    // opcode remap, a trace-name change, a router bits reinterpretation,
+    // an Argon fixture envelope change — refuses inherited evidence
+    // even when the schema tags and the maximum version are unchanged.
+    sources: {
+      manifest: sources.manifest,
+      sha256: sources.manifestSha256,
+    },
   };
+}
+
+/**
+ * The CURRENT measurement-source snapshot: hashes (no copy) of every
+ * benchmark-defining authority of the working tree. Used to build the
+ * current release fields; the harness freezes its own copy at startup
+ * and records it.
+ */
+export function currentMeasurementSourceSnapshot() {
+  return snapshotMeasurementSources({ snapshotRoot: null });
 }
 
 /**
@@ -382,10 +408,12 @@ export function currentReleaseMeasurementFields(facts = readHarnessMeasurementFa
     harnessSchema: facts.schema,
     harnessSourceSha256: facts.sourceSha256,
     manifestSchema: facts.manifestSchema,
+    manifestSha256: facts.manifestSha256,
     executionMaxVersion: facts.maxExecutionVersion,
     solver: { ...facts.solverDefaults },
     difficulties: facts.difficulties,
     clientAssets: canonicalClientAssets(),
+    sources: currentMeasurementSourceSnapshot(),
   });
 }
 
@@ -530,6 +558,16 @@ export function runMeasurementFields(runPayload) {
   } else {
     reasons.push(`run payload records no execution manifest schema (methodology.execution.manifestSchema ${JSON.stringify(executionRecord.manifestSchema)})`);
   }
+  // The FULL execution-manifest hash (audit finding 2): schema tag and
+  // maximum version alone cannot distinguish an opcode remap or a
+  // trace-name change. A run that never recorded the manifest bytes it
+  // measured cannot be bound to a context.
+  let manifestSha256 = null;
+  if (typeof executionRecord.manifestSha256 === 'string' && HARNESS_SOURCE_SHA256_RE.test(executionRecord.manifestSha256)) {
+    manifestSha256 = executionRecord.manifestSha256;
+  } else {
+    reasons.push(`run payload records no execution manifest sha256 (methodology.execution.manifestSha256 ${JSON.stringify(executionRecord.manifestSha256)}): the exact grammar bytes the run measured were not recorded`);
+  }
 
   const fixedWork = methodology.fixedWork && typeof methodology.fixedWork === 'object' && !Array.isArray(methodology.fixedWork)
     ? methodology.fixedWork
@@ -621,6 +659,82 @@ export function runMeasurementFields(runPayload) {
     reasons.push('run payload records no clientAssets block (the client bytes it measured)');
   }
 
+  // The recorded measurement-source manifest (audit finding 1/2): the
+  // frozen snapshot of every benchmark-defining authority the run was
+  // executed against. Without it a run cannot be bound to a source
+  // identity, and the exact manifest is validated for shape and
+  // cross-checked against the other recorded facts.
+  let sources = null;
+  const recordedSources = runPayload.measurementSources;
+  if (!recordedSources || typeof recordedSources !== 'object' || Array.isArray(recordedSources)) {
+    reasons.push('run payload records no measurementSources block (the frozen measurement-source manifest the run executed against)');
+  } else {
+    if (typeof recordedSources.sha256 !== 'string' || !HARNESS_SOURCE_SHA256_RE.test(recordedSources.sha256)) {
+      reasons.push(`run payload measurementSources.sha256 ${JSON.stringify(recordedSources.sha256)} is not a 64-hex lowercase sha256`);
+    }
+    const manifest = recordedSources.manifest;
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).length === 0) {
+      reasons.push('run payload measurementSources.manifest is not a non-empty object');
+    } else {
+      const validated = {};
+      for (const [rel, entry] of Object.entries(manifest)) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          reasons.push(`run payload measurementSources.manifest[${JSON.stringify(rel)}] is not an object`);
+          continue;
+        }
+        if (!['file', 'tree', 'asset'].includes(entry.kind)) {
+          reasons.push(`run payload measurementSources.manifest[${JSON.stringify(rel)}].kind ${JSON.stringify(entry.kind)} is not one of file|tree|asset`);
+          continue;
+        }
+        if (typeof entry.sha256 !== 'string' || !HARNESS_SOURCE_SHA256_RE.test(entry.sha256)) {
+          reasons.push(`run payload measurementSources.manifest[${JSON.stringify(rel)}].sha256 ${JSON.stringify(entry.sha256)} is not a 64-hex lowercase sha256`);
+          continue;
+        }
+        validated[rel] = entry;
+      }
+      if (reasons.length === 0) {
+        sources = { manifest: validated, manifestSha256: recordedSources.sha256 };
+        // The recorded digest must hash the recorded manifest: a
+        // fabricated digest that does not describe its own manifest is
+        // malformed evidence, whatever it happens to compare against.
+        const recomputed = sha256Hex(canonicalJson(validated));
+        if (recomputed !== recordedSources.sha256) {
+          reasons.push(`run payload measurementSources.sha256 ${recordedSources.sha256} does not hash its own manifest (recomputed ${recomputed})`);
+        }
+        // Cross-consistency: the manifest must describe the same bytes
+        // as the run's other recorded identities, or the run recorded
+        // two different measurement populations.
+        const harnessEntry = validated[harnessIdentity.path];
+        if (!harnessEntry) {
+          reasons.push(`run payload measurementSources.manifest does not carry the harness entry ${JSON.stringify(harnessIdentity.path)}`);
+        } else if (harnessEntry.sha256 !== harnessIdentity.sha256) {
+          reasons.push(`run payload measurementSources.manifest[${JSON.stringify(harnessIdentity.path)}].sha256 ${harnessEntry.sha256} disagrees with the recorded harness source sha256 ${harnessIdentity.sha256}`);
+        }
+        const manifestEntry = validated[EXECUTION_MANIFEST_REL_PATH];
+        if (!manifestEntry) {
+          reasons.push(`run payload measurementSources.manifest does not carry the execution manifest entry ${JSON.stringify(EXECUTION_MANIFEST_REL_PATH)}`);
+        } else if (manifestSha256 !== null && manifestEntry.sha256 !== manifestSha256) {
+          reasons.push(`run payload measurementSources.manifest[${JSON.stringify(EXECUTION_MANIFEST_REL_PATH)}].sha256 ${manifestEntry.sha256} disagrees with the recorded methodology.execution.manifestSha256 ${manifestSha256}`);
+        }
+        if (Object.keys(validated).length !== Object.keys(manifest).length) {
+          sources = null;
+        } else if (runPayload.clientAssets && typeof runPayload.clientAssets === 'object' && !Array.isArray(runPayload.clientAssets)) {
+          for (const [name, asset] of Object.entries(runPayload.clientAssets)) {
+            const rel = `packages/kiwicaptcha-wasm/assets/${name}`;
+            const entry = validated[rel];
+            if (!entry) {
+              reasons.push(`run payload measurementSources.manifest does not carry the recorded client asset ${name}`);
+              continue;
+            }
+            if (entry.sha256 !== asset.sha256 || entry.bytes !== asset.bytes) {
+              reasons.push(`run payload measurementSources.manifest[${JSON.stringify(rel)}] disagrees with the recorded clientAssets entry for ${name} (manifest ${entry.bytes} bytes / ${entry.sha256}, clientAssets ${asset.bytes} bytes / ${asset.sha256})`);
+            }
+          }
+        }
+      }
+    }
+  }
+
   if (reasons.length > 0) return { fields: null, reasons };
   return {
     fields: measurementFields({
@@ -628,10 +742,12 @@ export function runMeasurementFields(runPayload) {
       harnessSchema,
       harnessSourceSha256: harnessIdentity.sha256,
       manifestSchema,
+      manifestSha256,
       executionMaxVersion,
       solver,
       difficulties,
       clientAssets: runPayload.clientAssets,
+      sources,
     }),
     reasons: [],
   };

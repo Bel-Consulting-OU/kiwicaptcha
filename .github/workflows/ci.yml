@@ -1148,6 +1148,17 @@ jobs:
       - name: run browser tests
         working-directory: tests/browser
         run: npx playwright test
+      - name: adversarial measurement-freeze corpus
+        # Audit findings 1/2: the client-performance experiment is frozen
+        # at startup (immutable snapshot of every benchmark-defining
+        # source) and every acceptance mutation that changes an authority
+        # — an opcode remap, a trace-name change, a router
+        # reinterpretation, an Argon fixture envelope change — must
+        # refuse inherited evidence, while the excluded qualification
+        # page must not. The runtime cases start the real harness,
+        # mutate the tree mid-cell, and require a contamination abort (or
+        # the frozen bytes recorded) with no completion marker.
+        run: node tools/client-perf/test-measurement-freeze.mjs
 
 
   # The accessibility acceptance suite and the curated cross-browser

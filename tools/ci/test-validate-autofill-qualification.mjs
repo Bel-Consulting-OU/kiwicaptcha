@@ -49,7 +49,15 @@ const iso = (offsetMs) => new Date(Date.now() + offsetMs).toISOString();
 const FIXTURE_DIR = mkdtempSync(join(tmpdir(), 'kiwicaptcha-autofill-'));
 let fixtureSeq = 0;
 
-/** A good pass row for a registry surface, with an exact version. */
+/** The two control observations every pass row must record. */
+function goodControls() {
+  return {
+    negative: { result: 'pass', note: 'Run A: honeypot_hit=false, decoy field stayed empty' },
+    positive: { result: 'pass', note: 'Run B (fresh challenge): honeypot_hit=true, proof still valid' },
+  };
+}
+
+/** A good pass row for a registry surface, with an exact version and both controls. */
 function goodRow(surface, overrides = {}) {
   return {
     surface: surface.id,
@@ -58,6 +66,7 @@ function goodRow(surface, overrides = {}) {
     platform: surface.platform,
     status: 'pass',
     tested_at: iso(-HOUR_MS),
+    controls: goodControls(),
     ...overrides,
   };
 }
@@ -125,6 +134,7 @@ expect('good matrix', goodMatrix(), { code: 0 });
     platform: 'desktop',
     status: 'pass',
     tested_at: iso(-HOUR_MS),
+    controls: goodControls(),
   });
   expect('extra advisory surface', matrix, { code: 0, contains: ['not in the surface registry'] });
 }
@@ -203,6 +213,22 @@ expect('blocked required row', withRow(goodMatrix(), 0, { status: 'blocked', tes
 expect('fail required row', withRow(goodMatrix(), 0, { status: 'fail', tested_at: null }), { contains: ['status "fail"'] });
 expect('manual_pending required row', withRow(goodMatrix(), 0, { status: 'manual_pending', tested_at: null }), { contains: ['status "manual_pending"'] });
 expect('unknown status', withRow(goodMatrix(), 0, { status: 'maybe' }), { contains: ['is not one of'] });
+
+// ── Decoy controls (the two-run protocol). ──────────────────────────
+
+expect('pass without controls', withRow(goodMatrix(), 0, { controls: undefined }), { contains: ['without a controls object'] });
+expect('pass with controls null', withRow(goodMatrix(), 0, { controls: null }), { contains: ['without a controls object'] });
+expect('pass with missing negative control', withRow(goodMatrix(), 0, { controls: { positive: goodControls().positive } }), { contains: ['without a controls.negative object'] });
+expect('pass with missing positive control', withRow(goodMatrix(), 0, { controls: { negative: goodControls().negative } }), { contains: ['without a controls.positive object'] });
+expect('negative control failed', withRow(goodMatrix(), 0, { controls: { negative: { result: 'fail', note: 'decoy auto-filled' }, positive: goodControls().positive } }), { contains: ['controls.negative.result "fail" is not "pass"'] });
+expect('positive control missing note', withRow(goodMatrix(), 0, { controls: { negative: goodControls().negative, positive: { result: 'pass', note: '   ' } } }), { contains: ['controls.positive records no observation note'] });
+if (ADVISORY.length > 0) {
+  expect('advisory pass also needs controls', (() => {
+    const matrix = goodMatrix();
+    matrix.rows.push(goodRow(ADVISORY[0], { controls: undefined }));
+    return matrix;
+  })(), { contains: ['without a controls object'] });
+}
 
 // ── Product identity. ───────────────────────────────────────────────
 

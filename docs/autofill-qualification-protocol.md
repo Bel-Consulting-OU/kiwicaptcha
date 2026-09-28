@@ -88,6 +88,15 @@ A row passes when all three criteria hold on the tested surface:
    adds, never replaces: a proof that would verify still verifies,
    and the hit rides alongside it instead of banning the user.
 
+Criteria 1 and 2 are the **negative control**; criterion 3 is the
+**positive control**. A `PASS` requires observing both: a row is only
+`PASS` when its machine-readable record carries
+`controls.negative` and `controls.positive`, each with `result:
+"pass"` and a non-empty `note` naming what was observed (the exact
+`honeypot_hit` value and the decoy field name for each run). The
+matrix validator enforces this, so a row cannot be marked `PASS` with
+only the no-hit half of the contract.
+
 A row that fails any criterion is recorded `FAIL` with the exact
 observed behavior, the surface version, and the date. A row whose
 setup could not be completed (no device, no manager, no OS) is
@@ -99,13 +108,43 @@ cannot exercise a NATIVE-autofill interaction (a saved profile filling
 the form through the browser's own autofill/prompt), so they cannot
 make a native-autofill row `PASS`. Only the manual qualification can.
 
+## The shared mandatory procedure (every required surface)
+
+Every required surface runs the same two-run procedure on the test
+page; the per-row steps below describe the surface-specific setup and
+are always followed by both runs:
+
+- **Run A (negative control).** Save the profile/login/address in the
+  surface under test for the test page URL; reload the page; accept
+  whatever fill the surface performs on the real fields; press
+  **Submit**. The submit handler serializes the form and POSTs it to
+  `/form-submit` without navigating, so the page and its controls stay
+  open (the raw posted form is recorded at `/capture/form`). Press
+  **Check serialized form and decoy evidence**: the decoy input must
+  be empty, `honeypot_hit` must be `false`, the challenge token must
+  verify (`"ok": true`), and the reported `decoy_field` is the
+  authenticated decoy name this run must keep empty.
+- **Run B (positive control).** `/honeypot-check` consumes the verified
+  record, so **reload for a fresh challenge** (a reused proof is
+  refused with `record_not_found`, never accepted). Press **Fill the
+  authenticated decoy (positive control)**: the page reads the decoy
+  name from the fresh challenge response and fills exactly that input
+  through the native value setter. Press **Check** again:
+  `"ok": true` and `honeypot_hit: true` under the same authenticated
+  decoy name proves the evidence is additive and the proof still
+  verifies.
+
+Record both runs in the matrix row's `controls` block. A `PASS` with
+a single run, or with a reused proof, is invalid.
+
 ## The qualification matrix
 
 Every row carries the surface id (and its product name), the surface
 version, the test date, the result (`PASS`, `FAIL`, `BLOCKED` or
-`AUTOMATED PASS / MANUAL PENDING`) and notes. The page to use is the
-standard autofill test page from the browser suite, served as a real
-route by the local fixture router: start it with
+`AUTOMATED PASS / MANUAL PENDING`), the two
+control observations for `PASS` rows, and notes. The page to use is
+the standard autofill test page from the browser suite, served as a
+real route by the local fixture router: start it with
 `php -d opcache.jit=off -S 127.0.0.1:8085 router.php` from
 `tests/browser` and open `http://127.0.0.1:8085/autofill-form`. The
 page is the same markup the `autofill-evidence` spec builds in memory:
@@ -115,14 +154,14 @@ It arms the authenticated decoy pool by default (`?decoy=pool`, the
 same arm the automated suites use; `?decoyname=<name>` pins the emitted
 name), so the decoy name in the challenge response is the authenticated
 name the server checks. The exact steps per surface are listed in each
-row. After the fill and the form submission, the page's
-`Check serialized form and decoy evidence` button posts the serialized
-form to the fixture's `/honeypot-check` endpoint and prints the
-non-empty fields plus the JSON outcome (`honeypot_hit` and
-`decoy_field`), exactly as the automated suites read it; the raw posted
-form is recorded at `/capture/form`. A `PASS` row requires the decoy
-input to stay empty, `honeypot_hit` to be false, and the challenge
-token to verify.
+row, and the shared two-run procedure above is part of every row. The
+page's `Check serialized form and decoy evidence` button posts the
+serialized form to the fixture's `/honeypot-check` endpoint and prints
+the non-empty fields plus the JSON outcome (`honeypot_hit` and
+`decoy_field`), exactly as the automated suites read it. A `PASS` row
+requires Run A (decoy empty, `honeypot_hit` false, token verifies) and
+Run B (fresh challenge, deliberate decoy fill, `honeypot_hit` true,
+token still verifies).
 
 | Surface id | Required steps | Version | Date | Result | Notes |
 |------------|----------------|---------|------|--------|-------|

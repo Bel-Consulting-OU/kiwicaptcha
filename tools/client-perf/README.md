@@ -328,11 +328,13 @@ there and nowhere else:
   16-hex prefixes bound only 64 bits (two different files of the same
   length collide 1 in 2^64) and were dropped; a truncated fingerprint
   is an invalid record today.
-- **Recorded at run time.** `client-perf.mjs` fingerprints the
-  working tree at measurement time into every results payload;
-  `sync-lab-baseline.mjs` writes the same block into the maintenance
-  baseline; `merge-cells.mjs` and the release validator compare
-  against it.
+- **Recorded at run time, from the frozen snapshot.** `client-perf.mjs`
+  fingerprints the immutable measurement snapshot taken before the
+  first browser launches into every results payload — never the
+  working tree at payload-write time (see the measurement-source
+  freeze below); `sync-lab-baseline.mjs` writes the same block into the
+  maintenance baseline; `merge-cells.mjs` and the release validator
+  compare against it.
 
 The identity rules bind in CI mode and in release mode alike:
 
@@ -365,6 +367,52 @@ The identity rules bind in CI mode and in release mode alike:
   assets` with the naming detail — merging repetitions recorded
   against different bytes, ladders or grammar versions would fabricate
   a percentile over incomparable measurements.
+
+## The measurement-source freeze (re-audit findings 1 and 2)
+
+A performance run is a claim about an immutable byte set. Hashing the
+tree when the payload is finalized is not that claim: the harness is
+loaded into memory at startup, a multi-hour physical run can race a
+working-tree edit, and a file that changes and is restored between
+checks would leave a start/end comparison none the wiser. The harness
+therefore freezes the experiment before the first browser launches
+(`tools/client-perf/measurement-sources.mjs`):
+
+- **Immutable serving snapshot.** Every benchmark-defining file is read
+  once, hashed, and copied into a temporary benchmark directory
+  (`<tmp>/kiwicaptcha-client-perf-*`); the fixture server (`php -S`)
+  serves exclusively from that copy, so a mid-run edit cannot change
+  the bytes any cell receives. The snapshot is removed on completion,
+  interruption or crash.
+- **Canonical measurement-source manifest.** The frozen bytes are
+  hashed into one manifest: the harness source, the asset-fingerprint
+  policy, the fixture workload router (`tests/browser/router.php`), the
+  full execution grammar (`protocol/execution-v1.json`, also surfaced
+  as `methodology.execution.manifestSha256`), the release asset set
+  definition, every canonical client asset and the PHP core source tree
+  (`packages/kiwicaptcha-php/src` plus its composer.json). The manifest
+  digest (sha256 over its canonical JSON) is embedded in the payload's
+  `measurementSources` block and in the measurement context, so
+  evidence recorded against one manifest can never be certified for
+  another. A change in any bound file — an opcode remap, a trace-name
+  change, an opcode-count change, a router bits reinterpretation, an
+  Argon fixture envelope change — refuses inherited evidence even when
+  the schema tag and the maximum version are unchanged.
+- **Per-cell verification and contamination abort.** Before every cell
+  the harness re-hashes the working tree against the frozen manifest,
+  fetches every served asset and the cell's page, and compares the
+  served bytes to the frozen hashes. Any drift aborts the run: the
+  partial payload is written with `completion.status = "contaminated"`
+  (plus the exact reasons) and WITHOUT the completion marker, so it can
+  never be promoted. A tree that moved mid-run is never silently
+  certified, even if it was restored before the run finished.
+- **Narrow, deliberate exclusions.** The manual qualification page
+  (`tests/browser/autofill-qualification.php`) is not part of the source
+  set: it never serves a benchmark request, so editing it can never
+  invalidate a recording. The parity is enforced by
+  `tools/client-perf/test-measurement-freeze.mjs`, which also proves
+  the acceptance mutations above refuse inherited evidence at merge
+  time, in the context comparison and at the gate.
 
 The committed maintenance baseline was re-bound on 2026-09-05: its
 identity block was regenerated from the current release asset bytes

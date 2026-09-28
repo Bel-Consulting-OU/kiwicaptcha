@@ -63,7 +63,14 @@
  *      local timezone;
  *   8. every required pass row's tested_at is within the qualification
  *      window (90 days by default) and no more than five minutes ahead
- *      of the validator clock.
+ *      of the validator clock;
+ *   9. every pass row records BOTH decoy controls
+ *      (controls.negative and controls.positive, each with
+ *      result "pass" and a non-empty observation note): the protocol's
+ *      pass requires the negative control (no auto-fill, no hit) and
+ *      the positive control (a deliberate fill of the authenticated
+ *      decoy name still reports the hit with the proof valid), so a
+ *      pass row that records only one run is rejected.
  *
  * Rows whose surface id is not in the registry, or whose registry
  * entry is advisory (required=false), are printed as notes but never
@@ -258,6 +265,44 @@ function isVersionPlaceholder(value) {
   return typeof value !== 'string' || VERSION_PLACEHOLDER_PATTERN.test(value.trim());
 }
 
+/**
+ * A pass row must record BOTH decoy controls: the negative control
+ * (the surface's own fill never writes the decoy and never trips the
+ * evidence) and the positive control (a deliberate fill of the
+ * authenticated decoy name still reports the hit with the proof
+ * valid). The shape is
+ *
+ *   "controls": {
+ *     "negative": { "result": "pass", "note": "<what was observed>" },
+ *     "positive": { "result": "pass", "note": "<what was observed>" }
+ *   }
+ *
+ * Each control must be an object with result exactly "pass" and a
+ * non-empty note; anything else appends a hard reason. This is what
+ * stops a row from claiming PASS with only the no-hit half of the
+ * protocol (docs/autofill-qualification-protocol.md).
+ */
+function validatePassControls(row, where, reasons) {
+  const controls = row.controls;
+  if (!controls || typeof controls !== 'object' || Array.isArray(controls)) {
+    reasons.push(`${where} is marked pass without a controls object (controls.negative and controls.positive, each { result: "pass", note })`);
+    return;
+  }
+  for (const name of ['negative', 'positive']) {
+    const control = controls[name];
+    if (!control || typeof control !== 'object' || Array.isArray(control)) {
+      reasons.push(`${where} is marked pass without a controls.${name} object ({ result: "pass", note })`);
+      continue;
+    }
+    if (control.result !== 'pass') {
+      reasons.push(`${where} controls.${name}.result ${JSON.stringify(control.result)} is not "pass"`);
+    }
+    if (typeof control.note !== 'string' || control.note.trim() === '') {
+      reasons.push(`${where} controls.${name} records no observation note (a pass needs the observed honeypot_hit value and decoy field name)`);
+    }
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   if (argv.length < 1) {
@@ -352,9 +397,9 @@ function main() {
 
     // The meaning of "pass" is universal: whether a row must exist and
     // pass depends on the registry's required flag, but ANY pass row —
-    // required or advisory — must carry a real exact version and a real,
-    // non-future timestamp. An advisory row cannot claim a pass on
-    // placeholder evidence.
+    // required or advisory — must carry a real exact version, a real,
+    // non-future timestamp, and the two control observations. An
+    // advisory row cannot claim a pass on placeholder evidence.
     if (row.status === 'pass') {
       if (isVersionPlaceholder(row.version)) {
         reasons.push(`${where} is marked pass with a placeholder version ${JSON.stringify(row.version ?? null)}; an exact tested version is required`);
@@ -366,6 +411,7 @@ function main() {
       } else if (Date.parse(row.tested_at) - now > FUTURE_SKEW_MS) {
         reasons.push(`${where} tested_at ${row.tested_at} is materially in the future (more than five minutes ahead of the validator clock)`);
       }
+      validatePassControls(row, where, reasons);
     }
   }
 

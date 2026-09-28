@@ -2,6 +2,17 @@
 /**
  * KiwiCaptcha client-performance harness (tools/client-perf).
  *
+ * The experiment is FROZEN at process startup: before the first browser
+ * launches the harness reads and hashes every benchmark-defining
+ * repository input (see measurement-sources.mjs), serves the fixture
+ * exclusively from an immutable temporary copy of those exact bytes,
+ * and records the frozen manifest as the run's provenance. Payload-time
+ * hashing of the working tree is gone: provenance describes the bytes
+ * the repetitions actually ran against. Before every cell the working
+ * tree and the served bytes are re-verified against the frozen hashes;
+ * any drift aborts the run as contaminated (status "contaminated", no
+ * completion marker, never promotable).
+ *
  * A Playwright-based client benchmark that drives the browser fixture
  * (tests/browser/router.php) and measures, per difficulty tier
  * (SHA-256 16/18/20 bits, Argon2id at the real ladder, the three rsw
@@ -123,11 +134,17 @@
  */
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
+import {
+  probeServedMeasurementBytes,
+  probeServedPage,
+  removeMeasurementSnapshot,
+  snapshotMeasurementSources,
+  verifyMeasurementSources,
+} from './measurement-sources.mjs';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -750,10 +767,21 @@ function waitForHttp(url, timeoutMs) {
   });
 }
 
-async function bootFixture(opts) {
+async function bootFixture(opts, snapshot) {
   if (opts.noFixture) return null;
-  if (!existsSync(FIXTURE_ROUTER)) {
-    console.error(`fixture router not found: ${FIXTURE_ROUTER}`);
+  // Serve EXCLUSIVELY from the immutable snapshot the experiment was
+  // frozen against (audit finding 1): on-disk edits cannot change the
+  // bytes any cell receives. The working-tree drift check below still
+  // aborts a run whose tree moved, because the evidence must describe
+  // the tree the operator intends to commit.
+  const router = snapshot && snapshot.snapshotRoot
+    ? join(snapshot.snapshotRoot, 'tests', 'browser', 'router.php')
+    : FIXTURE_ROUTER;
+  const cwd = snapshot && snapshot.snapshotRoot
+    ? join(snapshot.snapshotRoot, 'tests', 'browser')
+    : BROWSER_DIR;
+  if (!existsSync(router)) {
+    console.error(`fixture router not found: ${router}`);
     process.exit(2);
   }
   const port = opts.fixturePort;
@@ -763,8 +791,8 @@ async function bootFixture(opts) {
     console.log(`fixture already answering on ${base}; reusing it`);
     return null;
   }
-  const child = spawn(opts.php, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, FIXTURE_ROUTER], {
-    cwd: BROWSER_DIR,
+  const child = spawn(opts.php, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, router], {
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (d) => {
@@ -1888,21 +1916,51 @@ function resultsOutFile(opts, completed) {
   return join(RESULTS_DIR, `results-${date}-partial-${time}.json`);
 }
 
+/**
+ * The frozen clientAssets block of the run: the per-asset bytes + full
+ * sha256 of the measurement snapshot the repetitions actually ran
+ * against. NEVER re-read from the tree at payload time (audit finding
+ * 1: the payload-time hash described whatever was on disk when the run
+ * finished, not the immutable bytes the browser received).
+ */
+function snapshotClientAssets(snapshot) {
+  const out = {};
+  for (const [rel, entry] of Object.entries(snapshot.manifest)) {
+    if (entry.kind !== 'asset') continue;
+    out[rel.slice(rel.lastIndexOf('/') + 1)] = { bytes: entry.bytes, sha256: entry.sha256 };
+  }
+  return out;
+}
+
 function buildPayload(opts, ctx, completion) {
   const tierNames = ctx.tierNames;
+  const snapshot = ctx.snapshot;
+  const harnessPath = 'tools/client-perf/client-perf.mjs';
+  const harnessEntry = snapshot.manifest[harnessPath];
+  const manifestEntry = snapshot.manifest['protocol/execution-v1.json'];
   return {
     schema: SCHEMA,
     generated_at: new Date().toISOString(),
     started_at: ctx.startedAt,
-    harness: 'tools/client-perf/client-perf.mjs',
-    // The recorder's own source identity: the release measurement context
-    // binds every physical device to the exact recorder revision that
-    // produced its repetitions, so the validator can refuse a run whose
-    // harness source differs from the current one.
-    harnessSha256: createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex'),
+    harness: harnessPath,
+    // The recorder's own source identity, FROM THE FROZEN SNAPSHOT: the
+    // release measurement context binds every physical device to the
+    // exact recorder revision that produced its repetitions, so the
+    // validator can refuse a run whose harness source differs from the
+    // current one. buildPayload() never re-reads the working tree for
+    // provenance; the snapshot taken before the first browser launched
+    // is the authority.
+    harnessSha256: harnessEntry.sha256,
     chromium: ctx.chromiumVersion,
     environment: environment(),
-    clientAssets: clientAssets(),
+    clientAssets: snapshotClientAssets(snapshot),
+    // The canonical measurement-source manifest the run was frozen
+    // against (audit finding 1/2): every benchmark-defining repository
+    // input, hashed once at startup. The release gate binds the digest.
+    measurementSources: {
+      manifest: snapshot.manifest,
+      sha256: snapshot.manifestSha256,
+    },
     completion,
     methodology: {
       note: 'desktop CPU-throttled emulation: the tiers are Playwright device descriptors plus CDP Emulation.setCPUThrottlingRate on an Apple silicon Mac. The emulation approximates the named device classes on a desktop CPU; it does NOT reproduce real device thermals, battery saver, or the real device browser JIT/wasm behavior. These numbers are desktop-emulation evidence only and make no low-end-mobile claim; the physical-device tiers described in README.md are the release boundary.',
@@ -1945,7 +2003,20 @@ function buildPayload(opts, ctx, completion) {
       execution: {
         maxVersion: EXECUTION_MAX_VERSION,
         manifestSchema: EXECUTION_MANIFEST.$schema,
-        note: 'every armed execution query carries ?exec_cap=<maxVersion> (executionQuery), raising the fixture\'s simulated deployment cap to the live execution manifest maximum (audit finding 1): the cells measure the current grammar, never the fixture\'s historical v3 default. The version the fixture actually issued is decoded from each armed /challenge response\'s execution_program blob (layout format/scopeLen/scope/actionLen/action/opVersion) and recorded per repetition and per cell row as executionVersion, so the evidence is attributable to the grammar it ran and the release-baseline validator requires the manifest maximum.',
+        // The FULL execution-manifest hash (audit finding 2): the
+        // schema tag and the maximum version alone cannot distinguish
+        // an opcode remap, a trace-name change or an opcode-count
+        // change from the grammar the cells actually ran. Frozen at
+        // startup, never re-read at payload time.
+        manifestSha256: manifestEntry.sha256,
+        note: 'every armed execution query carries ?exec_cap=<maxVersion> (executionQuery), raising the fixture\'s simulated deployment cap to the live execution manifest maximum (audit finding 1): the cells measure the current grammar, never the fixture\'s historical v3 default. The version the fixture actually issued is decoded from each armed /challenge response\'s execution_program blob (layout format/scopeLen/scope/actionLen/action/opVersion) and recorded per repetition and per cell row as executionVersion, so the evidence is attributable to the grammar it ran and the release-baseline validator requires the manifest maximum. manifestSha256 binds the exact protocol/execution-v1.json bytes (opcode mapping, trace names, opcode count), so a grammar change that keeps the schema tag and the maximum version refuses inherited evidence.',
+      },
+      measurementSources: {
+        sha256: snapshot.manifestSha256,
+        frozenAt: ctx.startedAt,
+        servedFrom: snapshot.snapshotRoot ? 'immutable-snapshot-copy' : 'external-fixture-with-served-byte-probes',
+        verifiedCells: ctx.sourceVerifications,
+        note: 'the experiment is frozen at process startup (audit finding 1): every benchmark-defining repository input (harness source, asset-fingerprint policy, fixture workload router, execution manifest, release asset set, every canonical client asset, the PHP core source tree) is read, hashed and served from an immutable temporary copy before the first browser launches; the recorded manifest describes the bytes the repetitions actually ran against, buildPayload() never re-reads the tree for provenance, and every cell boundary re-verifies the working tree and the served asset/page bytes against the frozen hashes, aborting the run as contaminated on any drift.',
       },
     },
     fixture: {
@@ -2083,6 +2154,40 @@ function promoteBaseline(file, baselinePath) {
   return true;
 }
 
+/**
+ * A measurement-contamination failure (audit finding 1): the working
+ * tree moved since the experiment was frozen, or the fixture served
+ * bytes that do not hash to the frozen snapshot. The run aborts and its
+ * output carries no completion marker, so it can never become evidence.
+ */
+function contaminationError(reasons, label) {
+  const error = new Error(
+    `measurement contamination at ${label}: ${reasons.join('; ')} (the run is aborted; no completion marker is written)`,
+  );
+  error.measurementContamination = { cell: label, reasons };
+  return error;
+}
+
+/**
+ * The per-cell freeze check: the working tree must still hash to the
+ * frozen manifest, every served canonical asset must hash to its frozen
+ * sha256, and the page this cell is about to load must be attributable
+ * to the frozen source set. Any mismatch aborts the run.
+ */
+async function verifyCellMeasurementSources(ctx, cell) {
+  const label = `${cell.tier}:${cell.difficulty}:${cell.cache}:${cell.assets}`;
+  const drift = verifyMeasurementSources(ctx.snapshot);
+  if (drift.length) throw contaminationError(drift, label);
+  const base = `http://127.0.0.1:${ctx.opts.fixturePort}`;
+  const served = await probeServedMeasurementBytes(base, ctx.snapshot);
+  if (served.length) throw contaminationError(served, label);
+  const query =
+    DIFFICULTIES[cell.difficulty].query(ctx.opts) + (cell.assets === 'files' ? '&assets=files' : '');
+  const page = await probeServedPage(base, '/' + query, ctx.snapshot);
+  if (page.length) throw contaminationError(page, label);
+  ctx.sourceVerifications += 1;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.promoteBaseline) {
@@ -2112,9 +2217,31 @@ async function main() {
     process.exit(2);
   }
 
+  // ── Freeze the performance experiment at process startup ─────────
+  // (audit finding 1: the provenance TOCTOU). Every benchmark-defining
+  // repository input is read and hashed ONCE, before the first browser
+  // launches, and the fixture server is pointed at an immutable copy of
+  // those exact bytes. buildPayload() never re-reads the tree for
+  // provenance: the recorded manifest is what the repetitions actually
+  // ran against.
+  let snapshot;
+  try {
+    snapshot = snapshotMeasurementSources({
+      snapshotRoot: opts.noFixture
+        ? null
+        : mkdtempSync(join(os.tmpdir(), 'kiwicaptcha-client-perf-')),
+    });
+  } catch (e) {
+    console.error(`client-perf: cannot freeze the measurement sources: ${e.message}`);
+    process.exit(2);
+  }
+  console.log(
+    `measurement sources frozen (${Object.keys(snapshot.manifest).length} entries, manifest sha256 ${snapshot.manifestSha256})` +
+      (snapshot.snapshotRoot ? ` — serving the immutable snapshot at ${snapshot.snapshotRoot}` : ' — external fixture; served bytes are probed against the frozen hashes'),
+  );
   const seed = opts.seed ?? Math.floor(Date.now());
   const cells = seededShuffle(buildCellList(opts, tierNames), mulberry32(seed));
-  const fixture = await bootFixture(opts);
+  const fixture = await bootFixture(opts, snapshot);
   const startedAt = new Date().toISOString();
   const ctx = {
     opts,
@@ -2127,6 +2254,8 @@ async function main() {
     browser: null,
     chromiumVersion: null,
     startedAt,
+    snapshot,
+    sourceVerifications: 0,
   };
   runCtx = ctx;
   console.log(`cell execution order: seeded random (seed ${seed}, ${cells.length} cells)`);
@@ -2150,6 +2279,10 @@ async function main() {
         }
         console.log(`tier ${tierName} (${tier.label}, CPU x${tier.cpuThrottle}) — fresh process, ${tierCells.length} cells`);
         for (const cell of tierCells) {
+          // The freeze check runs at every cell boundary: the working
+          // tree must still match the frozen manifest and the fixture
+          // must still serve the frozen bytes (audit finding 1).
+          await verifyCellMeasurementSources(ctx, cell);
           ctx.executedOrder.push(cell);
           await runCell(browser, opts, cell, ctx.results);
         }
@@ -2174,15 +2307,26 @@ async function main() {
         }
       }
     }
+    // The final freeze check before the completion marker is written:
+    // a tree that moved during the last cell (or the multi-widget
+    // scenario) must not produce a promotable file.
+    const finalDrift = verifyMeasurementSources(ctx.snapshot);
+    if (finalDrift.length) throw contaminationError(finalDrift, 'run completion');
     completion.status = 'completed';
     completion.marker = COMPLETION_MARKER;
   } catch (e) {
-    completion.status = 'failed';
+    if (e && e.measurementContamination) {
+      completion.status = 'contaminated';
+      completion.contamination = e.measurementContamination;
+    } else {
+      completion.status = 'failed';
+    }
     completion.error = String((e && e.message) || e);
     throw e;
   } finally {
     if (ctx.browser) await ctx.browser.close().catch(() => {});
     if (fixture) fixture.kill('SIGKILL');
+    removeMeasurementSnapshot(snapshot);
     const completed = completion.status === 'completed';
     const outFile = resultsOutFile(opts, completed);
     mkdirSync(dirname(outFile), { recursive: true });
@@ -2205,6 +2349,7 @@ process.on('SIGINT', () => {
   if (ctx.fixture) {
     try { ctx.fixture.kill('SIGKILL'); } catch (e) {}
   }
+  removeMeasurementSnapshot(ctx.snapshot);
   try {
     const outFile = resultsOutFile(ctx.opts, false);
     mkdirSync(dirname(outFile), { recursive: true });
@@ -2226,6 +2371,7 @@ process.on('SIGTERM', () => {
   if (ctx.fixture) {
     try { ctx.fixture.kill('SIGKILL'); } catch (e) {}
   }
+  removeMeasurementSnapshot(ctx.snapshot);
   try {
     const outFile = resultsOutFile(ctx.opts, false);
     mkdirSync(dirname(outFile), { recursive: true });

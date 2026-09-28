@@ -21,6 +21,26 @@ require $repo.'/packages/kiwicaptcha-php/vendor/autoload.php';
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
 if (is_file($symfonyAutoload)) {
     require $symfonyAutoload;
+} else {
+    // The immutable client-performance measurement snapshot copies the
+    // bundle SOURCE (not its ~64 MiB vendor), because the fixture's
+    // chained-challenge store implements the bundle's Risk state-store
+    // interfaces. Register a PSR-4 fallback for the bundle namespace so
+    // those interfaces resolve when the bundle vendor is absent (the
+    // snapshot router); the interfaces carry no framework dependencies.
+    $bundleSrc = $repo.'/packages/kiwicaptcha/integrations/symfony/src';
+    if (is_dir($bundleSrc)) {
+        spl_autoload_register(static function (string $class) use ($bundleSrc): void {
+            $prefix = 'BelConsulting\\KiwiCaptchaBundle\\';
+            if (!str_starts_with($class, $prefix)) {
+                return;
+            }
+            $file = $bundleSrc.'/'.str_replace('\\', '/', substr($class, strlen($prefix))).'.php';
+            if (is_file($file)) {
+                require $file;
+            }
+        });
+    }
 }
 
 use KiwiCaptcha\Config;
@@ -1734,88 +1754,19 @@ if ($path === '/pentest/runtime-redirect-evil.js') {
 }
 
 // The human-openable autofill qualification page
-// (docs/autofill-qualification-protocol.md): the same standard page the
-// autofill-evidence spec constructs in memory, served by the fixture
-// router so a native-autofill qualification can save a profile/login for
-// the URL, reload it, accept the browser's or the password manager's
-// fill on the real fields, submit, and check the decoy invariant against
-// the real /honeypot-check endpoint. ?decoy=pool arms the authenticated
-// pool issuance and ?decoyname=<name> pins the emitted name, like the
-// other fixtures.
+// (docs/autofill-qualification-protocol.md): the page body lives in
+// tests/browser/autofill-qualification.php, which is deliberately NOT
+// part of the benchmark measurement source set (the client-performance
+// provenance manifest), so editing the qualification page can never
+// invalidate a recorded performance measurement. The route arms the
+// authenticated decoy pool by default; the page itself owns the submit
+// interception and the negative/positive decoy controls.
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && $path === '/autofill-form') {
-    $assets = $repo.'/packages/kiwicaptcha-wasm/assets';
-    $glue = (string) file_get_contents($assets.'/kiwicaptcha-wasm.js');
-    $driver = (string) file_get_contents($assets.'/widget-driver.js');
-    $risk = (string) file_get_contents($assets.'/widget-risk.js');
-    // The authenticated pool is the default: the manual qualification
-    // checks the exact server-issued decoy name of the verified record
-    // (the unarmed ?decoy=1 emission carries no authenticated name, so a
-    // pass row needs the pool arm).
-    $endpoint = '/challenge?decoy='.(($_GET['decoy'] ?? '') === '1' ? '1' : 'pool');
-    if (($_GET['decoyname'] ?? '') !== '') {
-        $endpoint .= '&decoyname='.rawurlencode((string) $_GET['decoyname']);
-    }
-    header('Content-Type: text/html; charset=utf-8');
-    header('Cache-Control: no-store');
-    echo '<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>KiwiCaptcha autofill qualification page</title>
-</head>
-<body>
-<h1>KiwiCaptcha autofill qualification</h1>
-<p>This is the manual qualification page of docs/autofill-qualification-protocol.md.
-Save a profile/login for this URL in the surface under test, reload, accept the
-native fill on the real fields, submit, then press the check button below. The
-serialized form must show no non-empty value under the server-issued decoy name
-(the decoy name is in the /challenge response), and honeypot_hit must be false.</p>
-<form id="f" action="/form-submit" method="post">
-  <div class="kiwi-container" id="kiwicaptcha-root"
-    data-kiwi-endpoint="'.htmlspecialchars($endpoint, ENT_QUOTES).'" data-kiwi-scope="login">
-    <input type="hidden" name="kiwi__token" data-kiwi-token value="" />
-    <div class="kiwi-widget" data-kiwi-widget data-state="idle">
-      <div class="kiwi-icon-wrapper"><svg></svg><div class="kiwi-glow"></div></div>
-      <div class="kiwi-main">
-        <div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>
-        <div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>
-        <div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected</p><span class="kiwi-timer" data-kiwi-timer></span></div>
-      </div>
-    </div>
-  </div>
-  <p><label>Email <input type="email" name="email" autocomplete="email" /></label></p>
-  <p><label>Username <input type="text" name="username" autocomplete="username" /></label></p>
-  <p><label>Password <input type="password" name="password" autocomplete="current-password" /></label></p>
-  <p><button type="submit">Submit</button></p>
-</form>
-<p><button type="button" id="autofill-check">Check serialized form and decoy evidence</button></p>
-<pre id="autofill-out"></pre>
-<p>Posted form capture: <a href="/capture/form">/capture/form</a></p>
-<script>'.$glue.'</script>
-<script>'.$driver.'</script>
-<script>'.$risk.'</script>
-<script>
-document.getElementById("autofill-check").addEventListener("click", function () {
-  var form = document.getElementById("f");
-  var body = new URLSearchParams();
-  var filled = [];
-  new FormData(form).forEach(function (value, key) {
-    if (value !== "") filled.push(key + "=" + value);
-    body.append(key, value);
-  });
-  fetch("/honeypot-check", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body })
-    .then(function (resp) { return resp.json(); })
-    .then(function (data) {
-      document.getElementById("autofill-out").textContent =
-        "non-empty fields: " + JSON.stringify(filled) + "\n" + JSON.stringify(data, null, 2);
-    });
-});
-</script>
-</body>
-</html>';
+    require __DIR__.'/autofill-qualification.php';
 
     return true;
 }
+
 
 if ($path === '/' || $path === '/index.html') {
     $assets = $repo.'/packages/kiwicaptcha-wasm/assets';

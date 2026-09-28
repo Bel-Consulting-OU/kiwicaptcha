@@ -34,6 +34,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalClientAssets } from '../client-perf/client-assets.mjs';
 import {
   buildMeasurementContext,
+  canonicalJson,
   currentReleaseMeasurementContext,
   currentReleaseMeasurementFields,
   measurementFieldDifferences,
@@ -112,6 +113,22 @@ const RELEASE_TIER = 'mainstream-desktop';
 const FACTS = readHarnessMeasurementFacts();
 const HARNESS_REL_PATH = 'tools/client-perf/client-perf.mjs';
 const HARNESS_SOURCE_SHA256 = sha256Hex(HARNESS_SOURCE);
+
+// The current release measurement-source manifest and the full
+// execution-manifest hash (audit finding 2): every run fixture records
+// these exact facts, so a fixture is a run "carrying all recorded facts
+// equal to current" by construction.
+const CURRENT_RELEASE_FIELDS = currentReleaseMeasurementFields();
+const CURRENT_SOURCES = CURRENT_RELEASE_FIELDS.sources;
+const EXECUTION_MANIFEST_SHA256 = CURRENT_RELEASE_FIELDS.execution.manifestSha256;
+
+/** The recorded sources block with one manifest entry mutated. */
+function mutatedRecordedSources(mutateManifest) {
+  const sources = clone(CURRENT_SOURCES);
+  mutateManifest(sources.manifest);
+  sources.sha256 = sha256Hex(canonicalJson(sources.manifest));
+  return sources;
+}
 
 // The live execution-grammar authority (audit finding 1): the suite
 // reads the manifest maximum exactly like the validator, so every
@@ -470,8 +487,13 @@ function runFixture(mutate) {
     harnessSha256: HARNESS_SOURCE_SHA256,
     clientAssets: canonicalClientAssets(),
     completion: { status: 'completed', marker: COMPLETION_MARKER },
+    measurementSources: clone(CURRENT_SOURCES),
     methodology: {
-      execution: { manifestSchema: 'kiwicaptcha.execution-v1/1', maxVersion: EXECUTION_MAX_VERSION },
+      execution: {
+        manifestSchema: 'kiwicaptcha.execution-v1/1',
+        manifestSha256: EXECUTION_MANIFEST_SHA256,
+        maxVersion: EXECUTION_MAX_VERSION,
+      },
       fixedWork: {
         shaHashes: sd.shaFixedWork,
         shaTargetBits: sd.shaTargetBits,
@@ -1667,9 +1689,14 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 
 // (a) Different recorder source (the audit's core false-provenance
 // scenario: same recorded options/assets, recorded by another harness).
+// The recorded source manifest is mutated consistently, so the run's
+// fields build and the merge refusal names the differing field.
 {
   const run = runFixture((p) => {
     p.harnessSha256 = 'f'.repeat(64);
+    p.measurementSources = mutatedRecordedSources((m) => {
+      m['tools/client-perf/client-perf.mjs'].sha256 = 'f'.repeat(64);
+    });
   });
   reject('run provenance (a): a run recorded by a different harness source is refused at merge time', runMergeCells([run]), [
     'recorded measurement facts differ from the current release facts',
@@ -1806,6 +1833,9 @@ selfCheck('provenance self-check: current-tree-minted but run-different context 
   const currentCtx = buildMeasurementContext(currentFields);
   const run = runFixture((p) => {
     p.harnessSha256 = 'f'.repeat(64);
+    p.measurementSources = mutatedRecordedSources((m) => {
+      m['tools/client-perf/client-perf.mjs'].sha256 = 'f'.repeat(64);
+    });
     p.difficulties.sha16 = { ...p.difficulties.sha16, label: 'SHA-256, 17 leading zero bits' };
   });
   const { fields, reasons } = runMeasurementFields(run);
@@ -1827,6 +1857,8 @@ selfCheck('provenance self-check: current-tree-minted but run-different context 
   const oldStyle = clone(fields);
   oldStyle.harness.sourceSha256 = currentFields.harness.sourceSha256;
   oldStyle.difficulties = clone(currentFields.difficulties);
+  oldStyle.sources = clone(currentFields.sources);
+  oldStyle.execution.manifestSha256 = currentFields.execution.manifestSha256;
   const falseCtx = buildMeasurementContext(oldStyle);
   assert(
     falseCtx.sha256 === currentCtx.sha256,
@@ -1864,9 +1896,23 @@ selfCheck('provenance self-check: solver, difficulty, manifest and client-asset 
     (p) => {
       const asset = p.clientAssets['widget.css'];
       p.clientAssets['widget.css'] = { bytes: asset.bytes + 1, sha256: asset.sha256 };
+      p.measurementSources.manifest['packages/kiwicaptcha-wasm/assets/widget.css'].bytes += 1;
+      p.measurementSources.sha256 = sha256Hex(canonicalJson(p.measurementSources.manifest));
     },
     (p) => {
       p.methodology.execution.manifestSchema = 'kiwicaptcha.execution-v9/1';
+    },
+    (p) => {
+      // The full grammar bytes hash (audit finding 2): an opcode remap
+      // keeps the schema tag and the maximum version.
+      p.methodology.execution.manifestSha256 = 'c'.repeat(64);
+      p.measurementSources.manifest['protocol/execution-v1.json'].sha256 = 'c'.repeat(64);
+      p.measurementSources.sha256 = sha256Hex(canonicalJson(p.measurementSources.manifest));
+    },
+    (p) => {
+      // The fixture workload authority: a router reinterpretation.
+      p.measurementSources.manifest['tests/browser/router.php'].sha256 = 'd'.repeat(64);
+      p.measurementSources.sha256 = sha256Hex(canonicalJson(p.measurementSources.manifest));
     },
   ];
   for (const [i, mutate] of mutations.entries()) {
@@ -1897,6 +1943,117 @@ selfCheck('provenance self-check: missing recorded facts are refused with exact 
     assert(reasons.some((r) => r.includes(expected)), `missing reason ${JSON.stringify(expected)} in ${JSON.stringify(reasons)}`);
   }
 });
+
+// ── Measurement-source manifest acceptance mutations (audit finding 2) ─
+// A run that never recorded the frozen source manifest, or whose
+// manifest is internally inconsistent, is refused with the exact
+// reason; a manifest that differs from current refuses the merge, and a
+// device context minted from it rejects against the current release
+// context. This is what makes an opcode remap, a trace-name change, a
+// router reinterpretation or an Argon fixture envelope change refuse
+// inherited evidence even when the schema tags and the maximum version
+// are unchanged.
+
+{
+  const run = runFixture((p) => {
+    delete p.measurementSources;
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(fields === null && reasons.some((r) => r.includes('records no measurementSources block')), `missing measurementSources must be refused: ${JSON.stringify(reasons)}`);
+}
+
+{
+  const run = runFixture((p) => {
+    delete p.methodology.execution.manifestSha256;
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('records no execution manifest sha256')),
+    `missing execution manifestSha256 must be refused: ${JSON.stringify(reasons)}`,
+  );
+}
+
+{
+  const run = runFixture((p) => {
+    p.measurementSources.sha256 = 'e'.repeat(64);
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('does not hash its own manifest')),
+    `a digest that does not hash its manifest must be refused: ${JSON.stringify(reasons)}`,
+  );
+}
+
+{
+  const run = runFixture((p) => {
+    p.measurementSources.manifest['tools/client-perf/client-perf.mjs'].sha256 = 'f'.repeat(64);
+    p.measurementSources.sha256 = sha256Hex(canonicalJson(p.measurementSources.manifest));
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('disagrees with the recorded harness source sha256')),
+    `a manifest disagreeing with the recorded harness identity must be refused: ${JSON.stringify(reasons)}`,
+  );
+}
+
+{
+  const run = runFixture((p) => {
+    p.measurementSources.manifest['packages/kiwicaptcha-wasm/assets/widget.css'].bytes += 1;
+    p.measurementSources.sha256 = sha256Hex(canonicalJson(p.measurementSources.manifest));
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('disagrees with the recorded clientAssets entry')),
+    `a manifest disagreeing with the recorded clientAssets must be refused: ${JSON.stringify(reasons)}`,
+  );
+}
+
+{
+  // The end-to-end merge refusal: a run recorded against an execution
+  // manifest whose bytes changed (opcode remap) cannot be stamped.
+  const run = runFixture((p) => {
+    p.measurementSources = mutatedRecordedSources((m) => {
+      m['protocol/execution-v1.json'].sha256 = 'a'.repeat(64);
+    });
+    p.methodology.execution.manifestSha256 = 'a'.repeat(64);
+  });
+  reject('manifest mutation: an opcode remap recorded in the manifest refuses the merge', runMergeCells([run]), [
+    'sources.manifest.["protocol/execution-v1.json"].sha256',
+  ]);
+}
+
+{
+  // A router reinterpretation recorded in the manifest refuses the merge.
+  const run = runFixture((p) => {
+    p.measurementSources = mutatedRecordedSources((m) => {
+      m['tests/browser/router.php'].sha256 = 'b'.repeat(64);
+    });
+  });
+  reject('manifest mutation: a router reinterpretation recorded in the manifest refuses the merge', runMergeCells([run]), [
+    'sources.manifest.["tests/browser/router.php"].sha256',
+  ]);
+}
+
+{
+  // A device stamped from a run whose manifest differs from current
+  // rejects against the current release context.
+  const run = runFixture((p) => {
+    p.measurementSources = mutatedRecordedSources((m) => {
+      m['tests/browser/router.php'].sha256 = 'b'.repeat(64);
+    });
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(fields && reasons.length === 0, `fixture regression: run fields not built (${reasons.join('; ')})`);
+  const index = deviceIndex('dev-manifest');
+  index.measurement_context = buildMeasurementContext(fields);
+  const payload = physicalPayload({ 'dev-manifest': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'manifest mutation: a device context minted from a different source manifest is not the current release context',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-manifest')] }), false),
+    ['physical_results["dev-manifest"]', 'is not the current release measurement context'],
+  );
+}
 
 console.log(`\n${cases - failures}/${cases} mutation cases passed`);
 process.exit(failures === 0 ? 0 : 1);
