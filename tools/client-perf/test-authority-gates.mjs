@@ -516,7 +516,10 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
   const state = spawnSync(process.execPath, [LAUNCHER, ...HARNESS_ARGS, '--fixture-port', String(await freePort()), '--out', join(FIXTURE_DIR, 'node-options.json')], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    env: { ...process.env, NODE_OPTIONS: '--require /tmp/does-not-exist.js' },
+    // A valid, nonempty NODE_OPTIONS: the launcher must refuse it
+    // before the benchmark starts (the refusal, not a Node loader error,
+    // is the assertion).
+    env: { ...process.env, NODE_OPTIONS: '--no-warnings' },
   });
   if (state.status === 0 || !/NODE_OPTIONS is set/.test(`${state.stdout}${state.stderr}`)) {
     fail('NODE_OPTIONS must be refused by the launcher', `${state.status}\n${(state.stdout || '').slice(0, 400)}${(state.stderr || '').slice(0, 400)}`);
