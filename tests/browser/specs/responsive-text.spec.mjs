@@ -1,12 +1,12 @@
 import { test, expect } from '@playwright/test';
 
 // Narrow-container status-text regression gate (the mobile ellipsis
-// defect). The widget previously clipped meaningful status text with
-// text-overflow: ellipsis and refused to wrap, so a 240px sidebar on a
-// desktop browser (or a small phone) silently lost localized words such
-// as "Kontrola bezpieczeństwa" or the long failure/help messages. The
-// old responsive tests only proved that the element box was visible and
-// that the page had no horizontal scrollbar; ellipsized text passes both.
+// defect). Meaningful status text must never be clipped with
+// text-overflow: ellipsis or refused a wrap: a 240px sidebar on a
+// desktop browser (or a small phone) must keep every localized word,
+// such as "Kontrola bezpieczeństwa" or the long failure/help messages.
+// Box-visibility and page-scrollbar checks alone cannot see ellipsized
+// text; this suite proves real glyph fit:
 //
 // This suite measures the container box itself (not the viewport) at
 // 240/280/320px, across English, German, French, Portuguese, Polish and
