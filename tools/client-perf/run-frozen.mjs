@@ -184,14 +184,24 @@ if (!/^chromium(-headless-shell)?-\d+$/.test(basename(bundleRoot))) {
 }
 const browsersDir = join(tempRoot, 'browsers');
 mkdirSync(browsersDir, { recursive: true });
-const frozenBundle = join(browsersDir, basename(bundleRoot));
-try {
-  cpSync(bundleRoot, frozenBundle, { recursive: true });
-} catch (e) {
-  cleanup();
-  refuse(`cannot copy the Chromium bundle into the frozen run directory: ${e.message}`);
+// The default `chromium.launch({ headless: true })` runs the
+// chromium_headless_shell bundle, while executablePath() names the full
+// bundle; both are part of the runtime identity and both are copied.
+const bundleRevision = basename(bundleRoot).replace(/^chromium(-headless-shell)?-/, '');
+const bundleRoots = [bundleRoot];
+const headlessShellRoot = join(dirname(bundleRoot), `chromium_headless_shell-${bundleRevision}`);
+if (existsSync(headlessShellRoot) && headlessShellRoot !== bundleRoot) {
+  bundleRoots.push(headlessShellRoot);
 }
-const browserTreeSha = hashTreeDigest(frozenBundle);
+for (const root of bundleRoots) {
+  try {
+    cpSync(root, join(browsersDir, basename(root)), { recursive: true });
+  } catch (e) {
+    cleanup();
+    refuse(`cannot copy the Chromium bundle ${basename(root)} into the frozen run directory: ${e.message}`);
+  }
+}
+const browserTreeSha = hashTreeDigest(browsersDir);
 
 console.log(
   `run-frozen: executing ${commit.slice(0, 12)} from the frozen worktree ${tree} (launcher sha256 ${LAUNCHER_SHA256.slice(0, 12)}, owned snapshot fixture, dirty-tree refusal armed, Node controls refused, Chromium bundle ${basename(bundleRoot)} copied and frozen with tree sha256 ${browserTreeSha.slice(0, 12)})`,

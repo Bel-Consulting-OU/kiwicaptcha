@@ -162,7 +162,7 @@ import {
 import os from 'node:os';
 import net from 'node:net';
 import { execFileSync, execSync } from 'node:child_process';
-import { sha256Hex } from './canonical-json.mjs';
+import { canonicalJson, sha256Hex } from './canonical-json.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -935,16 +935,35 @@ function computeRuntimeIdentity(opts, snapshot) {
     while (bundleRoot !== dirname(bundleRoot) && !/^chromium(-headless-shell)?-\d+$/.test(basename(bundleRoot))) {
       bundleRoot = dirname(bundleRoot);
     }
-    const stats = treeStats(bundleRoot);
+    // Both bundles the launch can touch: the full Chromium named by
+    // executablePath() and the chromium_headless_shell the default
+    // headless launch actually executes. They share a revision suffix.
+    const revision = basename(bundleRoot).replace(/^chromium(-headless-shell)?-/, '');
+    const bundleRoots = [bundleRoot];
+    const headlessShellRoot = join(dirname(bundleRoot), `chromium_headless_shell-${revision}`);
+    if (existsSync(headlessShellRoot) && headlessShellRoot !== bundleRoot) {
+      bundleRoots.push(headlessShellRoot);
+    }
+    const perRoot = {};
+    let files = 0;
+    let bytes = 0;
+    for (const root of bundleRoots) {
+      const stats = treeStats(root);
+      files += stats.files;
+      bytes += stats.bytes;
+      perRoot[basename(root)] = { files: stats.files, bytes: stats.bytes, sha256: hashTreeDigest(root) };
+    }
     identity.browser = {
       name: 'chromium',
       version: browserVersion,
       executable: browserExecutable,
       bundleRoot,
+      bundleRoots,
       browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null,
-      treeSha256: hashTreeDigest(bundleRoot),
-      files: stats.files,
-      bytes: stats.bytes,
+      treeSha256: sha256Hex(canonicalJson(perRoot)),
+      treeSha256ByRoot: perRoot,
+      files,
+      bytes,
       unresolved: false,
     };
   } else {
@@ -2527,8 +2546,13 @@ function verifyBrowserBundle(runtime) {
       : [];
   }
   try {
-    if (hashTreeDigest(runtime.browser.bundleRoot) !== runtime.browser.treeSha256) {
-      return [`the Chromium bundle ${runtime.browser.bundleRoot} changed during the run`];
+    const perRoot = runtime.browser.treeSha256ByRoot;
+    const roots = runtime.browser.bundleRoots ?? [runtime.browser.bundleRoot];
+    for (const root of roots) {
+      const expected = perRoot ? perRoot[basename(root)]?.sha256 : runtime.browser.treeSha256;
+      if (hashTreeDigest(root) !== expected) {
+        return [`the Chromium bundle ${root} changed during the run`];
+      }
     }
   } catch (e) {
     return [`the Chromium bundle cannot be re-read (${e.message})`];
