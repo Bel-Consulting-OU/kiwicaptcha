@@ -254,9 +254,9 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   });
 }
 
-function startFrozen(label) {
+function startFrozen(label, args = HARNESS_ARGS) {
   const out = join(FIXTURE_DIR, `${label}.json`);
-  const child = spawn(process.execPath, [LAUNCHER, ...HARNESS_ARGS, '--fixture-port', String(port), '--out', out], {
+  const child = spawn(process.execPath, [LAUNCHER, ...args, '--fixture-port', String(port), '--out', out], {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -320,27 +320,44 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
   } else {
     ok('a working-tree mutation during the run never reaches the frozen recorded identity');
   }
-  // The frozen run is certifiable: the physical index accepts it.
-  const index = runNode(MERGE_CELLS, [
-    '--physical-index', '--source', 'physical', '--device-id', 'dev-authority-test',
-    '--tier', 'mainstream-desktop', '--run', frozen.out,
+  // The race run used development options (tiny repetitions), which are
+  // not eligible for physical indexing by construction. The certifiable
+  // case runs a focused selection (sha16) with the REAL solver defaults,
+  // which is exactly the focused-recording path: a clean run over a
+  // deliberately selected subset.
+  const certify = startFrozen('certify', [
+    '--tiers', 'mainstream-desktop',
+    '--difficulties', 'sha16',
+    '--no-multi-widget',
   ]);
-  if (index.code !== 0) {
-    fail('frozen run: --physical-index must accept the frozen run', index.output.slice(0, 800));
+  const certifyExit = await new Promise((resolvePromise) => {
+    certify.child.on('exit', (code) => resolvePromise(code));
+  });
+  const certifyPayload = readRun(certify.out);
+  if (certifyExit !== 0 || certifyPayload?.completion?.status !== 'completed') {
+    fail('frozen certifying run: expected a clean completed run', `${certifyExit}\n${certify.getOutput().slice(0, 800)}`);
   } else {
-    const parsed = JSON.parse(index.output);
-    const device = parsed.physical_results['dev-authority-test'];
-    const runs = device.source_runs;
-    if (!Array.isArray(runs) || runs.length !== 1) {
-      fail('frozen run: the device index must record source_runs', JSON.stringify(runs));
-    } else if (runs[0].completion !== 'completed' || runs[0].marker !== 'kiwicaptcha.client-perf.completed.v1') {
-      fail('frozen run: source_runs completion state wrong', JSON.stringify(runs[0]));
-    } else if (runs[0].measurement_sources_sha256 !== frozenPayload.measurementSources.sha256) {
-      fail('frozen run: source_runs manifest identity wrong', JSON.stringify(runs[0]));
-    } else if (!/^[0-9a-f]{64}$/.test(runs[0].run_digest || '')) {
-      fail('frozen run: source_runs run_digest missing', JSON.stringify(runs[0]));
+    const index = runNode(MERGE_CELLS, [
+      '--physical-index', '--source', 'physical', '--device-id', 'dev-authority-test',
+      '--tier', 'mainstream-desktop', '--run', certify.out,
+    ]);
+    if (index.code !== 0) {
+      fail('frozen certifying run: --physical-index must accept a focused frozen run with real solver defaults', index.output.slice(0, 1200));
     } else {
-      ok('a frozen run is certifiable physical evidence and carries its source_runs record');
+      const parsed = JSON.parse(index.output);
+      const device = parsed.physical_results['dev-authority-test'];
+      const runs = device.source_runs;
+      if (!Array.isArray(runs) || runs.length !== 1) {
+        fail('frozen certifying run: the device index must record source_runs', JSON.stringify(runs));
+      } else if (runs[0].completion !== 'completed' || runs[0].marker !== 'kiwicaptcha.client-perf.completed.v1') {
+        fail('frozen certifying run: source_runs completion state wrong', JSON.stringify(runs[0]));
+      } else if (runs[0].measurement_sources_sha256 !== certifyPayload.measurementSources.sha256) {
+        fail('frozen certifying run: source_runs manifest identity wrong', JSON.stringify(runs[0]));
+      } else if (!/^[0-9a-f]{64}$/.test(runs[0].run_digest || '')) {
+        fail('frozen certifying run: source_runs run_digest missing', JSON.stringify(runs[0]));
+      } else {
+        ok('a focused frozen run with real solver defaults is certifiable physical evidence and carries its source_runs record');
+      }
     }
   }
 }
