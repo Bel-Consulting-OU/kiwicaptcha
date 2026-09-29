@@ -362,6 +362,44 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
   }
 }
 
+// ── 5. The Composer vendor tree is not executable benchmark input ───
+
+{
+  const vendorAutoload = join(REPO_ROOT, 'packages', 'kiwicaptcha-php', 'vendor', 'autoload.php');
+  if (!existsSync(vendorAutoload)) {
+    ok('vendor tree absent; nothing to trap (the fixture never loads Composer)');
+  } else {
+    const pristineVendor = readFileSync(vendorAutoload);
+    pristineByPath.set(vendorAutoload, pristineVendor);
+    writeFileSync(
+      vendorAutoload,
+      '<?php\n// Adversarial trap for the authority corpus: if any fixture path executes\n// Composer as benchmark input, this file announces it and aborts.\nfwrite(STDERR, "VENDOR EXECUTED\\n");\nthrow new RuntimeException("vendor executed");\n',
+    );
+    const trapped = startFrozen('vendor-trap');
+    const trappedExit = await new Promise((resolvePromise) => {
+      trapped.child.on('exit', (code) => resolvePromise(code));
+    });
+    restoreAllPristine();
+    const trappedOutput = trapped.getOutput();
+    const trappedPayload = readRun(trapped.out);
+    const currentSources = snapshotMeasurementSources({ snapshotRoot: null });
+    if (trappedOutput.includes('VENDOR EXECUTED')) {
+      fail('vendor trap: the fixture executed the altered Composer vendor tree', trappedOutput.slice(0, 800));
+    } else if (trappedExit !== 0 || trappedPayload?.completion?.status !== 'completed') {
+      fail('vendor trap: the run must complete while ignoring vendor', `${trappedExit}\n${trappedOutput.slice(0, 800)}`);
+    } else if (trappedPayload.measurementSources.sha256 !== currentSources.manifestSha256) {
+      fail(
+        'vendor trap: the measurement identity changed although vendor is not executable input',
+        `recorded ${trappedPayload.measurementSources.sha256}, current ${currentSources.manifestSha256}`,
+      );
+    } else if (Object.keys(trappedPayload.measurementSources.manifest).some((k) => k.includes('/vendor/'))) {
+      fail('vendor trap: the manifest must not carry vendor entries', 'vendor path found');
+    } else {
+      ok('an altered Composer vendor tree is ignored entirely: the fixture loads only hashed source trees and the identity is unchanged');
+    }
+  }
+}
+
 // ── Summary ─────────────────────────────────────────────────────────
 
 rmSync(FIXTURE_DIR, { recursive: true, force: true });

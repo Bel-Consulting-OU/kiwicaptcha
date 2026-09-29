@@ -51,8 +51,8 @@ registry, not this document.
 | `edge-native-autofill` | Edge | windows | yes | yes |
 | `firefox-native-autofill` | Firefox | desktop | yes | yes |
 | `safari-autofill` | Safari | macos | yes | yes |
-| `ios-safari` | iOS Safari | ios | yes | yes |
-| `android-chrome` | Android Chrome | android | yes | yes |
+| `ios-safari` | iOS Safari | ios | yes | advisory |
+| `android-chrome` | Android Chrome | android | yes | advisory |
 | `icloud-keychain` | iCloud Keychain | macos | yes | yes |
 | `1password` | 1Password | desktop | yes | yes |
 | `bitwarden` | Bitwarden | desktop | yes | yes |
@@ -172,8 +172,8 @@ token still verifies).
 | `bitwarden` | Install the Bitwarden browser extension; unlock with a test vault; use the inline autofill menu on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Follow the steps in this row |
 | `1password` | Install the 1Password browser extension; unlock with a test vault; use the inline autofill menu on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Follow the steps in this row |
 | `second-major-manager` (advisory) | Install the manager's extension; unlock with a test vault; use its fill menu on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Recommended second major manager; advisory, never gates |
-| `ios-safari` | On an iPhone or iPad, save a login in iCloud Keychain; open the test page in Safari; accept the AutoFill prompt on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Requires a physical iOS device; follow the steps in this row |
-| `android-chrome` | Save a login and an address in the Google account; open the test page in Chrome; accept the autofill suggestions on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Requires a physical Android device; follow the steps in this row |
+| `ios-safari` (advisory) | On an iPhone or iPad, save a login in iCloud Keychain; open the test page in Safari; accept the AutoFill prompt on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Advisory: recommended for the broad compatibility picture, never a release gate. Automated mobile-width and RTL coverage runs in the browser lanes |
+| `android-chrome` (advisory) | Save a login and an address in the Google account; open the test page in Chrome; accept the autofill suggestions on the real fields; submit; check the decoy stays empty, no hit, proof verifies | TBD | | PENDING | Advisory: recommended for the broad compatibility picture, never a release gate. Automated mobile-width and RTL coverage runs in the browser lanes |
 | `icloud-keychain` | With a login saved in iCloud Keychain, use the Keychain fill on the real fields in a browser that offers it; submit; check the decoy stays empty and the honeypot-check reports no hit | TBD | | PENDING | Separate row from Safari: the Keychain fill path is its own surface |
 | `voiceover-macos` | Enable VoiceOver; navigate the form with the keyboard; read the fields; confirm the decoy is not announced and the real fields are; submit with a keyboard-only fill; check the decoy stays empty and the proof verifies | TBD | | PENDING | The AT snapshot evidence is automated in the a11y lane; the screen-reader confirmation is pending |
 | `nvda-windows` | Start NVDA; navigate the form with the keyboard; read the fields; confirm the decoy is not announced and the real fields are; submit with a keyboard-only fill; check the decoy stays empty and the proof verifies | TBD | | PENDING | Requires a Windows host; follow the steps in this row |

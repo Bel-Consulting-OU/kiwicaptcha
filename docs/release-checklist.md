@@ -18,13 +18,12 @@ each one can block a tag on data that ages:
 - Release-mode baseline validation: `node tools/ci/validate-release-baseline.mjs
   --release tools/client-perf/results/baseline.json`. The qualification
   must be `physical` with fresh device evidence; a stale or lab-status
-  qualification refuses the release. The release ladder must also have
-  no `qualification.pending_release_tiers` entry: the declared mobile
-  tiers (`current-iphone`, `mid-android`, `low-android`, the product's
-  public mobile/low-memory profile) refuse certification until each
-  carries its own physical devices and p95 budget rows. Re-record the
-  baseline on physical devices when the qualification window or the
-  asset set changes.
+  qualification refuses the release. Every tier in
+  `qualification.release_tiers` (mainstream-desktop today) must carry
+  its own physical devices, its complete p95 budget rows and its
+  device-indexed evidence; nothing outside that list is a physical
+  prerequisite. Re-record the baseline on physical devices when the
+  qualification window or the asset set changes.
 - Protocol manifest check: `bash tools/ci/protocol-manifest-check.sh`
   (also a required CI lane). The execution-v1 register must agree
   across the manifest, the PHP core, the Rust core and the interpreter

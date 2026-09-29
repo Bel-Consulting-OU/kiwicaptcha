@@ -144,7 +144,7 @@ line without failing on it, and release mode (`--release`) refuses to
 certify unless `qualification.status` is `"physical"`.
 
 The current qualification status is `physical`: the committed baseline
-(`tools/client-perf/results/baseline.json`, generated 2026-09-07) was
+(`tools/client-perf/results/baseline.json`, generated 2026-09-29) was
 recorded on the physical mainstream-desktop device described in
 `qualification.devices` (Apple MacBook Pro, Apple M5 Pro, macOS, the
 machine browser), so the desktop tier's budgets are
@@ -152,19 +152,19 @@ ceil(1.2 x merged physical p95) over real device repetitions. The
 earlier lab runs remain in `tools/client-perf/results/` as history;
 they are not the certified record.
 
-The physical release ladder is deliberately split. The public product
-exposes a mobile / low-memory profile, so
-`qualification.pending_release_tiers` declares `current-iphone`,
-`mid-android` and `low-android` as required-before-mobile-claim tiers
-that have no physical device evidence yet; the harness carries those
-tier profiles, but emulation is not physical evidence (the client-lab
-README states this explicitly). Ordinary CI prints the pending tiers as
-notes; release certification refuses each of them with an explicit
-reason until a physical device of that tier records the full solver
-mode x cache matrix and the tier moves into `release_tiers` with its
-own devices and p95 budget rows in the same file. A missing mobile
-cell is therefore a hard release reason exactly as a missing desktop
-cell is. The budget file documents the full ladder; the physical
+The release ladder is exactly `qualification.release_tiers`:
+`mainstream-desktop` today. Every tier placed there must carry its own
+physical device, its full solver mode x cache p95 budget rows, its
+ceilings and engineering target, and its device-indexed evidence in
+the same budget file; a missing cell in a listed tier is a hard release
+reason. The mobile and emulation tier profiles (low-android,
+mid-android, flagship-android, older-iphone, current-iphone) remain
+automated regression coverage in the harness and are calibration
+signals only: they carry no budget rows and are not physical release
+prerequisites. Nothing outside `release_tiers` is required. Extending
+the ladder later is a deliberate act — record that tier's physical
+device rows, add its budget rows and ceilings, and move it into
+`release_tiers`. The budget file documents the ladder; the physical
 measurement procedure lives in `tools/client-perf/README.md`.
 
 ## Measured baselines

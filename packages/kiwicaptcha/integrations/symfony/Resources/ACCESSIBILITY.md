@@ -40,7 +40,7 @@ The accessibility acceptance set below is enforced by the automated browser suit
 | Keyboard operation: every action keyboard-operable | 2.1.1 / 2.1.2 | the Retry button is a native `<button>`; the passive widget is never focusable; no keyboard trap |
 | No pointerdown-only activation | 2.5.2 | reacquisition uses the native button with click activation only |
 | Visible focus | 2.4.7 | `:focus-visible` ring on the Retry button (its 1.4.11 contrast and 2.4.13 area/change evidence are computed in the suite) |
-| Pointer targets >= 24x24 CSS px (32px height) | 2.5.8 | `min-height: 32px; min-width: 24px` on the Retry button; bounding-box asserted |
+| Pointer targets >= 44x44 CSS px | 2.5.8 | `min-height: 44px; min-width: 44px` on the Retry button; bounding-box asserted |
 | No content/function loss at 2x component font-scale enlargement (a component-level custom-property stress test, distinct from browser/user text zoom; actual 200% browser zoom is part of the manual release-gate qualification, performed at release time for each released artifact with recorded, signed evidence, never implied to have been run on any particular commit) | 1.4.4 | 320 CSS px reflow + text-spacing overrides asserted; long German strings tested |
 | Text spacing overrides (1.4.12) | 1.4.12 | letter/word spacing + line-height overrides injected and asserted |
 | Reduced motion eliminates decorative motion | 2.3.1 (A); 2.3.3 is Level AAA; the reduced-motion support satisfies 2.3.1 (A) plus above-AA 2.3.3 engineering | CSS animations + the SVG SMIL wink removed under `prefers-reduced-motion`; asserted |
@@ -64,7 +64,7 @@ The widget's disposition for all nine criteria:
 | 2.4.12 Focus Not Obscured (Enhanced) | AAA (above AA target) | Above-AA engineering: the same component-local guarantee (single focusable control, no overlapping content within the component) supports the criterion; KiwiCaptcha introduces no component-local obstruction that would cause it to fail, and the host application's own overlays are outside the component's control |
 | 2.4.13 Focus Appearance | AAA (above AA target) | Above-AA engineering: the Retry button's `:focus-visible` ring is a non-decorative appearance change genuinely measured in the suite (indicator area >= the 2-CSS-px-perimeter minimum, and >= 3:1 contrast change at the same pixels between the focused and unfocused states, a 2.4.13-specific measurement, not the 1.4.11 adjacent-surface evidence) |
 | 2.5.7 Dragging Movements | AA, N/A to the widget | No drag interaction exists in the widget; every action is a single click or keyboard activation, so no pointer-drag alternative exists |
-| 2.5.8 Target Size Minimum | AA | Supported: the Retry button is >= 24x24 CSS px with a 32px height (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
+| 2.5.8 Target Size Minimum | AA | Supported: the Retry button is >= 44x44 CSS px (an accessibility/security control has no reason to be cramped); bounding box asserted in the suite |
 | 3.2.6 Consistent Help | A, N/A (host-page responsibility) | KiwiCaptcha provides no help mechanism of its own; consistent placement of help is the integrating page's responsibility |
 | 3.3.7 Redundant Entry | A, N/A to the widget | The widget captures no user-entered data, so nothing is ever re-requested |
 | 3.3.8 Accessible Authentication (Minimum) | AA | Supported: the automatic computational challenge is the only path and no cognitive test is ever required; KiwiCaptcha introduces no cognitive-function test, so the component adds no obstruction to this criterion; conformance of the complete authentication process remains the integrating application's responsibility |
@@ -87,7 +87,6 @@ The qualification is never implied to have been run on any particular commit:
 
 - NVDA + Firefox, NVDA + Chrome (Windows)
 - VoiceOver + Safari (macOS)
-- TalkBack + Chrome (Android)
 - at least one speech-recognition or switch-access pass (W3C's own explanation of 2.4.11 discusses keyboard-equivalent switch and voice input)
 
 The checklist: Tab order reaches the Retry button and the form fields, Enter/Space activate the button, the live region announces Checking/verified/failed/expired, and the widget never traps focus.
@@ -98,7 +97,7 @@ Each release records a qualification artifact with the template below, as record
 The stronger formulation is published only when the artifact for that release is complete.
 It states that KiwiCaptcha is designed and tested to satisfy the WCAG 2.2 Level AA success criteria applicable to the component and to support WCAG 2.2 AA conforming integrations:
 
-- release tag and commit; browser versions (Chromium, Firefox, Safari, Android Chrome); AT versions: NVDA, VoiceOver, TalkBack, plus the speech-recognition or switch-access tool used.
+- release tag and commit; browser versions (Chromium, Firefox, Safari); AT versions: NVDA, VoiceOver, plus the speech-recognition or switch-access tool used.
 - actual 200% browser zoom verification in a real browser; date and tester (signed); pass/fail notes and known exceptions.
 
 Only the conservative claim in the Positioning section is published.

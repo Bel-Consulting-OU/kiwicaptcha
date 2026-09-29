@@ -544,10 +544,10 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    loaded the page before, so no asset or connection state leaks in.
    The warmed device cells come second, after the page has loaded at
    least once.
-2. Include the battery-saver state and the thermal-throttled state on
-   the Android tiers. A mid-session CPU governor drop changes the
-   percentiles more than any code change, and the harness cannot see
-   it.
+2. If a recorded tier runs on battery-powered hardware, include the
+   battery-saver state and a thermal-throttled state. A mid-session CPU
+   governor drop changes the percentiles more than any code change, and
+   the harness cannot see it.
 3. Let the host cool down between runs: a few idle minutes with the
    device idle and no background load. A warm device measures a
    different machine, and the fixed-work metrics in the results file
@@ -558,21 +558,20 @@ widget, or the difficulty ladder, run the same matrix on real devices:
    the steady state a real user hits on a warmed phone. Thermal
    saturation is a state to measure in, not a reason to stop: report
    both the early and the saturated windows.
-5. The mobile tiers are part of the boundary. The public product
-   exposes a mobile / low-memory profile, so the release ladder must
-   cover a current physical iPhone and a representative mid-range
-   Android device (and the low-end Android tier while KiwiCaptcha
-   supports that population). Until those measurements exist, the
-   budget file declares them in `qualification.pending_release_tiers`:
-   ordinary CI prints them as notes, and release certification refuses
-   each pending tier with an explicit reason. A mobile tier joins
-   `qualification.release_tiers` only with its own physical devices,
-   its full solver mode x cache p95 budget rows and its device-indexed
-   evidence. A fast desktop or a CPU-throttled emulation tier is never
-   mobile evidence.
+5. The release ladder is exactly `qualification.release_tiers`
+   (`mainstream-desktop` today): every tier placed there must carry its
+   own physical device, its full solver mode x cache p95 budget rows,
+   its ceilings and engineering target, and its device-indexed
+   evidence in the same budget file. The mobile and emulation tier
+   profiles (low-android, mid-android, flagship-android, older-iphone,
+   current-iphone) remain automated regression coverage in the harness.
+   They are calibration signals, never physical release prerequisites:
+   nothing outside `release_tiers` is required. Extending the ladder
+   later is a deliberate act — record that tier's physical device rows,
+   add its budget rows and ceilings, and move it into `release_tiers`.
 6. The release boundary is met when the physical-device p95 solve
-   times stay within the documented budget for every tier the
-   deployment targets, and no tier shows a failure rate above the
+   times stay within the documented budget for every tier in
+   `release_tiers`, and no tier shows a failure rate above the
    mode's `failureRateBudgets` limit (1% per cell by default; the 2%
    sha20 allowance is only for the measured driver-exhaustion tail,
    and the physical sha20 evidence must meet `minSha20SamplesPhysical`

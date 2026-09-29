@@ -139,18 +139,26 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    /* Narrow containers (a 240px sidebar on desktop, a small phone)
+       must never sacrifice meaningful status text: the row wraps and
+       the label grows. The badge keeps its intrinsic size. */
+    flex-wrap: wrap;
   }
   .kiwi-label {
     font-size: calc(13px * var(--kiwi-font-scale));
     color: var(--kiwi-text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: 1 1 12rem;
+    min-width: 0;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
   }
 
   /* ── Badge: the primary SLOT ── */
   .kiwi-badge {
-    flex-shrink: 0;
+    flex: 0 0 auto;
     font-family: var(--kiwi-mono);
     font-size: calc(11px * var(--kiwi-font-scale));
     font-weight: 600;
@@ -242,21 +250,28 @@
     justify-content: space-between;
     gap: 8px;
     margin-top: 6px;
+    /* Same rule as the top row: the informational line wraps instead
+       of being clipped, and the timer keeps its intrinsic size. */
+    flex-wrap: wrap;
   }
   .kiwi-info {
     margin: 0;
     font-family: var(--kiwi-mono);
     font-size: calc(10.5px * var(--kiwi-font-scale));
     color: var(--kiwi-text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: 1 1 12rem;
+    min-width: 0;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
   }
   .kiwi-timer {
     font-family: var(--kiwi-mono);
     font-size: calc(10.5px * var(--kiwi-font-scale));
     color: var(--kiwi-text-muted);
-    flex-shrink: 0;
+    flex: 0 0 auto;
   }
 
   /* ── Retry: >=44px target, mono, quiet ── */

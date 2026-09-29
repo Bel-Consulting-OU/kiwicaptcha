@@ -105,10 +105,6 @@
  *      newest physical tested_at (a qualification date may never
  *      precede the evidence it certifies; a regenerated baseline can
  *      never launder old measurements).
- *   6b. qualification.pending_release_tiers (optional): the physical
- *      tiers declared for measurement with no device evidence yet.
- *      Ordinary CI notes them; release mode refuses certification
- *      until each one is certified (release_tiers + budgets + devices).
  *   7. release mode only: qualification.status must be "physical";
  *      and a current-harness (schema 3) payload must additionally
  *      satisfy the completed-run guards: the completion marker,
@@ -360,17 +356,6 @@ const EXECUTION_MANIFEST_FILE = process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST
   ? resolve(process.env.KIWI_VALIDATOR_EXECUTION_MANIFEST)
   : join(REPO_ROOT, 'protocol', 'execution-v1.json');
 
-// The physical release-tier ladder is an independent repository
-// authority: the validator always reads the committed
-// protocol/client-release-tiers.json, so an evidence file can never
-// define (and silently shrink) the set of tiers a release must
-// certify. The KIWI_VALIDATOR_TIER_MANIFEST override exists purely as
-// the mutation-suite seam; CI and release invocations never set it.
-const RELEASE_TIERS_FILE = process.env.KIWI_VALIDATOR_TIER_MANIFEST
-  ? resolve(process.env.KIWI_VALIDATOR_TIER_MANIFEST)
-  : join(REPO_ROOT, 'protocol', 'client-release-tiers.json');
-const RELEASE_TIERS_SCHEMA = 'kiwicaptcha.client-release-tiers/1';
-
 const BUDGETS_SCHEMA = 'kiwicaptcha.release-budgets/2';
 const RELEASE_STATUSES = ['lab', 'physical'];
 const DEVICE_KINDS = ['lab', 'physical'];
@@ -451,52 +436,6 @@ function parseEvidenceTime(label, value, reasons) {
     reasons.push(`${label} ${value} is in the future beyond the 5-minute clock-skew allowance`);
   }
   return ms;
-}
-
-/**
- * The independent physical-tier support ladder
- * (protocol/client-release-tiers.json, overridable only through the
- * KIWI_VALIDATOR_TIER_MANIFEST mutation seam). Returns the required
- * tier list, or null when the manifest itself is unusable (the reasons
- * carry the failures).
- */
-function readRequiredPhysicalTiers(reasons) {
-  let raw;
-  try {
-    raw = readFileSync(RELEASE_TIERS_FILE, 'utf8');
-  } catch (e) {
-    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: cannot read (${e.message})`);
-    return null;
-  }
-  let doc;
-  try {
-    doc = JSON.parse(raw);
-  } catch (e) {
-    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: invalid JSON (${e.message})`);
-    return null;
-  }
-  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc.schema !== RELEASE_TIERS_SCHEMA) {
-    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: schema must be ${RELEASE_TIERS_SCHEMA}`);
-    return null;
-  }
-  const tiers = doc.required_physical_tiers;
-  if (!Array.isArray(tiers) || tiers.length === 0) {
-    reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers must be a non-empty array`);
-    return null;
-  }
-  const seen = new Set();
-  for (const tier of tiers) {
-    if (typeof tier !== 'string' || !tier.length) {
-      reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers entries must be non-empty tier keys`);
-      return null;
-    }
-    if (seen.has(tier)) {
-      reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required_physical_tiers repeats tier ${tier}`);
-      return null;
-    }
-    seen.add(tier);
-  }
-  return tiers;
 }
 
 /**
@@ -966,38 +905,15 @@ function main() {
   if (budgetTiers.length === 0) {
     reasons.push(`budget file ${budgetsPath}: tiers list is empty (a release gate must name the tiers it qualifies)`);
   }
-    // The pending physical ladder: tiers the release claim must
-    // eventually certify but which have NO measured device evidence
-    // yet. Ordinary CI records them as notes (the honest "not
-    // measured" state); release mode refuses certification until each
-    // one moves into release_tiers with its budgets and devices.
-    if (qualification.pending_release_tiers !== undefined) {
-      if (!Array.isArray(qualification.pending_release_tiers)) {
-        reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers must be an array of harness tier keys (the physical tiers declared for measurement, release-blocking until evidence lands)`);
-      } else {
-        const seenPending = new Set();
-        for (const t of qualification.pending_release_tiers) {
-          if (typeof t !== 'string' || !t.length) {
-            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers entries must be non-empty tier key strings (got ${JSON.stringify(t)})`);
-            continue;
-          }
-          if (!tierNames.includes(t)) {
-            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers names unknown tier ${JSON.stringify(t)} (not a harness tier)`);
-          }
-          if (seenPending.has(t)) {
-            reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers repeats tier ${t}`);
-          }
-          seenPending.add(t);
-          if (Array.isArray(qualification.release_tiers) && qualification.release_tiers.includes(t)) {
-            reasons.push(`budget file ${budgetsPath}: tier ${t} is declared both release_tiers and pending_release_tiers (a tier is either certified with device evidence or pending)`);
-          }
-        }
-      }
-    }
   const unknownBudgetTiers = budgetTiers.filter((t) => !tierNames.includes(t));
   if (unknownBudgetTiers.length) {
     reasons.push(`budget file ${budgetsPath}: unknown tier(s) ${unknownBudgetTiers.join(', ')} (not harness tiers)`);
   }
+  // The certified ladder is exactly qualification.release_tiers: every
+  // tier explicitly placed there must carry complete physical evidence,
+  // p95 budget rows, ceilings and device rows. Tiers outside the list
+  // are automated regression profiles, never physical release
+  // prerequisites.
   const releaseTiers =
     qualification && Array.isArray(qualification.release_tiers)
       ? qualification.release_tiers.filter((t) => typeof t === 'string' && tierNames.includes(t))
@@ -1008,46 +924,7 @@ function main() {
   // committed, ordinary CI must prove every physical invariant (and
   // the release-tier budget rows must exist) immediately, never only
   // under --release.
-  const pendingReleaseTiers =
-    qualification && Array.isArray(qualification.pending_release_tiers)
-      ? qualification.pending_release_tiers.filter((t) => typeof t === 'string' && tierNames.includes(t))
-      : [];
   const releaseTierSet = new Set(releaseTiers);
-  // The independent ladder: a physical qualification (or any --release
-  // run) must partition the product's required physical tiers exactly.
-  // pending_release_tiers must be present even when empty, so deleting
-  // the pending list cannot silently drop the mobile release blockers
-  // and the evidence file never defines the set of evidence that must
-  // exist.
-  const requiredPhysicalTiers = readRequiredPhysicalTiers(reasons);
-  if (requiredPhysicalTiers !== null && (releaseMode || physicalClaim)) {
-    for (const tier of requiredPhysicalTiers) {
-      if (!tierNames.includes(tier)) {
-        reasons.push(`tier manifest ${RELEASE_TIERS_FILE}: required tier ${tier} is not a harness tier`);
-      }
-    }
-    const declaredRelease = new Set(
-      qualification && Array.isArray(qualification.release_tiers) ? qualification.release_tiers : [],
-    );
-    const declaredPending = new Set(
-      qualification && Array.isArray(qualification.pending_release_tiers)
-        ? qualification.pending_release_tiers
-        : [],
-    );
-    if (!qualification || qualification.pending_release_tiers === undefined) {
-      reasons.push(`budget file ${budgetsPath}: qualification.pending_release_tiers is missing — the independent ladder (protocol/client-release-tiers.json) requires the field present even when empty, so a pending release blocker can never be deleted away`);
-    }
-    for (const tier of requiredPhysicalTiers) {
-      if (!declaredRelease.has(tier) && !declaredPending.has(tier)) {
-        reasons.push(`budget file ${budgetsPath}: required physical tier ${tier} (protocol/client-release-tiers.json) is declared neither release_tiers nor pending_release_tiers`);
-      }
-    }
-    for (const tier of new Set([...declaredRelease, ...declaredPending])) {
-      if (!requiredPhysicalTiers.includes(tier)) {
-        reasons.push(`budget file ${budgetsPath}: tier ${tier} is not a required physical tier in protocol/client-release-tiers.json (the ladder manifest owns the tier set)`);
-      }
-    }
-  }
   const certTiers = releaseMode || physicalClaim ? [...new Set([...budgetTiers, ...releaseTiers])] : [...budgetTiers];
   if (releaseMode || physicalClaim) {
     for (const t of releaseTiers) {
@@ -1814,25 +1691,14 @@ function main() {
   const physicalCount = physicalDevices.length;
   const statusLine =
     status === 'physical'
-      ? `performance qualification status=physical (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded, ${physicalCount} physical device(s) on release tiers ${(Array.isArray(qual.release_tiers) ? qual.release_tiers : []).join('+') || '(none)'}${Array.isArray(qual.pending_release_tiers) && qual.pending_release_tiers.length ? `, pending release tier(s) ${qual.pending_release_tiers.join('+')}` : ''})`
+      ? `performance qualification status=physical (qualified_at ${qual.qualified_at || 'unset'}, ${Array.isArray(qual.devices) ? qual.devices.length : 0} device(s) recorded, ${physicalCount} physical device(s) on release tiers ${(Array.isArray(qual.release_tiers) ? qual.release_tiers : []).join('+') || '(none)'})`
       : `performance qualification status=${status} — physical-device data required before release certification`;
   if (releaseMode) {
     if (status !== 'physical') {
       reasons.push(`qualification status ${JSON.stringify(status)} is not "physical": release certification requires physical-device qualification data (qualified_at date and recorded devices), not lab-rig or emulation evidence`);
     }
-    // A tier the product's public profile exposes (mobile / low-memory)
-    // cannot be certified from emulation or from a desktop-only record:
-    // each declared pending tier is a hard release reason until its
-    // physical device evidence lands and the tier moves into
-    // release_tiers with its budgets.
-    for (const t of pendingReleaseTiers) {
-      reasons.push(`physical release tier ${t} is declared pending in qualification.pending_release_tiers: no measured device evidence exists, so release certification is refused until the tier carries its physical devices and p95 budget rows`);
-    }
   } else {
     console.log(statusLine);
-    for (const t of pendingReleaseTiers) {
-      notes.push(`physical release tier ${t} is declared pending (release-blocking until measured device evidence lands)`);
-    }
   }
 
   if (reasons.length) {

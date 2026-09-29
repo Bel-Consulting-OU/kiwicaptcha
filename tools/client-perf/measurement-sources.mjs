@@ -48,8 +48,14 @@
  *   - the canonical release asset set definition
  *     (packages/kiwicaptcha-wasm/release-assets.txt),
  *   - every canonical client asset (packages/kiwicaptcha-wasm/assets/*),
- *   - the PHP core source tree the fixture issues with
- *     (packages/kiwicaptcha-php/src) and its composer.json.
+ *   - the fixture's executable PHP source trees, loaded through the
+ *     router's deterministic PSR-4 loader (never through Composer):
+ *     packages/kiwicaptcha-php/src, packages/kiwicaptcha-risk-php/src
+ *     and packages/kiwicaptcha/integrations/symfony/src, plus the core
+ *     composer.json. The Composer vendor tree is not executable
+ *     benchmark input and is not part of the snapshot: a modified
+ *     vendor/autoload.php can neither load fixture classes nor change
+ *     the measurement identity.
  *
  * The set is deliberately narrow. The manual qualification page
  * (tests/browser/autofill-qualification.php) is EXCLUDED by design:
@@ -90,20 +96,25 @@ export const SOURCE_FILE_PATHS = [
   'packages/kiwicaptcha-php/composer.json',
 ];
 
-/** Directories hashed as a canonical tree digest (every file bound). */
-export const SOURCE_TREE_PATHS = ['packages/kiwicaptcha-php/src'];
+/**
+ * Directories hashed as a canonical tree digest (every file bound).
+ * These are the fixture's executable PHP inputs: the router loads them
+ * through its deterministic PSR-4 loader, never through Composer, so
+ * every class the benchmark executes is hashed.
+ */
+export const SOURCE_TREE_PATHS = [
+  'packages/kiwicaptcha-php/src',
+  'packages/kiwicaptcha-risk-php/src',
+  'packages/kiwicaptcha/integrations/symfony/src',
+];
 
 /**
  * Serving-only directories copied into the immutable snapshot but NOT
- * hashed: the installed Composer autoloader/vendor tree loads the
- * hashed core sources, and the Symfony bundle source only carries the
- * Risk state-store interface declarations the fixture's own (hashed)
- * router implements — neither carries benchmark semantics.
+ * hashed. Empty by design: the fixture no longer executes anything
+ * outside the hashed source trees, so there is no unhashed executable
+ * input to carry into the snapshot.
  */
-export const SERVED_COPY_DIRS = [
-  'packages/kiwicaptcha-php/vendor',
-  'packages/kiwicaptcha/integrations/symfony/src',
-];
+export const SERVED_COPY_DIRS = [];
 
 export const ASSET_DIR_REL = 'packages/kiwicaptcha-wasm/assets';
 

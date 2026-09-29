@@ -14,33 +14,48 @@ declare(strict_types=1);
 
 $repo = dirname(__DIR__, 2); // tests/browser -> repo root
 
-require $repo.'/packages/kiwicaptcha-php/vendor/autoload.php';
-// The Siteverify e2e route uses the real Symfony bundle
-// controller + SiteVerify stores — load the bundle's autoloader when its
-// vendor is installed (CI installs it for exactly this fixture fidelity).
+// Deterministic executable inputs of the fixture: the committed source
+// trees below, every one of them hashed into the client-performance
+// measurement-source manifest. No Composer autoloader runs for these
+// namespaces, so the vendor tree is not executable benchmark input: a
+// modified vendor file can neither load fixture classes nor change the
+// measurement identity. The loader is prepended so it wins over any
+// installed vendor autoloader (a working-tree run resolves the same
+// committed sources as the certifying snapshot).
+$fixtureNamespaces = [
+    // More specific prefixes first: KiwiCaptcha\Risk\ must not fall
+    // through to the core KiwiCaptcha\ mapping.
+    'KiwiCaptcha\\Risk\\' => $repo.'/packages/kiwicaptcha-risk-php/src/',
+    'KiwiCaptcha\\' => $repo.'/packages/kiwicaptcha-php/src/',
+    'BelConsulting\\KiwiCaptchaBundle\\' => $repo.'/packages/kiwicaptcha/integrations/symfony/src/',
+];
+spl_autoload_register(static function (string $class) use ($fixtureNamespaces): void {
+    foreach ($fixtureNamespaces as $prefix => $dir) {
+        if (!str_starts_with($class, $prefix)) {
+            continue;
+        }
+        $file = $dir.str_replace('\\', '/', substr($class, strlen($prefix))).'.php';
+        if (is_file($file)) {
+            require $file;
+
+            return;
+        }
+    }
+}, true, true);
+// The risk package's composer.json declares autoload.files for
+// ProcessEmergencyCap; the class file is a pure declaration, so the
+// deterministic loader resolves it on demand like every other class.
+// (The certifying snapshot has no Composer at all; a working-tree run
+// may see the bundle vendor's eager copy of that one class, which is
+// not part of the benchmark path.)
+// The Siteverify e2e route executes the real Symfony bundle controller,
+// whose framework dependencies (Symfony HttpFoundation and friends)
+// come from the bundle vendor when it is installed. Neither this
+// autoloader nor its eager files entries are part of the benchmark
+// path: the certifying snapshot carries no vendor tree at all.
 $symfonyAutoload = $repo.'/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php';
 if (is_file($symfonyAutoload)) {
     require $symfonyAutoload;
-} else {
-    // The immutable client-performance measurement snapshot copies the
-    // bundle source (not its ~64 MiB vendor), because the fixture's
-    // chained-challenge store implements the bundle's Risk state-store
-    // interfaces. Register a PSR-4 fallback for the bundle namespace so
-    // those interfaces resolve when the bundle vendor is absent (the
-    // snapshot router); the interfaces carry no framework dependencies.
-    $bundleSrc = $repo.'/packages/kiwicaptcha/integrations/symfony/src';
-    if (is_dir($bundleSrc)) {
-        spl_autoload_register(static function (string $class) use ($bundleSrc): void {
-            $prefix = 'BelConsulting\\KiwiCaptchaBundle\\';
-            if (!str_starts_with($class, $prefix)) {
-                return;
-            }
-            $file = $bundleSrc.'/'.str_replace('\\', '/', substr($class, strlen($prefix))).'.php';
-            if (is_file($file)) {
-                require $file;
-            }
-        });
-    }
 }
 
 use KiwiCaptcha\Config;

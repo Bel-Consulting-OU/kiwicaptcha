@@ -90,9 +90,12 @@
  * CPU-throttled approximations of the device classes they name: CDP
  * throttling is a coarse model of cheap hardware, and the emulation
  * does NOT reproduce real thermals, battery savers, or the real
- * device's JIT/wasm behavior. This lab records desktop-emulation
- * evidence only; it makes no low-end-mobile claim. The physical-device
- * tiers described in README.md are the release boundary.
+ * device's JIT/wasm behavior. The mobile and emulation tiers are
+ * automated regression profiles and calibration signals only: they are
+ * never physical evidence and they are not release prerequisites. The
+ * release ladder is exactly qualification.release_tiers (today
+ * mainstream-desktop, recorded on its physical device per README.md);
+ * nothing outside that list is a physical release requirement.
  *
  * Methodology controls against host-state contamination:
  *
@@ -2091,7 +2094,7 @@ function buildPayload(opts, ctx, completion) {
     },
     completion,
     methodology: {
-      note: 'desktop CPU-throttled emulation: the tiers are Playwright device descriptors plus CDP Emulation.setCPUThrottlingRate on an Apple silicon Mac. The emulation approximates the named device classes on a desktop CPU; it does NOT reproduce real device thermals, battery saver, or the real device browser JIT/wasm behavior. These numbers are desktop-emulation evidence only and make no low-end-mobile claim; the physical-device tiers described in README.md are the release boundary.',
+      note: 'desktop CPU-throttled emulation: the tiers are Playwright device descriptors plus CDP Emulation.setCPUThrottlingRate on an Apple silicon Mac. The emulation approximates the named device classes on a desktop CPU; it does NOT reproduce real device thermals, battery saver, or the real device browser JIT/wasm behavior. These numbers are automated regression profiles and calibration signals only: they are never physical evidence and not release prerequisites. The release ladder is exactly qualification.release_tiers (today mainstream-desktop, recorded on its physical device per README.md).',
       cellOrder: {
         strategy: 'seeded-random-shuffle',
         seed: ctx.seed,

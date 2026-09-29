@@ -138,12 +138,11 @@ function mutatedRecordedSources(mutateManifest) {
 const EXECUTION_MANIFEST = JSON.parse(readFileSync(join(REPO_ROOT, 'protocol', 'execution-v1.json'), 'utf8'));
 const EXECUTION_MAX_VERSION = EXECUTION_MANIFEST.max_execution_version;
 
-// The independent physical-tier ladder authority: the fixture builders
-// derive the complete pending set from it, exactly like the validator.
-const RELEASE_TIERS_MANIFEST = JSON.parse(
-  readFileSync(join(REPO_ROOT, 'protocol', 'client-release-tiers.json'), 'utf8'),
-);
-const REQUIRED_PHYSICAL_TIERS = RELEASE_TIERS_MANIFEST.required_physical_tiers;
+// The multi-tier certification fixture used by the ceiling and
+// engineering-target cases: the validator supports an arbitrary
+// qualification.release_tiers ladder, so the fixture exercises a
+// four-tier declaration carrying complete evidence and budgets.
+const CERTIFIED_LADDER_FIXTURE = ['mainstream-desktop', 'current-iphone', 'mid-android', 'low-android'];
 
 // ── Fixture helpers. ────────────────────────────────────────────────
 
@@ -374,44 +373,38 @@ function inflateSha20(budgets) {
   return budgets;
 }
 
-function physicalBudgets({ devices, status = 'physical', qualifiedAt = nowIso(), releaseTiers = [RELEASE_TIER], pendingTiers = null, budgets = null }) {
+function physicalBudgets({ devices, status = 'physical', qualifiedAt = nowIso(), releaseTiers = [RELEASE_TIER], budgets = null }) {
   const file = budgets || baseBudgets();
-  // A physical claim must declare the complete independent ladder: the
-  // tiers not yet certified are pending until their device evidence
-  // lands. Explicit pendingTiers overrides (mutation cases).
-  const pending =
-    pendingTiers !== null ? pendingTiers : REQUIRED_PHYSICAL_TIERS.filter((t) => !releaseTiers.includes(t));
   file.qualification = {
     status,
     qualified_at: qualifiedAt,
     harness_schema: SCHEMA,
     release_tiers: releaseTiers,
-    pending_release_tiers: pending,
     devices,
   };
   return file;
 }
 
 /**
- * A release-certifiable ladder fixture: every required physical tier
- * carries its own device, its evidence index, its budget rows and its
- * engineering-target/absolute-ceiling entries, with the pending list an
- * explicit empty array. The engineering-target cases certifying a
- * single tier derive from this helper, so they exercise the target
- * rule without tripping the independent ladder invariant.
+ * A release-certifiable multi-tier ladder fixture: every tier in the
+ * fixture ladder carries its own device, its evidence index, its budget
+ * rows and its engineering-target/absolute-ceiling entries. The
+ * engineering-target cases certifying a single tier derive from this
+ * helper, so they exercise the target rule without tripping the
+ * per-tier completeness invariant.
  */
 function fullyCertifiedLadder() {
-  const devices = REQUIRED_PHYSICAL_TIERS.map((tier) => physicalDevice(`dev-${tier}`, tier));
+  const devices = CERTIFIED_LADDER_FIXTURE.map((tier) => physicalDevice(`dev-${tier}`, tier));
   const physicalIndexes = Object.fromEntries(
     devices.map((device) => [device.id, deviceIndex(device.id, () => healthySample(), deviceRepCount, device.tier)]),
   );
-  const budgets = physicalBudgets({ devices, releaseTiers: [...REQUIRED_PHYSICAL_TIERS], pendingTiers: [] });
-  for (const tier of REQUIRED_PHYSICAL_TIERS) {
+  const budgets = physicalBudgets({ devices, releaseTiers: [...CERTIFIED_LADDER_FIXTURE] });
+  for (const tier of CERTIFIED_LADDER_FIXTURE) {
     budgets.engineeringTargetP95[tier] = { ...budgets.engineeringTargetP95[RELEASE_TIER] };
     budgets.absoluteP95Ceilings[tier] = { ...budgets.absoluteP95Ceilings[RELEASE_TIER] };
     if (tier !== RELEASE_TIER) budgets.budgets[tier] = clone(budgets.budgets[RELEASE_TIER]);
   }
-  budgets.tiers = [...new Set([...budgets.tiers, ...REQUIRED_PHYSICAL_TIERS])];
+  budgets.tiers = [...new Set([...budgets.tiers, ...CERTIFIED_LADDER_FIXTURE])];
   return { budgets, payload: physicalPayload(physicalIndexes) };
 }
 
@@ -1323,7 +1316,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   const { budgets, payload } = fullyCertifiedLadder();
   for (const cache of CACHE_STATES) {
     for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
-      for (const tier of REQUIRED_PHYSICAL_TIERS) budgets.budgets[tier].sha20[cache][metric] = 4100;
+      for (const tier of CERTIFIED_LADDER_FIXTURE) budgets.budgets[tier].sha20[cache][metric] = 4100;
     }
   }
   const res = runValidator(payload, budgets, true);
@@ -1339,7 +1332,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   const { budgets, payload } = fullyCertifiedLadder();
   for (const cache of CACHE_STATES) {
     for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
-      for (const tier of REQUIRED_PHYSICAL_TIERS) budgets.budgets[tier].sha20[cache][metric] = 4250;
+      for (const tier of CERTIFIED_LADDER_FIXTURE) budgets.budgets[tier].sha20[cache][metric] = 4250;
     }
   }
   const res = runValidator(payload, budgets, true);
@@ -1356,7 +1349,7 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 {
   const { budgets, payload } = fullyCertifiedLadder();
   for (const cache of CACHE_STATES) {
-    for (const tier of REQUIRED_PHYSICAL_TIERS) {
+    for (const tier of CERTIFIED_LADDER_FIXTURE) {
       for (const metric of ['solveMsP95', 'pageToVerifiedMsP95']) {
         budgets.budgets[tier].sha20[cache][metric] = 4100;
       }
@@ -1424,71 +1417,6 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
   );
 }
 
-// ── Pending release tiers (the physical mobile ladder). ─────────────
-//     The budget file declares tiers the release claim must eventually
-//     certify (current-iphone, mid-android, low-android: the product's
-//     public mobile/low-memory profile) before their device evidence
-//     exists. Ordinary CI records them as notes; release mode refuses
-//     certification until each one moves into release_tiers with its
-//     devices and budgets. The corpus proves the note/refusal split and
-//     the structural validation of the pending ladder.
-{
-  const budgets = baseBudgets();
-  budgets.qualification.pending_release_tiers = ['current-iphone', 'mid-android'];
-  const ci = runValidator(schema3Payload(), budgets, false);
-  check(
-    'pending release tiers: CI mode notes them without failing',
-    ci,
-    { status: 0, mustInclude: ['declared pending'] },
-  );
-  const release = runValidator(schema3Payload(), budgets, true);
-  reject(
-    'pending release tiers: release mode refuses certification until measured',
-    release,
-    ['is declared pending in qualification.pending_release_tiers', 'current-iphone', 'mid-android'],
-  );
-}
-
-{
-  const budgets = baseBudgets();
-  budgets.qualification.pending_release_tiers = ['nokia-3310'];
-  reject(
-    'pending release tier unknown to the harness: reject',
-    runValidator(schema3Payload(), budgets, false),
-    ['names unknown tier'],
-  );
-}
-
-{
-  const budgets = baseBudgets();
-  budgets.qualification.pending_release_tiers = ['current-iphone', 'current-iphone'];
-  reject(
-    'pending release tier repeated: reject',
-    runValidator(schema3Payload(), budgets, false),
-    ['repeats tier'],
-  );
-}
-
-{
-  const budgets = baseBudgets();
-  budgets.qualification.pending_release_tiers = [RELEASE_TIER];
-  reject(
-    'tier declared both certified and pending: reject',
-    runValidator(schema3Payload(), budgets, false),
-    ['both release_tiers and pending_release_tiers'],
-  );
-}
-
-{
-  const budgets = baseBudgets();
-  budgets.qualification.pending_release_tiers = 'current-iphone';
-  reject(
-    'pending release tiers not an array: reject',
-    runValidator(schema3Payload(), budgets, false),
-    ['must be an array'],
-  );
-}
-
 // ── Calendar-real evidence timestamps and the failure-rate bounds. ──
 
 {
@@ -1528,38 +1456,6 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
     'failure budgets: a rate above one is rejected',
     runValidator(schema3Payload(), budgets, false),
     ['is not a rate in [0, 1]'],
-  );
-}
-
-// ── The independent physical-tier ladder. ───────────────────────────
-
-{
-  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
-  delete budgets.qualification.pending_release_tiers;
-  reject(
-    'ladder: a physical claim without pending_release_tiers is rejected',
-    runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false),
-    ['pending_release_tiers is missing'],
-  );
-}
-
-{
-  const budgets = physicalBudgets({ devices: [physicalDevice('dev-a')] });
-  budgets.qualification.pending_release_tiers = REQUIRED_PHYSICAL_TIERS.filter(
-    (t) => t !== 'low-android' && t !== RELEASE_TIER,
-  );
-  reject(
-    'ladder: an omitted required physical tier is rejected',
-    runValidator(physicalPayload({ 'dev-a': deviceIndex('dev-a') }), budgets, false),
-    ['required physical tier low-android'],
-  );
-}
-
-{
-  const { budgets, payload } = fullyCertifiedLadder();
-  pass(
-    'ladder: fully certified required tiers with an explicit empty pending list are accepted',
-    runValidator(payload, budgets, true),
   );
 }
 

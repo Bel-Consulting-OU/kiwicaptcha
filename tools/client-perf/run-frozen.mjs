@@ -14,8 +14,9 @@
  *      bytes);
  *   2. it records HEAD and creates a detached git worktree of that
  *      exact commit;
- *   3. it links the untracked runtime dependencies (Playwright's
- *      node_modules and the Composer vendor tree) into the worktree;
+ *   3. it links the untracked runtime dependency (Playwright's
+ *      node_modules) into the worktree; the fixture executes only the
+ *      committed PHP source trees and needs no Composer vendor;
  *   4. it re-executes tools/client-perf/client-perf.mjs FROM THE
  *      WORKTREE with the frozen origin recorded in the environment.
  *
@@ -91,11 +92,11 @@ function cleanup() {
 }
 process.on('exit', cleanup);
 
-// 3. The untracked runtime dependencies the harness needs: Playwright's
-//    node_modules (module resolution) and the PHP core vendor tree (the
-//    fixture server's autoloader). Neither is a measurement source; the
-//    snapshot binds only tracked bytes.
-for (const rel of ['tests/browser/node_modules', 'packages/kiwicaptcha-php/vendor']) {
+// 3. The untracked runtime dependency the harness needs: Playwright's
+//    node_modules (module resolution). The fixture executes only the
+//    committed PHP source trees through its deterministic loader, so no
+//    Composer vendor tree is linked or copied.
+for (const rel of ['tests/browser/node_modules']) {
   const target = join(REPO_ROOT, rel);
   if (!existsSync(target)) {
     cleanup();

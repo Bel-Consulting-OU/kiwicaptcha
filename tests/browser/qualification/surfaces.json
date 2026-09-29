@@ -35,14 +35,14 @@
       "product": "iOS Safari",
       "platform": "ios",
       "exact_version": true,
-      "required": true
+      "required": false
     },
     {
       "id": "android-chrome",
       "product": "Android Chrome",
       "platform": "android",
       "exact_version": true,
-      "required": true
+      "required": false
     },
     {
       "id": "icloud-keychain",

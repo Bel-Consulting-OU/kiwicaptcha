@@ -340,7 +340,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
   });
 
-  test('pointer targets: Retry >= 24x24 CSS px (32px height)', async ({ page }) => {
+  test('pointer targets: Retry >= 44x44 CSS px (WCAG 2.5.8 AAA target size)', async ({ page }) => {
     let failing = true;
     await page.route('**/challenge', async (route) => {
       if (failing) {
@@ -352,10 +352,11 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     await page.goto('/');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
     const box = await page.locator('[data-kiwi-retry]').boundingBox();
-    expect(box.width).toBeGreaterThanOrEqual(24);
-    expect(box.height).toBeGreaterThanOrEqual(24);
-    // The 32px target for an accessibility/security control.
-    expect(box.height).toBeGreaterThanOrEqual(32);
+    // The shipped CSS is a 44x44 minimum (an accessibility/security
+    // control has no reason to be cramped); the suite asserts the real
+    // target, not a weaker floor.
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
   });
 
   test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark', async ({ page }) => {
