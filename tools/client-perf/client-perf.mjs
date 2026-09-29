@@ -155,6 +155,7 @@ import {
   verifyMeasurementSources,
 } from './measurement-sources.mjs';
 import os from 'node:os';
+import net from 'node:net';
 import { execSync } from 'node:child_process';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -796,15 +797,49 @@ function waitForHttp(url, timeoutMs) {
   return new Promise((resolvePromise) => {
     const start = Date.now();
     const tick = () => {
-      fetch(url)
-        .then((r) => (r.ok ? resolvePromise(true) : retry()))
-        .catch(retry);
+      // Bound every attempt: a listener that accepts the connection but
+      // never answers must not hang the readiness wait forever.
+      const controller = new AbortController();
+      const attempt = setTimeout(() => controller.abort(), 500);
+      fetch(url, { signal: controller.signal })
+        .then((r) => {
+          clearTimeout(attempt);
+          if (r.ok) resolvePromise(true);
+          else retry();
+        })
+        .catch(() => {
+          clearTimeout(attempt);
+          retry();
+        });
     };
     const retry = () => {
       if (Date.now() - start > timeoutMs) resolvePromise(false);
       else setTimeout(tick, 250);
     };
     tick();
+  });
+}
+
+/**
+ * TCP-level occupancy probe for the fixture port. A server that accepts
+ * connections but never answers an HTTP request must still count as
+ * occupied, and a black-holing listener must never hang the check; a
+ * refused connection is the only state that means the port is free.
+ */
+function portIsOccupied(port, host = '127.0.0.1', timeoutMs = 700) {
+  return new Promise((resolvePromise) => {
+    const socket = net.connect({ port, host });
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(value);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(true)); // silent listener: treat as occupied
+    socket.once('error', (e) => done(e && e.code === 'ECONNREFUSED' ? false : true));
   });
 }
 
@@ -847,7 +882,7 @@ async function bootFixture(opts, snapshot) {
   }
   const port = opts.fixturePort;
   const base = `http://127.0.0.1:${port}`;
-  const occupied = await waitForHttp(base, 800);
+  const occupied = await portIsOccupied(port);
   if (occupied) {
     removeMeasurementSnapshot(snapshot);
     console.error(
