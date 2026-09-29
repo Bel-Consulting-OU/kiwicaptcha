@@ -1858,6 +1858,13 @@ jobs:
           composer-options: --no-scripts
       - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge responses)
         run: bash packages/kiwicaptcha/tools/perf-budget.sh
+      - name: install browser fixture deps (the measured Node runtime identity)
+        # The measurement context binds the exact Playwright trees; npm ci
+        # from the committed lockfile is verified to reproduce
+        # byte-identical @playwright/test, playwright and playwright-core
+        # trees (scripts skipped: no browser download is needed here).
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: client-performance release-baseline gate (CI mode)
         # The release-baseline validator enforces that every
         # release-required cell in tools/client-perf/release-budgets.json
@@ -1877,6 +1884,15 @@ jobs:
         # file keeps this required check red while the diagnostics
         # still ran.
         run: node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json || echo gate_failed > "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed"
+      - name: client-performance release-baseline preflight (release mode on committed evidence)
+        # The tag workflow runs the same validator with --release; this
+        # cheap push/PR preflight applies the stricter release parser to
+        # the committed evidence now, so a change that would break the tag
+        # gate fails the merge lane instead of the tag. It reruns no
+        # measurements and needs no device. Marker semantics match the
+        # CI-mode step: diagnostics still run, the aggregation step below
+        # fails the job.
+        run: node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json || echo gate_failed > "${RUNNER_TEMP}/kiwicaptcha-release-baseline-release-gate-failed"
       - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
         # This step and every benchmark step below it run even when the
         # release-baseline gate above recorded a failure: the
@@ -1923,18 +1939,19 @@ jobs:
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: php packages/kiwicaptcha/tools/perf-wait-replica.php
-      - name: fail the job when the release-baseline gate recorded a failure
-        # The gate step records a rejected evidence file in a marker
+      - name: fail the job when the release-baseline gates recorded a failure
+        # The gate steps record a rejected evidence file in markers
         # instead of failing, so the diagnostics above still run. This
         # step restores the gate semantics at the end of the job: it
-        # fails the run when the marker exists and passes otherwise.
+        # fails the run when either marker (CI mode or the release-mode
+        # preflight) exists and passes otherwise.
         if: always()
         run: |
-          if [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed" ]; then
-            echo "::error::release-baseline evidence gate rejected the committed baseline; the diagnostic steps still ran. See the gate step log."
+          if [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed" ] || [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-release-gate-failed" ]; then
+            echo "::error::release-baseline evidence gate rejected the committed baseline (CI and/or release mode); the diagnostic steps still ran. See the gate step logs."
             exit 1
           fi
-          echo "release-baseline evidence gate passed; the diagnostic steps above ran"
+          echo "release-baseline evidence gates passed (CI and release mode); the diagnostic steps above ran"
 
   perf-latency-quiet:
     # Manually dispatched hard-ratchet benchmark on a GitHub-hosted
@@ -2200,7 +2217,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: install browser fixture deps (the measured Node runtime identity)
+        # The validator corpus computes the current measurement context,
+        # which binds the exact Playwright trees; npm ci from the committed
+        # lockfile reproduces them byte-identically (scripts skipped).
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: adversarial mutation corpus of the release-baseline validator
         run: node tools/ci/test-validate-release-baseline.mjs
       - name: adversarial mutation corpus of the autofill-qualification validator
         run: node tools/ci/test-validate-autofill-qualification.mjs
+      - name: adversarial mutation corpus of the accessibility-qualification validator
+        run: node tools/ci/test-validate-accessibility-qualification.mjs

@@ -90,6 +90,7 @@ function sourceSnapshot(root, relPaths) {
     repoRoot: root,
     filePaths: relPaths,
     treePaths: [],
+    hashOnlyTrees: [],
     servedCopyDirs: [],
     includeAssets: false,
   });
@@ -168,7 +169,16 @@ bindingCase('Argon fixture envelope change is rejected', 'tests/browser/router.p
   return Buffer.from(text.replace(line[0], line[0].replace(': 4;', ': 10;')));
 });
 
-// 5. The qualification page is deliberately EXCLUDED: editing it must
+// 5. The Playwright lockfile and package manifest are bound: a tracked
+//    dependency bump must change the measurement identity.
+bindingCase('a Playwright lockfile change is rejected', 'tests/browser/package-lock.json', (bytes) =>
+  Buffer.concat([bytes, Buffer.from('\n')]),
+);
+bindingCase('a Playwright package.json change is rejected', 'tests/browser/package.json', (bytes) =>
+  Buffer.concat([bytes, Buffer.from('\n')]),
+);
+
+// 6. The qualification page is deliberately EXCLUDED: editing it must
 //    not invalidate a performance recording.
 {
   const page = 'tests/browser/autofill-qualification.php';

@@ -14,9 +14,13 @@
  *      bytes);
  *   2. it records HEAD and creates a detached git worktree of that
  *      exact commit;
- *   3. it links the untracked runtime dependency (Playwright's
- *      node_modules) into the worktree; the fixture executes only the
- *      committed PHP source trees and needs no Composer vendor;
+ *   3. it COPIES the installed Playwright node_modules into the
+ *      worktree (never a symlink): the benchmark executes the frozen
+ *      copy and the manifest hashes the exact copied trees, so a
+ *      modified original installation cannot run under an unchanged
+ *      identity and a later mutation cannot affect a running run; the
+ *      fixture executes only the committed PHP source trees and needs
+ *      no Composer vendor;
  *   4. it re-executes tools/client-perf/client-perf.mjs FROM THE
  *      WORKTREE with the frozen origin recorded in the environment.
  *
@@ -34,7 +38,7 @@
  * Exit status: the harness's exit status; 2 for launcher refusals.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,21 +97,32 @@ function cleanup() {
 process.on('exit', cleanup);
 
 // 3. The untracked runtime dependency the harness needs: Playwright's
-//    node_modules (module resolution). The fixture executes only the
-//    committed PHP source trees through its deterministic loader, so no
-//    Composer vendor tree is linked or copied.
+//    node_modules. It is COPIED into the worktree, never symlinked: the
+//    benchmark executes the frozen copy, and the measurement-source
+//    manifest hashes the exact copied @playwright/test, playwright and
+//    playwright-core trees. A modified original installation can
+//    therefore never run under an unchanged identity, and a mutation
+//    after the copy can never affect the running experiment. The
+//    fixture executes only the committed PHP source trees through its
+//    deterministic loader, so no Composer vendor tree is linked or
+//    copied.
 for (const rel of ['tests/browser/node_modules']) {
   const target = join(REPO_ROOT, rel);
   if (!existsSync(target)) {
     cleanup();
-    refuse(`missing runtime dependency ${rel} in ${REPO_ROOT}; install it before a certifying run`);
+    refuse(`missing runtime dependency ${rel} in ${REPO_ROOT}; run npm ci in tests/browser before a certifying run`);
   }
-  const link = join(tree, rel);
-  if (existsSync(link)) {
+  const dest = join(tree, rel);
+  if (existsSync(dest)) {
     cleanup();
-    refuse(`the frozen worktree already contains ${rel}; refusing to shadow it`);
+    refuse(`the frozen worktree already contains ${rel}; refusing to overwrite it`);
   }
-  symlinkSync(target, link, 'dir');
+  try {
+    cpSync(target, dest, { recursive: true });
+  } catch (e) {
+    cleanup();
+    refuse(`cannot copy ${rel} into the frozen worktree: ${e.message}`);
+  }
 }
 
 console.log(

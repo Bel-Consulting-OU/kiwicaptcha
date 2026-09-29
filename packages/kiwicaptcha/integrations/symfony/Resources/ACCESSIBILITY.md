@@ -82,7 +82,7 @@ The two new criteria outside the component scope (3.2.6 above is a host-page res
 ## Manual assistive-technology qualification (release gate)
 
 Automated DOM checks are not sufficient conformance evidence (WCAG conformance depends on accessibility-supported technology).
-The manual qualification is a release gate: for each released artifact, at release time, the maintainers qualify the widget in a real browser with actual 200% browser/user zoom plus the assistive-technology passes below, and record signed evidence of the run.
+The manual qualification is a machine-enforced release gate. `tools/ci/validate-accessibility-qualification.mjs` reads `tests/browser/qualification/accessibility-matrix.json` in the release workflow and refuses certification until every required desktop row is a complete pass: exact browser and AT versions, `zoom_percent` 200, keyboard/live-region/focus/content-loss observations, and an `asset_identity` equal to the current release asset digest. For each released artifact, at release time, the maintainers qualify the widget in a real browser with actual 200% browser/user zoom plus the assistive-technology passes below, and record the run in that matrix with signed evidence.
 The qualification is never implied to have been run on any particular commit:
 
 - NVDA + Firefox, NVDA + Chrome (Windows)
@@ -97,8 +97,8 @@ Each release records a qualification artifact with the template below, as record
 The stronger formulation is published only when the artifact for that release is complete.
 It states that KiwiCaptcha is designed and tested to satisfy the WCAG 2.2 Level AA success criteria applicable to the component and to support WCAG 2.2 AA conforming integrations:
 
-- release tag and commit; browser versions (Chromium, Firefox, Safari); AT versions: NVDA, VoiceOver, plus the speech-recognition or switch-access tool used.
-- actual 200% browser zoom verification in a real browser; date and tester (signed); pass/fail notes and known exceptions.
+- release tag and commit; browser versions (Chromium, Firefox, Safari); AT versions: NVDA, VoiceOver, plus the speech-recognition or switch-access tool used; these map to the matrix evidence fields (`browser`, `browser_version`, `assistive_technology`, `assistive_technology_version`).
+- actual 200% browser zoom verification in a real browser (`zoom_percent: 200`); date and tester (signed); pass/fail notes and known exceptions; the `asset_identity` binds the record to the released widget bytes.
 
 Only the conservative claim in the Positioning section is published.
 

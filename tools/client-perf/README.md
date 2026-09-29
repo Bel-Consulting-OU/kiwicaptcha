@@ -425,17 +425,28 @@ therefore freezes the experiment before the first browser launches
 - **Frozen execution origin.** A certifying run is re-executed from a
   detached git worktree of the committed bytes by
   `tools/client-perf/run-frozen.mjs`: the launcher refuses a dirty
-  tracked tree, creates the worktree at `HEAD`, links the untracked
-  runtime dependencies (Playwright `node_modules`, the Composer vendor
-  tree), and starts the harness from the frozen copy. The payload
-  records `harnessOrigin.mode: "frozen-detached-worktree"` plus the
-  commit and launcher hash. In-process runs stay available for
-  development, but `--promote-baseline`, `--source physical` and
-  `--physical-index` accept only owned-snapshot
-  frozen-detached-worktree runs. Both guards are exercised by
-  `tools/client-perf/test-authority-gates.mjs`, including a fake
-  fixture that serves the real page and real assets while cheapening
-  the difficulty.
+  tracked tree, creates the worktree at `HEAD`, COPIES the installed
+  Playwright `node_modules` into the worktree (never a symlink, so the
+  executed runtime is immutable), and starts the harness from the
+  frozen copy. The payload records
+  `harnessOrigin.mode: "frozen-detached-worktree"` plus the commit and
+  launcher hash. In-process runs stay available for development, but
+  `--promote-baseline`, `--source physical` and `--physical-index`
+  accept only owned-snapshot frozen-detached-worktree runs. Both guards
+  are exercised by `tools/client-perf/test-authority-gates.mjs`,
+  including a fake fixture that serves the real page and real assets
+  while cheapening the difficulty.
+- **Node runtime identity.** `tests/browser/package.json` and
+  `package-lock.json` are bound as files, and the exact installed
+  `@playwright/test`, `playwright` and `playwright-core` trees are
+  hashed into the measurement-source manifest (and re-verified at every
+  cell boundary). A tracked Playwright bump changes the context; a
+  modified local installation is copied and recorded as a different
+  identity; a mutation of the original installation after the frozen
+  launch cannot reach the running experiment. The mutation corpus
+  covers all three, and the CI environments that compute the current
+  identity install the tree with `npm ci` (verified to reproduce
+  byte-identical tree digests).
 
 ## Certifiable evidence: completion and origin on the device
 

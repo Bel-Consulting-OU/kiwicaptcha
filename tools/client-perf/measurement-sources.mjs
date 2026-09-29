@@ -55,7 +55,15 @@
  *     composer.json. The Composer vendor tree is not executable
  *     benchmark input and is not part of the snapshot: a modified
  *     vendor/autoload.php can neither load fixture classes nor change
- *     the measurement identity.
+ *     the measurement identity;
+ *   - the Node dependency the benchmark executes: the intended version
+ *     from tests/browser/package.json and package-lock.json, and the
+ *     exact installed @playwright/test, playwright and playwright-core
+ *     trees (hashed but not copied by the harness snapshot, because the
+ *     frozen launcher already copied them into the immutable worktree).
+ *     Playwright drives browser launch, contexts, device descriptors,
+ *     CPU throttling/CDP and navigation instrumentation, so its bytes
+ *     are part of the measurement identity.
  *
  * The set is deliberately narrow. The manual qualification page
  * (tests/browser/autofill-qualification.php) is EXCLUDED by design:
@@ -91,6 +99,11 @@ export const SOURCE_FILE_PATHS = [
   'tools/client-perf/measurement-sources.mjs',
   'tools/client-perf/canonical-json.mjs',
   'tests/browser/router.php',
+  // The intended Node dependency version (the lockfile) and the package
+  // manifest: a tracked Playwright bump must change the measurement
+  // identity even before the installed tree is considered.
+  'tests/browser/package.json',
+  'tests/browser/package-lock.json',
   'protocol/execution-v1.json',
   'packages/kiwicaptcha-wasm/release-assets.txt',
   'packages/kiwicaptcha-php/composer.json',
@@ -106,6 +119,21 @@ export const SOURCE_TREE_PATHS = [
   'packages/kiwicaptcha-php/src',
   'packages/kiwicaptcha-risk-php/src',
   'packages/kiwicaptcha/integrations/symfony/src',
+];
+
+/**
+ * Trees hashed into the manifest but NOT copied by the harness snapshot
+ * (the frozen launcher already made them immutable inside the frozen
+ * worktree, and they are never served). These are the exact Playwright
+ * bytes the benchmark executes: Playwright controls browser launch,
+ * contexts, device descriptors, CPU throttling/CDP and navigation
+ * instrumentation, so a modified installation must never run under an
+ * unchanged measurement identity.
+ */
+export const HASH_ONLY_TREE_PATHS = [
+  'tests/browser/node_modules/@playwright/test',
+  'tests/browser/node_modules/playwright',
+  'tests/browser/node_modules/playwright-core',
 ];
 
 /**
@@ -158,6 +186,7 @@ export function snapshotMeasurementSources({
   snapshotRoot = null,
   filePaths = SOURCE_FILE_PATHS,
   treePaths = SOURCE_TREE_PATHS,
+  hashOnlyTrees = HASH_ONLY_TREE_PATHS,
   servedCopyDirs = SERVED_COPY_DIRS,
   includeAssets = true,
 } = {}) {
@@ -188,6 +217,26 @@ export function snapshotMeasurementSources({
       entries[fileRel] = sha256Hex(bytes);
       total += bytes.length;
       copyFile(`${rel}/${fileRel}`, bytes);
+    }
+    manifest[rel] = {
+      kind: 'tree',
+      files: Object.keys(entries).length,
+      bytes: total,
+      sha256: sha256Hex(canonicalJson(entries)),
+    };
+  }
+
+  for (const rel of hashOnlyTrees) {
+    const treeRoot = join(repoRoot, rel);
+    if (!statSync(treeRoot).isDirectory()) {
+      throw new Error(`measurement-sources: ${rel} is not a directory under ${repoRoot}`);
+    }
+    const entries = {};
+    let total = 0;
+    for (const fileRel of listFilesRecursive(treeRoot)) {
+      const bytes = readFileSync(join(treeRoot, fileRel));
+      entries[fileRel] = sha256Hex(bytes);
+      total += bytes.length;
     }
     manifest[rel] = {
       kind: 'tree',

@@ -371,6 +371,12 @@ jobs:
         # tag exists; this step makes the contract part of the release
         # run itself.
         run: bash "$GITHUB_WORKSPACE/tools/ci/release-asset-contract.sh"
+      - name: install browser fixture deps (the measured Node runtime identity)
+        # The current measurement context binds the exact Playwright
+        # trees; npm ci from the committed lockfile reproduces them
+        # byte-identically (scripts skipped: no browser download needed).
+        working-directory: ${{ github.workspace }}/tests/browser
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: client-performance release-baseline gate (release mode)
         # The release boundary is physical-device data: the same
         # validator the CI-mode step of the Performance budgets job
@@ -389,6 +395,15 @@ jobs:
         # ones docs/autofill-qualification-protocol.md defines.
         working-directory: ${{ github.workspace }}
         run: node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json
+      - name: accessibility qualification gate
+        # The desktop manual AT qualification (NVDA + Chrome, NVDA +
+        # Firefox, VoiceOver + Safari and one speech/switch pass at
+        # actual 200% zoom) is a release gate, not prose: the matrix must
+        # carry complete pass rows with exact versions, zoom_percent 200,
+        # the observation fields and an asset_identity equal to the
+        # current release asset digest.
+        working-directory: ${{ github.workspace }}
+        run: node tools/ci/validate-accessibility-qualification.mjs tests/browser/qualification/accessibility-matrix.json
       - name: upload the immutable build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

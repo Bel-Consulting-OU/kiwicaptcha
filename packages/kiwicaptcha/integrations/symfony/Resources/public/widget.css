@@ -158,11 +158,21 @@
 
   /* ── Badge: the primary SLOT ── */
   .kiwi-badge {
-    flex: 0 0 auto;
+    /* The badge carries meaningful localized words ("Fehlgeschlagen",
+       "Versionsfehler", "Erreur de version"): it wraps inside the
+       available main-column width at every font scale instead of
+       holding an intrinsic width the widget would clip. */
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.2;
+    text-align: center;
     font-family: var(--kiwi-mono);
     font-size: calc(11px * var(--kiwi-font-scale));
     font-weight: 600;
-    line-height: 1;
     padding: 4px 6px;
     border-radius: 4px;
     background: var(--kiwi-track);

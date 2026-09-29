@@ -33,12 +33,12 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256Hex } from './canonical-json.mjs';
-import { snapshotMeasurementSources } from './measurement-sources.mjs';
+import { snapshotMeasurementSources, verifyMeasurementSources } from './measurement-sources.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -357,8 +357,116 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
       } else if (!/^[0-9a-f]{64}$/.test(runs[0].run_digest || '')) {
         fail('frozen certifying run: source_runs run_digest missing', JSON.stringify(runs[0]));
       } else {
-        ok('a focused frozen run with real solver defaults is certifiable physical evidence and carries its source_runs record');
+        const missingRuntime = [
+          'tests/browser/node_modules/@playwright/test',
+          'tests/browser/node_modules/playwright',
+          'tests/browser/node_modules/playwright-core',
+        ].filter((rel) => !certifyPayload.measurementSources.manifest[rel]);
+        if (missingRuntime.length) {
+          fail('frozen certifying run: the manifest must bind the Playwright runtime trees', missingRuntime.join(', '));
+        } else {
+          ok('a focused frozen run with real solver defaults is certifiable physical evidence and carries its source_runs record plus the Playwright runtime identity');
+        }
       }
+    }
+  }
+
+  // ── The Playwright runtime is part of the measurement identity ────
+  // B/D: a modified installation is copied and hashed into a DIFFERENT
+  // identity; two installations with different bytes can never share a
+  // certifying context.
+  {
+    const pwFile = join(REPO_ROOT, 'tests', 'browser', 'node_modules', 'playwright-core', 'package.json');
+    if (!existsSync(pwFile)) {
+      ok('Playwright runtime absent; identity binding covered by the lockfile cases');
+    } else {
+      const pristinePw = readFileSync(pwFile);
+      pristineByPath.set(pwFile, pristinePw);
+      const frozenSnapshot = snapshotMeasurementSources({ snapshotRoot: null });
+      const pristineDigest = frozenSnapshot.manifest['tests/browser/node_modules/playwright-core'].sha256;
+      writeFileSync(pwFile, Buffer.concat([pristinePw, Buffer.from('\n')]));
+      // The per-cell freeze check must see the changed runtime tree.
+      const driftReasons = verifyMeasurementSources(frozenSnapshot);
+      if (!driftReasons.some((r) => r.includes('node_modules/playwright-core'))) {
+        fail('Playwright mutation: per-cell verification does not cover the runtime tree', JSON.stringify(driftReasons));
+      }
+      const mutated = startFrozen('pw-mutated');
+      const mutatedExit = await new Promise((resolvePromise) => {
+        mutated.child.on('exit', (code) => resolvePromise(code));
+      });
+      const mutatedPayload = readRun(mutated.out);
+      restoreAllPristine();
+      const restoredDigest = snapshotMeasurementSources({ snapshotRoot: null }).manifest[
+        'tests/browser/node_modules/playwright-core'
+      ].sha256;
+      if (mutatedExit !== 0 || mutatedPayload?.completion?.status !== 'completed') {
+        fail('Playwright mutation: the run must complete while binding the mutated bytes', `${mutatedExit}\n${mutated.getOutput().slice(0, 800)}`);
+      } else if (restoredDigest !== pristineDigest) {
+        fail('Playwright mutation: restoring the file did not restore the identity', `${restoredDigest} != ${pristineDigest}`);
+      } else if (
+        mutatedPayload.measurementSources.manifest['tests/browser/node_modules/playwright-core'].sha256 === pristineDigest
+      ) {
+        fail('Playwright mutation: a modified installation recorded the pristine identity', 'the runtime bytes are not bound');
+      } else {
+        ok('a modified Playwright installation is copied and hashed into a different measurement identity (B/D)');
+      }
+    }
+  }
+
+  // C: mutating the original installation after the frozen launch must
+  // not affect the running experiment. The run spans two tiers, so the
+  // second browser launch happens after the original tree is renamed
+  // away: a symlinked runtime cannot survive that, the frozen copy must.
+  {
+    const nm = join(REPO_ROOT, 'tests', 'browser', 'node_modules');
+    const movedNm = join(REPO_ROOT, 'tests', 'browser', 'node_modules.moved-authority-test');
+    if (!existsSync(nm)) {
+      ok('Playwright runtime absent; copy isolation covered by the launcher design');
+    } else {
+      const pristineDigest = snapshotMeasurementSources({ snapshotRoot: null }).manifest[
+        'tests/browser/node_modules/playwright-core'
+      ].sha256;
+      const state = startFrozen('pw-rename', [...HARNESS_ARGS, '--tiers', 'mainstream-desktop,low-desktop']);
+      const firstRepDeadline = Date.now() + 240000;
+      let firstRep = false;
+      while (Date.now() < firstRepDeadline && !firstRep) {
+        if (/rep 1\/2:/.test(state.getOutput())) firstRep = true;
+        else if (state.child.exitCode !== null) break;
+        else await new Promise((r) => setTimeout(r, 100));
+      }
+      let moved = false;
+      if (!firstRep) {
+        fail('Playwright mutation: the run never reached its first repetition', state.getOutput().slice(0, 800));
+      } else {
+        try {
+          renameSync(nm, movedNm);
+          moved = true;
+        } catch (e) {
+          fail('Playwright mutation: cannot move the original installation', e.message);
+        }
+      }
+      const exitCode = await new Promise((resolvePromise) => {
+        if (state.child.exitCode !== null) resolvePromise(state.child.exitCode);
+        else state.child.on('exit', (code) => resolvePromise(code));
+      });
+      if (moved) {
+        try {
+          renameSync(movedNm, nm);
+        } catch (e) {
+          fail('Playwright mutation: cannot restore the original installation', e.message);
+        }
+      }
+      const payload = readRun(state.out);
+      if (exitCode !== 0 || payload?.completion?.status !== 'completed') {
+        fail('Playwright mutation: renaming the original tree after launch must not affect the frozen run', `${exitCode}\n${state.getOutput().slice(0, 800)}`);
+      } else if (
+        payload.measurementSources.manifest['tests/browser/node_modules/playwright-core'].sha256 !== pristineDigest
+      ) {
+        fail('Playwright mutation: the run executed bytes other than the frozen copy', 'recorded identity differs from the pristine tree');
+      } else {
+        ok('a post-launch mutation of the original installation leaves the running frozen experiment unaffected (C)');
+      }
+      rmSync(movedNm, { recursive: true, force: true });
     }
   }
 }

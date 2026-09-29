@@ -10,7 +10,7 @@ milestones that sit outside the publication sequence.
 
 ## Wired release gates
 
-The release workflow runs three evidence gates that a release tag must
+The release workflow runs four evidence gates that a release tag must
 pass before anything is built, attested or published. They run
 automatically on every `v*` tag, but the checklist records them because
 each one can block a tag on data that ages:
@@ -37,6 +37,18 @@ each one can block a tag on data that ages:
   strict ISO-8601 `tested_at` inside the 90-day window; blocked or
   pending rows never satisfy the claim. Re-run the qualification
   protocol when a release touches the decoy surface.
+- Accessibility qualification matrix:
+  `node tools/ci/validate-accessibility-qualification.mjs
+  tests/browser/qualification/accessibility-matrix.json`. The required
+  desktop rows are NVDA + Chrome (Windows), NVDA + Firefox (Windows),
+  VoiceOver + Safari (macOS) and one speech-recognition or switch-access
+  pass. Each pass row records exact browser and assistive-technology
+  versions, `zoom_percent: 200` from an actual zoom run, the
+  keyboard/live-region/focus/content-loss observations and an
+  `asset_identity` equal to the current canonical client asset digest.
+  Re-run the manual qualification when a release touches the widget's
+  accessibility surface, and no physical mobile device is part of this
+  gate.
 
 ## Step 1. Publish the package chain to Packagist
 

@@ -1,0 +1,43 @@
+{
+  "schema": "kiwicaptcha.accessibility-qualification/1",
+  "note": "The machine-readable manual accessibility qualification record, enforced by tools/ci/validate-accessibility-qualification.mjs as a release gate (workflows/release.yml). Scope is desktop: NVDA + Chrome (Windows), NVDA + Firefox (Windows), VoiceOver + Safari (macOS) and one speech-recognition or switch-access pass. Every required row must be status \"pass\" with a fresh tested_at and complete evidence: exact browser and assistive-technology versions (placeholders rejected), zoom_percent 200 (the actual release zoom run), keyboard/live_region/focus/content_loss observations all \"pass\", and asset_identity equal to the current canonical client asset digest (the release artifact identity, not a commit string). No physical mobile device appears in this gate. Rows: status manual_pending | pass | fail | blocked; required rows are exactly the four ids below and are release-blocking until they pass.",
+  "qualification_window_days": 90,
+  "rows": [
+    {
+      "id": "nvda-chrome-windows",
+      "product": "NVDA + Chrome",
+      "platform": "windows",
+      "required": true,
+      "status": "manual_pending",
+      "tested_at": null,
+      "evidence": null
+    },
+    {
+      "id": "nvda-firefox-windows",
+      "product": "NVDA + Firefox",
+      "platform": "windows",
+      "required": true,
+      "status": "manual_pending",
+      "tested_at": null,
+      "evidence": null
+    },
+    {
+      "id": "voiceover-safari-macos",
+      "product": "VoiceOver + Safari",
+      "platform": "macos",
+      "required": true,
+      "status": "manual_pending",
+      "tested_at": null,
+      "evidence": null
+    },
+    {
+      "id": "speech-or-switch-desktop",
+      "product": "Speech recognition or switch access",
+      "platform": "desktop",
+      "required": true,
+      "status": "manual_pending",
+      "tested_at": null,
+      "evidence": null
+    }
+  ]
+}
