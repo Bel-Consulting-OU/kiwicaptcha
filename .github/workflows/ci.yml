@@ -1159,6 +1159,16 @@ jobs:
         # mutate the tree mid-cell, and require a contamination abort (or
         # the frozen bytes recorded) with no completion marker.
         run: node tools/client-perf/test-measurement-freeze.mjs
+      - name: certifiable-run authority gates
+        # An occupied fixture port is a hard refusal; a --no-fixture run
+        # (external fixture, including a fake server that serves
+        # byte-identical assets while reinterpreting bits) can never be
+        # promoted or indexed; an in-process run can never be indexed; a
+        # run executed through the frozen launcher from a detached
+        # worktree of the committed bytes is certifiable, and a
+        # working-tree mutation while it runs never reaches its recorded
+        # identity.
+        run: node tools/client-perf/test-authority-gates.mjs
 
 
   # The accessibility acceptance suite and the curated cross-browser
@@ -2003,12 +2013,24 @@ jobs:
       - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, hard ratchet gate)
         env:
           KIWI_STRICT_BASELINE: '1'
-        run: php packages/kiwicaptcha/tools/perf-bench-risk.php
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --json-out "${RUNNER_TEMP}/perf-risk-inmemory.json"
       - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, hard ratchet gate)
         env:
           KIWI_STRICT_BASELINE: '1'
           KC_REDIS_URL: ${{ inputs.redis_url }}
-        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis --json-out "${RUNNER_TEMP}/perf-risk-redis.json"
+      - name: retain the latency run records (qualification evidence)
+        if: always()
+        # The controlled run must be auditable, not only terminal
+        # scrollback. The JSON records carry command, configuration,
+        # PHP/OS/CPU, Redis version, source commit, the measured
+        # distribution and the ratchet verdict.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: perf-risk-latency-records
+          path: ${{ runner.temp }}/perf-risk-*.json
+          if-no-files-found: warn
+          retention-days: 90
       - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1, barrier invariants gate; timings advisory)
         env:
           KC_REDIS_URL: ${{ inputs.redis_url }}

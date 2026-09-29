@@ -413,6 +413,57 @@ therefore freezes the experiment before the first browser launches
   `tools/client-perf/test-measurement-freeze.mjs`, which also proves
   the acceptance mutations above refuse inherited evidence at merge
   time, in the context comparison and at the gate.
+- **Owned-fixture guard.** Normal mode owns the fixture server and
+  refuses to run when its port is already occupied
+  (`client-perf.mjs` `bootFixture()`): an external server can serve
+  byte-identical page and assets while reinterpreting `/challenge` and
+  `/verify` (for example answering a `bits=18` query with a much
+  cheaper target), and no page/asset probe can see through that.
+  `--no-fixture` remains a development mode: the payload records
+  `fixture.mode: "external"` and every certifying route refuses the
+  run.
+- **Frozen execution origin.** A certifying run is re-executed from a
+  detached git worktree of the committed bytes by
+  `tools/client-perf/run-frozen.mjs`: the launcher refuses a dirty
+  tracked tree, creates the worktree at `HEAD`, links the untracked
+  runtime dependencies (Playwright `node_modules`, the Composer vendor
+  tree), and starts the harness from the frozen copy. The payload
+  records `harnessOrigin.mode: "frozen-detached-worktree"` plus the
+  commit and launcher hash. In-process runs stay available for
+  development, but `--promote-baseline`, `--source physical` and
+  `--physical-index` accept only owned-snapshot
+  frozen-detached-worktree runs. Both guards are exercised by
+  `tools/client-perf/test-authority-gates.mjs`, including a fake
+  fixture that serves the real page and real assets while cheapening
+  the difficulty.
+
+## Certifiable evidence: completion and origin on the device
+
+`merge-cells.mjs` refuses any run that does not carry the harness
+completion marker with status `completed` (an interrupted, failed or
+contaminated run is never evidence in either the lab or the physical
+path), and the physical path additionally requires the owned-fixture
+and frozen-worktree origins above. The emitted device evidence object
+records that state per contributing run:
+
+```json
+"physical_results": {
+  "physical-...": {
+    "measurement_context": { "schema": "...", "sha256": "..." },
+    "source_runs": [
+      { "completion": "completed", "marker": "kiwicaptcha.client-perf.completed.v1",
+        "measurement_sources_sha256": "...", "generated_at": "...", "run_digest": "..." }
+    ],
+    "mainstream-desktop:sha18:cold:files": { "...": "..." }
+  }
+}
+```
+
+The release validator requires the `source_runs` record on every
+physical device, so the original run's completion state survives row
+extraction and a later hand edit cannot smuggle in rows whose source
+run never cleanly completed. Focused recordings qualify: a clean run
+over a deliberately selected subset carries the marker.
 
 The committed maintenance baseline was re-bound on 2026-09-05: its
 identity block was regenerated from the current release asset bytes

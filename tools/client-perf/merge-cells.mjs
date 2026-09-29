@@ -102,14 +102,27 @@
  * its runs:
  *   { "physical_results": { "<device-id>": {
  *       "measurement_context": { "schema": ..., "sha256": ... },
+ *       "source_runs": [ { "completion": "completed", "marker": ...,
+ *         "measurement_sources_sha256": ..., "generated_at": ...,
+ *         "run_digest": ... } ],
  *       "<tier>:<difficulty>:<cache>:<asset-mode>": <row> } } }
  * so the release validator can prove the device's evidence was
  * measured against the current bytes/configuration and can never be
- * silently re-bound to client bytes the device never measured.
+ * silently re-bound to client bytes the device never measured, and so
+ * the completion state of every contributing run survives row
+ * extraction.
+ *
+ * Every consumed run must carry the clean completion marker (status
+ * "completed" plus the harness marker); physical evidence additionally
+ * requires fixture.mode "owned-snapshot" (the harness owned its server)
+ * and harnessOrigin.mode "frozen-detached-worktree" (the committed
+ * bytes were re-executed from a frozen worktree).
  */
 import { readFileSync } from 'node:fs';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
+import { sha256Hex } from './canonical-json.mjs';
 import {
+  COMPLETION_MARKER,
   buildMeasurementContext,
   currentReleaseMeasurementFields,
   measurementFieldDifferences,
@@ -117,6 +130,58 @@ import {
   recordedTierMismatches,
   runMeasurementFields,
 } from './measurement-context.mjs';
+
+/**
+ * A run may only feed evidence when it cleanly completed every cell it
+ * was configured to run (audit finding 2). The harness omits the
+ * completion marker from a crashed, interrupted or contaminated run on
+ * purpose; merge-cells has no completion check of its own on the
+ * physical path, and once rows are extracted from an incomplete run
+ * that state is gone. Focused recordings remain fine: a clean run over
+ * a deliberately selected subset carries the marker. What can never
+ * qualify is an incomplete execution, alone or combined with others
+ * until coverage is satisfied.
+ */
+function completionReasons(payload, runPath) {
+  const reasons = [];
+  const completion = payload.completion || {};
+  if (completion.status !== 'completed') {
+    reasons.push(
+      `${runPath} completion.status ${JSON.stringify(completion.status ?? null)} is not "completed": an interrupted, failed or contaminated execution can never feed evidence`,
+    );
+  }
+  if (completion.marker !== COMPLETION_MARKER) {
+    reasons.push(
+      `${runPath} completion.marker ${JSON.stringify(completion.marker ?? null)} is not ${JSON.stringify(COMPLETION_MARKER)}`,
+    );
+  }
+  return reasons;
+}
+
+/**
+ * The certifiable-origin gates (audit findings 1 and 3): physical
+ * evidence must come from a run that owned its fixture (an external
+ * server can reinterpret /challenge and /verify while serving
+ * byte-identical page and assets) and that executed the committed
+ * bytes from a frozen detached worktree (an in-process run loaded
+ * mutable source). Both are top-level, immutable payload fields.
+ */
+function certifiableOriginReasons(payload, runPath) {
+  const reasons = [];
+  const fixtureMode = payload.fixture && payload.fixture.mode;
+  if (fixtureMode !== 'owned-snapshot') {
+    reasons.push(
+      `${runPath} fixture.mode ${JSON.stringify(fixtureMode ?? null)} is not "owned-snapshot": a run that attached to a server it does not own can be served a cheaper challenge under the recorded difficulty queries`,
+    );
+  }
+  const originMode = payload.harnessOrigin && payload.harnessOrigin.mode;
+  if (originMode !== 'frozen-detached-worktree') {
+    reasons.push(
+      `${runPath} harnessOrigin.mode ${JSON.stringify(originMode ?? null)} is not "frozen-detached-worktree": only a run re-executed from a frozen worktree of the committed bytes can feed physical evidence (use tools/client-perf/run-frozen.mjs)`,
+    );
+  }
+  return reasons;
+}
 
 function percentile(sorted, p) {
   if (sorted.length === 0) return null;
@@ -196,13 +261,24 @@ const SUMMARY_METRICS = [
 // run and the field.
 const runPayloads = runs.map((runPath) => {
   let payload;
+  let raw;
   try {
-    payload = JSON.parse(readFileSync(runPath, 'utf8'));
+    raw = readFileSync(runPath, 'utf8');
+    payload = JSON.parse(raw);
   } catch (e) {
     console.error(`merge-cells: cannot read run file ${runPath}: ${e.message}`);
     process.exit(1);
   }
-  return { runPath, payload };
+  // The completion gate applies to every run any merge consumes
+  // (audit finding 2): a partial, failed or contaminated execution is
+  // not evidence in either the lab or the physical path.
+  const completionProblems = completionReasons(payload, runPath);
+  if (completionProblems.length) {
+    throw new Error(
+      `cannot merge performance runs measured against different client assets: an incomplete run cannot feed evidence\n${completionProblems.map((r) => `  - ${r}`).join('\n')}`,
+    );
+  }
+  return { runPath, payload, raw };
 });
 
 const currentAssets = canonicalClientAssets();
@@ -283,6 +359,17 @@ if (physicalIndex) {
   let deviceFields = null;
   let firstRunPath = null;
   for (const { runPath, payload } of runPayloads) {
+    // 0. The certifiable-origin gates (audit findings 1 and 3): physical
+    // evidence requires the harness to have owned its fixture and to
+    // have executed the committed bytes from a frozen detached
+    // worktree. A run recorded against an external fixture or executed
+    // in-process can never be stamped into the device index.
+    const originProblems = certifiableOriginReasons(payload, runPath);
+    if (originProblems.length) {
+      throw new Error(
+        `cannot use the run as physical evidence: its fixture/harness origin is not certifiable\n${originProblems.map((r) => `  - ${r}`).join('\n')}`,
+      );
+    }
     // 1. The run's own recorded facts. A missing or malformed recorded
     // fact refuses the run: the current tree is never substituted for
     // something the run did not record.
@@ -427,8 +514,19 @@ if (physicalIndex) {
   // measurement context ALL of its runs were recorded against (proved
   // equal to the current release context above), so the release
   // validator can bind this device's rows to the exact client bytes,
-  // harness, manifest and solver configuration they measured.
-  const index = { measurement_context: deviceMeasurementContext };
+  // harness, manifest and solver configuration they measured. It then
+  // records one source_runs entry per contributing run (audit finding
+  // 2): the clean completion state survives row extraction, so a run
+  // that was interrupted, failed or contaminated can never be smuggled
+  // in after the fact by editing the derived rows.
+  const sourceRuns = runPayloads.map(({ payload, raw }) => ({
+    completion: (payload.completion || {}).status ?? null,
+    marker: (payload.completion || {}).marker ?? null,
+    measurement_sources_sha256: (payload.measurementSources || {}).sha256 ?? null,
+    generated_at: payload.generated_at ?? null,
+    run_digest: sha256Hex(raw),
+  }));
+  const index = { measurement_context: deviceMeasurementContext, source_runs: sourceRuns };
   for (const [indexKey, aggs] of [...indexed.entries()].sort()) {
     const [difficulty, cache, mode] = indexKey.split(':');
     index[`${tier}:${difficulty}:${cache}:${mode}`] = buildRow(difficulty, cache, aggs, mode);

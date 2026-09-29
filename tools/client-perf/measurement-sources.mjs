@@ -36,6 +36,8 @@
  * authority:
  *
  *   - the harness source (tools/client-perf/client-perf.mjs),
+ *   - the frozen launcher that re-executes the harness from a detached
+ *     worktree of the committed bytes (tools/client-perf/run-frozen.mjs),
  *   - the asset-fingerprint policy (tools/client-perf/client-assets.mjs),
  *   - this freeze implementation and the canonical-JSON primitives it
  *     hashes with (tools/client-perf/measurement-sources.mjs,
@@ -78,6 +80,7 @@ export const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
 /** Plain files whose exact bytes determine the measurement. */
 export const SOURCE_FILE_PATHS = [
   'tools/client-perf/client-perf.mjs',
+  'tools/client-perf/run-frozen.mjs',
   'tools/client-perf/client-assets.mjs',
   'tools/client-perf/measurement-sources.mjs',
   'tools/client-perf/canonical-json.mjs',

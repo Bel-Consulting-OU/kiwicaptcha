@@ -114,6 +114,15 @@ export const HARNESS_REL_PATH = 'tools/client-perf/client-perf.mjs';
 export const EXECUTION_MANIFEST_REL_PATH = 'protocol/execution-v1.json';
 export const EXECUTION_MANIFEST_SCHEMA = 'kiwicaptcha.execution-v1/1';
 export const MEASUREMENT_CONTEXT_SCHEMA = 'kiwicaptcha.measurement-context/1';
+
+/**
+ * The completion marker a run must carry before ANY consumer treats it
+ * as evidence. The harness deliberately omits it when a run aborts, is
+ * interrupted or is contaminated; merge-cells and the loader modes
+ * require it, and the physical evidence records it per source run so
+ * the original run's completion state survives row extraction.
+ */
+export const COMPLETION_MARKER = 'kiwicaptcha.client-perf.completed.v1';
 export const MEASUREMENT_CONTEXT_SHA256_RE = /^[0-9a-f]{64}$/;
 export const HARNESS_SOURCE_SHA256_RE = /^[0-9a-f]{64}$/;
 

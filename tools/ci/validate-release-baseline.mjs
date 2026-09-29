@@ -244,6 +244,16 @@
  *      configuration) is a hard reason naming the device, in CI mode and
  *      release mode alike: physical qualification can never be silently
  *      re-bound to client bytes the device did not measure.
+ *  12b. per-device source-run records (completion binding): every
+ *      physical device object must also carry a non-empty source_runs
+ *      array recording, for each contributing run, completion
+ *      "completed" plus the harness completion marker, the
+ *      measurement-source manifest identity, the run's generated_at and
+ *      a digest of the source run file. merge-cells refuses incomplete,
+ *      external-fixture or in-process runs before indexing, and this
+ *      check keeps that state on the device itself, so a later hand
+ *      edit cannot smuggle in rows whose source run never cleanly
+ *      completed.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -329,9 +339,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from '../client-perf/client-assets.mjs';
 import {
+  COMPLETION_MARKER,
   MEASUREMENT_CONTEXT_SCHEMA,
   MEASUREMENT_CONTEXT_SHA256_RE,
   currentReleaseMeasurementContext,
+  currentReleaseMeasurementFields,
 } from '../client-perf/measurement-context.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -632,14 +644,15 @@ function main() {
     process.exit(1);
   }
   let schema;
-  let completionMarker;
+  // The completion marker is exported by the measurement-context module
+  // (single authority); it is no longer embedded in the harness source.
+  const completionMarker = COMPLETION_MARKER;
   let tierNames;
   let difficultyProfiles;
   let shaRepsDefault;
   let argonRepsDefault;
   try {
     schema = harnessConst(source, 'schema string', /const SCHEMA = '([^']+)';/);
-    completionMarker = harnessConst(source, 'completion marker', /const COMPLETION_MARKER = '([^']+)';/);
     const tiersMatch = source.match(/const TIERS = \{([\s\S]*?)\n\};/);
     if (!tiersMatch) {
       throw new Error('TIERS block');
@@ -1345,6 +1358,41 @@ function main() {
         reasons.push(`physical_results[${JSON.stringify(deviceId)}] is not an object of result-key -> row entries`);
         continue;
       }
+      // The source_runs record (audit finding 2): the completion state
+      // of every contributing run must survive row extraction. A device
+      // whose evidence was assembled from a run that was interrupted,
+      // failed or contaminated can never be certified, and the marker
+      // plus the manifest identity make that state tamper-evident.
+      const sourceRuns = index.source_runs;
+      if (!Array.isArray(sourceRuns) || sourceRuns.length === 0) {
+        reasons.push(`physical_results[${JSON.stringify(deviceId)}] carries no source_runs array (every physical device must record the clean completion state and manifest identity of each contributing run, or incomplete evidence could be smuggled in after row extraction)`);
+      } else {
+        const currentSourcesSha = currentReleaseMeasurementFields().sources.sha256;
+        sourceRuns.forEach((entry, i) => {
+          const where = `physical_results[${JSON.stringify(deviceId)}] source_runs[${i}]`;
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+            reasons.push(`${where} is not an object`);
+            return;
+          }
+          if (entry.completion !== 'completed') {
+            reasons.push(`${where} completion ${JSON.stringify(entry.completion ?? null)} is not "completed"`);
+          }
+          if (entry.marker !== COMPLETION_MARKER) {
+            reasons.push(`${where} marker ${JSON.stringify(entry.marker ?? null)} is not ${JSON.stringify(COMPLETION_MARKER)}`);
+          }
+          if (typeof entry.measurement_sources_sha256 !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(entry.measurement_sources_sha256)) {
+            reasons.push(`${where} measurement_sources_sha256 ${JSON.stringify(entry.measurement_sources_sha256 ?? null)} is not a full 64-hex measurement-source manifest identity`);
+          } else if (entry.measurement_sources_sha256 !== currentSourcesSha) {
+            reasons.push(`${where} measurement_sources_sha256 ${entry.measurement_sources_sha256} is not the current measurement-source manifest ${currentSourcesSha}`);
+          }
+          if (typeof entry.generated_at !== 'string' || Number.isNaN(Date.parse(entry.generated_at))) {
+            reasons.push(`${where} generated_at ${JSON.stringify(entry.generated_at ?? null)} is not a parseable timestamp`);
+          }
+          if (typeof entry.run_digest !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(entry.run_digest)) {
+            reasons.push(`${where} run_digest ${JSON.stringify(entry.run_digest ?? null)} is not a full 64-hex digest of the source run file`);
+          }
+        });
+      }
       const deviceContext = index.measurement_context;
       if (deviceContext === undefined || deviceContext === null) {
         reasons.push(`physical_results[${JSON.stringify(deviceId)}] carries no measurement_context (every physical device's evidence must be bound to the release measurement context it was measured against; physical qualification can never be re-bound to client bytes the device did not measure)`);
@@ -1366,7 +1414,7 @@ function main() {
       }
       for (const [rowKey, row] of Object.entries(index)) {
         if (rowKey.startsWith('multi-widget')) continue;
-        if (rowKey === 'measurement_context') continue; // device metadata, validated above
+        if (rowKey === 'measurement_context' || rowKey === 'source_runs') continue; // device metadata, validated above
         if (!row || typeof row !== 'object' || Array.isArray(row)) {
           reasons.push(`physical_results[${JSON.stringify(deviceId)}] row ${rowKey} is not an object`);
           continue;

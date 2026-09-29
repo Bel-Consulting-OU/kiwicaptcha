@@ -33,6 +33,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalClientAssets } from '../client-perf/client-assets.mjs';
 import {
+  COMPLETION_MARKER,
   buildMeasurementContext,
   canonicalJson,
   currentReleaseMeasurementContext,
@@ -99,7 +100,7 @@ function harnessFacts(source) {
 
 const HARNESS_SOURCE = readFileSync(HARNESS_FILE, 'utf8');
 const SCHEMA = harnessConst(HARNESS_SOURCE, 'schema string', /const SCHEMA = '([^']+)';/);
-const COMPLETION_MARKER = harnessConst(HARNESS_SOURCE, 'completion marker', /const COMPLETION_MARKER = '([^']+)';/);
+
 const SHA_REPS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'SHA rep default', /reps: (\d+), \/\/ SHA-256 solve repetitions/), 10);
 const ARGON_REPS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'Argon rep default', /argonReps: (\d+), \/\/ Argon2id solve repetitions/), 10);
 const ARGON_BITS_DEFAULT = parseInt(harnessConst(HARNESS_SOURCE, 'argon bits default', /argonBits: (\d+), \/\/ the real adaptive-risk ladder/), 10);
@@ -432,7 +433,18 @@ function deviceRepCount(difficulty) {
  * validator demands it on every physical device object.
  */
 function deviceIndex(deviceId, sampleFor = () => healthySample(), countFor = deviceRepCount, tier = RELEASE_TIER) {
-  const index = { measurement_context: currentReleaseMeasurementContext() };
+  const index = {
+    measurement_context: currentReleaseMeasurementContext(),
+    source_runs: [
+      {
+        completion: 'completed',
+        marker: COMPLETION_MARKER,
+        measurement_sources_sha256: CURRENT_SOURCES.sha256,
+        generated_at: nowIso(),
+        run_digest: 'a'.repeat(64),
+      },
+    ],
+  };
   for (const [difficulty, profile] of Object.entries(DIFFICULTIES)) {
     for (const cache of CACHE_STATES) {
       for (const mode of profile.assetModes) {
@@ -487,6 +499,8 @@ function runFixture(mutate) {
     harnessSha256: HARNESS_SOURCE_SHA256,
     clientAssets: canonicalClientAssets(),
     completion: { status: 'completed', marker: COMPLETION_MARKER },
+    fixture: { mode: 'owned-snapshot', owned: true, router: 'tests/browser/router.php', port: 8091, php: 'php' },
+    harnessOrigin: { mode: 'frozen-detached-worktree', commit: 'a'.repeat(40), launcherSha256: 'b'.repeat(64) },
     measurementSources: clone(CURRENT_SOURCES),
     methodology: {
       execution: {
@@ -2052,6 +2066,121 @@ selfCheck('provenance self-check: missing recorded facts are refused with exact 
     'manifest mutation: a device context minted from a different source manifest is not the current release context',
     runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-manifest')] }), false),
     ['physical_results["dev-manifest"]', 'is not the current release measurement context'],
+  );
+}
+
+// ── Certifiable-origin and completion gates (round-5 findings 1-3) ──
+
+{
+  const run = runFixture((p) => {
+    p.fixture = { mode: 'external', owned: false, router: 'tests/browser/router.php', port: 8091, php: 'php' };
+  });
+  reject('external fixture: a --no-fixture run can never be indexed as physical evidence', runMergeCells([run]), [
+    'fixture.mode "external" is not "owned-snapshot"',
+  ]);
+}
+
+{
+  const run = runFixture((p) => {
+    p.harnessOrigin = { mode: 'in-process', commit: null, launcherSha256: null };
+  });
+  reject('in-process origin: a run that loaded mutable source can never be indexed as physical evidence', runMergeCells([run]), [
+    'harnessOrigin.mode "in-process" is not "frozen-detached-worktree"',
+  ]);
+}
+
+{
+  const run = runFixture((p) => {
+    delete p.completion.marker;
+  });
+  reject('missing marker: a run without the completion marker can never be indexed', runMergeCells([run]), [
+    'completion.marker null is not',
+  ]);
+}
+
+{
+  const run = runFixture((p) => {
+    p.completion = { status: 'partial', marker: null };
+  });
+  reject('partial status: an explicitly partial run can never be indexed', runMergeCells([run]), [
+    'completion.status "partial" is not "completed"',
+  ]);
+}
+
+{
+  const run = runFixture((p) => {
+    p.completion = { status: 'contaminated', marker: null, contamination: { cell: 'x', reasons: ['drift'] } };
+  });
+  reject('contaminated status: a contaminated run can never be indexed', runMergeCells([run]), [
+    'completion.status "contaminated" is not "completed"',
+  ]);
+}
+
+{
+  // A crash after sufficient repetitions: the rows are complete but the
+  // process never marked completion.
+  const run = runFixture((p) => {
+    p.completion = { status: 'failed', error: 'browser crashed after the last repetition', marker: null };
+  });
+  reject('crash after sufficient repetitions: a failed run can never be indexed', runMergeCells([run]), [
+    'completion.status "failed" is not "completed"',
+  ]);
+}
+
+{
+  // Two incomplete runs whose union would cover the matrix: the first
+  // one is refused, so the union can never be assembled.
+  const runA = runFixture((p) => {
+    p.completion = { status: 'contaminated', marker: null };
+    for (const key of Object.keys(p.results)) {
+      if (!key.includes(':sha16:')) delete p.results[key];
+    }
+  });
+  const runB = runFixture((p) => {
+    for (const key of Object.keys(p.results)) {
+      if (key.includes(':sha16:')) delete p.results[key];
+    }
+  });
+  reject('union of two incomplete runs: an incomplete contributor can never be indexed', runMergeCells([runA, runB]), [
+    'completion.status "contaminated" is not "completed"',
+  ]);
+}
+
+// ── Source-run records on the device evidence (round-5 finding 2) ───
+
+{
+  const index = deviceIndex('dev-source-runs');
+  delete index.source_runs;
+  const payload = physicalPayload({ 'dev-source-runs': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'device without source_runs: row extraction cannot drop the completion state',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-source-runs')] }), false),
+    ['carries no source_runs array'],
+  );
+}
+
+{
+  const index = deviceIndex('dev-source-runs');
+  index.source_runs[0].completion = 'contaminated';
+  const payload = physicalPayload({ 'dev-source-runs': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'device with a contaminated source_run: the completion state is bound on the device',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-source-runs')] }), false),
+    ['completion "contaminated" is not "completed"'],
+  );
+}
+
+{
+  const index = deviceIndex('dev-source-runs');
+  index.source_runs[0].measurement_sources_sha256 = 'c'.repeat(64);
+  const payload = physicalPayload({ 'dev-source-runs': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'device with a mismatched source_run manifest identity',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-source-runs')] }), false),
+    ['is not the current measurement-source manifest'],
   );
 }
 

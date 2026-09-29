@@ -120,14 +120,22 @@
  *     marker only when the run traversed every configured cell
  *     without an error or an interrupt. A crashed or interrupted run
  *     writes its partial results WITHOUT the marker, and
- *     --promote-baseline refuses to promote any results file that
- *     lacks the marker or does not cover the full default matrix.
+ *     --promote-baseline, the physical evidence merge and the release
+ *     validator refuse to consume any run that lacks the marker or
+ *     does not cover the full default matrix.
+ *   - OWNED-FIXTURE GUARD: normal mode owns the fixture server and
+ *     refuses to run when its port is already occupied. An external
+ *     server can serve byte-identical page and assets while
+ *     reinterpreting /challenge and /verify, so --no-fixture is a
+ *     development mode only: the payload records fixture.mode
+ *     "external" and every certifying route refuses it.
  *
  * Usage:
  *   node tools/client-perf/client-perf.mjs [--tiers all] [--reps 50]
  *     [--argon-reps 20] [--samples N] [--cache both] [--assets both]
  *     [--seed N] [--sha-fixed-work 500] [--argon-fixed-work 3]
  *     [--fixture-port 8091] [--out FILE]
+ *   node tools/client-perf/run-frozen.mjs [same options]   # certifying
  *   node tools/client-perf/client-perf.mjs --quick
  *   node tools/client-perf/client-perf.mjs --promote-baseline FILE
  *   node tools/client-perf/client-perf.mjs --help
@@ -138,6 +146,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
+import { COMPLETION_MARKER } from './measurement-context.mjs';
 import {
   probeServedMeasurementBytes,
   probeServedPage,
@@ -170,11 +179,26 @@ try {
 
 const SCHEMA = 'kiwicaptcha.client-perf/3';
 
-// The completion marker: written into the results payload ONLY when the
-// run traversed every configured cell without an error or an interrupt.
-// The baseline loader (--promote-baseline) refuses any results file
-// that does not carry this marker with status "completed".
-const COMPLETION_MARKER = 'kiwicaptcha.client-perf.completed.v1';
+// The completion marker (single authority in measurement-context.mjs):
+// written into the results payload ONLY when the run traversed every
+// configured cell without an error or an interrupt. The baseline loader
+// (--promote-baseline), the physical evidence merge and the release
+// validator all refuse any run that does not carry this marker with
+// status "completed".
+
+// ── Frozen-execution origin (audit finding 3) ───────────────────────
+// A certifying run must never execute mutable source. The frozen
+// launcher (tools/client-perf/run-frozen.mjs) creates a detached git
+// worktree of the committed bytes, re-executes this harness from that
+// worktree, and marks the child with this environment. An in-process
+// run keeps the development path cheap but is recorded as in-process
+// and can never mint promoted or physical evidence.
+const FROZEN_ORIGIN = {
+  mode: process.env.KIWI_PERF_FROZEN === '1' ? 'frozen-detached-worktree' : 'in-process',
+  commit: process.env.KIWI_PERF_FROZEN_COMMIT ?? null,
+  launcherSha256: process.env.KIWI_PERF_FROZEN_LAUNCHER_SHA256 ?? null,
+  tree: process.env.KIWI_PERF_FROZEN_TREE ?? null,
+};
 
 // The live execution-grammar authority (audit finding 1):
 // protocol/execution-v1.json is the single source of the current
@@ -613,9 +637,15 @@ Options:
                           container in both tiers, so each tier's cells
                           measure its own bootstrap against the one
                           lazy interpreter fetch).
-  --fixture-port N        fixture server port (default 8091)
+  --fixture-port N        fixture server port (default 8091). The harness
+                          owns this server and refuses to run when the port
+                          is already occupied: an external server can serve
+                          byte-identical page and assets while reinterpreting
+                          /challenge and /verify, so reuse is never allowed.
   --no-fixture            attach to an already-running fixture (e.g. the
-                          playwright lane on 8085)
+                          playwright lane on 8085). External fixture mode:
+                          useful for development, recorded as external, and
+                          never eligible for promotion or physical evidence.
   --php BIN               php binary for the fixture (default php)
   --argon-bits N          argon2id target bits for the argon tier (default 4,
                           the real adaptive-risk ladder highest rung, retuned
@@ -632,12 +662,15 @@ Options:
                           fixed-work loop at the real envelope m=16384 KiB
                           t=3 p=1 (default 3)
   --promote-baseline FILE validate a completed results file (completion marker
-                          present, full default matrix covered, default sample
-                          sizes and the real argon ladder, and clientAssets
-                          equal to the current release asset set: a run measured
-                          against other bytes is refused, never warned) and write
-                          it as tools/client-perf/results/baseline.json; refuses
-                          any file without the marker (the incomplete-run guard)
+                          present, fixture owned by the harness, harness
+                          executed from a frozen detached worktree of the
+                          committed bytes, full default matrix covered,
+                          default sample sizes and the real argon ladder, and
+                          clientAssets equal to the current release asset set:
+                          a run measured against other bytes or another origin
+                          is refused, never warned) and write it as
+                          tools/client-perf/results/baseline.json; refuses any
+                          file without the marker (the incomplete-run guard)
   --no-multi-widget       skip the multiple-widget scenario
   --quick                 iteration mode: low-android + mainstream-desktop,
                           3 SHA / 2 Argon reps, cold and warm, inline and files
@@ -651,6 +684,14 @@ Output: machine-readable JSON (schema ${SCHEMA}) written to
   The committed baseline lives at
   tools/client-perf/results/baseline.json and is replaced ONLY through
   --promote-baseline with a completed full-matrix run.
+
+Certifying runs: execute the committed bytes through the frozen
+  launcher, which refuses a dirty tracked tree and re-executes this
+  harness from a detached git worktree of HEAD:
+    node tools/client-perf/run-frozen.mjs --tiers mainstream-desktop
+  In-process runs remain useful for development but are recorded as
+  in-process (and normal mode refuses a port it does not own), so they
+  can never be promoted or indexed as physical evidence.
 `);
 }
 
@@ -767,8 +808,27 @@ function waitForHttp(url, timeoutMs) {
   });
 }
 
+/**
+ * Boot the fixture. Returns { mode, child }:
+ *
+ *   owned-snapshot — normal mode. The harness refuses to run when the
+ *     port is already occupied: it serves EXCLUSIVELY from the
+ *     immutable snapshot the experiment was frozen against, and a
+ *     foreign server (however byte-identical its page and assets) can
+ *     reinterpret /challenge and /verify semantics. Owning the server
+ *     process is the only trustworthy fixture origin.
+ *   external — --no-fixture. The harness attaches to a server it does
+ *     not own; the payload records this mode and every certifying
+ *     route (--promote-baseline, --source physical, --physical-index)
+ *     refuses the run.
+ */
 async function bootFixture(opts, snapshot) {
-  if (opts.noFixture) return null;
+  if (opts.noFixture) {
+    console.log(
+      `external fixture mode: attaching to 127.0.0.1:${opts.fixturePort}; this run is recorded as external and can never mint promoted or physical evidence`,
+    );
+    return { mode: 'external', child: null };
+  }
   // Serve EXCLUSIVELY from the immutable snapshot the experiment was
   // frozen against (audit finding 1): on-disk edits cannot change the
   // bytes any cell receives. The working-tree drift check below still
@@ -781,31 +841,64 @@ async function bootFixture(opts, snapshot) {
     ? join(snapshot.snapshotRoot, 'tests', 'browser')
     : BROWSER_DIR;
   if (!existsSync(router)) {
+    removeMeasurementSnapshot(snapshot);
     console.error(`fixture router not found: ${router}`);
     process.exit(2);
   }
   const port = opts.fixturePort;
   const base = `http://127.0.0.1:${port}`;
-  const up = await waitForHttp(base, 800);
-  if (up) {
-    console.log(`fixture already answering on ${base}; reusing it`);
-    return null;
+  const occupied = await waitForHttp(base, 800);
+  if (occupied) {
+    removeMeasurementSnapshot(snapshot);
+    console.error(
+      `client-perf: port ${port} is already occupied; refusing to reuse a server the harness does not own. ` +
+        `An external fixture can serve byte-identical page and assets while reinterpreting the challenge semantics ` +
+        `(/challenge, /verify), so an occupied port is a hard refusal for a certifying run. ` +
+        `Stop the process on ${port}, or use --no-fixture for a development run (recorded as external; never eligible for promotion or physical evidence).`,
+    );
+    process.exit(3);
   }
   const child = spawn(opts.php, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, router], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const fixtureStderr = [];
   child.stderr.on('data', (d) => {
     const s = String(d).trim();
-    if (s && !s.includes('Accepted') && !s.includes('Closing')) process.stderr.write(`[fixture] ${s}\n`);
+    if (!s) return;
+    fixtureStderr.push(s);
+    if (!s.includes('Accepted') && !s.includes('Closing')) process.stderr.write(`[fixture] ${s}\n`);
   });
-  const ready = await waitForHttp(base, 20000);
-  if (!ready) {
-    console.error('fixture did not come up in time');
+  // Readiness races the child's exit: a child that lost the bind race
+  // (a foreign process grabbed the port between the check and the
+  // spawn) exits instead of answering, and that is a refusal, never a
+  // silent reuse of whatever answers.
+  const ready = await new Promise((resolvePromise) => {
+    const started = Date.now();
+    const tick = async () => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolvePromise({ ok: false, reason: `the fixture server exited before answering (code ${child.exitCode ?? child.signalCode})` });
+        return;
+      }
+      if (await waitForHttp(base, 200)) {
+        resolvePromise({ ok: true });
+        return;
+      }
+      if (Date.now() - started > 20000) {
+        resolvePromise({ ok: false, reason: 'the fixture server did not come up within 20 s' });
+        return;
+      }
+      setTimeout(tick, 250);
+    };
+    tick();
+  });
+  if (!ready.ok) {
     child.kill('SIGKILL');
+    removeMeasurementSnapshot(snapshot);
+    console.error(`client-perf: ${ready.reason}${fixtureStderr.length ? `\n  fixture stderr: ${fixtureStderr.slice(-5).join(' | ')}` : ''}`);
     process.exit(2);
   }
-  return child;
+  return { mode: 'owned-snapshot', child };
 }
 
 function tierContextOptions(tierName) {
@@ -2019,11 +2112,34 @@ function buildPayload(opts, ctx, completion) {
         note: 'the experiment is frozen at process startup (audit finding 1): every benchmark-defining repository input (harness source, asset-fingerprint policy, fixture workload router, execution manifest, release asset set, every canonical client asset, the PHP core source tree) is read, hashed and served from an immutable temporary copy before the first browser launches; the recorded manifest describes the bytes the repetitions actually ran against, buildPayload() never re-reads the tree for provenance, and every cell boundary re-verifies the working tree and the served asset/page bytes against the frozen hashes, aborting the run as contaminated on any drift.',
       },
     },
+    // The fixture origin is part of the certifiable measurement
+    // identity (audit finding 1): an owned snapshot server is the only
+    // trustworthy origin. An external server can serve byte-identical
+    // page and assets while reinterpreting /challenge and /verify
+    // semantics, so a run recorded against one is marked external and
+    // every certifying route refuses it. The occupied-port refusal in
+    // bootFixture() makes an accidental reuse impossible.
     fixture: {
+      mode: ctx.fixtureMode,
+      owned: ctx.fixtureMode === 'owned-snapshot',
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
       php: opts.php,
+      servedFrom: ctx.snapshot.snapshotRoot ? 'immutable-snapshot-copy' : null,
       note: 'opt-in difficulty knobs (bits/argon_bits/m_kib, algorithm=rsw with rsw_t for the time-lock rungs), the assets=files knob, and the execution arms (?execution=1 armed challenges raised to the live grammar by ?exec_cap=<manifest max>, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
+    },
+    // The execution origin (audit finding 3): a certifying run executes
+    // the committed bytes from a frozen detached worktree through the
+    // launcher, never the mutable working tree. In-process runs remain
+    // available for cheap development but cannot mint evidence.
+    harnessOrigin: {
+      mode: FROZEN_ORIGIN.mode,
+      commit: FROZEN_ORIGIN.commit,
+      launcherSha256: FROZEN_ORIGIN.launcherSha256,
+      note:
+        FROZEN_ORIGIN.mode === 'frozen-detached-worktree'
+          ? 'the launcher verified a clean tracked tree, created a detached git worktree of the recorded commit, and re-executed the harness from that frozen tree; the benchmark process never loaded mutable source'
+          : 'in-process execution from the working tree; the measurement sources are frozen before the first browser, but this run is not eligible for promotion or physical evidence (use tools/client-perf/run-frozen.mjs)',
     },
     tiers: Object.fromEntries(
       tierNames.map((t) => [
@@ -2093,6 +2209,23 @@ function promoteBaseline(file, baselinePath) {
   const reasons = [];
   if (payload.schema !== SCHEMA) {
     reasons.push(`schema ${payload.schema} is not the current ${SCHEMA}`);
+  }
+  // ── Certifiable-origin gates (audit findings 1 and 3) ────────────
+  // A promoted run must have owned its fixture (an external server can
+  // reinterpret /challenge and /verify while serving byte-identical
+  // assets) and must have executed the committed bytes from a frozen
+  // detached worktree (an in-process run loaded mutable source).
+  const fixtureMode = payload.fixture && payload.fixture.mode;
+  if (fixtureMode !== 'owned-snapshot') {
+    reasons.push(
+      `fixture mode ${JSON.stringify(fixtureMode ?? null)} is not owned-snapshot: a run that attached to a server it does not own can be served a cheaper challenge under the recorded difficulty queries, so it can never mint promoted evidence`,
+    );
+  }
+  const originMode = payload.harnessOrigin && payload.harnessOrigin.mode;
+  if (originMode !== 'frozen-detached-worktree') {
+    reasons.push(
+      `harness origin ${JSON.stringify(originMode ?? null)} is not frozen-detached-worktree: only a run re-executed from a frozen worktree of the committed bytes can mint promoted evidence (use tools/client-perf/run-frozen.mjs)`,
+    );
   }
   const completion = payload.completion || {};
   if (completion.status !== 'completed' || completion.marker !== COMPLETION_MARKER) {
@@ -2250,7 +2383,8 @@ async function main() {
     cells,
     executedOrder: [],
     results: {},
-    fixture,
+    fixtureChild: fixture.child,
+    fixtureMode: fixture.mode,
     browser: null,
     chromiumVersion: null,
     startedAt,
@@ -2325,7 +2459,7 @@ async function main() {
     throw e;
   } finally {
     if (ctx.browser) await ctx.browser.close().catch(() => {});
-    if (fixture) fixture.kill('SIGKILL');
+    if (ctx.fixtureChild) ctx.fixtureChild.kill('SIGKILL');
     removeMeasurementSnapshot(snapshot);
     const completed = completion.status === 'completed';
     const outFile = resultsOutFile(opts, completed);
@@ -2346,8 +2480,8 @@ process.on('SIGINT', () => {
   if (ctx.browser && ctx.browser.process) {
     try { ctx.browser.process().kill('SIGKILL'); } catch (e) {}
   }
-  if (ctx.fixture) {
-    try { ctx.fixture.kill('SIGKILL'); } catch (e) {}
+  if (ctx.fixtureChild) {
+    try { ctx.fixtureChild.kill('SIGKILL'); } catch (e) {}
   }
   removeMeasurementSnapshot(ctx.snapshot);
   try {
@@ -2368,8 +2502,8 @@ process.on('SIGTERM', () => {
   if (ctx.browser && ctx.browser.process) {
     try { ctx.browser.process().kill('SIGKILL'); } catch (e) {}
   }
-  if (ctx.fixture) {
-    try { ctx.fixture.kill('SIGKILL'); } catch (e) {}
+  if (ctx.fixtureChild) {
+    try { ctx.fixtureChild.kill('SIGKILL'); } catch (e) {}
   }
   removeMeasurementSnapshot(ctx.snapshot);
   try {
