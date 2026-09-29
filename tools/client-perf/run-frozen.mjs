@@ -147,6 +147,11 @@ for (const rel of ['tests/browser/node_modules']) {
 //     installations that merely report the same version can never share
 //     an evidence identity, and mutating the original cache after the
 //     copy cannot affect the running experiment.
+// The ambient PLAYWRIGHT_BROWSERS_PATH must be neutralized BEFORE
+// playwright-core is loaded: the package captures the browsers path at
+// import time, so deleting it afterwards would not affect resolution.
+const ambientBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+delete process.env.PLAYWRIGHT_BROWSERS_PATH;
 const browserRequire = createRequire(join(tree, 'tests', 'browser', 'package.json'));
 let chromiumApi;
 try {
@@ -157,13 +162,13 @@ try {
 }
 let browserExecutable;
 try {
-  const ambientBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
-  delete process.env.PLAYWRIGHT_BROWSERS_PATH;
   browserExecutable = chromiumApi.executablePath();
-  if (ambientBrowsersPath !== undefined) process.env.PLAYWRIGHT_BROWSERS_PATH = ambientBrowsersPath;
 } catch (e) {
   cleanup();
   refuse(`cannot resolve the Playwright Chromium executable: ${e.message}`);
+}
+if (ambientBrowsersPath !== undefined && ambientBrowsersPath !== '') {
+  console.log(`run-frozen: ignoring the ambient PLAYWRIGHT_BROWSERS_PATH ${JSON.stringify(ambientBrowsersPath)}; the certifying run resolves and copies the default installation`);
 }
 if (!browserExecutable || !existsSync(browserExecutable)) {
   cleanup();
