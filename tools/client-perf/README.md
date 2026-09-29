@@ -447,6 +447,26 @@ therefore freezes the experiment before the first browser launches
   covers all three, and the CI environments that compute the current
   identity install the tree with `npm ci` (verified to reproduce
   byte-identical tree digests).
+- **Frozen runtime inputs.** The certifying launcher refuses ambient
+  `NODE_OPTIONS` and injected `execArgv`, hands the child an allowlisted
+  environment, resolves the Playwright Chromium bundle (ignoring any
+  ambient `PLAYWRIGHT_BROWSERS_PATH`), copies it into the frozen run
+  directory and forces the child to that copy. The harness then records
+  a `runtimeIdentity`: the Node version/executable digest, the SELECTED
+  PHP binary's real path and digest (the `--php` flag is honoured, and
+  `environment.php` now describes that binary, never the first `php` on
+  `PATH`), the PHP configuration copied from the selected binary's
+  effective `php.ini` plus scan directory and hashed (the fixture server
+  launches with `PHPRC`/`PHP_INI_SCAN_DIR` pointing at the frozen
+  copies, so an ambient `auto_prepend_file` never reaches it), and the
+  whole Chromium bundle tree digest. The runtime digests are required
+  on every source run of the physical evidence and must agree across
+  the runs feeding one device, so two runners with the same reported
+  versions but different bytes can never share an evidence identity.
+  The authority corpus covers the NODE_OPTIONS refusal, the PHPRC and
+  `PHP_INI_SCAN_DIR` traps, an alternate `PLAYWRIGHT_BROWSERS_PATH`, a
+  custom `--php` binary, the original bundle renamed away mid-run and
+  the same-version-different-bytes case.
 
 ## Certifiable evidence: completion and origin on the device
 

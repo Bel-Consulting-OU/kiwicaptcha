@@ -372,7 +372,7 @@ The dimension is controlled by these knobs:
   invalidates the challenge. The gate is inert without an
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
-- `kiwi_captcha.execution_required_version` (int 1..4, default 1):
+- `kiwi_captcha.execution_required_version` (int 1..5, default 1):
   the server-owned required execution tier. When set above 1, an
   execution-armed request from a client below that tier is refused
   with the deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED`
@@ -386,8 +386,14 @@ The dimension is controlled by these knobs:
   spelling stays valid through the one-major-version compatibility
   window, so an existing deployment never needs to change its config.
 
-- `kiwi_captcha.execution_version` (int 1..4, default 1): the
-  node's execution-program grammar cap. Version 4 is the nested-tree
+- `kiwi_captcha.execution_version` (int 1..5, default 1): the
+  node's execution-program grammar cap. The upper bound is the core
+  generator maximum (`KiwiCaptcha\\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`),
+  so the deployable grammar can never lag the generator. Version 5 adds the
+  causal object-graph arms: fragment append, deep clone,
+  reparent, attribute reflection, event-phase dispatch, text mutation,
+  select-depth walking and URL canonicalization of the current node
+  (see docs/execution-v5-design.md). Version 4 is the nested-tree
   grammar: the child opcode (35) builds nodes under the current node
   and the depth probe (36) walks the real ancestor chain. Version 3
   is the sibling-index traversal grammar (opcode 34); version 2 is

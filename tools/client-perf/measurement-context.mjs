@@ -668,6 +668,53 @@ export function runMeasurementFields(runPayload) {
     reasons.push('run payload records no clientAssets block (the client bytes it measured)');
   }
 
+  // The frozen runtime identity: the Node/PHP/browser inputs the
+  // benchmark executed. Required and validated structurally; NEVER
+  // substituted from the current machine (it is device-specific), and
+  // deliberately not part of the canonical field set — it is bound per
+  // source run on the physical device evidence.
+  const runtimeRecord = runPayload.runtimeIdentity;
+  if (!runtimeRecord || typeof runtimeRecord !== 'object' || Array.isArray(runtimeRecord)) {
+    reasons.push('run payload records no runtimeIdentity block (the frozen Node/PHP/browser runtime inputs)');
+  } else {
+    const node = runtimeRecord.node;
+    if (
+      !node ||
+      typeof node !== 'object' ||
+      typeof node.version !== 'string' ||
+      node.version === '' ||
+      typeof node.executable !== 'string' ||
+      node.executable === '' ||
+      !HARNESS_SOURCE_SHA256_RE.test(node.executableSha256 ?? '')
+    ) {
+      reasons.push(`run payload runtimeIdentity.node ${JSON.stringify(node ?? null)} is not { version, executable, executableSha256 }`);
+    }
+    const php = runtimeRecord.php;
+    if (
+      !php ||
+      typeof php !== 'object' ||
+      typeof php.realpath !== 'string' ||
+      php.realpath === '' ||
+      !HARNESS_SOURCE_SHA256_RE.test(php.sha256 ?? '') ||
+      typeof php.version !== 'string' ||
+      php.version === '' ||
+      !HARNESS_SOURCE_SHA256_RE.test(php.configSha256 ?? '')
+    ) {
+      reasons.push(`run payload runtimeIdentity.php ${JSON.stringify(php ?? null)} is not { realpath, sha256, version, configSha256 }`);
+    }
+    const browser = runtimeRecord.browser;
+    if (
+      !browser ||
+      typeof browser !== 'object' ||
+      browser.unresolved === true ||
+      typeof browser.executable !== 'string' ||
+      browser.executable === '' ||
+      !HARNESS_SOURCE_SHA256_RE.test(browser.treeSha256 ?? '')
+    ) {
+      reasons.push(`run payload runtimeIdentity.browser ${JSON.stringify(browser ?? null)} is not a resolved { executable, treeSha256 } identity`);
+    }
+  }
+
   // The recorded measurement-source manifest (audit finding 1/2): the
   // frozen snapshot of every benchmark-defining authority the run was
   // executed against. Without it a run cannot be bound to a source

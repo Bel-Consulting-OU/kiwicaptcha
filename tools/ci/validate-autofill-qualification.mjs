@@ -84,6 +84,7 @@
  * validator itself in CI.
  */
 import { readFileSync } from 'node:fs';
+import { parseStrictIsoInstant } from './strict-iso-instant.mjs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -106,15 +107,6 @@ const SURFACE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * optional group makes the empty string a placeholder too.
  */
 const VERSION_PLACEHOLDER_PATTERN = /^(current|tbd|tba|unknown|blank|n\/?a|none|null|pending|unversioned|-+)?$/i;
-/**
- * A strict ISO-8601 calendar date, or a date-time that MUST carry a UTC
- * designator or numeric offset: an offset-less date-time would be parsed
- * in the validator runner's local timezone, never as qualification
- * evidence. The written calendar components are round-tripped below, so
- * an impossible date (2025-02-29, 2026-02-30, hour 24, minute 60,
- * second 60) is rejected instead of being normalized by Date.parse.
- */
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2}))?$/;
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY = resolve(SCRIPT_DIR, '..', '..', 'tests', 'browser', 'qualification', 'surfaces.json');
@@ -215,50 +207,11 @@ function loadRegistry(path, reasons) {
   return byId;
 }
 
-/**
- * The written calendar components of a strict ISO value, or null when
- * the shape does not match. The round-trip in isIsoDate() compares these
- * against the UTC construction, so Date.parse normalization (Feb 30 to
- * Mar 2, hour 24 to the next day, second 60 to the next minute) can
- * never turn an impossible timestamp into evidence.
- */
-function parseCalendarComponents(value) {
-  const match = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?)?/,
-  );
-  if (!match) return null;
-  return {
-    year: Number(match[1]),
-    month: Number(match[2]),
-    day: Number(match[3]),
-    hour: match[4] === undefined ? null : Number(match[4]),
-    minute: match[5] === undefined ? null : Number(match[5]),
-    second: match[6] === undefined ? null : Number(match[6]),
-    fraction: match[7] ?? '',
-  };
-}
-
 function isIsoDate(value) {
-  if (typeof value !== 'string' || !ISO_DATE_PATTERN.test(value)) return false;
-  const c = parseCalendarComponents(value);
-  if (c === null) return false;
-  const hh = c.hour ?? 0;
-  const mm = c.minute ?? 0;
-  const ss = c.second ?? 0;
-  const ms = c.fraction === '' ? 0 : Math.floor(Number(`0.${c.fraction}`) * 1000);
-  const constructed = new Date(Date.UTC(c.year, c.month - 1, c.day, hh, mm, ss, ms));
-  if (
-    constructed.getUTCFullYear() !== c.year ||
-    constructed.getUTCMonth() + 1 !== c.month ||
-    constructed.getUTCDate() !== c.day ||
-    constructed.getUTCHours() !== hh ||
-    constructed.getUTCMinutes() !== mm ||
-    constructed.getUTCSeconds() !== ss ||
-    constructed.getUTCMilliseconds() !== ms
-  ) {
-    return false;
-  }
-  return !Number.isNaN(Date.parse(value));
+  // The shared strict parser (tools/ci/strict-iso-instant.mjs): real
+  // calendar components, component and offset ranges validated, and a
+  // finite epoch required, so freshness checks can never be fooled.
+  return parseStrictIsoInstant(value) !== null;
 }
 
 function isVersionPlaceholder(value) {

@@ -145,21 +145,24 @@
  */
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
 import { COMPLETION_MARKER } from './measurement-context.mjs';
 import {
+  hashTreeDigest,
   probeServedMeasurementBytes,
   probeServedPage,
   removeMeasurementSnapshot,
   snapshotMeasurementSources,
+  treeStats,
   verifyMeasurementSources,
 } from './measurement-sources.mjs';
 import os from 'node:os';
 import net from 'node:net';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
+import { sha256Hex } from './canonical-json.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -847,6 +850,119 @@ function portIsOccupied(port, host = '127.0.0.1', timeoutMs = 700) {
 }
 
 /**
+ * The frozen runtime identity (audit finding 4). A certifying run must
+ * not execute unbound Node/PHP/browser runtime inputs: the Node binary
+ * and version are recorded, the SELECTED PHP binary is resolved to its
+ * real path and hashed, its effective configuration (loaded php.ini and
+ * scan directory) is copied into the immutable run directory and hashed
+ * (the fixture server launches with PHPRC/PHP_INI_SCAN_DIR pointing at
+ * the copies, so ambient PHPRC, PHP_INI_SCAN_DIR and auto_prepend_file
+ * can never reach it), and the Playwright Chromium bundle the browser
+ * actually launches from is hashed as a whole tree (two installations
+ * with the same version but different bytes can never share an
+ * identity). The manifest digest plus this runtime block are the run's
+ * provenance; the physical device evidence records the runtime digests
+ * per source run.
+ */
+function computeRuntimeIdentity(opts, snapshot) {
+  const identity = { node: null, php: null, browser: null };
+  identity.node = {
+    version: process.version,
+    executable: process.execPath,
+    executableSha256: sha256Hex(readFileSync(process.execPath)),
+  };
+
+  if (!opts.noFixture) {
+    const discoveryEnv = { ...process.env, PHPRC: '', PHP_INI_SCAN_DIR: '' };
+    let phpReal;
+    try {
+      phpReal = execFileSync(opts.php, ['-r', 'echo PHP_BINARY;'], { encoding: 'utf8', env: discoveryEnv }).trim();
+    } catch (e) {
+      throw new Error(`cannot resolve the PHP binary behind ${JSON.stringify(opts.php)}: ${e.message}`);
+    }
+    if (!phpReal || !existsSync(phpReal)) {
+      throw new Error(`the PHP binary behind ${JSON.stringify(opts.php)} did not resolve to a real path (got ${JSON.stringify(phpReal)})`);
+    }
+    const sha = sha256Hex(readFileSync(phpReal));
+    const version = execFileSync(phpReal, ['-v'], { encoding: 'utf8', env: discoveryEnv }).split('\n')[0].trim();
+    const iniText = execFileSync(phpReal, ['--ini'], { encoding: 'utf8', env: discoveryEnv });
+    const loadedRaw = (iniText.match(/Loaded Configuration File:\s*(.+)/) || [])[1];
+    const scanRaw = (iniText.match(/Scan for additional \.ini files in:\s*(.+)/) || [])[1];
+    const loaded = loadedRaw ? loadedRaw.trim() : '';
+    const scanDir = scanRaw ? scanRaw.trim() : '';
+    const configRoot = join(snapshot.snapshotRoot ?? mkdtempSync(join(os.tmpdir(), 'kiwicaptcha-php-config-')), 'php-config');
+    mkdirSync(configRoot, { recursive: true });
+    const frozenIni = join(configRoot, 'php.ini');
+    let copiedIni = false;
+    if (loaded && loaded !== '(none)' && existsSync(loaded)) {
+      copyFileSync(loaded, frozenIni);
+      copiedIni = true;
+    } else {
+      writeFileSync(frozenIni, '; no php.ini was loaded at discovery time\n');
+    }
+    const frozenScanDir = join(configRoot, 'scan');
+    mkdirSync(frozenScanDir, { recursive: true });
+    if (scanDir && scanDir !== '(none)' && existsSync(scanDir)) {
+      for (const entry of readdirSync(scanDir)) {
+        if (entry.endsWith('.ini')) {
+          copyFileSync(join(scanDir, entry), join(frozenScanDir, entry));
+        }
+      }
+    }
+    identity.php = {
+      binary: opts.php,
+      realpath: phpReal,
+      sha256: sha,
+      version,
+      iniLoaded: copiedIni ? loaded : null,
+      iniScanDir: scanDir && scanDir !== '(none)' ? scanDir : null,
+      configSha256: hashTreeDigest(configRoot),
+      frozenIni,
+      frozenScanDir,
+    };
+  }
+
+  let browserExecutable = null;
+  let browserVersion = null;
+  try {
+    browserExecutable = chromium.executablePath();
+    browserVersion = typeof chromium.version === 'function' ? chromium.version() : null;
+  } catch (e) {
+    browserExecutable = null;
+  }
+  if (browserExecutable && existsSync(browserExecutable)) {
+    let bundleRoot = dirname(browserExecutable);
+    while (bundleRoot !== dirname(bundleRoot) && !/^chromium(-headless-shell)?-\d+$/.test(basename(bundleRoot))) {
+      bundleRoot = dirname(bundleRoot);
+    }
+    const stats = treeStats(bundleRoot);
+    identity.browser = {
+      name: 'chromium',
+      version: browserVersion,
+      executable: browserExecutable,
+      bundleRoot,
+      browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH ?? null,
+      treeSha256: hashTreeDigest(bundleRoot),
+      files: stats.files,
+      bytes: stats.bytes,
+      unresolved: false,
+    };
+  } else {
+    identity.browser = {
+      name: 'chromium',
+      version: browserVersion,
+      executable: browserExecutable,
+      unresolved: true,
+      reason: 'the Playwright Chromium executable could not be resolved',
+    };
+  }
+  if (FROZEN_ORIGIN.mode === 'frozen-detached-worktree' && identity.browser.unresolved) {
+    throw new Error(`a certifying run requires a resolvable Chromium bundle: ${identity.browser.reason}`);
+  }
+  return identity;
+}
+
+/**
  * Boot the fixture. Returns { mode, child }:
  *
  *   owned-snapshot — normal mode. The harness refuses to run when the
@@ -860,7 +976,7 @@ function portIsOccupied(port, host = '127.0.0.1', timeoutMs = 700) {
  *     route (--promote-baseline, --source physical, --physical-index)
  *     refuses the run.
  */
-async function bootFixture(opts, snapshot) {
+async function bootFixture(opts, snapshot, runtime) {
   if (opts.noFixture) {
     console.log(
       `external fixture mode: attaching to 127.0.0.1:${opts.fixturePort}; this run is recorded as external and can never mint promoted or physical evidence`,
@@ -899,6 +1015,13 @@ async function bootFixture(opts, snapshot) {
   const child = spawn(opts.php, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, router], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // The fixture server launches against the FROZEN PHP configuration
+    // (copied at startup and hashed): ambient PHPRC, PHP_INI_SCAN_DIR
+    // and any auto_prepend_file can never reach the benchmark.
+    env:
+      runtime && runtime.php
+        ? { ...process.env, PHPRC: runtime.php.frozenIni, PHP_INI_SCAN_DIR: runtime.php.frozenScanDir }
+        : process.env,
   });
   const fixtureStderr = [];
   child.stderr.on('data', (d) => {
@@ -2002,17 +2125,25 @@ async function runMultiWidget(browser, opts, results) {
   }
 }
 
-function environment() {
+function environment(runtime = null) {
   const out = {
     os: `${os.type()} ${os.release()} (${os.arch()})`,
     machine: os.hostname(),
     node: process.version,
     cpus: os.cpus().length ? `${os.cpus().length} x ${os.cpus()[0].model.trim()}` : 'unknown',
   };
-  try {
-    out.php = execSync('php -v', { encoding: 'utf8' }).split('\n')[0];
-  } catch (e) {
-    out.php = 'unavailable';
+  if (runtime && runtime.php && typeof runtime.php.version === 'string' && runtime.php.version !== '') {
+    // The SELECTED PHP binary's version, never whichever php happens to
+    // be first on PATH (the --php flag must describe the binary that
+    // actually served the fixture).
+    out.php = runtime.php.version;
+    out.phpBinary = runtime.php.realpath;
+  } else {
+    try {
+      out.php = execSync('php -v', { encoding: 'utf8' }).split('\n')[0];
+    } catch (e) {
+      out.php = 'unavailable';
+    }
   }
   return out;
 }
@@ -2083,7 +2214,13 @@ function buildPayload(opts, ctx, completion) {
     // is the authority.
     harnessSha256: harnessEntry.sha256,
     chromium: ctx.chromiumVersion,
-    environment: environment(),
+    environment: environment(ctx.runtime),
+    // The run-derived runtime identity (audit finding 4): the exact
+    // Node/PHP/browser inputs the frozen run executed. Validated as a
+    // required recorded fact; deliberately NOT part of the machine-
+    // independent measurement context (it is device-specific), it is
+    // bound per source run on the physical device evidence instead.
+    runtimeIdentity: ctx.runtime,
     clientAssets: snapshotClientAssets(snapshot),
     // The canonical measurement-source manifest the run was frozen
     // against (audit finding 1/2): every benchmark-defining repository
@@ -2345,8 +2482,64 @@ function contaminationError(reasons, label) {
  * sha256, and the page this cell is about to load must be attributable
  * to the frozen source set. Any mismatch aborts the run.
  */
+/**
+ * The cheap per-cell runtime checks: the Node executable, the selected
+ * PHP binary and the frozen PHP configuration must still hash to their
+ * recorded identities. The Chromium bundle is hashed once at startup
+ * (and once before the completion marker) because hashing hundreds of
+ * megabytes per cell would distort the measurement.
+ */
+function verifyRuntimeIdentity(runtime) {
+  const reasons = [];
+  if (runtime && runtime.node) {
+    try {
+      if (sha256Hex(readFileSync(process.execPath)) !== runtime.node.executableSha256) {
+        reasons.push('the Node executable changed during the run');
+      }
+    } catch (e) {
+      reasons.push(`the Node executable cannot be re-read (${e.message})`);
+    }
+  }
+  if (runtime && runtime.php) {
+    try {
+      if (sha256Hex(readFileSync(runtime.php.realpath)) !== runtime.php.sha256) {
+        reasons.push(`the PHP binary ${runtime.php.realpath} changed during the run`);
+      }
+    } catch (e) {
+      reasons.push(`the PHP binary cannot be re-read (${e.message})`);
+    }
+    try {
+      if (hashTreeDigest(dirname(runtime.php.frozenIni)) !== runtime.php.configSha256) {
+        reasons.push('the frozen PHP configuration changed during the run');
+      }
+    } catch (e) {
+      reasons.push(`the frozen PHP configuration cannot be re-read (${e.message})`);
+    }
+  }
+  return reasons;
+}
+
+/** The full Chromium bundle hash, checked at run boundaries only. */
+function verifyBrowserBundle(runtime) {
+  if (!runtime || !runtime.browser || runtime.browser.unresolved) {
+    return runtime && runtime.browser && runtime.browser.unresolved && FROZEN_ORIGIN.mode === 'frozen-detached-worktree'
+      ? ['the Chromium bundle was not resolved for a certifying run']
+      : [];
+  }
+  try {
+    if (hashTreeDigest(runtime.browser.bundleRoot) !== runtime.browser.treeSha256) {
+      return [`the Chromium bundle ${runtime.browser.bundleRoot} changed during the run`];
+    }
+  } catch (e) {
+    return [`the Chromium bundle cannot be re-read (${e.message})`];
+  }
+  return [];
+}
+
 async function verifyCellMeasurementSources(ctx, cell) {
   const label = `${cell.tier}:${cell.difficulty}:${cell.cache}:${cell.assets}`;
+  const runtimeDrift = verifyRuntimeIdentity(ctx.runtime);
+  if (runtimeDrift.length) throw contaminationError(runtimeDrift, label);
   const drift = verifyMeasurementSources(ctx.snapshot);
   if (drift.length) throw contaminationError(drift, label);
   const base = `http://127.0.0.1:${ctx.opts.fixturePort}`;
@@ -2410,9 +2603,25 @@ async function main() {
     `measurement sources frozen (${Object.keys(snapshot.manifest).length} entries, manifest sha256 ${snapshot.manifestSha256})` +
       (snapshot.snapshotRoot ? ` — serving the immutable snapshot at ${snapshot.snapshotRoot}` : ' — external fixture; served bytes are probed against the frozen hashes'),
   );
+  // ── Freeze the runtime inputs (audit finding 4) ──────────────────
+  // Before the fixture boots or any browser launches: resolve and hash
+  // the selected PHP binary and copy its effective configuration, hash
+  // the Node executable, and hash the whole Chromium bundle the browser
+  // will launch from.
+  let runtime;
+  try {
+    runtime = computeRuntimeIdentity(opts, snapshot);
+  } catch (e) {
+    removeMeasurementSnapshot(snapshot);
+    console.error(`client-perf: cannot freeze the runtime identity: ${e.message}`);
+    process.exit(2);
+  }
+  console.log(
+    `runtime frozen: node ${runtime.node.version}, php ${runtime.php ? `${runtime.php.version} (${runtime.php.realpath})` : 'external-fixture mode'}, chromium ${runtime.browser.version ?? 'unresolved'} bundle sha256 ${runtime.browser.treeSha256 ? runtime.browser.treeSha256.slice(0, 12) : '(unresolved)'}`,
+  );
   const seed = opts.seed ?? Math.floor(Date.now());
   const cells = seededShuffle(buildCellList(opts, tierNames), mulberry32(seed));
-  const fixture = await bootFixture(opts, snapshot);
+  const fixture = await bootFixture(opts, snapshot, runtime);
   const startedAt = new Date().toISOString();
   const ctx = {
     opts,
@@ -2427,6 +2636,7 @@ async function main() {
     chromiumVersion: null,
     startedAt,
     snapshot,
+    runtime,
     sourceVerifications: 0,
   };
   runCtx = ctx;
@@ -2484,6 +2694,8 @@ async function main() {
     // scenario) must not produce a promotable file.
     const finalDrift = verifyMeasurementSources(ctx.snapshot);
     if (finalDrift.length) throw contaminationError(finalDrift, 'run completion');
+    const finalRuntimeDrift = [...verifyRuntimeIdentity(ctx.runtime), ...verifyBrowserBundle(ctx.runtime)];
+    if (finalRuntimeDrift.length) throw contaminationError(finalRuntimeDrift, 'run completion');
     completion.status = 'completed';
     completion.marker = COMPLETION_MARKER;
   } catch (e) {

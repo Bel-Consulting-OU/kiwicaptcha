@@ -553,6 +553,50 @@ final class ExecutionChallengeDimensionTest extends TestCase
         }
     }
 
+    public function testRequiredExecutionVersionFiveIssuesVersionFiveToCapableClients(): void
+    {
+        // The ladder's current maximum: a client that advertises v5
+        // under the required tier 5, with the node cap 5 and the
+        // confirmed central floor 5, receives the v5 causal
+        // object-graph grammar, the record stamps version 5, and the
+        // full solve verifies end to end.
+        $storage = null;
+        [$payload, $trace, $expected, $counter] = $this->solvableArmedDraw(function () use (&$storage): array {
+            [$response, $store] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '5', 5, 5);
+            self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+            $storage = $store;
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertArrayHasKey('execution_program', $payload);
+
+            return $payload;
+        });
+        self::assertSame(5, $this->programVersion($payload['execution_program']), 'the required tier issues version 5 to a capable client');
+        self::assertMatchesRegularExpression(
+            '/d(frag|clone|repar|reflec|phase|urlc|mutate|sdep)\(/',
+            $trace,
+            'the version-5 grammar carries a causal object-graph arm',
+        );
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-5 solve must verify');
+    }
+
+    public function testRequiredExecutionVersionFiveRefusesAClientAdvertisingFour(): void
+    {
+        // The converse capability case: required 5 with a client that
+        // advertises 4 (or less) is refused with the deterministic
+        // client-unsupported outcome, never downgraded to v4 and never
+        // issued an unarmed challenge.
+        foreach (['4', '3', null] as $capability) {
+            [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', $capability, 5, 5);
+            $label = 'client capability '.var_export($capability, true);
+            self::assertSame(422, $response->getStatusCode(), $label.' must be refused');
+            $body = json_decode((string) $response->getContent(), true);
+            self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, $label.' refusal code');
+            self::assertArrayNotHasKey('execution_program', $body, $label.' receives no weaker grammar');
+            self::assertArrayNotHasKey('challenge', $body, $label.' receives no challenge');
+        }
+    }
+
     public function testVersion3GrammarIsIssuedWhenClientConfigAndFloorAllReachThree(): void
     {
         // The version ladder reaches 3 (the sibling-index traversal

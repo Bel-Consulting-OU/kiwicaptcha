@@ -146,6 +146,32 @@ export const SERVED_COPY_DIRS = [];
 
 export const ASSET_DIR_REL = 'packages/kiwicaptcha-wasm/assets';
 
+/**
+ * The canonical digest of a directory tree: sha256 over the canonical
+ * JSON of { relative path -> sha256 }, files only, sorted walks. Used
+ * for the measurement-source trees and for the frozen runtime bundles
+ * (the Playwright browser install) so two installations with different
+ * bytes can never share an identity.
+ */
+export function hashTreeDigest(treeRoot) {
+  const entries = {};
+  for (const rel of listFilesRecursive(treeRoot)) {
+    entries[rel] = sha256Hex(readFileSync(join(treeRoot, rel)));
+  }
+  return sha256Hex(canonicalJson(entries));
+}
+
+/** { files, bytes } of a directory tree. */
+export function treeStats(treeRoot) {
+  let files = 0;
+  let bytes = 0;
+  for (const rel of listFilesRecursive(treeRoot)) {
+    files += 1;
+    bytes += statSync(join(treeRoot, rel)).size;
+  }
+  return { files, bytes };
+}
+
 function listFilesRecursive(root) {
   const out = [];
   const walk = (dir) => {

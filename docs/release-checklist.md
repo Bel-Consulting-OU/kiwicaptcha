@@ -45,10 +45,12 @@ each one can block a tag on data that ages:
   pass. Each pass row records exact browser and assistive-technology
   versions, `zoom_percent: 200` from an actual zoom run, the
   keyboard/live-region/focus/content-loss observations and an
-  `asset_identity` equal to the current canonical client asset digest.
-  Re-run the manual qualification when a release touches the widget's
-  accessibility surface, and no physical mobile device is part of this
-  gate.
+  `asset_identity` equal to the current canonical client asset digest,
+  and an Ed25519 signature over the canonical evidence object from a
+  tester whose public key is provisioned in
+  `tests/browser/qualification/tester-keys.json`. Re-run the manual
+  qualification when a release touches the widget's accessibility
+  surface, and no physical mobile device is part of this gate.
 
 ## Step 1. Publish the package chain to Packagist
 

@@ -307,7 +307,7 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical), `min_execution_version <= 4` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical), `min_execution_version <= 5` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative.
   - the required execution tier is satisfiable, only when `risk.execution_challenge` is on. The effective fleet tier is the policy minimum of the node's `kiwi_captcha.execution_version` cap, the central `min_execution_version` floor (absent or 0 counts as version 1) and the generator's maximum execution version.
     A configured `kiwi_captcha.execution_required_version` above the effective tier refuses readiness (503 `security_policy_incompatible:execution_required_R_effective_E`), because every armed request would refuse every client until the confirmed floor reaches the required tier.
@@ -476,6 +476,13 @@ measurement. Version 3 adds a second constructed node and the
 sibling-index traversal probe (opcode 34), a real DOM walk. Version 4
 adds the nested-tree ops: opcode 35 builds a child under the current
 node and the depth probe (opcode 36) walks the real ancestor chain.
+Version 5 is the causal object-graph grammar: fragment append, deep
+clone, reparent, attribute reflection, event-phase dispatch, text
+mutation, select-depth walking and URL canonicalization of the
+current node (see docs/execution-v5-design.md). The deployable
+maximum is the core generator's `MAX_EXECUTION_VERSION`; the Symfony
+configuration bounds derive from that constant, so the production
+integration can never cap below the grammar the register ships.
 Older binaries and stale open pages only know version 1, so the newer
 grammars must never reach them: a mixed fleet cannot tell the
 grammars apart by protocol_version alone, since every execution

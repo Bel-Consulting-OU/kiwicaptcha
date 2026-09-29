@@ -362,6 +362,7 @@ if (physicalIndex) {
     process.exit(1);
   }
   let deviceFields = null;
+  let deviceRuntime = null;
   let firstRunPath = null;
   for (const { runPath, payload } of runPayloads) {
     // 0. The certifiable-origin gates (audit findings 1 and 3): physical
@@ -415,7 +416,18 @@ if (physicalIndex) {
       );
     }
     const normalizedFields = { ...fields, difficulties: currentFields.difficulties };
-    // 3. Multiple runs feeding one device must record one context.
+    // 3. Multiple runs feeding one device must record one context AND
+    //    one frozen runtime identity (audit finding 4): the Node/PHP/
+    //    browser bytes a device executed are part of its evidence, so
+    //    runs with different runtime digests can never be folded into a
+    //    single device record.
+    const runRuntime = {
+      node_version: (payload.runtimeIdentity || {}).node?.version ?? null,
+      node_executable_sha256: (payload.runtimeIdentity || {}).node?.executableSha256 ?? null,
+      php_binary_sha256: (payload.runtimeIdentity || {}).php?.sha256 ?? null,
+      php_config_sha256: (payload.runtimeIdentity || {}).php?.configSha256 ?? null,
+      browser_tree_sha256: (payload.runtimeIdentity || {}).browser?.treeSha256 ?? null,
+    };
     if (deviceFields !== null) {
       const runDifferences = measurementFieldDifferences(normalizedFields, deviceFields);
       if (runDifferences.length) {
@@ -423,6 +435,13 @@ if (physicalIndex) {
           `cannot merge performance runs measured against different client assets: ${runPath} recorded measurement facts disagree with those of ${firstRunPath} (every run feeding one device must share one measurement context)\n${runDifferences.map((r) => `  - ${r}`).join('\n')}`
         );
       }
+      if (JSON.stringify(deviceRuntime) !== JSON.stringify(runRuntime)) {
+        throw new Error(
+          `cannot merge performance runs measured against different client assets: ${runPath} recorded runtime inputs disagree with those of ${firstRunPath} (every run feeding one device must share one frozen Node/PHP/browser identity)`,
+        );
+      }
+    } else {
+      deviceRuntime = runRuntime;
     }
     // 4. Every recorded fact must equal the current release fact.
     const differences = measurementFieldDifferences(normalizedFields, currentFields);
@@ -561,6 +580,17 @@ if (physicalIndex) {
     measurement_sources_sha256: (payload.measurementSources || {}).sha256 ?? null,
     generated_at: payload.generated_at ?? null,
     run_digest: sha256Hex(raw),
+    // The frozen runtime inputs (audit finding 4): the device evidence
+    // keeps the exact Node/PHP/browser bytes the run executed, so two
+    // runners with the same reported versions but different runtime
+    // bytes can never share an evidence identity.
+    runtime: {
+      node_version: (payload.runtimeIdentity || {}).node?.version ?? null,
+      node_executable_sha256: (payload.runtimeIdentity || {}).node?.executableSha256 ?? null,
+      php_binary_sha256: (payload.runtimeIdentity || {}).php?.sha256 ?? null,
+      php_config_sha256: (payload.runtimeIdentity || {}).php?.configSha256 ?? null,
+      browser_tree_sha256: (payload.runtimeIdentity || {}).browser?.treeSha256 ?? null,
+    },
   }));
   const index = { measurement_context: deviceMeasurementContext, source_runs: sourceRuns };
   for (const [indexKey, aggs] of [...indexed.entries()].sort()) {

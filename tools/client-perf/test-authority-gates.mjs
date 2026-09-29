@@ -33,12 +33,12 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256Hex } from './canonical-json.mjs';
-import { snapshotMeasurementSources, verifyMeasurementSources } from './measurement-sources.mjs';
+import { hashTreeDigest, snapshotMeasurementSources, verifyMeasurementSources } from './measurement-sources.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -505,6 +505,183 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
       fail('vendor trap: the manifest must not carry vendor entries', 'vendor path found');
     } else {
       ok('an altered Composer vendor tree is ignored entirely: the fixture loads only hashed source trees and the identity is unchanged');
+    }
+  }
+}
+
+// ── 6. The frozen runtime inputs (round-6 finding 4) ────────────────
+
+// Ambient Node controls are refused outright.
+{
+  const state = spawnSync(process.execPath, [LAUNCHER, ...HARNESS_ARGS, '--fixture-port', String(await freePort()), '--out', join(FIXTURE_DIR, 'node-options.json')], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_OPTIONS: '--require /tmp/does-not-exist.js' },
+  });
+  if (state.status === 0 || !/NODE_OPTIONS is set/.test(`${state.stdout}${state.stderr}`)) {
+    fail('NODE_OPTIONS must be refused by the launcher', `${state.status}\n${(state.stdout || '').slice(0, 400)}${(state.stderr || '').slice(0, 400)}`);
+  } else {
+    ok('a certifying launcher refuses ambient NODE_OPTIONS');
+  }
+  const execArgv = spawnSync(process.execPath, ['--no-warnings', LAUNCHER, ...HARNESS_ARGS, '--fixture-port', String(await freePort()), '--out', join(FIXTURE_DIR, 'exec-argv.json')], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  if (execArgv.status === 0 || !/unexpected Node execArgv/.test(`${execArgv.stdout}${execArgv.stderr}`)) {
+    fail('unexpected execArgv must be refused by the launcher', `${execArgv.status}\n${(execArgv.stdout || '').slice(0, 400)}${(execArgv.stderr || '').slice(0, 400)}`);
+  } else {
+    ok('a certifying launcher refuses injected Node execArgv');
+  }
+}
+
+// PHPRC and PHP_INI_SCAN_DIR with an auto_prepend_file are neutralized:
+// the sentinel file must never appear and the run must complete.
+{
+  const sentinel = join(FIXTURE_DIR, 'prepend-sentinel');
+  const prepend = join(FIXTURE_DIR, 'evil-prepend.php');
+  const evilIni = join(FIXTURE_DIR, 'evil-php.ini');
+  const scanDir = join(FIXTURE_DIR, 'evil-scan');
+  mkdirSync(scanDir, { recursive: true });
+  writeFileSync(prepend, `<?php file_put_contents(${JSON.stringify(sentinel)}, "executed\\n");\n`);
+  writeFileSync(evilIni, `auto_prepend_file=${prepend}\n`);
+  writeFileSync(join(scanDir, 'evil.ini'), `auto_prepend_file=${prepend}\n`);
+  const out = join(FIXTURE_DIR, 'phprc-trap.json');
+  const state = spawnSync(process.execPath, [HARNESS, ...HARNESS_ARGS, '--fixture-port', String(await freePort()), '--out', out], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, PHPRC: evilIni, PHP_INI_SCAN_DIR: scanDir },
+  });
+  const payload = readRun(out);
+  if (existsSync(sentinel)) {
+    fail('PHPRC/PHP_INI_SCAN_DIR trap: the auto_prepend_file executed', 'the fixture server used ambient PHP configuration');
+  } else if (state.status !== 0 || payload?.completion?.status !== 'completed') {
+    fail('PHPRC/PHP_INI_SCAN_DIR trap: the run must complete with the frozen configuration', `${state.status}\n${(state.stderr || '').slice(0, 600)}`);
+  } else {
+    ok('ambient PHPRC and PHP_INI_SCAN_DIR auto_prepend_file traps never reach the frozen fixture server');
+  }
+}
+
+// A custom --php binary is resolved, hashed and reported (never the
+// first php on PATH).
+{
+  const which = spawnSync('bash', ['-lc', 'command -v php'], { encoding: 'utf8' });
+  const phpPath = which.stdout.trim();
+  if (!phpPath) {
+    ok('no php on PATH; the --php identity case is covered by the runtime smoke');
+  } else {
+    const out = join(FIXTURE_DIR, 'custom-php.json');
+    const state = spawnSync(process.execPath, [HARNESS, ...HARNESS_ARGS, '--php', phpPath, '--fixture-port', String(await freePort()), '--out', out], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    });
+    const payload = readRun(out);
+    const expectedSha = sha256Hex(readFileSync(phpPath));
+    if (state.status !== 0 || payload?.completion?.status !== 'completed') {
+      fail('custom --php: the run must complete', `${state.status}\n${(state.stderr || '').slice(0, 600)}`);
+    } else if (payload.runtimeIdentity?.php?.realpath !== phpPath || payload.runtimeIdentity.php.sha256 !== expectedSha) {
+      fail('custom --php: the recorded binary identity must be the selected binary', JSON.stringify(payload.runtimeIdentity?.php));
+    } else if (payload.environment?.phpBinary !== phpPath) {
+      fail('custom --php: environment.phpBinary must be the selected binary', JSON.stringify(payload.environment));
+    } else {
+      ok('a custom --php binary is resolved, hashed and reported');
+    }
+  }
+}
+
+// An alternate PLAYWRIGHT_BROWSERS_PATH is neutralized: the launcher
+// resolves the default installation and forces the child to its copy.
+{
+  const alternate = join(FIXTURE_DIR, 'alternate-browsers');
+  mkdirSync(join(alternate, 'chromium-1', 'chrome-mac'), { recursive: true });
+  writeFileSync(join(alternate, 'chromium-1', 'chrome-mac', 'fake'), 'not a browser');
+  const out = join(FIXTURE_DIR, 'browsers-path.json');
+  const state = spawnSync(process.execPath, [LAUNCHER, ...HARNESS_ARGS, '--fixture-port', String(await freePort()), '--out', out], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: alternate },
+  });
+  const payload = readRun(out);
+  if (state.status !== 0 || payload?.completion?.status !== 'completed') {
+    fail('PLAYWRIGHT_BROWSERS_PATH: the launcher must neutralize the alternate path', `${state.status}\n${(state.stderr || '').slice(0, 600)}`);
+  } else if ((payload.runtimeIdentity?.browser?.executable || '').includes('alternate-browsers')) {
+    fail('PLAYWRIGHT_BROWSERS_PATH: the run executed the alternate installation', JSON.stringify(payload.runtimeIdentity?.browser));
+  } else if (!/^[0-9a-f]{64}$/.test(payload.runtimeIdentity?.browser?.treeSha256 || '')) {
+    fail('PLAYWRIGHT_BROWSERS_PATH: the frozen browser identity is missing', JSON.stringify(payload.runtimeIdentity?.browser));
+  } else {
+    ok('an alternate PLAYWRIGHT_BROWSERS_PATH is neutralized and the frozen bundle identity recorded');
+  }
+}
+
+// Mutating the ORIGINAL browser cache after the frozen copy cannot
+// affect the running experiment: the second tier launches after the
+// original bundle is renamed away.
+{
+  const browsersJson = JSON.parse(readFileSync(join(REPO_ROOT, 'tests', 'browser', 'node_modules', 'playwright-core', 'browsers.json'), 'utf8'));
+  const revision = browsersJson.browsers.find((b) => b.name === 'chromium').revision;
+  const candidates = [
+    join(process.env.HOME ?? '', 'Library', 'Caches', 'ms-playwright', `chromium-${revision}`),
+    join(process.env.HOME ?? '', '.cache', 'ms-playwright', `chromium-${revision}`),
+  ];
+  const cacheBundle = candidates.find((p) => existsSync(p));
+  if (!cacheBundle) {
+    ok('browser cache absent; the mid-run mutation case is covered by the frozen copy design');
+  } else {
+    const moved = `${cacheBundle}.moved-authority-test`;
+    const state = startFrozen('browser-rename', [...HARNESS_ARGS, '--tiers', 'mainstream-desktop,low-desktop']);
+    const firstRepDeadline = Date.now() + 240000;
+    let firstRep = false;
+    while (Date.now() < firstRepDeadline && !firstRep) {
+      if (/rep 1\/2:/.test(state.getOutput())) firstRep = true;
+      else if (state.child.exitCode !== null) break;
+      else await new Promise((r) => setTimeout(r, 100));
+    }
+    let renamed = false;
+    if (!firstRep) {
+      fail('browser cache mutation: the run never reached its first repetition', state.getOutput().slice(0, 800));
+    } else {
+      try {
+        renameSync(cacheBundle, moved);
+        renamed = true;
+      } catch (e) {
+        fail('browser cache mutation: cannot move the original bundle', e.message);
+      }
+    }
+    const exitCode = await new Promise((resolvePromise) => {
+      if (state.child.exitCode !== null) resolvePromise(state.child.exitCode);
+      else state.child.on('exit', (code) => resolvePromise(code));
+    });
+    if (renamed) {
+      try {
+        renameSync(moved, cacheBundle);
+      } catch (e) {
+        fail('browser cache mutation: cannot restore the original bundle', e.message);
+      }
+    }
+    const payload = readRun(state.out);
+    if (exitCode !== 0 || payload?.completion?.status !== 'completed') {
+      fail('browser cache mutation: the frozen run must survive the original cache disappearing', `${exitCode}\n${state.getOutput().slice(0, 800)}`);
+    } else if (!/^[0-9a-f]{64}$/.test(payload.runtimeIdentity?.browser?.treeSha256 || '')) {
+      fail('browser cache mutation: the browser identity is missing', JSON.stringify(payload.runtimeIdentity?.browser));
+    } else {
+      ok('renaming the original browser cache mid-run leaves the frozen experiment unaffected');
+    }
+  }
+  // Unit level: two bundles with the same version but different bytes
+  // never share a digest.
+  {
+    const a = join(FIXTURE_DIR, 'bundle-a');
+    const b = join(FIXTURE_DIR, 'bundle-b');
+    mkdirSync(a, { recursive: true });
+    mkdirSync(b, { recursive: true });
+    writeFileSync(join(a, 'chrome'), 'same-version-different-bytes');
+    writeFileSync(join(b, 'chrome'), 'same-version-different-bytes');
+    const digestA = hashTreeDigest(a);
+    writeFileSync(join(b, 'chrome'), 'same-version-different-bytes!');
+    const digestB = hashTreeDigest(b);
+    if (digestA === digestB) {
+      fail('browser bundle identity: different bytes must produce different digests', `${digestA} == ${digestB}`);
+    } else {
+      ok('two browser bundles with different bytes produce different identities');
     }
   }
 }

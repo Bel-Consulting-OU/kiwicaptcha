@@ -38,11 +38,13 @@
  * Exit status: the harness's exit status; 2 for launcher refusals.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sha256Hex } from './canonical-json.mjs';
+import { hashTreeDigest } from './measurement-sources.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, '..', '..');
@@ -56,6 +58,17 @@ function refuse(message) {
 const args = process.argv.slice(2);
 if (args.some((a) => a === '--promote-baseline')) {
   refuse('--promote-baseline is a loader mode, not a benchmark run; execute it directly with node tools/client-perf/client-perf.mjs --promote-baseline FILE (the loader checks the recorded origin itself)');
+}
+
+// 0. Reject ambient Node controls. A certifying run must not preload
+//    untracked JavaScript through the environment or through the node
+//    invocation: NODE_OPTIONS (--require/--import/--loader) and any
+//    execArgv flags would execute code outside the frozen tree.
+if ((process.env.NODE_OPTIONS ?? '').trim() !== '') {
+  refuse(`NODE_OPTIONS is set (${JSON.stringify(process.env.NODE_OPTIONS)}); a certifying run refuses injected Node controls — unset it and start the launcher plain`);
+}
+if (process.execArgv.length > 0) {
+  refuse(`unexpected Node execArgv ${JSON.stringify(process.execArgv)}; start the launcher as plain \`node tools/client-perf/run-frozen.mjs\``);
 }
 
 function git(gitArgs, { allowFailure = false } = {}) {
@@ -125,22 +138,80 @@ for (const rel of ['tests/browser/node_modules']) {
   }
 }
 
+// 3b. The Playwright browser bundle: resolve the exact executable with
+//     the installed Playwright (ignoring any ambient
+//     PLAYWRIGHT_BROWSERS_PATH, which could redirect to another
+//     installation), copy the bundle into the frozen run directory and
+//     force the child to that immutable copy. The harness re-hashes the
+//     copied bundle into the run's runtime identity, so two Chromium
+//     installations that merely report the same version can never share
+//     an evidence identity, and mutating the original cache after the
+//     copy cannot affect the running experiment.
+const browserRequire = createRequire(join(tree, 'tests', 'browser', 'package.json'));
+let chromiumApi;
+try {
+  ({ chromium: chromiumApi } = browserRequire('playwright-core'));
+} catch (e) {
+  cleanup();
+  refuse(`cannot load playwright-core from the frozen worktree: ${e.message}`);
+}
+let browserExecutable;
+try {
+  const ambientBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+  browserExecutable = chromiumApi.executablePath();
+  if (ambientBrowsersPath !== undefined) process.env.PLAYWRIGHT_BROWSERS_PATH = ambientBrowsersPath;
+} catch (e) {
+  cleanup();
+  refuse(`cannot resolve the Playwright Chromium executable: ${e.message}`);
+}
+if (!browserExecutable || !existsSync(browserExecutable)) {
+  cleanup();
+  refuse(`the Playwright Chromium executable is missing at ${browserExecutable ?? '(unresolved)'}; run npx playwright install chromium before a certifying run`);
+}
+let bundleRoot = dirname(browserExecutable);
+while (bundleRoot !== dirname(bundleRoot) && !/^chromium(-headless-shell)?-\d+$/.test(basename(bundleRoot))) {
+  bundleRoot = dirname(bundleRoot);
+}
+if (!/^chromium(-headless-shell)?-\d+$/.test(basename(bundleRoot))) {
+  cleanup();
+  refuse(`cannot find the Chromium bundle root above ${browserExecutable}`);
+}
+const browsersDir = join(tempRoot, 'browsers');
+mkdirSync(browsersDir, { recursive: true });
+const frozenBundle = join(browsersDir, basename(bundleRoot));
+try {
+  cpSync(bundleRoot, frozenBundle, { recursive: true });
+} catch (e) {
+  cleanup();
+  refuse(`cannot copy the Chromium bundle into the frozen run directory: ${e.message}`);
+}
+const browserTreeSha = hashTreeDigest(frozenBundle);
+
 console.log(
-  `run-frozen: executing ${commit.slice(0, 12)} from the frozen worktree ${tree} (launcher sha256 ${LAUNCHER_SHA256.slice(0, 12)}, owned snapshot fixture, dirty-tree refusal armed)`,
+  `run-frozen: executing ${commit.slice(0, 12)} from the frozen worktree ${tree} (launcher sha256 ${LAUNCHER_SHA256.slice(0, 12)}, owned snapshot fixture, dirty-tree refusal armed, Node controls refused, Chromium bundle ${basename(bundleRoot)} copied and frozen with tree sha256 ${browserTreeSha.slice(0, 12)})`,
 );
 
-// 4. Re-execute the harness from the frozen worktree. The child's cwd
-//    stays the caller's directory, so relative --out paths land in the
-//    invoking repository.
+// 4. Re-execute the harness from the frozen worktree with an
+//    ALLOWLISTED environment: ambient NODE_OPTIONS, PHPRC,
+//    PHP_INI_SCAN_DIR and PLAYWRIGHT_BROWSERS_PATH can never reach the
+//    benchmark process; the harness freezes the PHP configuration and
+//    browser path itself. The child's cwd stays the caller's directory,
+//    so relative --out paths land in the invoking repository.
+const childEnv = {
+  PATH: process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin',
+  HOME: process.env.HOME ?? tmpdir(),
+  TMPDIR: process.env.TMPDIR ?? tmpdir(),
+  LANG: process.env.LANG ?? 'en_US.UTF-8',
+  KIWI_PERF_FROZEN: '1',
+  KIWI_PERF_FROZEN_COMMIT: commit,
+  KIWI_PERF_FROZEN_LAUNCHER_SHA256: LAUNCHER_SHA256,
+  KIWI_PERF_FROZEN_TREE: tree,
+  PLAYWRIGHT_BROWSERS_PATH: browsersDir,
+};
 const child = spawn(process.execPath, [join(tree, 'tools', 'client-perf', 'client-perf.mjs'), ...args], {
   stdio: 'inherit',
-  env: {
-    ...process.env,
-    KIWI_PERF_FROZEN: '1',
-    KIWI_PERF_FROZEN_COMMIT: commit,
-    KIWI_PERF_FROZEN_LAUNCHER_SHA256: LAUNCHER_SHA256,
-    KIWI_PERF_FROZEN_TREE: tree,
-  },
+  env: childEnv,
 });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {

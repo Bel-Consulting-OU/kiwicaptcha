@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -919,6 +920,38 @@ final class ConfigurationTest extends TestCase
         $belowCap = $this->process(['execution_version' => 3, 'execution_required_version' => 2]);
         self::assertSame(3, $belowCap['execution_version']);
         self::assertSame(2, $belowCap['execution_required_version']);
+    }
+
+    public function testExecutionVersionBoundsTrackTheGeneratorMaximum(): void
+    {
+        // The deployable maximum is the generator's, never a second
+        // literal: the config authority must accept the current
+        // generator maximum (version 5) for both execution-version
+        // knobs and refuse one above it. This is the semantic guard
+        // that keeps the public Symfony integration from lagging the
+        // protocol register.
+        $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+
+        $atMax = $this->process([
+            'execution_version' => $max,
+            'execution_required_version' => $max,
+        ]);
+        self::assertSame($max, $atMax['execution_version'], 'the node cap must accept the generator maximum');
+        self::assertSame($max, $atMax['execution_required_version'], 'the required tier must accept the generator maximum');
+        self::assertGreaterThanOrEqual(5, $max, 'the register must be at the v5 causal object-graph grammar');
+
+        try {
+            $this->process(['execution_version' => $max + 1]);
+            self::fail('an execution_version above the generator maximum must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_version', $e->getMessage());
+        }
+        try {
+            $this->process(['execution_required_version' => $max + 1]);
+            self::fail('an execution_required_version above the generator maximum must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_required_version', $e->getMessage());
+        }
     }
 
     public function testExecutionVersioningAliasesCanonicalizeOntoTheLegacyNames(): void

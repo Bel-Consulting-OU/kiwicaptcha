@@ -265,6 +265,14 @@ final class KiwiHealthControllerTest extends TestCase
             [true, 3, 2, 3, 503, 'security_policy_incompatible:execution_required_3_effective_2'],
             [true, 3, 3, 3, 200, null],
             [false, 3, 1, 3, 200, null],
+            // The current generator maximum: cap 5 with floor 5
+            // satisfies required 5; a floor one below the required
+            // tier refuses; and a node cap below the (higher) floor
+            // still satisfies a required tier at the cap, because the
+            // effective fleet tier is the minimum of all three.
+            [true, 5, 5, 5, 200, null],
+            [true, 5, 4, 5, 503, 'security_policy_incompatible:execution_required_5_effective_4'],
+            [true, 4, 5, 4, 200, null],
         ];
         foreach ($rows as [$gate, $cap, $floor, $required, $expectedCode, $expectedReason]) {
             $client = $this->requirePredis();

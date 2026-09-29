@@ -435,6 +435,13 @@ function deviceIndex(deviceId, sampleFor = () => healthySample(), countFor = dev
         measurement_sources_sha256: CURRENT_SOURCES.sha256,
         generated_at: nowIso(),
         run_digest: 'a'.repeat(64),
+        runtime: {
+          node_version: 'v24.0.0',
+          node_executable_sha256: 'b'.repeat(64),
+          php_binary_sha256: 'c'.repeat(64),
+          php_config_sha256: 'd'.repeat(64),
+          browser_tree_sha256: 'e'.repeat(64),
+        },
       },
     ],
   };
@@ -494,6 +501,11 @@ function runFixture(mutate) {
     completion: { status: 'completed', marker: COMPLETION_MARKER },
     fixture: { mode: 'owned-snapshot', owned: true, router: 'tests/browser/router.php', port: 8091, php: 'php' },
     harnessOrigin: { mode: 'frozen-detached-worktree', commit: 'a'.repeat(40), launcherSha256: 'b'.repeat(64) },
+    runtimeIdentity: {
+      node: { version: 'v24.0.0', executable: '/usr/bin/node', executableSha256: 'b'.repeat(64) },
+      php: { binary: 'php', realpath: '/usr/bin/php', sha256: 'c'.repeat(64), version: 'PHP 8.4.0 (cli)', configSha256: 'd'.repeat(64) },
+      browser: { name: 'chromium', version: '151.0.7922.34', executable: '/cache/chromium-1194/chrome-mac/Chromium.app/Contents/MacOS/Chromium', bundleRoot: '/cache/chromium-1194', treeSha256: 'e'.repeat(64), unresolved: false },
+    },
     measurementSources: clone(CURRENT_SOURCES),
     methodology: {
       execution: {
@@ -2077,6 +2089,54 @@ selfCheck('provenance self-check: missing recorded facts are refused with exact 
     'device with a mismatched source_run manifest identity',
     runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-source-runs')] }), false),
     ['is not the current measurement-source manifest'],
+  );
+}
+
+// ── The frozen runtime identity (round-6 finding 4) ─────────────────
+
+{
+  const index = deviceIndex('dev-runtime');
+  delete index.source_runs[0].runtime;
+  const payload = physicalPayload({ 'dev-runtime': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'device source_run without a runtime record is rejected',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-runtime')] }), false),
+    ['carries no runtime record'],
+  );
+}
+
+{
+  const index = deviceIndex('dev-runtime');
+  delete index.source_runs[0].runtime.browser_tree_sha256;
+  const payload = physicalPayload({ 'dev-runtime': index });
+  payload.clientAssets = canonicalClientAssets();
+  reject(
+    'device source_run without the browser bundle digest is rejected',
+    runValidator(payload, physicalBudgets({ devices: [physicalDevice('dev-runtime')] }), false),
+    ['runtime.browser_tree_sha256'],
+  );
+}
+
+{
+  const run = runFixture((p) => {
+    delete p.runtimeIdentity;
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('records no runtimeIdentity block')),
+    `a run without the runtime identity must be refused: ${JSON.stringify(reasons)}`,
+  );
+}
+
+{
+  const run = runFixture((p) => {
+    p.runtimeIdentity.browser = { name: 'chromium', unresolved: true, reason: 'not found' };
+  });
+  const { fields, reasons } = runMeasurementFields(run);
+  assert(
+    fields === null && reasons.some((r) => r.includes('is not a resolved')),
+    `an unresolved browser bundle must be refused: ${JSON.stringify(reasons)}`,
   );
 }
 

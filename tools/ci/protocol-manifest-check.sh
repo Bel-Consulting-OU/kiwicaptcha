@@ -168,4 +168,43 @@ JS_GATE=$(sed -n -E 's/.*opVersion < 1 \|\| opVersion > ([0-9]+)\) return null;.
     || fail "interpreter version gate allows version $JS_GATE, manifest max_execution_version is $MAX_VERSION"
 pass "interpreter OP_COUNT and the decode version gate agree with the manifest"
 
+# The deployable maximum must follow the generator, never a second
+# literal: the Symfony configuration bounds and the widget driver's
+# Kiwi-Execution-Max-Version advertisement are the two production
+# surfaces that can silently lag the register while every other check
+# stays green. Both must equal ExecutionChallengeGenerator's maximum.
+CONFIG_PHP="$ROOT/packages/kiwicaptcha/integrations/symfony/src/DependencyInjection/Configuration.php"
+[ -f "$CONFIG_PHP" ] || fail "missing source file: $CONFIG_PHP"
+CONFIG_REFS=$(grep -c "ExecutionChallengeGenerator::MAX_EXECUTION_VERSION" "$CONFIG_PHP" || true)
+[ "$CONFIG_REFS" -ge 2 ] \
+    || fail "Symfony Configuration must derive BOTH execution-version maxima from ExecutionChallengeGenerator::MAX_EXECUTION_VERSION (found $CONFIG_REFS reference(s))"
+# Each execution-version node block must reference the constant and must
+# not carry a literal ->max(N).
+for node in execution_version execution_required_version; do
+    needle="integerNode('$node')"
+    block=$(awk -v needle="$needle" '
+        index($0, needle) { inside = 1 }
+        inside { print }
+        inside && /->end\(\)/ { exit }
+    ' "$CONFIG_PHP")
+    [ -n "$block" ] || fail "Symfony Configuration has no $node block"
+    echo "$block" | grep -q "ExecutionChallengeGenerator::MAX_EXECUTION_VERSION" \
+        || fail "Symfony Configuration $node does not reference the generator maximum"
+    if echo "$block" | grep -qE -- "->max\([0-9]+\)"; then
+        fail "Symfony Configuration $node pins a literal ->max(...) instead of the generator maximum (drift hazard)"
+    fi
+done
+pass "the Symfony configuration maxima follow ExecutionChallengeGenerator::MAX_EXECUTION_VERSION"
+
+for driver in \
+    "$ROOT/packages/kiwicaptcha-wasm/assets/widget-driver.js" \
+    "$ROOT/packages/kiwicaptcha/resources/widget-driver.js" \
+    "$ROOT/packages/kiwicaptcha/integrations/symfony/Resources/public/widget-driver.js"; do
+    [ -f "$driver" ] || fail "missing source file: $driver"
+    DRIVER_MAX=$(sed -n -E 's/.*Kiwi-Execution-Max-Version"\] = "([0-9]+)".*/\1/p' "$driver" | head -n 1)
+    [ "$DRIVER_MAX" = "$MAX_VERSION" ] \
+        || fail "$driver advertises Kiwi-Execution-Max-Version $DRIVER_MAX, manifest max_execution_version is $MAX_VERSION"
+done
+pass "the widget driver capability header equals the manifest maximum in all three copies"
+
 echo "execution-v1 protocol manifest: all registers coherent"

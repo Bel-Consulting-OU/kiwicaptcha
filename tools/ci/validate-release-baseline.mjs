@@ -249,7 +249,13 @@
  *      external-fixture or in-process runs before indexing, and this
  *      check keeps that state on the device itself, so a later hand
  *      edit cannot smuggle in rows whose source run never cleanly
- *      completed.
+ *      completed. Each source_runs entry also records the frozen
+ *      runtime identity the run executed: the Node version and digest,
+ *      the selected PHP binary digest, the frozen PHP configuration
+ *      digest and the whole Chromium bundle tree digest, all
+ *      full-length and structural, so two runners with the same
+ *      reported versions but different runtime bytes can never share
+ *      an evidence identity.
  *
  * Physical-evidence proofs (audit finding 3, round 4). When
  * qualification.status is "physical", the validator additionally
@@ -1267,6 +1273,21 @@ function main() {
           }
           if (typeof entry.run_digest !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(entry.run_digest)) {
             reasons.push(`${where} run_digest ${JSON.stringify(entry.run_digest ?? null)} is not a full 64-hex digest of the source run file`);
+          }
+          // The frozen runtime inputs (audit finding 4): every source
+          // run records the exact Node/PHP/browser bytes it executed.
+          const runtime = entry.runtime;
+          if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime)) {
+            reasons.push(`${where} carries no runtime record (node_version plus the Node/PHP/browser binary and configuration digests the run executed)`);
+          } else {
+            if (typeof runtime.node_version !== 'string' || runtime.node_version.trim() === '') {
+              reasons.push(`${where} runtime.node_version ${JSON.stringify(runtime.node_version ?? null)} is missing`);
+            }
+            for (const field of ['node_executable_sha256', 'php_binary_sha256', 'php_config_sha256', 'browser_tree_sha256']) {
+              if (typeof runtime[field] !== 'string' || !MEASUREMENT_CONTEXT_SHA256_RE.test(runtime[field])) {
+                reasons.push(`${where} runtime.${field} ${JSON.stringify(runtime[field] ?? null)} is not a full 64-hex runtime digest`);
+              }
+            }
           }
         });
       }
