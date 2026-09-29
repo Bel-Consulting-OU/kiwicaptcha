@@ -145,7 +145,7 @@
  */
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertAssetSetCurrent, canonicalClientAssets } from './client-assets.mjs';
@@ -873,7 +873,13 @@ function computeRuntimeIdentity(opts, snapshot) {
   };
 
   if (!opts.noFixture) {
-    const discoveryEnv = { ...process.env, PHPRC: '', PHP_INI_SCAN_DIR: '' };
+    // Discovery runs with the ambient config controls REMOVED (not set
+    // to empty strings): the selected binary's default configuration is
+    // what gets copied and hashed, and an ambient PHPRC would otherwise
+    // execute its auto_prepend_file during discovery itself.
+    const discoveryEnv = { ...process.env };
+    delete discoveryEnv.PHPRC;
+    delete discoveryEnv.PHP_INI_SCAN_DIR;
     let phpReal;
     try {
       phpReal = execFileSync(opts.php, ['-r', 'echo PHP_BINARY;'], { encoding: 'utf8', env: discoveryEnv }).trim();
@@ -893,30 +899,47 @@ function computeRuntimeIdentity(opts, snapshot) {
     const configRoot = join(snapshot.snapshotRoot ?? mkdtempSync(join(os.tmpdir(), 'kiwicaptcha-php-config-')), 'php-config');
     mkdirSync(configRoot, { recursive: true });
     const frozenIni = join(configRoot, 'php.ini');
-    let copiedIni = false;
+    // One merged ini: the loaded php.ini plus every scanned *.ini in
+    // scan order. PHP_INI_SCAN_DIR semantics vary across builds, so the
+    // frozen configuration must not depend on them; the merge keeps
+    // every extension directive effective.
+    const iniChunks = [];
     if (loaded && loaded !== '(none)' && existsSync(loaded)) {
-      copyFileSync(loaded, frozenIni);
-      copiedIni = true;
-    } else {
-      writeFileSync(frozenIni, '; no php.ini was loaded at discovery time\n');
+      iniChunks.push(readFileSync(loaded, 'utf8'));
     }
+    if (scanDir && scanDir !== '(none)' && existsSync(scanDir)) {
+      for (const entry of readdirSync(scanDir).filter((e) => e.endsWith('.ini')).sort()) {
+        iniChunks.push(`; merged from ${entry}`);
+        iniChunks.push(readFileSync(join(scanDir, entry), 'utf8'));
+      }
+    }
+    writeFileSync(frozenIni, `${iniChunks.join('\n')}\n`);
+    // An empty scan directory plus the merged ini: the server sees
+    // exactly the frozen configuration, and an ambient auto_prepend_file
+    // can never enter the process.
     const frozenScanDir = join(configRoot, 'scan');
     mkdirSync(frozenScanDir, { recursive: true });
-    if (scanDir && scanDir !== '(none)' && existsSync(scanDir)) {
-      for (const entry of readdirSync(scanDir)) {
-        if (entry.endsWith('.ini')) {
-          copyFileSync(join(scanDir, entry), join(frozenScanDir, entry));
-        }
-      }
+    const configSha256 = hashTreeDigest(configRoot);
+    // Prove the frozen configuration still loads what the fixture
+    // needs: a config freeze that silently drops extensions would fail
+    // later as an opaque 500 mid-run.
+    const probe = execFileSync(
+      phpReal,
+      ['-c', frozenIni, '-r', 'echo function_exists("ctype_digit") && function_exists("sodium_crypto_sign_verify_detached") ? "ok" : "missing";'],
+      { encoding: 'utf8', env: { ...discoveryEnv, PHPRC: frozenIni, PHP_INI_SCAN_DIR: frozenScanDir } },
+    ).trim();
+    if (probe !== 'ok') {
+      throw new Error(`the frozen PHP configuration is missing required extensions (ctype/sodium) for ${phpReal}`);
     }
     identity.php = {
       binary: opts.php,
       realpath: phpReal,
       sha256: sha,
       version,
-      iniLoaded: copiedIni ? loaded : null,
+      iniLoaded: loaded && loaded !== '(none)' && existsSync(loaded) ? loaded : null,
       iniScanDir: scanDir && scanDir !== '(none)' ? scanDir : null,
-      configSha256: hashTreeDigest(configRoot),
+      iniMergedFiles: scanDir && scanDir !== '(none)' && existsSync(scanDir) ? readdirSync(scanDir).filter((e) => e.endsWith('.ini')).sort().length : 0,
+      configSha256,
       frozenIni,
       frozenScanDir,
     };
@@ -2641,7 +2664,7 @@ async function main() {
     process.exit(2);
   }
   console.log(
-    `runtime frozen: node ${runtime.node.version}, php ${runtime.php ? `${runtime.php.version} (${runtime.php.realpath})` : 'external-fixture mode'}, chromium ${runtime.browser.version ?? 'unresolved'} bundle sha256 ${runtime.browser.treeSha256 ? runtime.browser.treeSha256.slice(0, 12) : '(unresolved)'}`,
+    `runtime frozen: node ${runtime.node.version}, php ${runtime.php ? `${runtime.php.version} (${runtime.php.realpath}, ini ${runtime.php.iniLoaded ?? '(none)'}, scan ${runtime.php.iniScanDir ?? '(none)'}, merged ${runtime.php.iniMergedFiles})` : 'external-fixture mode'}, chromium ${runtime.browser.version ?? 'unresolved'} bundle sha256 ${runtime.browser.treeSha256 ? runtime.browser.treeSha256.slice(0, 12) : '(unresolved)'}`,
   );
   const seed = opts.seed ?? Math.floor(Date.now());
   const cells = seededShuffle(buildCellList(opts, tierNames), mulberry32(seed));
