@@ -33,7 +33,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -575,12 +575,15 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
       encoding: 'utf8',
     });
     const payload = readRun(out);
-    const expectedSha = sha256Hex(readFileSync(phpPath));
+    // --php may name a symlink; the identity records the real path of
+    // the binary that actually served the fixture.
+    const expectedReal = realpathSync(phpPath);
+    const expectedSha = sha256Hex(readFileSync(expectedReal));
     if (state.status !== 0 || payload?.completion?.status !== 'completed') {
       fail('custom --php: the run must complete', `${state.status}\n${(state.stderr || '').slice(0, 600)}`);
-    } else if (payload.runtimeIdentity?.php?.realpath !== phpPath || payload.runtimeIdentity.php.sha256 !== expectedSha) {
+    } else if (payload.runtimeIdentity?.php?.realpath !== expectedReal || payload.runtimeIdentity.php.sha256 !== expectedSha) {
       fail('custom --php: the recorded binary identity must be the selected binary', JSON.stringify(payload.runtimeIdentity?.php));
-    } else if (payload.environment?.phpBinary !== phpPath) {
+    } else if (payload.environment?.phpBinary !== expectedReal) {
       fail('custom --php: environment.phpBinary must be the selected binary', JSON.stringify(payload.environment));
     } else {
       ok('a custom --php binary is resolved, hashed and reported');
