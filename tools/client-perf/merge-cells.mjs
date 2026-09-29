@@ -342,7 +342,12 @@ if (!physicalIndex) {
 // equal the current release fields, so the device is stamped with the
 // run's own context — a run recorded under different bytes, harness,
 // manifest, solver configuration or difficulty definitions can never be
-// stamped with the current identity.
+// stamped with the current identity. The recorded difficulty table is
+// treated as a verified SELECTION (focused recordings are legitimate
+// evidence for the cells they ran): each recorded entry must equal the
+// current definition, and the stamped context uses the current full
+// table, so several focused runs over the same committed bytes share
+// one context instead of being refused for recording different subsets.
 let deviceMeasurementContext = null;
 if (physicalIndex) {
   let facts;
@@ -379,23 +384,54 @@ if (physicalIndex) {
         `cannot merge performance runs measured against different client assets: ${runPath} cannot be bound to a release measurement context from its own recorded facts\n${recordedReasons.map((r) => `  - ${r}`).join('\n')}`
       );
     }
-    // 2. Multiple runs feeding one device must record one context.
+    // 2. The recorded difficulty table is a SELECTION (a focused
+    //    recording records only the difficulties it was configured to
+    //    run): every recorded entry must equal the current definition
+    //    entry by entry, every recorded row must be defined by the
+    //    recorded table (step 4), and the context normalized for the
+    //    device uses the current full table, because the selection
+    //    itself does not change the measurement identity — it only
+    //    names which of the verified definitions this run measured. The
+    //    normalized field set is what the cross-run guard and the
+    //    stamp below use, so several focused runs over the same
+    //    committed bytes share one context.
+    const recordedDifficulties = payload.difficulties || {};
+    const selectionProblems = [];
+    for (const [name, entry] of Object.entries(recordedDifficulties)) {
+      const currentEntry = currentFields.difficulties[name];
+      if (!currentEntry) {
+        selectionProblems.push(`recorded difficulty ${name} is not defined by the current harness`);
+        continue;
+      }
+      if (JSON.stringify(entry) !== JSON.stringify(currentEntry)) {
+        selectionProblems.push(
+          `recorded difficulty ${name} differs from the current definition (recorded ${JSON.stringify(entry)}, current ${JSON.stringify(currentEntry)})`,
+        );
+      }
+    }
+    if (selectionProblems.length) {
+      throw new Error(
+        `cannot merge performance runs measured against different client assets: ${runPath} recorded difficulty selection does not match the current definitions\n${selectionProblems.map((r) => `  - ${r}`).join('\n')}`,
+      );
+    }
+    const normalizedFields = { ...fields, difficulties: currentFields.difficulties };
+    // 3. Multiple runs feeding one device must record one context.
     if (deviceFields !== null) {
-      const runDifferences = measurementFieldDifferences(fields, deviceFields);
+      const runDifferences = measurementFieldDifferences(normalizedFields, deviceFields);
       if (runDifferences.length) {
         throw new Error(
           `cannot merge performance runs measured against different client assets: ${runPath} recorded measurement facts disagree with those of ${firstRunPath} (every run feeding one device must share one measurement context)\n${runDifferences.map((r) => `  - ${r}`).join('\n')}`
         );
       }
     }
-    // 3. Every recorded fact must equal the current release fact.
-    const differences = measurementFieldDifferences(fields, currentFields);
+    // 4. Every recorded fact must equal the current release fact.
+    const differences = measurementFieldDifferences(normalizedFields, currentFields);
     if (differences.length) {
       throw new Error(
         `cannot merge performance runs measured against different client assets: ${runPath} recorded measurement facts differ from the current release facts\n${differences.map((r) => `  - ${r}`).join('\n')}`
       );
     }
-    // 4. The recorded tier table is verified entry by entry (a run
+    // 5. The recorded tier table is verified entry by entry (a run
     // records only the tiers it executed), and every result row the
     // merge could emit must be defined by the run's recorded tables.
     const rowReasons = new Set();
@@ -419,9 +455,9 @@ if (physicalIndex) {
     }
     if (deviceFields === null) {
       firstRunPath = runPath;
-      deviceFields = fields;
+      deviceFields = normalizedFields;
     }
-    deviceMeasurementContext = buildMeasurementContext(fields);
+    deviceMeasurementContext = buildMeasurementContext(normalizedFields);
   }
   // For an accepted run every recorded fact equals the current release
   // fact, so the run-derived context must equal the current release

@@ -1746,8 +1746,8 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
     p.difficulties.sha16 = { ...p.difficulties.sha16, label: 'SHA-256, 17 leading zero bits' };
   });
   reject('run provenance (a): a run with a different recorded difficulty definition is refused at merge time', runMergeCells([run]), [
-    'recorded measurement facts differ from the current release facts',
-    'difficulties.sha16.label',
+    'recorded difficulty selection does not match the current definitions',
+    'recorded difficulty sha16 differs from the current definition',
   ]);
 }
 
@@ -1758,8 +1758,8 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
     p.difficulties.rsw75k = { ...p.difficulties.rsw75k, query: '?algorithm=rsw&rsw_t=76000' };
   });
   reject('run provenance (a): a run with a different recorded difficulty query is refused at merge time', runMergeCells([run]), [
-    'recorded measurement facts differ from the current release facts',
-    'difficulties.rsw75k.query',
+    'recorded difficulty selection does not match the current definitions',
+    'recorded difficulty rsw75k differs from the current definition',
   ]);
 }
 
@@ -1777,17 +1777,17 @@ const reject = (label, res, mustInclude, mustExclude = []) =>
 }
 
 // (a) Multiple runs feeding one device with disagreeing recorded facts:
-// refused naming the disagreement between the runs (checked before the
-// per-run current comparison, so the multi-run class has its own
-// reason).
+// the second run's recorded difficulty no longer matches the current
+// definition, so the run itself is refused before it can feed the
+// device.
 {
   const first = runFixture();
   const second = runFixture((p) => {
     p.difficulties.sha18 = { ...p.difficulties.sha18, dimension: 'rsw' };
   });
   reject('run provenance (a): runs disagreeing on their recorded facts are refused for one device', runMergeCells([first, second]), [
-    'recorded measurement facts disagree with those of',
-    'difficulties.sha18.dimension',
+    'recorded difficulty selection does not match the current definitions',
+    'recorded difficulty sha18 differs from the current definition',
   ]);
 }
 
