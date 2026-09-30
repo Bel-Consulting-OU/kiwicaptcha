@@ -241,7 +241,7 @@ perf-budget.sh): every eager-core driver copy is
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 39,439 bytes raw, 11,499 bytes gzip and 9,864 bytes
+module) is 40,373 bytes raw, 11,783 bytes gzip and 10,118 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every

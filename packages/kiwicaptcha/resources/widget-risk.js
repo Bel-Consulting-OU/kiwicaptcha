@@ -508,9 +508,13 @@
             return;
           }
           if (msg.type === "progress") {
+            if (msg.reqId !== solveReqId) return;
             if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
             onProgress(Math.min(95, (msg.counter * 100) / expectedUnits));
           } else if (msg.type === "done") {
+            // Correlation is mandatory for a done: an uncorrelated (or
+            // foreign) done must never settle this solve.
+            if (msg.reqId !== solveReqId) return;
             if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
               if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
               return;
@@ -533,6 +537,9 @@
               ? { proof: msg.proof, duration: Math.round(performance.now() - workerStart) }
               : { counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
           } else if (msg.type === "failed") {
+            // Pre-solve handshake failures carry no reqId; a solve-scoped
+            // failure must be correlated to this request.
+            if (msg.reqId !== undefined && msg.reqId !== solveReqId) return;
             if (typeof msg.reason !== "string") return;
             // protocol-mismatch (the wasm/worker generations differ) is
             // surfaced as the controlled solver-mismatch state, same UX as
@@ -564,6 +571,12 @@
         var prefixBytes = encoder.encode(data.prefix);
         var saltBytes = b64decode(data.salt);
         var isRsw = algorithm === "rsw";
+        // The solve request id: the worker echoes it on every solve-scoped
+        // reply and the listener accepts correlated replies only, so a
+        // page script posting a crafted solve+done pair into the worker
+        // can never settle this solve (the reply it provokes carries the
+        // other request's id, or none at all).
+        var solveReqId = "q" + Math.random().toString(36).slice(2) + performance.now().toString(36).replace(".", "");
         try {
           // Hand the runtime URL to the worker BEFORE the solve: it
           // importScripts the URL, verifies the wasm protocol version and
@@ -578,6 +591,7 @@
           var solveMsg = {
             v: 1,
             type: "solve",
+            reqId: solveReqId,
             algorithm: algorithm,
             prefix: data.prefix,
             prefixLen: prefixBytes.length,

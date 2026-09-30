@@ -20,12 +20,12 @@
       "gzip_bytes_zlib13": 29805
     },
     "widget_worker": {
-      "raw_bytes": 141695,
+      "raw_bytes": 142937,
       "copies_identical": true,
       "note": "The worker asset (kiwi-worker.js), three byte-identical copies; since the r8 glue-embedding change the asset is assembled by tools/embed-worker as the `var window = self;` prelude plus the full wasm glue (kiwicaptcha-wasm.js) plus the worker solver source, so a files-mode worker boots with wasm in scope (SHA solves in the worker use solve_sha256_chunk; the rsw sequential time-lock solver stays pure JS BigInt, exactly the Argon worker's loading and message pattern). The lazy runtime fetch of the driver stays for the compat tier. The row carries no cap fields by design, like the widget_runtime and widget_css rows: the asset is lazy in the files tier (a SHA-only page never fetches it) and perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_runtime": {
-      "raw_bytes": 114264,
+      "raw_bytes": 114895,
       "copies_identical": true,
       "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from the worker solver source (the tail of assets/kiwi-worker.js) by the embed-worker tool, so the rsw solver rides the glue copy too; the release worker asset embeds this same glue text, so the files-mode worker needs no runtime fetch to solve. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
@@ -67,15 +67,15 @@
       "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
     },
     "widget_risk": {
-      "raw_bytes": 39439,
-      "brotli_bytes": 9864,
+      "raw_bytes": 40373,
+      "brotli_bytes": 10118,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner and the decoy/honeypot machinery. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 11499,
-      "gzip_bytes_zlib13": 11499
+      "gzip_bytes_zlib12": 11783,
+      "gzip_bytes_zlib13": 11783
     },
     "widget_telemetry": {
       "raw_bytes": 2922,
