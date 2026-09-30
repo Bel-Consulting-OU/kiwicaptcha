@@ -180,7 +180,7 @@ test.describe('destroy mid-solve: no progress write, no state mutation, no event
           if (state !== 'pending') return;
           const st = widget.getAttribute('data-state');
           const v = fill.getAttribute('data-progress');
-          if (st !== 'solving' || v === null || v === '100') return;
+          if (st !== 'solving' || v === null || v === '0' || v === '100') return;
           // ── The deterministic destroy point ──────────────────────
           // This callback is a microtask queued by the chunk's
           // data-progress write; the next chunk is only a later
@@ -334,7 +334,7 @@ test.describe('destroy mid-solve: no progress write, no state mutation, no event
       // The destroy must provably have landed mid-solve: the observed
       // tick is a real progress write (non-100), never the final 100.
       const pct = Number.parseFloat(r.tickValue);
-      expect(Number.isFinite(pct) && pct > 0 && pct < 100, `iteration ${i}: destroy must happen on a mid-solve progress tick, not the terminal write (tick ${r.tickValue})`).toBe(true);
+      expect(Number.isFinite(pct) && pct >= 10 && pct < 100, `iteration ${i}: destroy must happen on a mid-solve progress tick, not the terminal write (tick ${r.tickValue})`).toBe(true);
       expect(r.snapshot.state, `iteration ${i}: destroy must clear data-state (got ${r.snapshot.state})`).toBeNull();
       expect(r.snapshot.token, `iteration ${i}: destroy must clear the token (got "${r.snapshot.token}")`).toBe('');
       expect(r.snapshot.destroyed, `iteration ${i}: destroy must mark the widget destroyed`).toBe('1');
@@ -557,7 +557,7 @@ test.describe('closure case 2: the bulk destroy over a page of two solving widge
             if (ticked[i] !== null) return;
             const st = p.widget.getAttribute('data-state');
             const v = p.fill.getAttribute('data-progress');
-            if (st !== 'solving' || v === null || v === '100') return;
+            if (st !== 'solving' || v === null || v === '0' || v === '100') return;
             ticked[i] = v;
           });
           obs.observe(p.fill, { attributes: true, attributeFilter: ['data-progress'] });
@@ -723,7 +723,7 @@ test.describe('closure case 2: the bulk destroy over a page of two solving widge
       expect(r.widgets.length, `iteration ${i}: the cycle must run ${MULTI_WIDGETS} widgets`).toBe(MULTI_WIDGETS);
       for (const [wi, w] of r.widgets.entries()) {
         const pct = Number.parseFloat(w.tick);
-        expect(Number.isFinite(pct) && pct > 0 && pct < 100, `iteration ${i} widget ${wi}: the destroy must happen after a mid-solve progress tick, not the terminal write (tick ${w.tick})`).toBe(true);
+        expect(Number.isFinite(pct) && pct >= 10 && pct < 100, `iteration ${i} widget ${wi}: the destroy must happen after a mid-solve progress tick, not the terminal write (tick ${w.tick})`).toBe(true);
         expect(w.snapshot.state, `iteration ${i} widget ${wi}: the bulk destroy must clear data-state (got ${w.snapshot.state})`).toBeNull();
         expect(w.snapshot.token, `iteration ${i} widget ${wi}: the bulk destroy must leave the token blank (got "${w.snapshot.token}")`).toBe('');
         expect(w.snapshot.destroyed, `iteration ${i} widget ${wi}: the bulk destroy must mark the widget destroyed`).toBe('1');

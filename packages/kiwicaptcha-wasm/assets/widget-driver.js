@@ -1,4 +1,12 @@
 (function() {
+  // Idempotency guard: per-widget inlining (Rust/Twig) executes this
+  // IIFE more than once; the first copy owns the API, bridge and DOM
+  // scan, and a later copy must never re-bind them.
+  if (typeof window !== "undefined" && window.__kiwiDriverLoaded) {
+    window.__kiwiDriverReused = (window.__kiwiDriverReused || 0) + 1;
+    return;
+  }
+  if (typeof window !== "undefined") window.__kiwiDriverLoaded = true;
   var encoder = new TextEncoder();
 
   // ── Solver PROTOCOL id ──
@@ -33,6 +41,11 @@
   // The cancellation notification is rate-limited per widget: once per
   // nonce plus this window, so a retry loop never spams the endpoint.
   var KIWI_CANCEL_COOLDOWN_MS = 5000;
+
+  // Client expiry margin: the server TTL starts at ISSUANCE, so the
+  // client anchors expiry at receipt + ttl − margin, never at solve
+  // completion + ttl (which showed Success after server expiry).
+  var KIWI_EXPIRY_MARGIN_MS = 2000;
 
   // ── Supported external configuration attributes ──
   // The one data-kiwi-* configuration list: the native path reads it
@@ -158,20 +171,18 @@
     }
   }
 
-  // ── Optimized synchronous SHA-256 (pure JS, recycled buffers) ─
+  // ── Synchronous SHA-256 (pure JS, module-scoped scratch) ──
+  // Split so the solver can cache the prefix midstate (see deriveHash):
+  // sha256Compress advances _h over whole blocks, sha256Output renders.
   var _h = new Uint32Array(8), _w = new Uint32Array(64);
   var _k = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
-  function sha256sync(data, result) {
+  function sha256Init() {
     _h[0] = 0x6a09e667; _h[1] = 0xbb67ae85; _h[2] = 0x3c6ef372; _h[3] = 0xa54ff53a;
     _h[4] = 0x510e527f; _h[5] = 0x9b05688c; _h[6] = 0x1f83d9ab; _h[7] = 0x5be0cd19;
-    var l = data.length * 8;
-    var padLen = (data.length % 64 < 56) ? (56 - data.length % 64) : (120 - data.length % 64);
-    var msg = new Uint8Array(data.length + padLen + 8);
-    msg.set(data); msg[data.length] = 0x80;
-    var view = new DataView(msg.buffer);
-    view.setUint32(msg.length - 4, l, false);
+  }
+  function sha256Compress(view, start, end) {
     var a, b, c, d, e, f, g, hh, s0, s1, ch, maj, t1, t2;
-    for (var i = 0; i < msg.length; i += 64) {
+    for (var i = start; i < end; i += 64) {
       for (var j = 0; j < 16; j++) _w[j] = view.getUint32(i + j * 4, false);
       for (j = 16; j < 64; j++) {
         var x = _w[j - 15]; s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
@@ -189,10 +200,23 @@
       _h[0] = (_h[0] + a) | 0; _h[1] = (_h[1] + b) | 0; _h[2] = (_h[2] + c) | 0; _h[3] = (_h[3] + d) | 0;
       _h[4] = (_h[4] + e) | 0; _h[5] = (_h[5] + f) | 0; _h[6] = (_h[6] + g) | 0; _h[7] = (_h[7] + hh) | 0;
     }
-    for (i = 0; i < 8; i++) {
+  }
+  function sha256Output(result) {
+    for (var i = 0; i < 8; i++) {
       result[i * 4] = (_h[i] >>> 24) & 0xff; result[i * 4 + 1] = (_h[i] >>> 16) & 0xff;
       result[i * 4 + 2] = (_h[i] >>> 8) & 0xff; result[i * 4 + 3] = _h[i] & 0xff;
     }
+  }
+  function sha256sync(data, result) {
+    sha256Init();
+    var l = data.length * 8;
+    var padLen = (data.length % 64 < 56) ? (56 - data.length % 64) : (120 - data.length % 64);
+    var msg = new Uint8Array(data.length + padLen + 8);
+    msg.set(data); msg[data.length] = 0x80;
+    var view = new DataView(msg.buffer);
+    view.setUint32(msg.length - 4, l, false);
+    sha256Compress(view, 0, msg.length);
+    sha256Output(result);
   }
   function b64decode(str) {
     str = str.replace(/-/g, "+").replace(/_/g, "/");
@@ -207,20 +231,47 @@
     }
     return n;
   }
-  var _hashBuf = new Uint8Array(32), _inputBuf = null;
+  var _hashBuf = new Uint8Array(32);
+  // Midstate cache: the constant prefix's full blocks compress once per
+  // (prefix identity, total length) shape and each derivation resumes
+  // from the cached state — no per-hash buffer/DataView allocation and
+  // no prefix re-hash. The total length key changes only when the
+  // counter gains a digit, so stale challenges can never be reused.
+  var _mid = { prefix: null, totalLen: -1, resumeAt: 0, msg: null, view: null, state: new Uint32Array(8) };
   function deriveHash(prefixBytes, counter, saltBytes) {
     var cStr = counter.toString(), cLen = cStr.length, totalLen = prefixBytes.length + cLen + saltBytes.length;
-    if (!_inputBuf || _inputBuf.length !== totalLen) _inputBuf = new Uint8Array(totalLen);
-    _inputBuf.set(prefixBytes, 0);
-    for (var i = 0; i < cLen; i++) _inputBuf[prefixBytes.length + i] = cStr.charCodeAt(i);
-    _inputBuf.set(saltBytes, prefixBytes.length + cLen);
-    sha256sync(_inputBuf, _hashBuf);
+    if (_mid.prefix !== prefixBytes || _mid.totalLen !== totalLen) {
+      var padLen = (totalLen % 64 < 56) ? (56 - totalLen % 64) : (120 - totalLen % 64);
+      var msg = new Uint8Array(totalLen + padLen + 8);
+      msg.set(prefixBytes, 0);
+      msg[totalLen] = 0x80;
+      var view = new DataView(msg.buffer);
+      view.setUint32(msg.length - 4, totalLen * 8, false);
+      var fullPrefixBlocksEnd = prefixBytes.length - (prefixBytes.length % 64);
+      sha256Init();
+      sha256Compress(view, 0, fullPrefixBlocksEnd);
+      _mid.state.set(_h);
+      _mid.prefix = prefixBytes;
+      _mid.totalLen = totalLen;
+      _mid.resumeAt = fullPrefixBlocksEnd;
+      _mid.msg = msg;
+      _mid.view = view;
+    }
+    var m = _mid.msg;
+    m.set(prefixBytes.subarray(_mid.resumeAt, prefixBytes.length), _mid.resumeAt);
+    for (var i = 0; i < cLen; i++) m[prefixBytes.length + i] = cStr.charCodeAt(i);
+    m.set(saltBytes, prefixBytes.length + cLen);
+    _h.set(_mid.state);
+    sha256Compress(_mid.view, _mid.resumeAt, m.length);
+    sha256Output(_hashBuf);
     return _hashBuf;
   }
 
-  var MAX_SHA_HASHES = 5000000;
+  // A 20-bit challenge exhausts at e^-20 (~2e-9) instead of the ~0.85%
+  // a 5M cap left; the challenge deadline caps it further.
+  var MAX_SHA_HASHES = 20000000;
   var SHA_CHUNK_TIME_BUDGET_MS = 10;
-  function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p, onProgress, deadline) {
+  function solve(prefix, saltBytes, targetBits, algorithm, m_kib, t, p, onProgress, deadline, isCancelled) {
     return new Promise(async function(resolve) {
       var prefixBytes = encoder.encode(prefix), expectedHashes = Math.pow(2, targetBits), solveStart = performance.now(), counter = 0;
       var w = await initWasm();
@@ -228,6 +279,21 @@
       // chunks, eliminating malloc/free churn on every 50k-hash iteration
       // (the hottest loop in the SHA-256 solver).
       var pp = 0, sp = 0;
+      // SINGLE exit path: every terminal path (solution, exhaustion,
+      // deadline, cancellation) releases the WASM buffers and resolves
+      // exactly once.
+      var settled = false;
+      function release() {
+        if (w) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); }
+        pp = 0;
+        sp = 0;
+      }
+      function finish(result) {
+        if (settled) return;
+        settled = true;
+        release();
+        resolve(result);
+      }
       // wasm is usable when the solver AND an allocator export exist. The
       // wasm-opt pipeline exports alloc/dealloc (stable names); wasm-bindgen's
       // generated __wbindgen_malloc may be dead-code-eliminated, so it is not
@@ -268,31 +334,35 @@
       var useWasm = wasmUsable();
       var CHUNK = useWasm ? 50000 : 8000;
       function chunk() {
+        if (settled) return;
+        // Cancellation (reset/remove/destroy/BFCache) stops the loop at
+        // the next chunk boundary instead of burning CPU.
+        if (isCancelled && isCancelled()) { finish({ cancelled: true }); return; }
         // The solve deadline (challenge expiry − margin): abort BETWEEN
         // chunks — a solve that would outlive the challenge is pure waste
         // and the token would be rejected anyway. The driver's retry flow
         // re-acquires a fresh challenge.
-        if (deadline && performance.now() >= deadline) { resolve({ deadline: true }); return; }
+        if (deadline && performance.now() >= deadline) { finish({ deadline: true }); return; }
         if (useWasm) {
           try {
             if (ensureBuffers()) {
               // The wasm window is bounded by the remaining hash budget,
               // so the search never scans past the cap even mid-chunk.
               var want = Math.min(CHUNK, MAX_SHA_HASHES - counter);
-              if (want <= 0) { resolve(null); return; }
+              if (want <= 0) { finish(null); return; }
               var res = w.solve_sha256_chunk(pp, prefixBytes.length, sp, saltBytes.length, targetBits, counter, want);
-              if (res >= 0) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); resolve({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
+              if (res >= 0) { finish({ counter: res, duration: Math.round(performance.now() - solveStart) }); return; }
               // -1 = the whole CHUNK window was scanned; -(scanned + 1)
               // = the time budget elapsed after `scanned` hashes. Both
               // resume at the exact next counter, never skipping work.
               counter += res === -1 ? want : -res - 1;
-              if (counter >= MAX_SHA_HASHES) { resolve(null); return; }
+              if (counter >= MAX_SHA_HASHES) { finish(null); return; }
             } else {
               // Allocation failed: wasm is disabled permanently — fall back to JS.
               console.warn("KiwiCaptcha: WASM allocation failed, disabling WASM and falling back to JS");
               useWasm = false;
             }
-          } catch (e) { wasmFree(w, pp, prefixBytes.length); wasmFree(w, sp, saltBytes.length); console.error("KiwiCaptcha: WASM solve failed, falling back to JS", e); useWasm = false; }
+          } catch (e) { release(); console.error("KiwiCaptcha: WASM solve failed, falling back to JS", e); useWasm = false; }
         }
         if (!useWasm) {
           var end = Math.min(counter + CHUNK, MAX_SHA_HASHES);
@@ -300,12 +370,12 @@
           var inChunk = 0;
           for (; counter < end; counter++, inChunk++) {
             if (leadingZeros(deriveHash(prefixBytes, counter, saltBytes)) >= targetBits) {
-              resolve({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
+              finish({ counter: counter, duration: Math.round(performance.now() - solveStart) }); return;
             }
             if ((inChunk & 255) === 0 && performance.now() - chunkStart >= SHA_CHUNK_TIME_BUDGET_MS) break;
           }
         }
-        if (counter >= MAX_SHA_HASHES) { resolve(null); return; }
+        if (counter >= MAX_SHA_HASHES) { finish(null); return; }
         onProgress(Math.min(92, (counter * 100) / expectedHashes));
         fastYield(chunk);
       }
@@ -444,16 +514,22 @@
     en: { dir: "ltr",
       label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
       badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
-      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable",
+      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable", badgeExpired: "Expired",
       statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
       statusVerified: "Verification complete", statusFailed: "Verification failed",
-      statusExpired: "Verification expired", statusWorkerUnavailable: "Worker unavailable",
+      statusExpired: "Verification expired", statusWorkerUnavailable: "Check could not start",
+      statusExecutionUnavailable: "Check incomplete",
       statusSolverMismatch: "Solver version mismatch",
       hintProtected: "Protected", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
       hintClickRetry: "Challenge failed ({msg}) \u2014 press the Retry button to try again.",
       hintVerified: "Proof-of-work verified locally.",
-      hintWorker: "Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.",
+      hintWorker: "The security check could not start on this device \u2014 press the Retry button to try again.",
+      hintExecution: "The security check could not complete \u2014 press the Retry button to try again.",
+      hintExpired: "The check expired \u2014 press the Retry button to run it again.",
       hintSolver: "The solver worker is out of date \u2014 reload the page to load the current version.",
+      errConnection: "the connection failed", errMalformed: "the server returned an unexpected response",
+      errExhausted: "the check took too long", errExpired: "the challenge expired",
+      errGeneric: "the check could not complete",
       expired: "expired", retryButton: "Retry", checking: "Checking\u2026" },
     // The lazy widget-locales.js module fills these placeholders with
     // the same language codes it ships.
@@ -462,23 +538,36 @@
   var kiwiFallbackLang = "en";
   function kiwiNormalizeLang(pref) {
     if (typeof pref !== "string") return "";
-    return pref.trim().toLowerCase().split(/[_-]/)[0] || "";
+    // The full tag is preserved (region included): the resolver tries
+    // the exact pack before the base pack.
+    return pref.trim().toLowerCase().replace(/_/g, "-") || "";
+  }
+  // Resolution: explicit per-widget lang, then <html lang>, then
+  // navigator.language — an unsupported explicit language falls through
+  // instead of collapsing to English. Regional tags try their exact pack
+  // (pt-br) before the base pack (pt).
+  function kiwiLangCandidates(pref) {
+    var norm = kiwiNormalizeLang(pref);
+    if (!norm) return [];
+    var out = [norm];
+    var base = norm.split(/[-_]/)[0];
+    if (base && base !== norm) out.push(base);
+    return out;
   }
   function kiwiResolveLang(options) {
     var prefs = [];
     if (options && typeof options.lang === "string" && options.lang) prefs.push(options.lang);
-    if (!prefs.length && typeof document !== "undefined") {
-      var attr = null;
-      try {
-        var cs = document.currentScript;
-        attr = cs && cs.getAttribute ? cs.getAttribute("data-kiwi-lang") : null;
-      } catch (e) {}
-      if (attr) prefs.push(attr);
+    if (typeof document !== "undefined") {
+      var htmlLang = null;
+      try { htmlLang = document.documentElement ? document.documentElement.getAttribute("lang") : null; } catch (e) {}
+      if (htmlLang) prefs.push(htmlLang);
     }
-    if (!prefs.length && navigator && navigator.language) prefs.push(navigator.language);
+    if (typeof navigator !== "undefined" && navigator.language) prefs.push(navigator.language);
     for (var i = 0; i < prefs.length; i++) {
-      var base = kiwiNormalizeLang(prefs[i]);
-      if (kiwiLocalePacks[base] !== undefined) return base;
+      var candidates = kiwiLangCandidates(prefs[i]);
+      for (var c = 0; c < candidates.length; c++) {
+        if (kiwiLocalePacks[candidates[c]] !== undefined) return candidates[c];
+      }
     }
     return kiwiFallbackLang;
   }
@@ -583,6 +672,9 @@
     // at 1 would let a stale in-flight run look current again after a
     // reset cancelled it.
     var prevRecord = kiwiWidgets[widgetId];
+    // A re-init supersedes the previous generation: its retry timer,
+    // abort, worker and countdown are cancelled first.
+    if (prevRecord) kiwiCancelGeneration(widgetId);
     var newGen = prevRecord ? prevRecord.gen + 1 : 1;
     // The decoy state is PRIVATE per widget (never on the DOM): the
     // authenticated name, the deferred flag, the strategy/wrapper-class
@@ -636,12 +728,27 @@
     if (telemetryMode !== "minimal" && telemetryMode !== "full") telemetryMode = "off";
     var requestSent = false;
     var kiwiTelemetrySession = null;
+    // The session must exist BEFORE the request: the token is built
+    // with telemetry.build(), so a session created in a later microtask
+    // would never attach (every token {}) — run() awaits the module
+    // briefly; an already-registered module is used synchronously.
+    function kiwiCreateTelemetrySession() {
+      if (kiwiTelemetrySession) return true;
+      var module = kiwiModuleApi("telemetry");
+      if (module && module.create) {
+        kiwiTelemetrySession = module.create(container, W, telemetryMode);
+        return true;
+      }
+      return false;
+    }
     if (telemetryMode !== "off") {
-      kiwiEnsureModule("telemetry", container, W).then(function (module) {
-        if (!kiwiGenerationCurrent(widgetId, newGen)) return;
-        if (requestSent) return;
-        if (module && module.create) kiwiTelemetrySession = module.create(container, W, telemetryMode);
-      });
+      if (!kiwiCreateTelemetrySession()) {
+        kiwiEnsureModule("telemetry", container, W).then(function () {
+          if (!kiwiGenerationCurrent(widgetId, newGen)) return;
+          if (requestSent && !kiwiTelemetrySession) return;
+          kiwiCreateTelemetrySession();
+        });
+      }
     }
     var telemetry = {
       build: function () { return kiwiTelemetrySession ? kiwiTelemetrySession.build() : {}; },
@@ -747,7 +854,12 @@
     function setProgress(pct) {
       if (!fillEl || W.dataset.kiwiDestroyed) return;
       var clamped = Math.max(0, Math.min(100, pct));
-      fillEl.setAttribute("data-progress", String(clamped));
+      // The stylesheet paints exact 10..100 buckets; the solver reports a
+      // continuous float (and the worker path forwards its own float).
+      // Round to the nearest bucket so the bar actually moves during the
+      // solve instead of sitting at 0% until success.
+      var bucket = Math.round(clamped / 10) * 10;
+      fillEl.setAttribute("data-progress", String(bucket));
     }
     
     var countdownTimer = null;
@@ -796,12 +908,8 @@
       try { setBinding(""); } catch (e) {}
       try { writeResponseAlias(""); } catch (e) {}
       try {
-        // The expired view keeps the solved-state strings (the label, the
-        // Success badge and the verified hint stay on the widget exactly
-        // like the legacy expiry path left them) and only flips the DOM
-        // state to "expired", so a later language settlement repaints the
-        // same expired presentation in the settled pack.
-        kiwiSetView({ statusKey: "label", badgeKey: "badgeSuccess", domState: "expired", hintKey: "hintVerified" });
+        // The expired credential must not keep the Success presentation.
+        kiwiSetView({ statusKey: "label", badgeKey: "badgeExpired", domState: "expired", hintKey: "hintExpired" });
         if (countdownEl) countdownEl.textContent = kiwiT("expired");
       } catch (e) {}
       // The credential is gone — the widget is not started anymore, so
@@ -811,16 +919,21 @@
       announce(kiwiT("statusExpired"));
       if (options.expiredCallback) { try { options.expiredCallback(); } catch (e) {} }
     }
-    function scheduleExpiry(ttlSecs) {
+    // Fires at the receipt-anchored deadline (never at completion).
+    function scheduleExpiryAt(deadlineAt) {
       clearExpiryTimer();
-      if (!ttlSecs || ttlSecs <= 0) return;
+      if (!deadlineAt) return;
       var r = kiwiWidgets[widgetId];
       if (!r) return;
-      r.expiryTimer = setTimeout(expireWidget, ttlSecs * 1000);
+      r.expiryTimer = setTimeout(expireWidget, Math.max(0, deadlineAt - performance.now()));
     }
-    function startCountdown(ttlSecs) {
+    // The timer counts down to the same receipt-anchored deadline.
+    function startCountdown(ttlSecs, deadlineAt) {
       var remaining = ttlSecs;
-      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : kiwiT("expired"); };
+      var tick = function() {
+        if (deadlineAt) remaining = Math.max(0, Math.ceil((deadlineAt - performance.now()) / 1000));
+        if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : kiwiT("expired");
+      };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
       var rc = kiwiWidgets[widgetId];
@@ -907,31 +1020,39 @@
       r.errorFired = true;
       try { options.errorCallback(msg || "challenge-failed"); } catch (e) {}
     }
+    // Driver-owned failures map to translated text; raw internals never
+    // reach the widget (they stay in the event detail / console).
+    function kiwiErrorKeyFor(msg) {
+      var m = String(msg || "");
+      if (m === "Expired") return "errExpired";
+      if (m === "Exhausted") return "errExhausted";
+      if (m.indexOf("Challenge malformed") === 0 || m.indexOf("Challenge downgraded") === 0) return "errMalformed";
+      if (m.indexOf("Challenge failed") === 0 || m.indexOf("signal is aborted") !== -1
+        || m.indexOf("Failed to fetch") !== -1 || m.indexOf("NetworkError") !== -1) return "errConnection";
+      return "errGeneric";
+    }
     function fail(msg) {
       resetToIdle();
       announce(kiwiT("statusFailed"));
-      dispatch("error", { error: msg });
+      var userMsg = kiwiT(kiwiErrorKeyFor(msg));
       if (retryCount < RETRY_LIMIT) {
         retryCount++;
-        // The bounded auto-retry keeps the idle DOM state (the label
-        // and badge the reset painted) and swaps only the hint for the
-        // retrying text; a late language settlement repaints the same
-        // view in the settled pack.
-        kiwiSetView({ statusKey: "label", badgeKey: "badgeIdle", domState: "idle", hintKey: "hintRetrying", replacements: { msg: msg } });
+        // Transient failure: kiwi:retrying (never kiwi:error), so
+        // execute() does not reject on an auto-recovered failure.
+        dispatch("retrying", { error: msg, attempt: retryCount });
+        kiwiSetView({ statusKey: "label", badgeKey: "badgeIdle", domState: "idle", hintKey: "hintRetrying", replacements: { msg: userMsg } });
         // The retry is a cancellable handle — a reset that lands during
         // the backoff must never start a stale run().
         var r = kiwiWidgets[widgetId];
         if (r && r.retryTimer) clearTimeout(r.retryTimer);
         if (r) r.retryTimer = setTimeout(function () { if (r) r.retryTimer = null; run(); }, 1000 * retryCount);
       } else {
-        // Terminal failure must surface on the visible widget — the
-        // Retry button's visibility is keyed on
-        // .kiwi-widget[data-state="failed"].
-        kiwiSetView({ statusKey: "label", badgeKey: "badgeFailed", domState: "failed", hintKey: "hintClickRetry", replacements: { msg: msg } });
+        // Terminal failure: kiwi:error fires once per generation, at
+        // retry exhaustion, with the Retry button visible.
+        dispatch("error", { error: msg });
+        kiwiSetView({ statusKey: "label", badgeKey: "badgeFailed", domState: "failed", hintKey: "hintClickRetry", replacements: { msg: userMsg } });
         delete W.dataset.kiwiStarted;
         if (retryEl) retryEl.style.display = "";
-        // The provider error callback fires exactly once per generation,
-        // at automatic-retry exhaustion.
         fireErrorCallback(msg);
       }
     }
@@ -947,6 +1068,7 @@
       if (countdownEl) countdownEl.textContent = "";
       kiwiSetView({ statusKey: "statusSolverMismatch", badgeKey: "badgeVersionError", domState: "kiwi:solver-mismatch", hintKey: "hintSolver" });
       setProgress(0);
+      announce(kiwiT("statusSolverMismatch"));
       fireErrorCallback("solver-mismatch");
     }
     // Worker creation or solve failure for a memory-hard challenge
@@ -965,6 +1087,10 @@
       kiwiSetView({ statusKey: "statusWorkerUnavailable", badgeKey: "badgeUnavailable", domState: "kiwi:worker-unavailable", hintKey: "hintWorker" });
       setProgress(0);
       announce(kiwiT("statusWorkerUnavailable"));
+      // Developer diagnostics stay on the console; the visible hint is
+      // visitor-facing text.
+      console.warn("KiwiCaptcha: off-main-thread solver unavailable (" + (reason || "worker-creation-failed")
+        + "); check the worker asset attributes (data-kiwi-worker-src/integrity, data-kiwi-runtime-src/integrity) and the page CSP");
       dispatch("worker-unavailable", { reason: reason || "worker-creation-failed" });
       delete W.dataset.kiwiStarted;
       // Worker conditions are non-retryable within the flow — the
@@ -982,9 +1108,12 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
-      kiwiSetView({ statusKey: "statusWorkerUnavailable", badgeKey: "badgeUnavailable", domState: "kiwi:execution-unavailable", hintKey: "hintWorker" });
+      // A dedicated execution state with its own hint and Retry (the
+      // worker hint is wrong here; Retry re-runs the whole flow).
+      kiwiSetView({ statusKey: "statusExecutionUnavailable", badgeKey: "badgeUnavailable", domState: "kiwi:execution-unavailable", hintKey: "hintExecution" });
       setProgress(0);
-      announce(kiwiT("statusWorkerUnavailable"));
+      announce(kiwiT("statusExecutionUnavailable"));
+      console.warn("KiwiCaptcha: execution interpreter unavailable (" + (reason || "execution-failed") + ")");
       dispatch("execution-unavailable", { reason: reason || "execution-failed" });
       delete W.dataset.kiwiStarted;
       fireErrorCallback("execution-unavailable");
@@ -1010,11 +1139,24 @@
     kiwiHook = { el: W, reset: reset };
     if (kiwiHookIdx < kiwiResetHooks.length) kiwiResetHooks[kiwiHookIdx] = kiwiHook;
     else kiwiResetHooks.push(kiwiHook);
+    // Move focus to the widget group before Retry hides the focused
+    // button (WCAG 2.4.3: users must not be dropped to <body>).
+    function kiwiFocusWidgetGroup() {
+      if (!a11yRoot || !a11yRoot.setAttribute) return;
+      if (!a11yRoot.hasAttribute("tabindex")) a11yRoot.setAttribute("tabindex", "-1");
+      try { a11yRoot.focus(); } catch (e) {}
+    }
     // The Retry button re-inits exactly like the click/tap reacquire path.
     if (retryEl && !retryEl.dataset.kiwiRetryBound) {
       retryEl.dataset.kiwiRetryBound = "1";
       kiwiAddListener(retryEl, "click", function () {
-        if (W.dataset.kiwiStarted || W.dataset.kiwiDestroyed) return;
+        if (W.dataset.kiwiDestroyed) return;
+        if (W.dataset.kiwiStarted) {
+          // During the auto-retry backoff an explicit Retry supersedes
+          // the pending timer instead of being refused.
+          var rec = kiwiWidgets[widgetId];
+          if (!(rec && rec.retryTimer && rec.state === "idle")) return;
+        }
         // Reacquisition MUST restore the FULL original configuration —
         // a blank initWidget(W) would fall back to DOM/URL heuristics and
         // the default "login", silently downgrading a sensitive
@@ -1024,6 +1166,7 @@
         var preserved = (kiwiWidgets[widgetId] && kiwiWidgets[widgetId].options) || options;
         // Retry button: explicit retry clears the backoff.
         kiwiClearModuleBackoff();
+        kiwiFocusWidgetGroup();
         delete W.dataset.kiwiStarted;
         initWidget(W, preserved);
       });
@@ -1039,6 +1182,7 @@
       // bails without touching state.
       var gen = (kiwiWidgets[widgetId] || {}).gen || 1;
       if (!kiwiGenerationCurrent(widgetId, gen)) return;
+      var expiryDeadlineAt = null;
       try {
         kiwiSetView({ statusKey: "statusConnecting", badgeKey: "badgeWait", domState: "connecting" });
       var riskApi = kiwiModuleApi("risk");        var endpoint = kiwiEndpoint(kiwiConfigValue(W, container, "data-kiwi-endpoint") || "/api/kcaptcha/challenge");
@@ -1105,6 +1249,17 @@
         var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
         var rw = kiwiWidgets[widgetId];
         if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
+        // Attach telemetry before sending (bounded wait; a module that
+        // never arrives leaves the token empty instead of blocking).
+        if (telemetryMode !== "off" && !kiwiTelemetrySession) {
+          try {
+            await Promise.race([
+              kiwiEnsureModule("telemetry", container, W),
+              new Promise(function (res) { setTimeout(res, 2000); }),
+            ]);
+          } catch (e) {}
+          if (kiwiGenerationCurrent(widgetId, gen)) kiwiCreateTelemetrySession();
+        }
         // The request is SENT from here on: a telemetry module
         // registering after this point is refused for this generation,
         // so the token never carries a half-session.
@@ -1148,7 +1303,15 @@
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
         }
         if (riskApi && riskApi.renderDecoy) riskApi.renderDecoy(data, decoyState, tokenEl);
-        if (data.ttlSecs) startCountdown(data.ttlSecs);
+        // Receipt-anchored expiry (server TTL started at issuance).
+        if (data.ttlSecs) {
+          // The margin is capped at a quarter of the TTL so very short
+          // challenge lifetimes (fixtures, test keys) still get a real
+          // window instead of an already-expired one.
+          var expiryMargin = Math.min(KIWI_EXPIRY_MARGIN_MS, Math.max(0, data.ttlSecs * 250));
+          expiryDeadlineAt = performance.now() + data.ttlSecs * 1000 - expiryMargin;
+          startCountdown(data.ttlSecs, expiryDeadlineAt);
+        }
         kiwiSetView({ statusKey: "statusVerifying", badgeKey: "badgeWorking", domState: "solving" });
         announce(kiwiT("checking"));
         dispatch("verifying");
@@ -1175,7 +1338,7 @@
             if (!kiwiGenerationCurrent(widgetId, gen)) return;
           }
           if (!riskApi || !riskApi.solveWorker) { workerUnavailable("worker-unavailable"); return; }
-          var workerHandle = riskApi.solveWorker(data, setProgress, container, deadline);
+          var workerHandle = riskApi.solveWorker(data, setProgress, container, deadline, W);
           var wr = kiwiWidgets[widgetId];
           if (wr) wr.worker = workerHandle;
           result = await workerHandle.promise;
@@ -1192,7 +1355,7 @@
               if (!kiwiGenerationCurrent(widgetId, gen)) return;
             }
             if (riskApi && riskApi.solveWorker) {
-              var shaWorkerHandle = riskApi.solveWorker(data, setProgress, container, deadline);
+              var shaWorkerHandle = riskApi.solveWorker(data, setProgress, container, deadline, W);
               var shr = kiwiWidgets[widgetId];
               if (shr) shr.worker = shaWorkerHandle;
               var shaWorkerResult = await shaWorkerHandle.promise;
@@ -1210,10 +1373,11 @@
             }
           }
           if (!result) {
-            result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline);
+            result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline, function () { return !kiwiGenerationCurrent(widgetId, gen); });
           }
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        if (result && result.cancelled) return;
         if (result && result.deadline) throw new Error("Expired");
         if (!result) throw new Error("Exhausted");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
@@ -1275,10 +1439,9 @@
         kiwiRecordState("verified", token);
         writeResponseAlias(token);
         dispatch("verified", { nonce: data.nonce, token: token });
-        // Provider-style solved-token expiry: the server stays
-        // authoritative (an expired record is rejected); this client
-        // timer is UX convenience mirroring incumbent token lifetimes.
-        scheduleExpiry(data.ttlSecs || 0);
+        // UX-only expiry timer at the receipt-derived deadline; the
+        // server remains authoritative.
+        scheduleExpiryAt(expiryDeadlineAt);
         if (options.callback) { try { options.callback(token); } catch (e) {} }
         telemetry.stop();
       } catch (e) {
@@ -1800,6 +1963,9 @@
       isExpired: kiwiIsExpired,
       safeCallback: kiwiSafeCallback,
       normalizeLang: kiwiNormalizeLang,
+      // The one configuration reader (widget element wins over the
+      // container) so the lazy modules never re-implement precedence.
+      configValue: kiwiConfigValue,
       resolveTarget: kiwiResolveTarget,
       record: kiwiBridgeRecord,
       // Registry bookkeeping for inspection: the live widget-record

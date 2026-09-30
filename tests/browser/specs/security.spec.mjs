@@ -625,7 +625,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', {
       timeout: 60_000,
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('Worker unavailable', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('could not start on this device', {
       timeout: 60_000,
     });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');

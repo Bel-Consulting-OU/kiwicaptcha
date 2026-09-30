@@ -149,7 +149,7 @@ test.describe('KiwiCaptcha polymorphic decoy rendering', () => {
       } else if (strategy.id === 3) {
         expect(facts.position).toBe('absolute');
         expect(facts.left).toBe('-9999px');
-        expect(facts.autocomplete).toBe('new-password');
+        expect(facts.autocomplete).toBe('off');
         expect(facts.wrapped).toBe(false);
       } else if (strategy.id === 4) {
         expect(facts.hiddenAttr).toBe(true);

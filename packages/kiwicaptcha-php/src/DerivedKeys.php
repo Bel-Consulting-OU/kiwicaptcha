@@ -147,9 +147,11 @@ final class DerivedKeys
         // The derivation boundary carries the entropy invariant too: the
         // supported Config path already requires 16 bytes, and a direct
         // caller with a shorter secret must not derive usable keys.
-        if (\strlen($master) < 16) {
+        // 16 bytes of master is only 128 bits, and a 16-character hex
+        // string is 64 bits while still passing a 16-byte floor.
+        if (\strlen($master) < 32) {
             throw new \InvalidArgumentException(sprintf(
-                'The master secret must be at least 16 bytes (got %d)',
+                'The master secret must be at least 32 bytes (got %d)',
                 \strlen($master),
             ));
         }

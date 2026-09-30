@@ -414,11 +414,11 @@ final class KiwiCaptchaDoctorCommand extends Command
         $secret = $this->config['secret_key'];
         $length = \strlen($secret);
         if ($length < 16) {
-            return ['FAIL', sprintf('secret_key is %d bytes; the core refuses secrets under 16 bytes', $length)];
+            return ['FAIL', sprintf('secret_key is %d bytes; the core refuses secrets under 32 bytes', $length)];
         }
         $normalized = strtolower($secret);
         if (preg_match('/^(change|replace|your|example|sample|test)[-_]?/', $normalized) === 1
-            || \in_array($normalized, ['secret', 'kiwi-secret', 'kiwi_secret', 'kiwicaptcha', 'changeme', 'changeme123'], true)
+            || \in_array($normalized, ['secret', 'kiwi-secret', 'kiwi_secret', 'kiwicaptcha', 'changeme', 'changeme123', 'replace-with-32-random-bytes', 'replace-with-a-random-32-byte-secret-value'], true)
             || preg_match('/^(.)\1+$/', $secret) === 1
         ) {
             return ['WARN', sprintf('%d-byte secret looks like a placeholder or has no entropy; use a fresh random value', $length)];

@@ -129,6 +129,10 @@
     background: rgba(var(--kiwi-error-rgb), 0.1);
     color: var(--kiwi-error);
   }
+  .kiwi-widget[data-state="expired"] .kiwi-icon-wrapper {
+    background: rgba(var(--kiwi-error-rgb), 0.1);
+    color: var(--kiwi-error);
+  }
   /* No pulse while solving; no scale on done. The slot strip carries the
      activity; the chip stays still. */
 
@@ -188,6 +192,10 @@
     color: var(--kiwi-badge-success-text);
   }
   .kiwi-widget[data-state="failed"] .kiwi-badge {
+    background: rgba(var(--kiwi-error-rgb), 0.12);
+    color: var(--kiwi-badge-error-text);
+  }
+  .kiwi-widget[data-state="expired"] .kiwi-badge {
     background: rgba(var(--kiwi-error-rgb), 0.12);
     color: var(--kiwi-badge-error-text);
   }
@@ -252,6 +260,7 @@
   .kiwi-bar[data-progress="100"] { width: 100%; }
   .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
   .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
+  .kiwi-widget[data-state="expired"] .kiwi-bar { background: var(--kiwi-error); }
 
   /* ── Bottom row: the RECEIPT typography (mono, muted) ── */
   .kiwi-bottom {
@@ -311,7 +320,8 @@
   .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
   .kiwi-widget[data-state="expired"] .kiwi-retry,
-  .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry {
+  .kiwi-widget[data-state="kiwi:worker-unavailable"] .kiwi-retry,
+  .kiwi-widget[data-state="kiwi:execution-unavailable"] .kiwi-retry {
     display: inline-flex;
   }
 
@@ -330,8 +340,20 @@
     .kiwi-retry { transition: none; animation: none; }
   }
 
-  /* High-contrast mode: borders carry the states alone. */
+  /* High-contrast mode: the bar keeps a visible fill (a background is
+     forced away otherwise) and the borders carry a DISTINCT system
+     color per state, because the default forced border color is
+     CanvasText for every state. */
   @media (forced-colors: active) {
     .kiwi-widget { border: 1px solid CanvasText; }
     .kiwi-badge, .kiwi-slots i { border: 1px solid CanvasText; }
+    .kiwi-track { border: 1px solid CanvasText; }
+    .kiwi-bar { forced-color-adjust: none; background: Highlight; }
+    .kiwi-widget[data-state="done"] { border-color: Highlight; }
+    .kiwi-widget[data-state="failed"],
+    .kiwi-widget[data-state="expired"],
+    .kiwi-widget[data-state="kiwi:worker-unavailable"],
+    .kiwi-widget[data-state="kiwi:execution-unavailable"],
+    .kiwi-widget[data-state="kiwi:solver-mismatch"] { border-color: Mark; }
+    .kiwi-widget[data-state="solving"] { border-style: dashed; }
   }

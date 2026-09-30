@@ -237,16 +237,16 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-92,600 bytes raw, 27,251 bytes gzip and 23,109 bytes brotli, against
+100,555 bytes raw, 29,702 bytes gzip and 25,076 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 34,305 bytes raw, 9,983 bytes gzip and 8,587 bytes
+module) is 39,227 bytes raw, 11,451 bytes gzip and 9,829 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
-widget-locales.js copy (the lazy non-default locale packs) is 13,395
-bytes raw, 3,570 bytes gzip and 3,193 bytes brotli against caps of
+widget-locales.js copy (the lazy non-default locale packs) is 16,293
+bytes raw, 4,490 bytes gzip and 3,940 bytes brotli against caps of
 16,384 / 6,000 / 5,000; every widget-compat.js copy is 31,586 bytes
 raw, 9,304 bytes gzip and 8,095 bytes brotli against caps of
 32,768 / 12,000 / 10,000; every execution-interpreter copy
@@ -324,8 +324,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 92,600 bytes
-raw, 27,251 gzip and 23,109 brotli (the record's
+any memory-hard challenge — is the eager core alone: 100,555 bytes
+raw, 29,702 gzip and 25,076 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits at 96.8% of its 30,720-byte cap after the provider-control
 architecture and lazy-module recovery work added core code (the cap is
@@ -353,7 +353,7 @@ record's budget rows, equality-gated):
   the fallback, and loads the module exactly when a widget's resolved
   language is non-default, so a default-language page pays zero bytes
   for translations; a load failure degrades to English with a console
-  warning, never a broken widget (13,395 raw / 3,570 gzip / 3,193
+  warning, never a broken widget (16,293 raw / 4,490 gzip / 3,940
   brotli);
 - `widget-telemetry.js`, the lazy telemetry session, loaded only when
   a widget enables one (2,922 raw / 1,229 gzip / 992 brotli);

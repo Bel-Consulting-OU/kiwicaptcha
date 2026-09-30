@@ -1,5 +1,18 @@
 (function () {
   var encoder = new TextEncoder();
+  var decoder = new TextDecoder();
+  function kiwiRiskConfigValue(W, container, name) {
+    // The eager core exposes the one configuration reader (widget element
+    // wins over the container); fall back to the same order when the
+    // module somehow runs without it.
+    var bridge = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
+    if (bridge && bridge.core && typeof bridge.core.configValue === "function") {
+      return bridge.core.configValue(W, container, name);
+    }
+    var value = W && W.getAttribute ? W.getAttribute(name) : null;
+    if ((value === null || value === "") && container && container !== W && container.getAttribute) value = container.getAttribute(name);
+    return value;
+  }
   // Solver protocol/ABI generation label, identical to the eager core's
   // literal (the spec asserts the copies agree) and verified by the worker
   // in its ready/done handshake; a stale cached worker is refused. This
@@ -8,7 +21,9 @@
   var KIWI_SOLVER_PROTOCOL_ID = "2026-09-r1";
   // Bounded search cap, identical to the eager core's constant; the
   // worker enforces it there, the solve message carries it here.
-  var MAX_SHA_HASHES = 5000000;
+  // The same search cap as the eager core: a 20-bit challenge exhausts at
+  // e^-20 instead of the ~0.85% a 5M cap left at the top rung.
+  var MAX_SHA_HASHES = 20000000;
   function b64decode(str) {
     str = str.replace(/-/g, "+").replace(/_/g, "/");
     while (str.length % 4) str += "=";
@@ -41,15 +56,22 @@
   // closed). The iframe is removed after the run.
   function kiwiRunExecution(program, nonce, container, W) {
     return new Promise(function (resolve, reject) {
-      var executionSrc = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
-        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
-      var executionIntegrity = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
-        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
+      // The one configuration reader: the widget element wins over the
+      // container, exactly like every other data-kiwi-* attribute.
+      var executionSrc = kiwiRiskConfigValue(W, container, "data-kiwi-execution-src");
+      var executionIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-execution-integrity");
       if (!executionSrc || !executionIntegrity) {
         reject("execution-asset-unconfigured");
         return;
       }
       var iframe = document.createElement("iframe");
+      // sandbox="allow-scripts allow-same-origin": a same-origin document
+      // can remove its own sandbox attribute, so this is a confinement
+      // boundary for the DISPOSABLE frame, not a security boundary
+      // against the interpreter itself — the interpreter asset is the
+      // SRI-pinned, content-addressed first-party code and the actual
+      // trust anchor. (The frame is created per armed challenge, removed
+      // after the run and never reused.)
       iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
       iframe.setAttribute("aria-hidden", "true");
       iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;";
@@ -182,13 +204,21 @@
     kiwiIntegrityWarned = true;
     console.warn("KiwiCaptcha: asset URL carries no integrity digest; loading it unverified");
   }
-  function kiwiVerifyIntegrity(src, integrity, url) {
+  // Byte-exact preflight: the digest is computed over the EXACT fetched
+  // bytes (never a re-encoded text form), and when the URL is
+  // content-addressed (….<64-hex-sha256>.js) the embedded name must equal
+  // the digest too — the same immutable URL the browser APIs then load is
+  // therefore pinned to the verified bytes.
+  function kiwiSha256B64ToHex(b64) {
+    try {
+      var bin = atob(b64);
+      var hex = "";
+      for (var i = 0; i < bin.length; i++) hex += ("0" + bin.charCodeAt(i).toString(16)).slice(-2);
+      return hex;
+    } catch (e) { return null; }
+  }
+  function kiwiVerifyIntegrityBytes(bytes, integrity, url) {
     if (!integrity) {
-      // An asset URL without an integrity attribute keeps the legacy
-      // unverified contract ONLY on the page's own origin: when the URL
-      // is missing, unparseable or cross-origin, the content is
-      // unverifiable and the check fails closed. The same-origin state
-      // is surfaced once per page instead of passing silently.
       var resolved = null;
       if (typeof url === "string" && url !== "") {
         try { resolved = new URL(url, window.location.href); } catch (e) {}
@@ -216,11 +246,19 @@
     if (!window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
       return Promise.resolve({ ok: false, reason: "integrity-unverifiable" });
     }
-    return crypto.subtle.digest(algo.algo, encoder.encode(src)).then(function (buf) {
-      var bytes = new Uint8Array(buf);
+    var buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return crypto.subtle.digest(algo.algo, buf).then(function (dig) {
+      var out = new Uint8Array(dig);
       var bin = "";
-      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      return btoa(bin) === expected ? { ok: true } : { ok: false, reason: "integrity-mismatch" };
+      for (var i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+      if (btoa(bin) !== expected) return { ok: false, reason: "integrity-mismatch" };
+      if (algo.algo === "SHA-256" && typeof url === "string" && url !== "") {
+        var m = url.match(/\.([0-9a-f]{64})\.(?:js|css)(?:[?#]|$)/);
+        if (m && m[1] !== kiwiSha256B64ToHex(expected)) {
+          return { ok: false, reason: "integrity-url-mismatch" };
+        }
+      }
+      return { ok: true };
     }).catch(function () { return { ok: false, reason: "integrity-unverifiable" }; });
   }
   function kiwiFetchRuntimeGlue(url, integrity) {
@@ -237,15 +275,15 @@
           .then(function (r) {
             if (!r.ok) { lastReason = "runtime-fetch-" + r.status; throw new Error("KiwiCaptcha runtime fetch failed"); }
             var finalUrl = r.url || url;
-            return r.text().then(function (text) { return { src: text, finalUrl: finalUrl }; });
+            return r.arrayBuffer().then(function (buf) { return { bytes: new Uint8Array(buf), finalUrl: finalUrl }; });
           })
           .then(function (res) {
-            var src = res.src;
+            var src = decoder.decode(res.bytes);
             if (src.indexOf("var KIWI_WASM_B64") === -1 || src.indexOf("__kiwiCaptchaWasm") === -1) {
               lastReason = "runtime-malformed";
               throw new Error("KiwiCaptcha runtime asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity, res.finalUrl).then(function (vres) {
+            return kiwiVerifyIntegrityBytes(res.bytes, integrity, res.finalUrl).then(function (vres) {
               if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha runtime integrity failure"); }
               return src;
             });
@@ -259,6 +297,9 @@
       tryFetch();
     });
     kiwiRuntimeGlueCache[url] = promise;
+    // A terminal failure must never be cached for the page lifetime: an
+    // explicit Retry after a transient network error has to fetch again.
+    promise.then(function (res) { if (res && res.error) delete kiwiRuntimeGlueCache[url]; });
     return promise;
   }
   function kiwiFetchWorkerAsset(url, integrity) {
@@ -274,15 +315,15 @@
           .then(function (r) {
             if (!r.ok) { lastReason = "worker-fetch-" + r.status; throw new Error("KiwiCaptcha worker asset fetch failed"); }
             var finalUrl = r.url || url;
-            return r.text().then(function (text) { return { src: text, finalUrl: finalUrl }; });
+            return r.arrayBuffer().then(function (buf) { return { bytes: new Uint8Array(buf), finalUrl: finalUrl }; });
           })
           .then(function (res) {
-            var src = res.src;
+            var src = decoder.decode(res.bytes);
             if (src.indexOf("KiwiCaptcha worker solver") === -1) {
               lastReason = "worker-malformed";
               throw new Error("KiwiCaptcha worker asset malformed");
             }
-            return kiwiVerifyIntegrity(src, integrity, res.finalUrl).then(function (vres) {
+            return kiwiVerifyIntegrityBytes(res.bytes, integrity, res.finalUrl).then(function (vres) {
               if (!vres.ok) { lastReason = vres.reason; throw new Error("KiwiCaptcha worker integrity failure"); }
               return src;
             });
@@ -296,9 +337,12 @@
       tryFetch();
     });
     kiwiWorkerAssetCache[url] = promise;
+    // Failed fetches are evicted (see the runtime cache): Retry can
+    // succeed after a transient error without a page reload.
+    promise.then(function (res) { if (res && res.error) delete kiwiWorkerAssetCache[url]; });
     return promise;
   }
-  function solveWithWorker(data, onProgress, container, deadline) {
+  function solveWithWorker(data, onProgress, container, deadline, W) {
     var worker = null;
     var blobUrl = null;
     // Blob-URL cleanup: the URL is revoked exactly once on every terminal
@@ -328,10 +372,13 @@
     // unchanged: every solve carries the full field set, and only an
     // rsw solve adds the nonce and modulus.
     var algorithm = data.algorithm === "argon2id" ? "argon2id" : (data.algorithm === "rsw" ? "rsw" : "sha256");
-    var workerSrc = container.getAttribute("data-kiwi-worker-src");
-    var workerIntegrity = container.getAttribute("data-kiwi-worker-integrity");
-    var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
-    var runtimeIntegrity = container.getAttribute("data-kiwi-runtime-integrity");
+    // The one configuration reader: the widget element wins over the
+    // container here too (this worker path used to read the container
+    // only, contradicting kiwiConfigValue).
+    var workerSrc = kiwiRiskConfigValue(W, container, "data-kiwi-worker-src");
+    var workerIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-worker-integrity");
+    var runtimeSrc = kiwiRiskConfigValue(W, container, "data-kiwi-runtime-src");
+    var runtimeIntegrity = kiwiRiskConfigValue(W, container, "data-kiwi-runtime-integrity");
     // An unverified runtime is trusted only on the page's own origin: a
     // runtime URL without a digest that resolves cross-origin (or does
     // not parse) is treated as unconfigured, so it is never fetched and
@@ -397,11 +444,14 @@
           if (workerSrc) {
             // Files mode: a SAME-ORIGIN Worker constructed from the
             // content-addressed URL of the fetched + preflight-verified
-            // asset. The Worker constructor loads the same immutable URL
-            // through the browser's worker-script fetcher — it can only
-            // ever serve the exact verified bytes (the hash is in the
-            // URL), so the running worker IS the verified source; no
-            // Blob is created, so files mode needs worker-src 'self'.
+            // asset. The preflight hashes the EXACT fetched bytes and
+            // (when integrity is present) requires the URL's embedded
+            // sha256 to equal that digest, so the immutable URL the
+            // browser's worker-script fetcher loads is pinned to the
+            // verified bytes. That is a main-thread preflight, not an
+            // in-worker re-verification; no Blob is created, so files
+            // mode needs worker-src 'self' (or the content-addressed
+            // source).
             worker = new Worker(workerSrc);
           } else {
             // Inline mode: the glue's embedded workerSource plus the
@@ -631,9 +681,14 @@
       input.setAttribute("autocomplete", "off");
     } else if (variant === 2 || variant === 4) {
       input.setAttribute("hidden", "");
+      // Inline display:none beats a site stylesheet that would otherwise
+      // render hidden-attribute inputs (input { display: block }).
+      input.style.display = "none";
       input.setAttribute("autocomplete", "off");
     } else {
-      input.setAttribute("autocomplete", "new-password");
+      // Never new-password: that invites password-manager and browser
+      // autofill to populate the decoy on legitimate users.
+      input.setAttribute("autocomplete", "off");
       input.setAttribute("aria-label", "off-screen field");
       input.style.position = "absolute";
       input.style.left = "-9999px";

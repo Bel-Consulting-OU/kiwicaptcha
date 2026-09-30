@@ -916,9 +916,9 @@ final class ExecutionChallengeGenerator
 
     private static function validateKey(string $executionKey): void
     {
-        if (\strlen($executionKey) < 16) {
+        if (\strlen($executionKey) < 32) {
             throw new \InvalidArgumentException(
-                'KiwiCaptcha execution key must be at least 16 bytes'
+                'KiwiCaptcha execution key must be at least 32 bytes'
             );
         }
     }

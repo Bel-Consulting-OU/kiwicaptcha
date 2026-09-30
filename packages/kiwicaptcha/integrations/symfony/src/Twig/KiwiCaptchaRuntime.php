@@ -240,6 +240,27 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The inline tier's once-per-page switch: true for the first widget
+     * of a request, false for every later one. The driver is idempotent
+     * and its DOM scan/observer initialize later widgets and share one
+     * module registry, so the shared inline assets need to be emitted
+     * exactly once. Files mode deduplicates through assetTags()
+     * instead, so the claim always succeeds there.
+     */
+    public function claimInlineAssets(): bool
+    {
+        if ($this->assetMode !== 'inline') {
+            return true;
+        }
+        if (isset($this->emittedAssetKeys['inline:shared'])) {
+            return false;
+        }
+        $this->emittedAssetKeys['inline:shared'] = true;
+
+        return true;
+    }
+
+    /**
      * The driver's data-kiwi-runtime-src value (files mode): the versioned
      * runtime URL the driver fetches lazily when a memory-hard challenge
      * arrives. Empty in inline mode.
@@ -466,6 +487,9 @@ final class KiwiCaptchaRuntime
             // response stays authoritative).
             'algorithm' => $algorithm,
             // Standalone renders have no form view vars; provide working defaults.
+            // Once per page: the shared inline assets are emitted by the
+            // first widget only (claimed per request).
+            'emit_assets' => $this->claimInlineAssets(),
             'id' => $context['id'] ?? '',
             'full_name' => $context['full_name'] ?? 'kiwi__token',
             'kiwi_css' => $this->css,

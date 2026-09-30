@@ -60,7 +60,7 @@ These invariants are pinned by cross-language tests; see [the claims registry](p
   A relay mitigation, not a guarantee.
 - Single-use with bounded verification cost: verification consumes the challenge; per-nonce attempt accounting bounds the cost of wrong candidates.
   Deployments must additionally rate-limit challenge issuance and cap aggregate Argon2id verification concurrency; the Symfony bundle ships both.
-- Widget: a modern, responsive browser widget with native dark mode and no external dependencies (no third-party JS, no third-party iframes and no third-party hosts), with optional CSP nonce support. Ordinary SHA-only mode renders no iframe; the experimental ExecutionChallenge feature runs its local interpreter in a short-lived same-origin sandboxed iframe.
+- Widget: a modern, responsive browser widget with native dark mode and no external dependencies (no third-party JS, no third-party iframes and no third-party hosts), with optional CSP nonce support. Ordinary SHA-only mode renders no iframe; the experimental ExecutionChallenge feature runs its local interpreter in a short-lived same-origin iframe under a sandbox attribute (allow-scripts allow-same-origin; confinement for the disposable frame, with the SRI-pinned first-party interpreter as the trust anchor).
 - First-party behavioral telemetry, off by default: the widget collects no hardware-capability, device-memory, or screen signals unless the operator explicitly enables the coarse client-context opt-in.
   `minimal` and `full` modes are client-controlled and forgeable; they are supplements, never the boundary.
 - Key rotation and revocation: the verifier resolves a challenge by its key id against a ring of historical secrets, and a revoked key id is refused immediately.
@@ -162,7 +162,7 @@ In outline:
 use kiwicaptcha::{BindingMode, ChallengeConfig, PoWAlgorithm, issue_challenge};
 
 let config = ChallengeConfig {
-    secret_key: "replace-with-32-random-bytes".into(), // >= 16 bytes required
+    secret_key: "replace-with-a-random-32-byte-secret-value".into(), // >= 32 bytes required
     algorithm: PoWAlgorithm::Sha256, // or PoWAlgorithm::Argon2id
     m_kib: 0,                        // Argon2id memory (KiB); ignored for SHA-256
     t: 1, p: 1,

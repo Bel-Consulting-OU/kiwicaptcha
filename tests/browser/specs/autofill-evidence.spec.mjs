@@ -370,7 +370,7 @@ test.describe('KiwiCaptcha engine form-assistance evidence', () => {
         ariaHidden: el.getAttribute('aria-hidden'),
       };
     }, name);
-    expect(surface.autocomplete, 'the offscreen variant carries the password-hint token').toBe('new-password');
+    expect(surface.autocomplete, 'the offscreen variant must never invite the password manager').toBe('off');
     expect(surface.position).toBe('absolute');
     expect(surface.left).toBe('-9999px');
     expect(surface.tabindex).toBe('-1');

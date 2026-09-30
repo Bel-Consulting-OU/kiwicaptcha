@@ -647,7 +647,7 @@ and documented; a knob set explicitly always wins over the profile.
 
 ```yaml
 kiwi_captcha:
-    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 16 bytes
+    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 32 bytes
     algorithm: sha256                       # sha256 | argon2id
     difficulty_bits: 18                     # SHA-256 leading zero bits (18 = the ordinary default; 20 = the elevated rung, reached via adaptive risk escalation)
     argon_m_kib: 0                          # Argon2id memory (KiB); 0 = sha256 only
@@ -862,7 +862,7 @@ What the DSN builds:
 
 Validation notes:
 
-- `secret_key`: at least 16 bytes; 32 random bytes recommended.
+- `secret_key`: at least 32 bytes of random material (a 16-character hex string is only 64 bits).
 - `difficulty_bits`: SHA-256 difficulty, 1..=20 (the browser solver
   ceiling); the config tree ceiling tracks the core constant. The
   default 18 is the ordinary baseline (mean ≈ 262k hashes, p99 ≈

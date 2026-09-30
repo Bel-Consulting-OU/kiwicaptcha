@@ -43,7 +43,7 @@ final class EmissionCapabilityTest extends TestCase
             'targetBits' => 8,
             'ttlSecs' => 120,
             'minDurationMs' => 0,
-            'executionKey' => 'execution-key-0123456789abcdef',
+            'executionKey' => 'execution-key-0123456789abcdef-012345',
         ], $config)), $storage, now: static fn (): int => self::ISSUED_AT);
 
         return [$issuer, $storage];

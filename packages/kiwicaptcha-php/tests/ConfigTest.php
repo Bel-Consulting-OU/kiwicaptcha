@@ -308,7 +308,7 @@ final class ConfigTest extends TestCase
     public function testShortSecretRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('at least 16 bytes');
+        $this->expectExceptionMessage('at least 32 bytes');
 
         new Config(...$this->base(['secretKey' => 'tooshort']));
     }

@@ -32,41 +32,31 @@ function tokenTelemetry(token) {
 }
 
 test.describe('Lazy telemetry module acquisition', () => {
-  test('an enabled mode never gates the challenge request: the POST fires while the module request is held, and the late module is refused for this generation', async ({ page }) => {
+  test('an enabled mode attaches the session BEFORE the request: the POST waits (bounded) for the module and the token carries the real session', async ({ page }) => {
     const held = [];
     await page.route('**/assets/telemetry*.js', async (route) => {
       held.push(route);
     });
-    const challengeSeen = page.waitForRequest(
-      (r) => r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel'),
-      { timeout: 30_000 }
-    );
+    let challengeFired = false;
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel')) challengeFired = true;
+    });
     await page.goto('/?assets=files&telemetry=full', { waitUntil: 'domcontentloaded' });
     await expect.poll(() => held.length, 'the telemetry fetch must be in flight').toBe(1);
 
-    // The challenge request is sent while the module request is still
-    // held: issuance never waits for the session module.
-    await challengeSeen;
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
-    const token = await page.locator('[data-kiwi-token]').inputValue();
-    expect(token.length, 'the solve must mint a token while the module is held').toBeGreaterThan(0);
-    expect(tokenTelemetry(token), 'a generation that sent its request before the module registered must embed the empty telemetry stub').toEqual({});
+    // The session must attach before the request: the POST is held back
+    // while the module load is in flight, so the token can never carry {}.
+    await page.waitForTimeout(500);
+    expect(challengeFired, 'the challenge POST must wait (bounded) for the telemetry module').toBe(false);
 
-    // Release the module: it registers after the request was sent, so
-    // the requestSent guard refuses the attach for this generation.
     for (const route of held.splice(0)) {
       await route.continue().catch(() => {});
     }
-    await page.waitForLoadState('load');
-    const injected = await page.evaluate(() => {
-      const script = document.querySelector('script[data-kiwi-module="telemetry"]');
-      return script ? script.getAttribute('src') : null;
-    });
-    expect(injected, 'the released module script must exist in the page').toBeTruthy();
-    expect(injected, 'the released module script must be the telemetry asset').toContain('/assets/telemetry.');
-    // The token is a written credential: its telemetry segment cannot
-    // change after the fact, and the stub is the generation's record.
-    expect(await page.locator('[data-kiwi-token]').inputValue()).toBe(token);
+    await expect.poll(() => challengeFired, 'the POST fires once the module registered').toBe(true);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    expect(tokenTelemetry(token).mode, 'the token must carry the real session, never the empty stub').toBe('full');
   });
 
   test('a hung or missing telemetry module degrades to the empty stub: three bounded attempts, no page error, the solve is unaffected', async ({ page }) => {
@@ -101,9 +91,9 @@ test.describe('Lazy telemetry module acquisition', () => {
     expect(requests[0].resourceType(), 'the module must ride a script element load').toBe('script');
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
-    // The auto-run generation sent its request before the module could
-    // register (the local asset usually lands mid-solve at the earliest),
-    // so the stub semantics hold; the module itself is registered.
-    expect(tokenTelemetry(token)).toEqual({});
+    // The session attaches before the request, so the token carries the
+    // real telemetry record (never the empty stub) while the module
+    // still loads exactly once.
+    expect(tokenTelemetry(token).mode).toBe('full');
   });
 });

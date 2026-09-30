@@ -157,7 +157,10 @@ test.describe('bounded solves', () => {
     // The wasm chunk window is bounded by the remaining hash budget and
     // the cap is re-checked right after the counter advance.
     expect(src).toMatch(/var want = Math\.min\(CHUNK, MAX_SHA_HASHES - counter\);/);
-    expect(src).toMatch(/counter \+= res === -1 \? want : -res - 1;\s*\n\s*if \(counter >= MAX_SHA_HASHES\) \{ resolve\(null\); return; \}/);
+    // Every terminal path (including the cap) funnels through finish(),
+    // which releases the WASM buffers and settles exactly once.
+    expect(src).toMatch(/counter \+= res === -1 \? want : -res - 1;\s*\n\s*if \(counter >= MAX_SHA_HASHES\) \{ finish\(null\); return; \}/);
+    expect(src).toMatch(/function finish\(result\)/);
     // The fallback deadline: a missing ttlSecs arms the wall-clock
     // ceiling, and the ceiling caps any longer estimate.
     expect(src).toMatch(/var KIWI_SOLVE_DEADLINE_CEILING_MS = 120000;/);
@@ -417,7 +420,9 @@ test.describe('canonical nonce shape', () => {
     // The failure is the validation message, never a btoa
     // InvalidCharacterError from the token write.
     const hint = await page.locator('[data-kiwi-info]').textContent();
-    expect(hint).toContain('Challenge malformed');
+    // The visible hint is the translated user-facing text; the raw parser
+    // detail ("Challenge malformed") stays console/event-side.
+    expect(hint).toContain('unexpected response');
     expect(hint).not.toContain('InvalidCharacterError');
     expect(hint).not.toContain('Latin1');
     expect(errors).toHaveLength(0);

@@ -161,9 +161,9 @@ final class DerivedKeysTest extends TestCase
         // ("a", "b\0c"+pad) vs ("a\0b", "c"+pad): the length prefixes
         // keep the tenant/master boundary unambiguous, so the two distinct
         // inputs derive and memoize separately. Both masters carry the
-        // 16-byte minimum.
-        $masterA = "b\0c".str_repeat('x', 13);
-        $masterB = 'c'.str_repeat('x', 15);
+        // 32-byte minimum.
+        $masterA = "b\0c".str_repeat('x', 29);
+        $masterB = 'c'.str_repeat('x', 31);
         $a = DerivedKeys::fromMaster($masterA, 'a');
         $b = DerivedKeys::fromMaster($masterB, "a\0b");
 
@@ -173,22 +173,22 @@ final class DerivedKeysTest extends TestCase
 
         $keys = self::memoKeys();
         self::assertCount(2, array_intersect_key($keys, [
-            hash('sha256', "\x01".pack('N', 1).'a'.pack('N', 16).$masterA) => true,
-            hash('sha256', "\x01".pack('N', 3)."a\0b".pack('N', 16).$masterB) => true,
+            hash('sha256', "\x01".pack('N', 1).'a'.pack('N', \strlen($masterA)).$masterA) => true,
+            hash('sha256', "\x01".pack('N', 3)."a\0b".pack('N', \strlen($masterB)).$masterB) => true,
         ]), 'the boundary-smuggling inputs must occupy two distinct memo entries');
     }
 
     public function testShortMasterIsRefusedAtTheDerivationBoundary(): void
     {
-        foreach (['', 'short-master', str_repeat('a', 15)] as $master) {
+        foreach (['', 'short-master', str_repeat('a', 31)] as $master) {
             try {
                 DerivedKeys::fromMaster($master);
                 self::fail(sprintf('the %d-byte master must be refused', \strlen($master)));
             } catch (\InvalidArgumentException $e) {
-                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
             }
         }
-        self::assertInstanceOf(DerivedKeys::class, DerivedKeys::fromMaster(str_repeat('a', 16)));
+        self::assertInstanceOf(DerivedKeys::class, DerivedKeys::fromMaster(str_repeat('a', 32)));
     }
 
     public function testIdenticalInputsHitTheSameMemoEntry(): void

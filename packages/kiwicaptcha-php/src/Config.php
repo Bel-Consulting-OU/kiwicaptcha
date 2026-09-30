@@ -114,7 +114,7 @@ final class Config
     public const MAX_ARGON_T = 6;
 
     /**
-     * @param string   $secretKey           HMAC secret key (min 16 bytes recommended).
+     * @param string   $secretKey           HMAC secret key (min 32 bytes).
      * @param PoWAlgorithm $algorithm       Proof-of-work algorithm to issue.
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
      * @param int      $t                   Argon2id time cost.
@@ -152,7 +152,7 @@ final class Config
      *                                      (UnknownKid when the record's kid is unknown or
      *                                      ahead of the newest configured kid, the
      *                                      rollback/forward guard).
-     * @param string|null $executionKey     The ExecutionChallengeV1 keyed-PRF key (min 16
+     * @param string|null $executionKey     The ExecutionChallengeV1 keyed-PRF key (min 32
      *                                      bytes). Null (default) = execution challenges
      *                                      are never issued: issuance with the execution
      *                                      surface armed refuses (the issuer throws), so
@@ -229,11 +229,14 @@ final class Config
         public readonly int $rswT = 75_000,
         public readonly ?string $tenantId = null,
     ) {
-        if (\strlen($secretKey) < 16) {
-            throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
+        // 16 random bytes is only 128 bits of HMAC key, and 16 HEX
+        // characters ("0123456789abcdef") is just 64 bits while still
+        // passing a 16-byte floor. The floor is 32 text bytes.
+        if (\strlen($secretKey) < 32) {
+            throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 32 bytes');
         }
-        if ($executionKey !== null && \strlen($executionKey) < 16) {
-            throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 16 bytes');
+        if ($executionKey !== null && \strlen($executionKey) < 32) {
+            throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 32 bytes');
         }
         if ($kid < 1 || $kid > 4_294_967_295) {
             throw new \InvalidArgumentException(
