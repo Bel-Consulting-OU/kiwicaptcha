@@ -1305,7 +1305,11 @@
         if (riskApi && riskApi.renderDecoy) riskApi.renderDecoy(data, decoyState, tokenEl);
         // Receipt-anchored expiry (server TTL started at issuance).
         if (data.ttlSecs) {
-          expiryDeadlineAt = performance.now() + data.ttlSecs * 1000 - KIWI_EXPIRY_MARGIN_MS;
+          // The margin is capped at a quarter of the TTL so very short
+          // challenge lifetimes (fixtures, test keys) still get a real
+          // window instead of an already-expired one.
+          var expiryMargin = Math.min(KIWI_EXPIRY_MARGIN_MS, Math.max(0, data.ttlSecs * 250));
+          expiryDeadlineAt = performance.now() + data.ttlSecs * 1000 - expiryMargin;
           startCountdown(data.ttlSecs, expiryDeadlineAt);
         }
         kiwiSetView({ statusKey: "statusVerifying", badgeKey: "badgeWorking", domState: "solving" });

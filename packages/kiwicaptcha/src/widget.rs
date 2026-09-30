@@ -150,7 +150,10 @@ pub fn kiwi_widget_html_with(options: &KiwiWidgetOptions) -> String {
     pair("data-kiwi-execution", options.execution);
     pair("data-kiwi-telemetry", options.telemetry_external);
     if let Some(mode) = options.telemetry.filter(|m| !m.is_empty()) {
-        extra_attrs.push_str(&format!(" data-kiwi-telemetry=\"{}\"", html_attr_escape(mode)));
+        extra_attrs.push_str(&format!(
+            " data-kiwi-telemetry=\"{}\"",
+            html_attr_escape(mode)
+        ));
     }
     if let Some(lang) = options.lang.filter(|l| !l.is_empty()) {
         extra_attrs.push_str(&format!(" data-kiwi-lang=\"{}\"", html_attr_escape(lang)));
@@ -159,15 +162,16 @@ pub fn kiwi_widget_html_with(options: &KiwiWidgetOptions) -> String {
         .lang
         .map(|l| l.trim().to_ascii_lowercase().starts_with("en"))
         .unwrap_or(true);
-    let inline_risk = options.emit_assets
-        && options.risk
-        && options.risk_external.is_none();
+    let inline_risk = options.emit_assets && options.risk && options.risk_external.is_none();
     let inline_locales = options.emit_assets
         && options.locales
         && !lang_is_default
         && options.locales_external.is_none();
     let inline_telemetry = options.emit_assets
-        && options.telemetry.filter(|m| !m.is_empty() && *m != "off").is_some()
+        && options
+            .telemetry
+            .filter(|m| !m.is_empty() && *m != "off")
+            .is_some()
         && options.telemetry_external.is_none();
     let mut shared_assets = String::new();
     if options.emit_assets {

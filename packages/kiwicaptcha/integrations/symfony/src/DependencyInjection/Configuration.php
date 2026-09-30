@@ -50,10 +50,10 @@ final class Configuration implements ConfigurationInterface
                     ->info('HMAC secret key for signing/verifying challenges (min 32 bytes).')
                     ->isRequired()
                     ->cannotBeEmpty()
-                    ->validate()
-                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 32)
-                        ->thenInvalid('must be at least 32 bytes of random material (a 16-character hex string is only 64 bits of entropy)')
-                    ->end()
+                    // The 32-byte floor is enforced by the core Config at
+                    // RUNTIME: a validate() closure here would reject an
+                    // unresolved %env(...)% placeholder at container build
+                    // (Symfony forbids env placeholders on validated nodes).
                 ->end()
                 ->scalarNode('issuer')
                     ->info('Deployment issuer stamped into every issued challenge (e.g. "auth-prod"). When set, the verifier REJECTS any record whose issuer does not match exactly — a dev/staging/prod mixup cannot validate cross-environment. The core long supported issuer; this makes it first-class bundle configuration.')
