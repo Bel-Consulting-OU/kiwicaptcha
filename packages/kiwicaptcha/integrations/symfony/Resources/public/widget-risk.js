@@ -65,11 +65,14 @@
         return;
       }
       var iframe = document.createElement("iframe");
-      // Genuinely sandboxed: allow-scripts WITHOUT allow-same-origin, so
-      // the opaque-origin frame cannot remove its own sandbox attribute.
-      // The parent only needs postMessage (WindowProxy identity compares
-      // across origins), never DOM access into the frame.
-      iframe.setAttribute("sandbox", "allow-scripts");
+      // sandbox="allow-scripts allow-same-origin": a same-origin document
+      // can remove its own sandbox attribute, so this is a confinement
+      // boundary for the DISPOSABLE frame, not a security boundary
+      // against the interpreter itself — the interpreter asset is the
+      // SRI-pinned, content-addressed first-party code and the actual
+      // trust anchor. (The frame is created per armed challenge, removed
+      // after the run and never reused.)
+      iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
       iframe.setAttribute("aria-hidden", "true");
       iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;";
       // allow-same-origin is required (an opaque-origin document cannot

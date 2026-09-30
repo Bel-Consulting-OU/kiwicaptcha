@@ -51,7 +51,7 @@ final class Configuration implements ConfigurationInterface
                     ->isRequired()
                     ->cannotBeEmpty()
                     // The 32-byte floor is enforced by the core Config at
-                    // RUNTIME: a validate() closure here would reject an
+                    // runtime: a validate() closure here would reject an
                     // unresolved %env(...)% placeholder at container build
                     // (Symfony forbids env placeholders on validated nodes).
                 ->end()
