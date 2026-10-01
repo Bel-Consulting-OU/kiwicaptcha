@@ -16,6 +16,9 @@ steps:
         set -eu
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
+        apt-get install -y -qq software-properties-common
+        add-apt-repository -y ppa:ondrej/php >/dev/null
+        apt-get update -qq
         apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
         php -r 'if (!extension_loaded("gmp")) { fwrite(STDERR, "gmp missing\n"); exit(1); }'
         EXPECTED="$$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
@@ -43,6 +46,9 @@ steps:
       - |
         set -eu
         export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq software-properties-common
+        add-apt-repository -y ppa:ondrej/php >/dev/null
         apt-get update -qq
         apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
         EXPECTED="$$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
