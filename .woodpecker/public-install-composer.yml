@@ -2,8 +2,8 @@
 # .github/workflows/public-install-smoke.yml, composer-smoke). Manual
 # event only: it proves the published packagist + Flex recipe journey
 # and is fail-closed until those artifacts exist. Provide
-# the bundle version through the kiwicaptcha_bundle_version repo
-# secret; the lane writes the documented minimum
+# KIWICAPTCHA_BUNDLE_VERSION in the environment; the lane writes the
+# documented minimum
 # configuration against the Redis service, requires
 # kiwicaptcha:doctor to exit cleanly, serves the application and drives
 # issue -> solve -> verify in a headless browser, then repeats the
@@ -53,14 +53,11 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
-    composer require "bel-consulting/kiwicaptcha-symfony:$$BUNDLE_VERSION" --no-interaction --no-progress
+    composer require "bel-consulting/kiwicaptcha-symfony:$${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}" --no-interaction --no-progress
 
     composer show bel-consulting/kiwicaptcha-symfony
 
     '
-  environment:
-    BUNDLE_VERSION:
-      from_secret: kiwicaptcha_bundle_version
 - name: the-application-boots-(console-about)
   image: php:8.3-cli
   commands:
@@ -203,9 +200,6 @@ steps:
 
 - name: application-journey-and-reinstall-cycle
   image: php:8.3-cli
-  environment:
-    BUNDLE_VERSION:
-      from_secret: kiwicaptcha_bundle_version
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
@@ -255,7 +249,7 @@ steps:
 
     composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
 
-    composer require "bel-consulting/kiwicaptcha-symfony:$$BUNDLE_VERSION" --no-interaction --no-progress
+    composer require "bel-consulting/kiwicaptcha-symfony:$${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}" --no-interaction --no-progress
 
     php bin/console about
 
