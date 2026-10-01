@@ -2,7 +2,8 @@
 # .github/workflows/public-install-smoke.yml, composer-smoke). Manual
 # event only: it proves the published packagist + Flex recipe journey
 # and is fail-closed until those artifacts exist. Provide
-# KIWICAPTCHA_BUNDLE_VERSION; the lane writes the documented minimum
+# the bundle version through the kiwicaptcha_bundle_version repo
+# secret; the lane writes the documented minimum
 # configuration against the Redis service, requires
 # kiwicaptcha:doctor to exit cleanly, serves the application and drives
 # issue -> solve -> verify in a headless browser, then repeats the
@@ -58,7 +59,8 @@ steps:
 
     '
   environment:
-    BUNDLE_VERSION: ${{ vars.bundle_version }}
+    BUNDLE_VERSION:
+      from_secret: kiwicaptcha_bundle_version
 - name: the-application-boots-(console-about)
   image: php:8.3-cli
   commands:
@@ -202,7 +204,8 @@ steps:
 - name: application-journey-and-reinstall-cycle
   image: php:8.3-cli
   environment:
-    BUNDLE_VERSION: ${{ vars.bundle_version }}
+    BUNDLE_VERSION:
+      from_secret: kiwicaptcha_bundle_version
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
