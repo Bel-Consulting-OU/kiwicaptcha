@@ -3,7 +3,7 @@
   "generated": "2026-10-01",
   "qualification": {
     "status": "physical",
-    "qualified_at": "2026-10-01T00:08:10.827Z",
+    "qualified_at": "2026-10-01T01:15:46.158Z",
     "harness_schema": "kiwicaptcha.client-perf/3",
     "release_tiers": [
       "mainstream-desktop"
@@ -16,7 +16,7 @@
         "hardware": "Apple MacBook Pro (18 x Apple M5 Pro)",
         "os": "macOS Darwin 25.5.0 (arm64)",
         "browser": "Chromium 151.0.7922.34",
-        "tested_at": "2026-10-01T00:01:46.933Z",
+        "tested_at": "2026-10-01T01:08:11.362Z",
         "battery_state": "ac"
       }
     ]
@@ -52,132 +52,132 @@
     "mainstream-desktop": {
       "argon2id": {
         "cold": {
-          "solveMsP95": 888,
-          "pageToVerifiedMsP95": 908
+          "solveMsP95": 1167,
+          "pageToVerifiedMsP95": 1185
         },
         "warm": {
-          "solveMsP95": 1053,
-          "pageToVerifiedMsP95": 1065
+          "solveMsP95": 1452,
+          "pageToVerifiedMsP95": 1463
         }
       },
       "execargon": {
         "cold": {
-          "solveMsP95": 631,
-          "pageToVerifiedMsP95": 651
+          "solveMsP95": 1081,
+          "pageToVerifiedMsP95": 1102
         },
         "warm": {
-          "solveMsP95": 791,
-          "pageToVerifiedMsP95": 803
+          "solveMsP95": 771,
+          "pageToVerifiedMsP95": 783
         }
       },
       "execchain": {
         "cold": {
-          "solveMsP95": 676,
-          "pageToVerifiedMsP95": 696
+          "solveMsP95": 925,
+          "pageToVerifiedMsP95": 945
         },
         "warm": {
-          "solveMsP95": 1499,
-          "pageToVerifiedMsP95": 1520
+          "solveMsP95": 1041,
+          "pageToVerifiedMsP95": 1067
         }
       },
       "execsha18": {
         "cold": {
-          "solveMsP95": 534,
-          "pageToVerifiedMsP95": 554
+          "solveMsP95": 369,
+          "pageToVerifiedMsP95": 392
         },
         "warm": {
-          "solveMsP95": 515,
-          "pageToVerifiedMsP95": 526
+          "solveMsP95": 445,
+          "pageToVerifiedMsP95": 466
         }
       },
       "execsha18inline": {
         "cold": {
-          "solveMsP95": 338,
-          "pageToVerifiedMsP95": 349
+          "solveMsP95": 328,
+          "pageToVerifiedMsP95": 339
         },
         "warm": {
-          "solveMsP95": 506,
-          "pageToVerifiedMsP95": 524
+          "solveMsP95": 499,
+          "pageToVerifiedMsP95": 513
         }
       },
       "execvm": {
         "cold": {
           "solveMsP95": 37,
-          "pageToVerifiedMsP95": 55
+          "pageToVerifiedMsP95": 60
         },
         "warm": {
-          "solveMsP95": 34,
-          "pageToVerifiedMsP95": 49
+          "solveMsP95": 33,
+          "pageToVerifiedMsP95": 47
         }
       },
       "execvminline": {
         "cold": {
-          "solveMsP95": 24,
-          "pageToVerifiedMsP95": 36
+          "solveMsP95": 25,
+          "pageToVerifiedMsP95": 38
         },
         "warm": {
-          "solveMsP95": 24,
-          "pageToVerifiedMsP95": 37
+          "solveMsP95": 23,
+          "pageToVerifiedMsP95": 35
         }
       },
       "rsw150k": {
         "cold": {
-          "solveMsP95": 386,
-          "pageToVerifiedMsP95": 405
+          "solveMsP95": 210,
+          "pageToVerifiedMsP95": 227
         },
         "warm": {
           "solveMsP95": 210,
-          "pageToVerifiedMsP95": 223
+          "pageToVerifiedMsP95": 224
         }
       },
       "rsw300k": {
         "cold": {
-          "solveMsP95": 410,
-          "pageToVerifiedMsP95": 425
+          "solveMsP95": 438,
+          "pageToVerifiedMsP95": 462
         },
         "warm": {
-          "solveMsP95": 395,
-          "pageToVerifiedMsP95": 405
+          "solveMsP95": 396,
+          "pageToVerifiedMsP95": 408
         }
       },
       "rsw75k": {
         "cold": {
-          "solveMsP95": 257,
-          "pageToVerifiedMsP95": 288
+          "solveMsP95": 132,
+          "pageToVerifiedMsP95": 154
         },
         "warm": {
-          "solveMsP95": 122,
-          "pageToVerifiedMsP95": 138
+          "solveMsP95": 136,
+          "pageToVerifiedMsP95": 149
         }
       },
       "sha16": {
         "cold": {
-          "solveMsP95": 75,
-          "pageToVerifiedMsP95": 95
+          "solveMsP95": 95,
+          "pageToVerifiedMsP95": 107
         },
         "warm": {
-          "solveMsP95": 75,
-          "pageToVerifiedMsP95": 89
+          "solveMsP95": 68,
+          "pageToVerifiedMsP95": 83
         }
       },
       "sha18": {
         "cold": {
-          "solveMsP95": 318,
-          "pageToVerifiedMsP95": 328
+          "solveMsP95": 235,
+          "pageToVerifiedMsP95": 257
         },
         "warm": {
-          "solveMsP95": 243,
-          "pageToVerifiedMsP95": 256
+          "solveMsP95": 216,
+          "pageToVerifiedMsP95": 228
         }
       },
       "sha20": {
         "cold": {
-          "solveMsP95": 951,
-          "pageToVerifiedMsP95": 964
+          "solveMsP95": 1193,
+          "pageToVerifiedMsP95": 1214
         },
         "warm": {
-          "solveMsP95": 1085,
-          "pageToVerifiedMsP95": 1099
+          "solveMsP95": 1450,
+          "pageToVerifiedMsP95": 1462
         }
       }
     }
