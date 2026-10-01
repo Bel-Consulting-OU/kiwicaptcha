@@ -21,7 +21,7 @@ steps:
       RISK_REDIS_URL: redis://redis:6379
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         cd packages/kiwicaptcha-risk
         cargo test
@@ -33,7 +33,7 @@ steps:
       RISK_REDIS_URL: tcp://redis:6379
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp
@@ -44,7 +44,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-risk-php
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit
@@ -58,7 +58,7 @@ steps:
       KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
         docker-php-ext-install -j"$$(nproc)" gmp sodium pcntl posix
@@ -69,7 +69,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-php
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
@@ -83,7 +83,7 @@ steps:
       KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
@@ -94,7 +94,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"

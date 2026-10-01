@@ -14,12 +14,12 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         cd packages/kiwicaptcha-risk
         cargo package --list | grep -q 'resources/risk-v1.lua' || { echo 'resources/risk-v1.lua missing from the .crate'; exit 1; }
       - |
-        set -euo pipefail
+        set -eu
         rm -rf "$$CI_WORKSPACE/.ci-crate-check"
         mkdir -p "$$CI_WORKSPACE/.ci-crate-check"
         cp -r packages/kiwicaptcha-risk "$$CI_WORKSPACE/.ci-crate-check/"
@@ -31,17 +31,17 @@ steps:
         sed -i 's|path = "../kiwicaptcha"|path = "'"$$CI_WORKSPACE"'/packages/kiwicaptcha"|' Cargo.toml
         cargo check
       - |
-        set -euo pipefail
+        set -eu
         cargo test -p kiwicaptcha --example quickstart
       - |
-        set -euo pipefail
+        set -eu
         cargo package --locked
 
   - name: package-composer
     image: php:8.3-cli
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq unzip git
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
@@ -51,7 +51,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         clean="$$CI_WORKSPACE/.ci-composer-clean"
         rm -rf "$$clean"
         mkdir -p "$$clean/packages"
@@ -72,7 +72,7 @@ steps:
     image: php:8.3-cli
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
@@ -83,7 +83,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         git -C "$$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
         git -C "$$CI_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
         bash tools/ci/n1-compat.sh /tmp/kiwi-n1

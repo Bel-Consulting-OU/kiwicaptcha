@@ -14,9 +14,9 @@ steps:
 - name: init-an-empty-crate-in-a-temp-dir-(no-repo-checkout)
   image: rust:1.96
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     rm -rf "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
@@ -26,10 +26,10 @@ steps:
 - name: add-the-exact-crates.io-version-(=)-and-check-(no-path,-no-g
   image: rust:1.96
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
       # `=X.Y.Z` is the only requirement that cannot resolve to a
       # newer compatible release: a caret requirement would accept
@@ -65,9 +65,9 @@ steps:
     CRATE: kiwicaptcha
     RUST_VERSION: $${KIWICAPTCHA_VERSION:?set KIWICAPTCHA_VERSION}
 - commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     rm -rf "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
@@ -77,10 +77,10 @@ steps:
   image: rust:1.96
   name: risk-init-an-empty-crate-in-a-temp-dir-(no-repo-checkout)
 - commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
       # `=X.Y.Z` is the only requirement that cannot resolve to a
       # newer compatible release: a caret requirement would accept

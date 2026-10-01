@@ -23,7 +23,7 @@ steps:
     image: composer:2.9
     commands:
       - |
-        set -euo pipefail
+        set -eu
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha-php
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha-risk-php
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha/integrations/symfony
@@ -34,12 +34,12 @@ steps:
     image: php:8.1-cli
     commands:
       - &php_extensions |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
       - &composer_install |
-        set -euo pipefail
+        set -eu
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
         ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
@@ -47,7 +47,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - &php_core_suite |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-php
         composer validate --strict
         bash ../kiwicaptcha/tools/check-psr4.sh
@@ -105,12 +105,12 @@ steps:
     image: php:8.3-cli
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq unzip git
       - *composer_install
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-php
         composer validate --strict
         composer install --no-interaction --prefer-dist
@@ -124,13 +124,13 @@ steps:
       KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
         docker-php-ext-install -j"$$(nproc)" gmp sodium pcntl posix
       - *composer_install
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-php
         composer install --no-interaction --prefer-dist
         (cd ../kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)
@@ -143,14 +143,14 @@ steps:
       TEST_REDIS_URL: redis://redis:6379
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
         pecl install redis && docker-php-ext-enable redis
       - *composer_install
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         php -r 'if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";'

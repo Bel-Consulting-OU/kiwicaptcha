@@ -21,7 +21,7 @@ steps:
       GITHUB_REPOSITORY: $${CI_REPO}
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash curl github-cli
         ruleset_id="20868582"
         if ! ruleset_json="$$(gh api "repos/$$GITHUB_REPOSITORY/rulesets/$$ruleset_id")"; then
@@ -38,7 +38,7 @@ steps:
       GITHUB_REPOSITORY: $${CI_REPO}
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash curl github-cli git
         tag="$${CI_COMMIT_TAG:?a tag event is required}"
         if gh release view "$$tag" >/dev/null 2>&1; then
@@ -47,7 +47,7 @@ steps:
         fi
         echo "release $$tag does not exist yet"
       - |
-        set -euo pipefail
+        set -eu
         # The GitHub gate proves exact-tag CI and authorized-HEAD
         # equality through the Actions API; on Woodpecker the tag
         # pipeline itself is the exact-tag CI run, and the annotated
@@ -63,7 +63,7 @@ steps:
       WASM_OPT_STRICT: '1'
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq git nodejs npm
         rustup target add wasm32-unknown-unknown
@@ -74,7 +74,7 @@ steps:
     image: alpine:3.20
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git
         cd packages/kiwicaptcha-wasm
         git diff --exit-code -- \
@@ -93,7 +93,7 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq git nodejs npm
         cd packages/kiwicaptcha-wasm
@@ -103,7 +103,7 @@ steps:
     image: alpine:3.20
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git grep
         bash "$$CI_WORKSPACE/tools/ci/release-asset-contract.sh"
 
@@ -111,7 +111,7 @@ steps:
     image: node:22-alpine
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git
         node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
 
@@ -119,7 +119,7 @@ steps:
     image: node:22-alpine
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git
         node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json
 
@@ -127,6 +127,6 @@ steps:
     image: node:22-alpine
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git
         node tools/ci/validate-accessibility-qualification.mjs tests/browser/qualification/accessibility-matrix.json

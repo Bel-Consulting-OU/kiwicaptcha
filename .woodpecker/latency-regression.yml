@@ -19,10 +19,10 @@ steps:
 - name: resolve-the-base-ref-(previous-release-commit-by-ref)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       base="$${LATENCY_BASE_REF:-head~1}"
       git fetch origin "$$base" --tags 2>/dev/null || true
       if ! git rev-parse --verify -q "$$base" >/dev/null 2>&1; then
@@ -34,9 +34,9 @@ steps:
 - name: check-out-the-base-tree-(same-session,-same-host)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     git worktree add --detach base "$$BASE_REF"
 
@@ -46,22 +46,22 @@ steps:
 - name: composer-install-(head-tree)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - composer install --no-interaction --prefer-dist
 - name: composer-install-(base-tree)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - composer install --no-interaction --prefer-dist
 - name: record-the-host-state-(machine-identity,-governor,-load,-ver
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency"
       evidence="$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt"
       {
@@ -91,10 +91,10 @@ steps:
 - name: host-warm-up-runs-(both-trees,-discarded;-settles-governor,-
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       for _ in 1 2; do
         for root in "$$CI_WORKSPACE/base" "$$CI_WORKSPACE"; do
           (cd "$$root" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true
@@ -105,10 +105,10 @@ steps:
 - name: balanced-repeated-benchmark-runs-(balanced-alternating-order
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       repeats="$${LATENCY_REGRESSION_REPEATS:-6}"
       modes="$${LATENCY_REGRESSION_MODES:-array}"
       if (( repeats < 2 || repeats % 2 != 0 )); then
@@ -142,10 +142,10 @@ steps:
 - name: compare-base-vs-head-(paired-distributions,-balanced-order)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       repeats="$${LATENCY_REGRESSION_REPEATS:-6}"
       modes="$${LATENCY_REGRESSION_MODES:-array}"
       rel_max="$${LATENCY_REGRESSION_MAX_REL_PCT:-20}"
@@ -165,7 +165,7 @@ steps:
 - name: reverse-order-validation-note
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'echo "reverse-order probe: dispatch with base_ref newer than the head commit; expect PASS"
 

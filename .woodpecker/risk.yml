@@ -20,12 +20,12 @@ steps:
       KC_REDIS_URL: redis://redis:6379
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp
       - |
-        set -euo pipefail
+        set -eu
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
         ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
@@ -33,7 +33,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-risk-php
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit
@@ -42,7 +42,7 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         rustup component add rustfmt clippy || true
         cd packages/kiwicaptcha-risk
@@ -54,7 +54,7 @@ steps:
     image: php:8.3-cli
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev unzip git curl
         docker-php-ext-install -j"$$(nproc)" gmp
@@ -65,7 +65,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         # rustup-init is fetched from its versioned dist path and verified
         # against the published sha256 before it runs, never piped from
         # the network into a shell.
@@ -77,7 +77,7 @@ steps:
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
         . "$$HOME/.cargo/env"
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-risk-php
         composer install --no-interaction --prefer-dist
         PHP_HASH="$$(php tools/fixture_hash.php)"

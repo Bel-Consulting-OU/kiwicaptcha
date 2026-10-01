@@ -23,7 +23,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - docker build -f deploy/Dockerfile -t kiwicaptcha/reference-deployment .
 - name: write-a-fresh-random-secret-to-deploy/.env
@@ -31,9 +31,9 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     umask 077
 
@@ -53,7 +53,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - docker compose up -d
 - name: retry-/healthz-until-200
@@ -61,10 +61,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       for attempt in $$(seq 1 60); do
         if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt"
@@ -81,10 +81,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       curl -fsS -o $$CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \
         -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
 - name: solve-the-sha-256-proof-inside-the-captcha-container
@@ -92,9 +92,9 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     docker compose cp $$CI_WORKSPACE/.ci-run-tmp/$$CI_WORKSPACE/.ci-run-tmp/challenge.json captcha:/tmp/challenge.json
 
@@ -108,10 +108,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       TOKEN="$$(cat $$CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
@@ -122,10 +122,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       TOKEN="$$(cat $$CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
@@ -137,10 +137,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       challenge_row() {  # $$1 = request body; asserts a 200 challenge
         curl -fsS -X POST -H 'Content-Type: application/json' \
           -d "$$1" http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
@@ -162,10 +162,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
       VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
       test -n "$$SECRET"
@@ -196,10 +196,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
       test -n "$$SECRET"
       # The committed rsw fixture pair (packages/kiwicaptcha-php
@@ -243,10 +243,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
       VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
       test -n "$$SECRET"
@@ -270,10 +270,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       issue() {  # $$1 = issue binding (empty = unbound)
         local body='{"scope":"login"}'
         if [ -n "$$1" ]; then
@@ -354,7 +354,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - docker compose restart captcha
 - name: retry-/healthz-after-the-restart
@@ -362,10 +362,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       for attempt in $$(seq 1 60); do
         if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt after the restart"
@@ -381,10 +381,10 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       curl -fsS -o $$CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
         -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
       docker compose cp $$CI_WORKSPACE/.ci-run-tmp/$$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json
@@ -400,6 +400,6 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - docker compose down

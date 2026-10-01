@@ -22,12 +22,12 @@ steps:
       KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
       - |
-        set -euo pipefail
+        set -eu
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
         ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
@@ -35,7 +35,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"

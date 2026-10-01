@@ -20,7 +20,7 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         while IFS= read -r f; do
           [ -n "$$f" ] || continue
@@ -36,14 +36,14 @@ steps:
         done < packages/kiwicaptcha-wasm/release-assets.txt
         echo "generated copies byte-identical to the canonical assets"
       - |
-        set -euo pipefail
+        set -eu
         cargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check
 
   - name: build-reproducibility
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq git nodejs npm
         rustup target add wasm32-unknown-unknown

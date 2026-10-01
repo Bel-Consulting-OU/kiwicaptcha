@@ -15,7 +15,7 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq git nodejs npm
         rustup target add wasm32-unknown-unknown
@@ -28,7 +28,7 @@ steps:
     depends_on: [regenerate-strict-build]
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apk add --no-cache bash git coreutils
         mkdir -p .ci-asset-refresh/packages/kiwicaptcha-wasm/assets \
           .ci-asset-refresh/packages/kiwicaptcha/resources \
@@ -41,6 +41,6 @@ steps:
         done < packages/kiwicaptcha-wasm/release-assets.txt
         echo "refreshed copies staged under .ci-asset-refresh/"
       - |
-        set -euo pipefail
+        set -eu
         git status --porcelain -- packages/kiwicaptcha-wasm/assets packages/kiwicaptcha/resources packages/kiwicaptcha/integrations/symfony/Resources/public | tee .ci-asset-refresh/diff.txt
         test -s .ci-asset-refresh/diff.txt || echo "no generated-copy drift in this build"

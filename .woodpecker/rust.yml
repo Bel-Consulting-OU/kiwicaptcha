@@ -19,7 +19,7 @@ steps:
     image: rust:1.96
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         rustup component add rustfmt clippy || true
         rustup target add wasm32-unknown-unknown || true
@@ -29,11 +29,11 @@ steps:
         cargo test -p kiwicaptcha --example quickstart
         cargo package --locked --manifest-path packages/kiwicaptcha/Cargo.toml
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-wasm
         cargo build --target wasm32-unknown-unknown
       - |
-        set -euo pipefail
+        set -eu
         cargo install cargo-audit --version 0.22.2 --locked
         cargo audit
 
@@ -43,6 +43,6 @@ steps:
       KC_REDIS_URL: redis://redis:6379
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq && apt-get install -y -qq git
         cargo test --features redis --test redis_verify

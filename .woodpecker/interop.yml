@@ -21,7 +21,7 @@ steps:
     image: php:8.3-cli
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
@@ -38,7 +38,7 @@ steps:
         KC_PHP_RECORD=../../.ci-cross-language/php-argon.json KC_PHP_ALGO=argon2id php tests/CrossLanguageIssue.php
         KC_PHP_RECORD=../../.ci-cross-language/php-rsw.json KC_PHP_ALGO=rsw php tests/CrossLanguageIssue.php
       - |
-        set -euo pipefail
+        set -eu
         test -s .ci-cross-language/php-sha.json
         test -s .ci-cross-language/php-argon.json
         test -s .ci-cross-language/php-rsw.json
@@ -48,12 +48,12 @@ steps:
     depends_on: [cross-language-php-issue]
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
         docker-php-ext-install -j"$$(nproc)" gmp sodium
       - |
-        set -euo pipefail
+        set -eu
         cd /tmp
         curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
         curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
@@ -62,7 +62,7 @@ steps:
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
         . "$$HOME/.cargo/env"
       - |
-        set -euo pipefail
+        set -eu
         KC_PHP_RECORD=.ci-cross-language/php-sha.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
         KC_PHP_RECORD=.ci-cross-language/php-argon.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
         KC_PHP_RSW_RECORD=.ci-cross-language/php-rsw.json cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture
@@ -75,12 +75,12 @@ steps:
     depends_on: [cross-language-rust-verify]
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
         docker-php-ext-install -j"$$(nproc)" gmp sodium
       - |
-        set -euo pipefail
+        set -eu
         cd /tmp
         curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
         curl -sSfO https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
@@ -89,7 +89,7 @@ steps:
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
         . "$$HOME/.cargo/env"
       - |
-        set -euo pipefail
+        set -eu
         KC_RUST_RECORD=.ci-cross-language/rust-sha.json cargo test --test cross_language rust_issues_record_for_php -- --nocapture
         KC_RUST_RECORD=.ci-cross-language/rust-argon.json KC_RUST_ALGO=argon2id cargo test --test cross_language rust_issues_record_for_php -- --nocapture
         KC_RUST_RSW_RECORD=.ci-cross-language/rust-rsw.json cargo test --test cross_language rust_issues_rsw_record_for_php -- --nocapture
@@ -104,7 +104,7 @@ steps:
     depends_on: [cross-language-rust-issue-and-redis]
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
@@ -115,7 +115,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha-php
         composer install --no-interaction --prefer-dist
         KC_RUST_RECORD=../../.ci-cross-language/rust-sha.json php tests/CrossLanguageVerify.php

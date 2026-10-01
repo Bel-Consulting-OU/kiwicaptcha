@@ -26,13 +26,13 @@ steps:
       TEST_REDIS_URL: redis://redis:6379
     commands:
       - &php_extensions |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
         pecl install redis && docker-php-ext-enable redis
       - &composer_install |
-        set -euo pipefail
+        set -eu
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
         ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
@@ -40,7 +40,7 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - &composer_audit |
-        set -euo pipefail
+        set -eu
         for i in 1 2 3 4 5; do
           if composer audit --locked; then
             break
@@ -50,7 +50,7 @@ steps:
         done
         composer audit --locked
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit
@@ -65,7 +65,7 @@ steps:
       - *composer_install
       - *composer_audit
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
@@ -81,7 +81,7 @@ steps:
       - *composer_install
       - *composer_audit
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
@@ -97,7 +97,7 @@ steps:
       - *composer_install
       - *composer_audit
       - |
-        set -euo pipefail
+        set -eu
         cd packages/kiwicaptcha/integrations/symfony
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*

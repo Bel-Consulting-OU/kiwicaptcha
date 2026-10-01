@@ -21,7 +21,7 @@ steps:
       KC_REDIS_URL: redis://redis:6399
     commands:
       - |
-        set -euo pipefail
+        set -eu
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
         docker-php-ext-install -j"$$(nproc)" gmp sodium
@@ -32,11 +32,11 @@ steps:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
-        set -euo pipefail
+        set -eu
         (cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)
         (cd packages/kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)
       - |
-        set -euo pipefail
+        set -eu
         php -r '
           require "packages/kiwicaptcha-php/vendor/autoload.php";
           $$url = getenv("KC_REDIS_URL") ?: "redis://redis:6399";

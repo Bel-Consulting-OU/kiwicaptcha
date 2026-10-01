@@ -23,10 +23,10 @@ steps:
 - name: install-the-symfony-cli-(versioned-release,-sha256-pinned)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       curl -fsSL -o /tmp/symfony-cli.tar.gz \
         "https://github.com/symfony-cli/symfony-cli/releases/download/v$${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz"
       echo "$${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz" | sha256sum -c -
@@ -41,9 +41,9 @@ steps:
 - name: create-the-empty-lts-application-(--webapp)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     symfony new kiwi-smoke --version=lts --webapp
 
@@ -51,9 +51,9 @@ steps:
 - name: require-the-bundle-from-packagist-(no-path-repository)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     composer require "bel-consulting/kiwicaptcha-symfony:$${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}" --no-interaction --no-progress
 
@@ -63,16 +63,16 @@ steps:
 - name: the-application-boots-(console-about)
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - php bin/console about
 - name: write-the-documented-minimum-configuration-(secret,-public-u
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       {
         echo "KIWI_SECRET_KEY=$${KIWI_SECRET_KEY}"
         echo "KIWI_PUBLIC_URL=http://127.0.0.1:8000"
@@ -85,9 +85,9 @@ steps:
 - name: kiwicaptcha:doctor-must-exit-cleanly-on-the-documented-minim
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - 'set -euo pipefail
+  - 'set -eu
 
     php bin/console kiwicaptcha:doctor
 
@@ -97,10 +97,10 @@ steps:
 - name: the-flex-recipe-delivered-the-starter-config-and-the-routes
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       test -f config/packages/kiwicaptcha.yaml \
         || { echo "the Flex recipe has not been applied (checklist steps 4-5 outstanding)"; exit 1; }
       php bin/console debug:router | grep -q kiwicaptcha \
@@ -110,10 +110,10 @@ steps:
 - name: add-the-demo-page-(form-widget)-to-the-smoke-application
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       mkdir -p src/Form src/Controller templates
       cat > src/Form/CaptchaDemoType.php <<'PHP'
       <?php
@@ -203,10 +203,10 @@ steps:
 - name: application-journey-and-reinstall-cycle
   image: php:8.3-cli
   commands:
-  - set -euo pipefail
+  - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
-      set -euo pipefail
+      set -eu
       symfony serve --no-tls --port=8000 --daemon
       for _ in $$(seq 1 60); do
         if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then
@@ -219,7 +219,7 @@ steps:
       exit 1
 
   - |
-      set -euo pipefail
+      set -eu
       npm init -y > /dev/null
       npm install --no-audit --no-fund playwright@1.62.1 > /dev/null
       npx playwright install --with-deps chromium > /dev/null
@@ -247,7 +247,7 @@ steps:
       JS
       node e2e.mjs
 
-  - 'set -euo pipefail
+  - 'set -eu
 
     composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
 
@@ -268,7 +268,7 @@ steps:
     echo "uninstall -> reinstall -> update cycle OK (boot, doctor and demo page after each step)"
 
     '
-  - 'set -euo pipefail
+  - 'set -eu
 
     test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js
 

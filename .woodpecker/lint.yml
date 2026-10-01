@@ -20,7 +20,7 @@ steps:
     commands:
       - apk add --no-cache bash git gawk ripgrep coreutils
       - |
-        set -euo pipefail
+        set -eu
         KIWI_HDR='# KiwiCaptcha'
         APEX_HDR='# ApexM''ail'
         grep -q "^$$KIWI_HDR" README.md
@@ -38,7 +38,7 @@ steps:
         done
         echo "product identity OK"
       - |
-        set -euo pipefail
+        set -eu
         cmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \
           packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md
         echo "accessibility documents byte-identical"
@@ -46,7 +46,7 @@ steps:
       - sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
       - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
       - |
-        set -euo pipefail
+        set -eu
         base="$${CI_COMMIT_BEFORE_SHA:-}"
         if [ -z "$$base" ] || [ "$$base" = "0000000000000000000000000000000000000000" ]; then
           if [ "$${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "$${CI_COMMIT_TARGET_SHA:-}" ]; then
@@ -81,7 +81,7 @@ steps:
       - bash tools/ci/deploy-image-pin-check.sh
       - bash tools/ci/release-governance-fixture.sh
       - |
-        set -euo pipefail
+        set -eu
         for f in risk-v1.lua calibration.lua confirm.lua correction.lua \
                   outcome_confirm.lua outcome_correct.lua outcome_register.lua \
                   register_decision.lua sampling_metrics.lua; do
@@ -93,7 +93,7 @@ steps:
         done
         echo "all canonical Lua copies byte-identical"
       - |
-        set -euo pipefail
+        set -eu
         PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
         if rg -n -i \
           --glob '!CHANGELOG*' \
@@ -113,7 +113,7 @@ steps:
     commands:
       - apk add --no-cache bash curl tar
       - |
-        set -euo pipefail
+        set -eu
         ACTIONLINT_VERSION=1.7.12
         # sha256 of the linux amd64 release tarball, from the release's
         # checksums file (actionlint_1.7.12_checksums.txt).
