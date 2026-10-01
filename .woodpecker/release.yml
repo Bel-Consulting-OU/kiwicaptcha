@@ -8,7 +8,7 @@
 # The tag-ruleset preflight reads the repository ruleset through the
 # GitHub API; provide a token as the Woodpecker secret `github_token`.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [tag]
 

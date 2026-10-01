@@ -5,7 +5,7 @@
 # the composer lane proves a clean-room install outside the monorepo;
 # the n1 lane proves the frozen previous release still interoperates.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [push, pull_request, tag, manual]
 

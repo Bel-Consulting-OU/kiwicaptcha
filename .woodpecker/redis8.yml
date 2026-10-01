@@ -3,7 +3,7 @@
 # risk Rust crate, the risk PHP package, the PHP core fault/topology
 # suites and the Symfony RealRedis filter against a Redis 8 server.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [push, pull_request, tag, manual]
 

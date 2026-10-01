@@ -8,7 +8,7 @@
 # comparator itself is tools/ci/latency-compare.sh with its
 # deterministic fixtures; only confident regressions block.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
 - event:
   - manual

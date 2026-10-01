@@ -4,7 +4,7 @@
 # the fixture router, which serves /kiwi-captcha/api.js and
 # /kiwi-captcha/widget.css through the real Symfony controller.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [push, pull_request, tag, manual]
 

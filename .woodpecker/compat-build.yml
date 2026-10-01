@@ -11,7 +11,7 @@
 # generated-copy parity and the worker-glue drift check close the
 # asset-integrity surface.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [push, pull_request, tag, manual]
 

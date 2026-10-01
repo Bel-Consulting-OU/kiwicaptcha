@@ -6,7 +6,7 @@
 # step reuses the vendor tree an earlier step installed. The chain is
 # fully modelled here, and no other workflow touches this directory.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [push, pull_request, tag, manual]
 

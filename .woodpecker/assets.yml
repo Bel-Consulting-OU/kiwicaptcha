@@ -6,7 +6,7 @@
 # lane opens the PR with a token this secondary pipeline does not
 # carry), so the lane proves the build and reports the diff instead.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
   - event: [manual]
 

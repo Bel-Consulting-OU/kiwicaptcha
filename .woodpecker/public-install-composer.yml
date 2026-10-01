@@ -12,7 +12,7 @@
 # survive between Woodpecker steps), and the clean-room app lives
 # under .ci-run-tmp/ in the workspace.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
 - event:
   - manual

@@ -10,7 +10,7 @@
 # restart-persistence pass all run here exactly as in the primary
 # pipeline.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
 - event:
   - push

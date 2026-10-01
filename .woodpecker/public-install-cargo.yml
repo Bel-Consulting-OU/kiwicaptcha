@@ -6,7 +6,7 @@
 # crates.io registry source, no path/git replacement. Provide
 # KIWICAPTCHA_VERSION and KIWICAPTCHA_RISK_VERSION.
 labels:
-  platform: linux/amd64
+  capability: docker
 when:
 - event:
   - manual
