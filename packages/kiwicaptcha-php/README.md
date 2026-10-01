@@ -54,10 +54,10 @@ Byte-for-byte compatible with the reference implementation in
   `t >= 1`). PHP `Config` throws at construction and Rust issuance
   validates, so cross-language verification always works. SHA-256 mode has
   no such constraint.
-- counter bound: the browser/WASM solver caps at 5,000,000 hashes, so
-  `SolutionToken::decode()` rejects any counter longer than 7 digits or
-  above 5,000,000 (`counter exceeds solver maximum`). A huge counter is an
-  abuse probe rather than a solution.
+- counter bound: the browser/WASM solver caps its search at 20,000,000
+  hashes, so `SolutionToken::decode()` rejects any counter with more than 8
+  canonical digits or at/above 20,000,000 (`counter exceeds solver
+  maximum`). A huge counter is an abuse probe rather than a solution.
 - record validation: every field is validated on the verify path,
   including scope, TTL, binding, the algorithm-specific parameter profile
   (Argon2id `t >= 3 && p == 1`, `m_kib >= 8`, the verifier's structural

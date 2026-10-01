@@ -29,7 +29,7 @@ pub fn security_random<const N: usize>() -> Result<[u8; N], getrandom::Error> {
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::keys::DerivedKeys;
+use crate::keys::{DerivedKeys, MIN_MASTER_BYTES};
 use crate::profile::{ChallengeProfile, ProfileError};
 use crate::token::IssuedChallenge;
 
@@ -542,7 +542,8 @@ pub struct ChallengeConfig {
     /// so the verifier can rotate secrets: it picks the signing secret by
     /// this id from its `secrets_by_kid` map. Default 1. Must be >= 1.
     pub kid: u32,
-    /// The ExecutionChallengeV1 keyed-PRF key (min 16 bytes), see
+    /// The ExecutionChallengeV1 keyed-PRF key (min 32 bytes, the same
+    /// floor PHP enforces), see
     /// [`crate::execution`]. `None` (the default) = execution challenges
     /// are never issued: issuance with the execution surface armed
     /// refuses (the generator errors), so a deployment cannot arm the
@@ -743,7 +744,7 @@ pub fn binding_tag_for_tenant(
     secret: &str,
     tenant: Option<&str>,
 ) -> Result<String, SignError> {
-    if secret.len() < 16 {
+    if secret.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, tenant))
@@ -1046,11 +1047,11 @@ pub fn execution_commitment(program_b64: &str) -> String {
 /// (protocol v1 legacy path — the master key is used directly; v2 records use
 /// the `HKDF`-derived challenge key via [`sign_canonical_v2`]).
 ///
-/// The secret key must be at least 16 bytes (the same minimum the PHP
-/// implementation enforces); 32 random bytes is the recommended size. Shorter
-/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
+/// The secret key must be at least [`MIN_MASTER_BYTES`] bytes (the same
+/// minimum the PHP implementation enforces); shorter keys are rejected
+/// with [`SignError::KeyTooShort`] before any hashing.
 fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     let mut mac =
@@ -1068,7 +1069,7 @@ pub(crate) fn sign_canonical_v2(
     secret_key: &str,
     tenant: Option<&str>,
 ) -> Result<String, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     let derived = DerivedKeys::from_master(secret_key, tenant);
@@ -1081,21 +1082,21 @@ pub(crate) fn sign_canonical_v2(
 /// Sign the payload with the secret key, returning a hex HMAC tag
 /// (protocol v1 canonical input; see [`ChallengePayload`]).
 ///
-/// The secret key must be at least 16 bytes (the same minimum the PHP
-/// implementation enforces); 32 random bytes is the recommended size. Shorter
-/// keys are rejected with [`SignError::KeyTooShort`] before any hashing.
+/// The secret key must be at least [`MIN_MASTER_BYTES`] bytes (the same
+/// minimum the PHP implementation enforces); shorter keys are rejected
+/// with [`SignError::KeyTooShort`] before any hashing.
 pub fn sign_payload(payload: &ChallengePayload, secret_key: &str) -> Result<String, SignError> {
     sign_canonical(&canonical_signing_input(payload), secret_key)
 }
 
 /// Verify that a signature matches the payload under the given key.
 ///
-/// The key minimum from [`sign_payload`] (16 bytes) applies here too — a key
-/// too short to have ever signed a valid challenge is rejected up front. The
-/// comparison itself is done in constant time: the hex signature is decoded
-/// to bytes and checked with `Mac::verify_slice`, which never short-circuits
-/// on a mismatching prefix and processes the full tag regardless of the
-/// inputs' relationship to the expected value.
+/// The key minimum from [`sign_payload`] ([`MIN_MASTER_BYTES`]) applies here
+/// too — a key too short to have ever signed a valid challenge is rejected up
+/// front. The comparison itself is done in constant time: the hex signature is
+/// decoded to bytes and checked with `Mac::verify_slice`, which never
+/// short-circuits on a mismatching prefix and processes the full tag
+/// regardless of the inputs' relationship to the expected value.
 pub fn verify_signature(
     payload: &ChallengePayload,
     signature: &str,
@@ -1153,7 +1154,7 @@ pub(crate) fn verify_signature_v2_with_keys(
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     // The HMAC-SHA256 tag is exactly 64 hex characters — a
@@ -1182,7 +1183,7 @@ fn verify_canonical_v2(
     secret_key: &str,
     tenant: Option<&str>,
 ) -> Result<bool, SignError> {
-    if secret_key.len() < 16 {
+    if secret_key.len() < MIN_MASTER_BYTES {
         return Err(SignError::KeyTooShort);
     }
     verify_canonical_v2_with_keys(
@@ -1240,10 +1241,11 @@ pub struct ChallengeCache {
 /// Maximum difficulty the in-browser SHA-256 solver can reliably complete.
 ///
 /// The widget solver (`packages/kiwicaptcha/src/widget.rs`) caps its search
-/// at `MAX = 5_000_000` hashes. At `n` target bits the expected work is
-/// `2^n` hashes; at 20 bits that is ~1.05M (solve probability ≈ 99.1% within
-/// the cap), while at 24 bits it is ~16.7M (solve probability ≈ 25.9% —
-/// ~74% of users would fail). Difficulty is therefore clamped to this
+/// at `MAX = 20_000_000` hashes. At `n` target bits the expected work is
+/// `2^n` hashes; at 20 bits that is ~1.05M (exhaustion probability
+/// ≈ 5.2×10⁻⁹ within the cap), while at 24 bits it is ~16.7M (exhaustion
+/// probability ≈ 30% — the solver fails to find a solution inside the cap
+/// for roughly three in ten users). Difficulty is therefore clamped to this
 /// ceiling so the auto-tuner can never issue a challenge the widget cannot
 /// solve.
 pub const SOLVER_MAX_TARGET_BITS: u32 = 20;
@@ -1260,10 +1262,11 @@ pub const MIN_DIFFICULTY: u32 = 1;
 pub const MAX_DIFFICULTY: u32 = 20;
 
 /// The maximum counter value any solver may legitimately produce (the widget
-/// caps its search at 5M hashes, both WASM and the pure-JS fallback).
+/// caps its search at 20M hashes, both WASM and the pure-JS fallback; the
+/// protocol/limits.json authority shared with the PHP core).
 /// [`crate::token::SolutionToken::decode`] rejects counters above this bound,
 /// and `verify_solution` accepts only solutions the solvers could produce.
-pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
+pub const SOLVER_MAX_HASHES: u64 = 20_000_000;
 
 /// Maximum challenge lifetime (seconds) a record may claim. Records with
 /// `expires_at - issued_at` above this are malformed (they could otherwise
@@ -2536,9 +2539,10 @@ pub fn payload_from_record(record: &ChallengeRecord) -> ChallengePayload {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignError {
-    /// The HMAC secret key must be at least 16 bytes (the PHP implementation
-    /// enforces the same minimum); 32 random bytes is the recommended size.
-    #[error("HMAC secret key is too short (minimum 16 bytes; 32 random bytes recommended)")]
+    /// The HMAC secret key must be at least 32 bytes (the PHP implementation
+    /// enforces the same minimum); 32 random bytes is both the floor and the
+    /// recommended size.
+    #[error("HMAC secret key is too short (minimum 32 bytes)")]
     KeyTooShort,
     /// The OS cryptographic random source failed — challenge creation MUST
     /// fail rather than fall back to a weak generator.
@@ -2611,7 +2615,7 @@ mod tests {
     #[test]
     fn issued_challenge_has_correct_difficulty() {
         let config = ChallengeConfig {
-            secret_key: "super-secret-key".into(),
+            secret_key: "super-secret-key-32-bytes-01234567".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2667,7 +2671,7 @@ mod tests {
 
     #[test]
     fn signatures_verify_round_trip() {
-        let key = "this-is-a-16-byte-key";
+        let key = "this-is-a-32-byte-key-0123456789a";
         let payload = ChallengePayload {
             nonce: "n".into(),
             scope: "login".into(),
@@ -2676,7 +2680,7 @@ mod tests {
         };
         let sig = sign_payload(&payload, key).unwrap();
         assert!(verify_signature(&payload, &sig, key).unwrap());
-        assert!(!verify_signature(&payload, &sig, "wrong-key-16-bytes").unwrap());
+        assert!(!verify_signature(&payload, &sig, "wrong-key-32-bytes-0123456789abc").unwrap());
         // Tampering with the nonce breaks the signature.
         let mut tampered = payload.clone();
         tampered.nonce = "x".into();
@@ -2691,8 +2695,13 @@ mod tests {
             ip_hash: hash_ip("9.9.9.9", "key"),
             issued_at: 123,
         };
-        for key in ["", "x", "0123456789abcde"] {
-            // 0, 1 and 15 bytes — all below the 16-byte minimum.
+        for key in [
+            "",
+            "x",
+            "0123456789abcde",
+            "0123456789abcdef0123456789abcde",
+        ] {
+            // 0, 1, 15 and 31 bytes — all below the 32-byte minimum.
             assert!(
                 matches!(sign_payload(&payload, key), Err(SignError::KeyTooShort)),
                 "key {key:?} must be rejected"
@@ -2705,12 +2714,85 @@ mod tests {
                 "key {key:?} must be rejected"
             );
         }
-        // Exactly 16 bytes is the minimum — accepted.
-        let key16 = "0123456789abcdef";
-        assert!(sign_payload(&payload, key16).is_ok());
+        // Exactly 32 bytes is the minimum — accepted.
+        let key32_min = "0123456789abcdef0123456789abcdef";
+        assert!(sign_payload(&payload, key32_min).is_ok());
         // 32 random bytes (recommended) — accepted.
         let key32 = "0123456789abcdef0123456789abcdef";
         assert!(sign_payload(&payload, key32).is_ok());
+    }
+
+    #[test]
+    fn secret_floor_is_32_bytes_at_every_signing_entry_point() {
+        // The PHP core enforces a 32-byte floor on the master/secret key
+        // (Config::__construct) and the execution key
+        // (ExecutionChallengeGenerator::validateKey); these entry points
+        // must agree exactly: 31 bytes rejected, 32 bytes accepted.
+        let short = "0123456789abcdef0123456789abcde";
+        let floor = "0123456789abcdef0123456789abcdef";
+        assert_eq!(short.len(), 31, "precondition: one byte below the floor");
+        assert_eq!(floor.len(), 32, "precondition: exactly at the floor");
+
+        let payload = ChallengePayload {
+            nonce: "n".into(),
+            scope: "login".into(),
+            ip_hash: hash_ip("9.9.9.9", floor),
+            issued_at: 123,
+        };
+
+        // v1 sign/verify.
+        assert!(matches!(
+            sign_payload(&payload, short),
+            Err(SignError::KeyTooShort)
+        ));
+        assert!(matches!(
+            verify_signature(&payload, "abc", short),
+            Err(SignError::KeyTooShort)
+        ));
+        let sig = sign_payload(&payload, floor).unwrap();
+        assert!(verify_signature(&payload, &sig, floor).unwrap());
+
+        // IP-binding tag.
+        assert!(matches!(
+            binding_tag("n", "1.2.3.4", short),
+            Err(SignError::KeyTooShort)
+        ));
+        assert!(binding_tag("n", "1.2.3.4", floor).is_ok());
+
+        // Issuance.
+        let mut config = profile_base_config();
+        config.secret_key = short.into();
+        assert!(matches!(
+            issue_challenge(
+                &config,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            ),
+            Err(SignError::KeyTooShort)
+        ));
+        config.secret_key = floor.into();
+        let issued = issue_challenge(
+            &config,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+
+        // v2 verification (the production record path).
+        assert!(matches!(
+            verify_signature_v2(&issued.record, "abc", short),
+            Err(SignError::KeyTooShort)
+        ));
+        let sig2 = crate::verify::signature_from_challenge(&issued.record);
+        assert!(verify_signature_v2(&issued.record, sig2, floor).unwrap());
     }
 
     #[test]
@@ -2722,11 +2804,13 @@ mod tests {
             issued_at: 123,
         };
         // A valid tag must verify…
-        let sig = sign_payload(&payload, "this-is-a-16-byte-key").unwrap();
-        assert!(verify_signature(&payload, &sig, "this-is-a-16-byte-key").unwrap());
+        let sig = sign_payload(&payload, "this-is-a-32-byte-key-0123456789a").unwrap();
+        assert!(verify_signature(&payload, &sig, "this-is-a-32-byte-key-0123456789a").unwrap());
         // …and an undecodable "signature" must be a mismatch, never an error.
-        assert!(!verify_signature(&payload, "not-hex!", "this-is-a-16-byte-key").unwrap());
-        assert!(!verify_signature(&payload, "abc", "this-is-a-16-byte-key").unwrap());
+        assert!(
+            !verify_signature(&payload, "not-hex!", "this-is-a-32-byte-key-0123456789a").unwrap()
+        );
+        assert!(!verify_signature(&payload, "abc", "this-is-a-32-byte-key-0123456789a").unwrap());
     }
 
     #[test]
@@ -2885,7 +2969,7 @@ mod tests {
     #[test]
     fn each_challenge_has_unique_nonce() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2935,7 +3019,7 @@ mod tests {
     #[test]
     fn auto_tune_adjusts_target_bits() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2975,7 +3059,7 @@ mod tests {
         let mid = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 25, None).unwrap();
         assert!(mid.challenge.target_bits >= 14 && mid.challenge.target_bits <= 16);
         // Peak load — clamped to the solver ceiling (not 24), because the
-        // browser solver's 5M-hash cap would fail ~74% of solves at 24 bits.
+        // browser solver's 20M-hash cap would fail ~30% of solves at 24 bits.
         let peak = issue_challenge(&config, "login", "1.1.1.1", 1, 1000000000, 50, None).unwrap();
         assert_eq!(peak.challenge.target_bits, SOLVER_MAX_TARGET_BITS);
     }
@@ -2985,7 +3069,7 @@ mod tests {
         // PHP rejects target_bits > 20 at construction; Rust must NOT clamp
         // a static configuration — issuance rejects it (parity).
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3030,7 +3114,7 @@ mod tests {
         // solver ceiling caps target_bits. A target_bits below the tuning min
         // stays as-is — it is never raised to the tuning bound.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3068,7 +3152,7 @@ mod tests {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let issued = issue_challenge(
             &ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
@@ -3120,7 +3204,7 @@ mod tests {
         // the least-recently-used entry after the prune, so 256 is a real maximum.
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3168,7 +3252,7 @@ mod tests {
     fn challenge_cache_put_prunes_expired_entries() {
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3223,7 +3307,7 @@ mod tests {
     #[test]
     fn challenge_cache_hit_returns_same_challenge() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3267,7 +3351,7 @@ mod tests {
     #[test]
     fn challenge_cache_miss_on_different_scope() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3308,7 +3392,7 @@ mod tests {
 
     fn profile_base_config() -> ChallengeConfig {
         ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3338,7 +3422,7 @@ mod tests {
     /// lambda with the smallest allowed sequential cost (fast solves).
     fn rsw_config(t: u32) -> ChallengeConfig {
         ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
@@ -3745,7 +3829,9 @@ mod tests {
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
-        assert!(verify_signature_v2(&issued.record, sig, "test-key-16-bytes!").unwrap());
+        assert!(
+            verify_signature_v2(&issued.record, sig, "test-key-32-bytes-0123456789abcd").unwrap()
+        );
         // The client-decodable challenge string carries it too (the
         // canonical payload IS the pre-image of the challenge base64).
         let (payload, _sig) = issued
@@ -4131,7 +4217,7 @@ mod tests {
         )
         .unwrap();
         let sig = crate::verify::signature_from_challenge(&armed.record);
-        let secret = "test-key-16-bytes!";
+        let secret = "test-key-32-bytes-0123456789abcd";
         assert!(verify_signature_v2(&armed.record, sig, secret).unwrap());
 
         // Renamed to a different grammar name (same shape, different pick).
@@ -4216,7 +4302,7 @@ mod tests {
         let counter = crate::verify::solve_for_test(&record).unwrap();
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4316,7 +4402,7 @@ mod tests {
             };
             let mut ctx = crate::verify::VerifyContext {
                 record: &mut record,
-                secret_key: "test-key-16-bytes!",
+                secret_key: "test-key-32-bytes-0123456789abcd",
                 tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
@@ -4376,7 +4462,7 @@ mod tests {
         let counter = crate::verify::solve_for_test(&record).expect("argon solve finds a counter");
         let mut ctx = crate::verify::VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4509,10 +4595,12 @@ mod tests {
             .rsplit_once('.')
             .map(|(_, sig)| sig)
             .unwrap();
-        assert!(
-            !crate::challenge::verify_signature_v2(&tampered, signature, "test-key-16-bytes!")
-                .unwrap()
-        );
+        assert!(!crate::challenge::verify_signature_v2(
+            &tampered,
+            signature,
+            "test-key-32-bytes-0123456789abcd"
+        )
+        .unwrap());
     }
 
     #[test]
@@ -4988,7 +5076,7 @@ mod tests {
 
     fn sha_issue_config() -> ChallengeConfig {
         ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,

@@ -97,3 +97,92 @@ test.describe('Lazy telemetry module acquisition', () => {
     expect(tokenTelemetry(token).mode).toBe('full');
   });
 });
+
+// The challenge-fetch deadline (data-kiwi-fetch-timeout-ms) bounds the
+// challenge POST itself. It must never start before the pre-fetch
+// telemetry wait: telemetry initialization carries its own independent
+// 2 s budget, so a slow module can never consume (and abort) the
+// configured challenge timeout.
+test.describe('Challenge fetch timeout vs telemetry initialization', () => {
+  test('telemetry slow (1500 ms) + fetch timeout 1000 ms + a fast server still succeeds', async ({ page }) => {
+    await page.route('**/assets/telemetry*.js', async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue().catch(() => {});
+    });
+    const pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e)));
+    await page.goto('/?assets=files&telemetry=minimal&fetch_timeout=1000', { waitUntil: 'domcontentloaded' });
+    // The healthy challenge endpoint answers in milliseconds; the only
+    // way this can fail is if the 1000 ms deadline had started before
+    // the telemetry wait consumed it.
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length, 'the solve must complete despite the slow telemetry module').toBeGreaterThan(0);
+    // The module still arrived inside its own budget, so the token
+    // carries the real session rather than the empty stub.
+    expect(tokenTelemetry(token).mode).toBe('minimal');
+    expect(pageErrors, 'the slow telemetry module must raise no page error').toEqual([]);
+  });
+
+  test('a challenge response slower than the configured timeout still aborts', async ({ page }) => {
+    let delayed = 0;
+    await page.route('**/challenge**', async (route) => {
+      if (route.request().method() === 'POST' && !route.request().url().includes('/cancel')) {
+        delayed++;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      await route.continue().catch(() => {});
+    });
+    await page.goto('/?assets=files&fetch_timeout=1000', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
+    expect(delayed, 'the delayed challenge POST must have been attempted').toBeGreaterThanOrEqual(1);
+  });
+
+  test('reset during the telemetry wait cancels the stale generation before any challenge POST', async ({ page }) => {
+    const held = [];
+    const posts = [];
+    await page.route('**/assets/telemetry*.js', (route) => {
+      held.push(route);
+    });
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel')) posts.push(r.url());
+    });
+    await page.goto('/?assets=files&telemetry=minimal&fetch_timeout=1000', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the first telemetry load must be held').toBe(1);
+    expect(posts, 'no challenge may be sent while telemetry is still pending').toEqual([]);
+
+    // Reset while the first generation is still waiting on telemetry.
+    const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    await page.evaluate((id) => window.KiwiCaptcha.reset(id), widgetId);
+
+    // Release the held module. Both generations resume from the same
+    // in-flight load: the superseded one must return at its generation
+    // check, and only the live generation may send a challenge.
+    await held.shift().continue().catch(() => {});
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    expect(posts, 'exactly the live generation may send a challenge; the stale generation must not').toHaveLength(1);
+  });
+
+  test('destroy during the telemetry wait leaves no challenge POST behind', async ({ page }) => {
+    const held = [];
+    const posts = [];
+    const pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e)));
+    await page.route('**/assets/telemetry*.js', (route) => {
+      held.push(route);
+    });
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/challenge') && !r.url().includes('/cancel')) posts.push(r.url());
+    });
+    await page.goto('/?assets=files&telemetry=minimal&fetch_timeout=1000', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the telemetry load must be held').toBe(1);
+
+    const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
+    await page.evaluate((id) => window.KiwiCaptcha.remove(id), widgetId);
+    await expect(page.locator('#kiwicaptcha-root')).toHaveCount(0);
+    for (const route of held.splice(0)) await route.continue().catch(() => {});
+    await page.waitForTimeout(700);
+    expect(posts, 'a destroyed widget must never send a challenge POST').toEqual([]);
+    expect(pageErrors, 'destroy during the telemetry wait must raise no page error').toEqual([]);
+  });
+});

@@ -419,9 +419,9 @@ final class Verifier
             ));
         }
         foreach ($secretsByKid as $kid => $secret) {
-            if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < 16) {
+            if (!\is_int($kid) || $kid < 1 || !\is_string($secret) || \strlen($secret) < Config::MIN_SECRET_BYTES) {
                 throw new \InvalidArgumentException(
-                    'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 16 bytes'
+                    'secretsByKid keys must be positive integer kid values 1..N with secrets of at least 32 bytes'
                 );
             }
         }

@@ -247,7 +247,7 @@ The covered surface, the intentional differences (v3 scores are not emulated; th
 
 ## Hardening
 
-The core verifier enforces IP binding itself (not left to the route layer), counts attempts intrinsically on every verification call, verifies the HMAC in constant time, rejects secrets under 16 bytes, and bounds token/nonce/scope shapes.
+The core verifier enforces IP binding itself (not left to the route layer), counts attempts intrinsically on every verification call, verifies the HMAC in constant time, rejects secrets under 32 bytes, and bounds token/nonce/scope shapes.
 The WASM solver uses a layout-matched allocator.
 The authoritative hardening and operational contracts (Redis requirements, proxy/IP-binding assumptions, release governance, supported versions) are in [the security document](SECURITY.md).
 The Symfony bundle ships `kiwicaptcha:doctor`, which validates a

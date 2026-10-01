@@ -1853,6 +1853,15 @@ if ($path === '/' || $path === '/index.html') {
     $telemetryAttr = $telemetryValue === 'full' || $telemetryValue === 'minimal'
         ? ' data-kiwi-telemetry="'.$telemetryValue.'"'
         : '';
+    // ?fetch_timeout=<ms> seeds the container with an explicit
+    // data-kiwi-fetch-timeout-ms (the challenge-fetch deadline). The
+    // telemetry-ordering specs use it to prove the deadline bounds the
+    // challenge POST itself and is not consumed by the pre-fetch
+    // telemetry wait. Absent (the default) emits no attribute.
+    $fetchTimeoutValue = (string) ($_GET['fetch_timeout'] ?? '');
+    $fetchTimeoutAttr = ctype_digit($fetchTimeoutValue) && (int) $fetchTimeoutValue > 0
+        ? ' data-kiwi-fetch-timeout-ms="'.$fetchTimeoutValue.'"'
+        : '';
     // Files-mode variant (?assets=files): mirrors the bundle theme's
     // files tier — the stylesheet link and the driver script are emitted
     // once (the page-level dedup registry), the runtime and the worker
@@ -1968,7 +1977,7 @@ if ($path === '/' || $path === '/index.html') {
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$fetchTimeoutAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

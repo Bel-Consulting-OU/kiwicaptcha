@@ -22,6 +22,7 @@ steps:
       - apk add --no-cache bash git
       - node tools/ci/test-validate-release-baseline.mjs
       - node tools/ci/test-validate-autofill-qualification.mjs
+      - node tools/ci/test-validate-accessibility-qualification.mjs
       - bash tools/ci/latency-compare-test.sh
 
   - name: perf-budget

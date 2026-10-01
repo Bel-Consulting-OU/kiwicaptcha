@@ -237,32 +237,35 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-100,840 bytes raw, 29,805 bytes gzip and 25,219 bytes brotli, against
+102,404 bytes raw, 30,240 bytes gzip and 25,524 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 40,397 bytes raw, 11,781 bytes gzip and 10,121 bytes
+module) is 42,369 bytes raw, 12,339 bytes gzip and 10,592 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
-widget-locales.js copy (the lazy non-default locale packs) is 16,293
-bytes raw, 4,490 bytes gzip and 3,940 bytes brotli against caps of
-16,384 / 6,000 / 5,000; every widget-compat.js copy is 31,586 bytes
-raw, 9,304 bytes gzip and 8,095 bytes brotli against caps of
-32,768 / 12,000 / 10,000; every execution-interpreter copy
-(execution-interpreter.js, the lazy ExecutionChallengeV1 asset) is
-33,039 bytes raw, 9,998 bytes gzip and 8,675 bytes brotli, against
-caps of 36,000 / 11,200 / 9,500 bytes; the same budgets section also
-records the measured raw bytes of the worker at 126,104 bytes, the
-wasm glue runtime at 99,325 bytes and the widget stylesheet at 13,863
-bytes, each byte-identical across the three copies. Since the r8
-glue-embedding change the worker row describes the assembled release
-asset (tools/embed-worker: the `var window = self;` prelude plus the
-full wasm glue text plus the worker solver source — 126,104 raw /
-40,068 gzip / 33,711 brotli), so the files-mode worker boots with wasm
-in scope and the optional rsw sequential solver still lives inside the
-worker's solver source; the runtime row quotes the glue asset alone,
-whose embedded workerSource copy is regenerated from that same solver
+widget-locales.js copy (the lazy non-default locale packs) is 12,737
+bytes raw, 4,387 bytes gzip and 3,860 bytes brotli against caps of
+16,384 / 6,000 / 5,000 (the packs are stored columnar — one value row
+per language in a fixed key order, rebuilt into the same registered
+object shape at module scope — which removed the repeated key names
+and restored translation headroom without a cap raise); every
+widget-compat.js copy is 31,586 bytes raw, 9,304 bytes gzip and 8,095
+bytes brotli against caps of 32,768 / 12,000 / 10,000; every
+execution-interpreter copy (execution-interpreter.js, the lazy
+ExecutionChallengeV1 asset) is 33,039 bytes raw, 9,998 bytes gzip and
+8,675 bytes brotli, against caps of 36,000 / 11,200 / 9,500 bytes; the
+same budgets section also records the measured raw bytes of the worker
+at 145,507 bytes, the wasm glue runtime at 116,196 bytes and the widget
+stylesheet at 13,014 bytes, each byte-identical across the three
+copies. Since the r8 glue-embedding change the worker row describes the
+assembled release asset (tools/embed-worker: the `var window = self;`
+prelude plus the full wasm glue text plus the worker solver source —
+145,507 raw), so the files-mode worker boots with wasm in scope and
+the optional rsw sequential solver still lives inside the worker's
+solver source; the runtime row quotes the glue asset alone, whose
+embedded workerSource copy is regenerated from that same solver
 source; the
 decoy-armed challenge-response JSON (the wire shape of the bundle's
 /challenge response) is 1,014-1,045 bytes for sha256 and 1,025-1,046
@@ -324,13 +327,16 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 100,840 bytes
-raw, 29,805 gzip and 25,219 brotli (the record's
+any memory-hard challenge — is the eager core alone: 102,404 bytes
+raw, 30,240 gzip and 25,524 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
-figure sits at 96.8% of its 30,720-byte cap after the provider-control
-architecture and lazy-module recovery work added core code (the cap is
-unchanged and still enforced, and the raw 160,000 cap keeps large
-headroom); the compressed caps remain the ordinary-bootstrap target.
+figure sits at 98.4% of its 30,720-byte cap after the timeout-ordering
+and correlation-hardening wave added core code; the cap is unchanged
+and still enforced, the asset carries a recorded `headroom_review`
+exemption under the 95% near-cap gate, and the raw 160,000 cap keeps
+large headroom. The reviewed follow-up is moving the pure-JS SHA-256
+fallback to a lazy module before the next behavior wave; the
+compressed caps remain the ordinary-bootstrap target.
 
 The driver surface is now five files with one eager core (the
 record's budget rows, equality-gated):
@@ -339,27 +345,27 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (97,316 raw / 29,138 gzip / 24,571 brotli);
+  lazy-module loader (102,404 raw / 30,240 gzip / 25,524 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge, an armed response or a glue-less SHA-256 solve (34,305
-  raw / 9,432 gzip / 8,095
+  challenge, an armed response or a glue-less SHA-256 solve (42,369
+  raw / 12,339 gzip / 10,592
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
   the fallback, and loads the module exactly when a widget's resolved
   language is non-default, so a default-language page pays zero bytes
   for translations; a load failure degrades to English with a console
-  warning, never a broken widget (16,293 raw / 4,490 gzip / 3,940
+  warning, never a broken widget (12,737 raw / 4,387 gzip / 3,860
   brotli);
 - `widget-telemetry.js`, the lazy telemetry session, loaded only when
   a widget enables one (2,922 raw / 1,229 gzip / 992 brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (26,943 raw / 8,478 gzip / 7,275 brotli).
+  (31,586 raw / 9,304 gzip / 8,095 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:

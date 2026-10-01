@@ -4669,7 +4669,7 @@ mod tests {
     #[test]
     fn hkdf_purpose_keys_derive_once_per_kid_and_are_reused() {
         let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
-        let secret_2 = "another-secret-16-bytes";
+        let secret_2 = "another-secret-32-bytes-0123456789";
         let verifier =
             ProductionVerifier::new(RedisChallengeStore::new(client, "hkdf-cache:"), SECRET)
                 .with_secrets_by_kid([(1u32, SECRET.to_string()), (2u32, secret_2.to_string())]);

@@ -71,6 +71,8 @@ steps:
       - bash tools/ci/version-prose-lint.sh
       - bash tools/ci/release-asset-contract.sh
       - bash tools/ci/protocol-manifest-check.sh
+      - bash tools/ci/limits-parity-check.sh
+      - bash tools/ci/deploy-image-pin-check.sh
       - bash tools/ci/release-governance-fixture.sh
       - |
         set -euo pipefail

@@ -120,3 +120,11 @@ steps:
         set -euo pipefail
         apk add --no-cache bash git
         node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json
+
+  - name: accessibility-qualification-gate
+    image: node:22-alpine
+    commands:
+      - |
+        set -euo pipefail
+        apk add --no-cache bash git
+        node tools/ci/validate-accessibility-qualification.mjs tests/browser/qualification/accessibility-matrix.json

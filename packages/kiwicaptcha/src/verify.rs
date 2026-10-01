@@ -1808,7 +1808,7 @@ mod tests {
 
     fn make_record_at(target_bits: u32, now_unix: u64, now_ns: u64) -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -1843,7 +1843,7 @@ mod tests {
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
             tenant: None,
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
@@ -1871,7 +1871,7 @@ mod tests {
     fn verify(record: &mut ChallengeRecord, counter: u64, duration_ms: u64) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2026,13 +2026,13 @@ mod tests {
         // verdict, and any changed input (the presented digest) is a
         // miss that re-derives and returns its own verdict.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_t: crate::challenge::DEFAULT_RSW_T,
             tenant: None,
-            execution_key: Some("test-key-16-bytes!".into()),
+            execution_key: Some("test-key-32-bytes-0123456789abcd".into()),
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2140,7 +2140,7 @@ mod tests {
             let counter = solve_for_test(&record).expect("8-bit sha solves");
             let mut ctx = VerifyContext {
                 record: &mut record,
-                secret_key: "test-key-16-bytes!",
+                secret_key: "test-key-32-bytes-0123456789abcd",
                 tenant: None,
                 secrets_by_kid: None,
                 revoked_kids: None,
@@ -2283,7 +2283,7 @@ mod tests {
     fn argon2_issuance_rejects_invalid_memory_params() {
         // m_kib < 8 * p must fail at issuance, not at verification time.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2316,7 +2316,7 @@ mod tests {
         // reject it so cross-language verification can never silently fail.
         for t in [0u32, 1, 2] {
             let config = ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
@@ -2353,7 +2353,7 @@ mod tests {
         // Expired — no acceptable submission time exists (verification
         // checks expiry before the floor).
         let base = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2396,7 +2396,7 @@ mod tests {
         // TTL cap (300) and TTL 0 is meaningless — issuance must refuse to
         // mint a record it would later declare malformed.
         let base = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2439,7 +2439,7 @@ mod tests {
         // structurally acceptable — but issuance refuses t above 6, the
         // browser-solver ceiling (PHP Config already does; Rust must match).
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2472,7 +2472,7 @@ mod tests {
     #[test]
     fn argon2_issuance_rejects_libsodium_unrepresentable_p() {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2504,7 +2504,7 @@ mod tests {
         // The verifier already rejects records above the argon2 solver memory
         // ceiling (64 MiB — the wasm heap cap); issuance must never mint one.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2556,7 +2556,7 @@ mod tests {
                 rsw_lambda: None,
                 rsw_t: crate::challenge::DEFAULT_RSW_T,
                 tenant: None,
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 algorithm: PoWAlgorithm::Argon2id,
@@ -2586,7 +2586,7 @@ mod tests {
         }
         // The maximum is accepted.
         let max_bits = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -2689,7 +2689,7 @@ mod tests {
         let mut record = make_record(8);
         record.protocol_version = 3;
         record.decoy_field = Some("company_website".to_string());
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         assert!(matches!(
             verify(&mut record, counter, 5000),
@@ -2770,7 +2770,7 @@ mod tests {
         record.execution_version = Some(1);
         // The commitment does not match the stored program's hash.
         record.execution_commitment = Some("0".repeat(64));
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let outcome = verify(&mut record, counter, 5000);
         assert_eq!(
@@ -2806,7 +2806,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2849,7 +2849,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2892,7 +2892,7 @@ mod tests {
         // Elapsed: 0 µs (immediately after issuance) — impossibly fast.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2943,7 +2943,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2977,7 +2977,7 @@ mod tests {
 
     #[test]
     fn short_secret_key_rejects_as_bad_signature() {
-        // A secret below the 16-byte minimum can never have signed a valid
+        // A secret below the 32-byte minimum can never have signed a valid
         // challenge — verification must fail closed (BadSignature), and the
         // attempt is still accounted on the record.
         let mut record = make_record(8);
@@ -3025,7 +3025,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3066,7 +3066,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3101,7 +3101,7 @@ mod tests {
         // verifies without an IP — binding is genuinely disabled. Issued
         // properly so the v2 signature (which covers the tag) stays valid.
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: None,
@@ -3131,7 +3131,7 @@ mod tests {
         let counter2 = solve_for_test(&unbound).unwrap();
         let mut ctx2 = VerifyContext {
             record: &mut unbound,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             rsw_proof: None,
@@ -3172,7 +3172,7 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3205,7 +3205,7 @@ mod tests {
         // Second call — the correct counter, but the attempt budget is gone.
         let mut ctx2 = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3246,7 +3246,7 @@ mod tests {
         let wrong = if counter == 0 { 1 } else { 0 };
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3281,7 +3281,7 @@ mod tests {
             rsw_modulus_n: None,
             rsw_lambda: None,
             rsw_keyring: None,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3319,7 +3319,7 @@ mod tests {
         // webdriver=true with enforcement → rejected.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3359,7 +3359,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3401,7 +3401,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3439,7 +3439,7 @@ mod tests {
             rsw_lambda: None,
             rsw_keyring: None,
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3475,7 +3475,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3516,7 +3516,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3557,7 +3557,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3600,7 +3600,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3642,7 +3642,7 @@ mod tests {
         assert!(record.min_duration_ms > 0, "record floor must be positive");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3683,7 +3683,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3855,7 +3855,7 @@ mod tests {
         let mut clock_calls = 0;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3903,7 +3903,7 @@ mod tests {
         let counter2 = solve_for_test(&record2).unwrap();
         let mut ctx2 = VerifyContext {
             record: &mut record2,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -3949,7 +3949,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4071,7 +4071,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4110,7 +4110,7 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4149,7 +4149,7 @@ mod tests {
         let expires_at = record.expires_at;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4240,7 +4240,7 @@ mod tests {
         let counter = solve_for_test(&sane).unwrap();
         let mut absurd = sane.clone();
         absurd.m_kib = crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1;
-        resign_v2(&mut absurd, "test-key-16-bytes!");
+        resign_v2(&mut absurd, "test-key-32-bytes-0123456789abcd");
         assert_eq!(
             verify(&mut absurd, counter, 5000),
             VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
@@ -4257,7 +4257,7 @@ mod tests {
         assert_eq!(record.min_duration_ms, 5);
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4289,7 +4289,7 @@ mod tests {
         ));
         let mut ctx_fast = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4536,7 +4536,7 @@ mod tests {
         // even though the submitting IP differs from the issuance IP.
         let issued = issue_challenge(
             &ChallengeConfig {
-                secret_key: "test-key-16-bytes!".into(),
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
                 kid: 1,
                 execution_key: None,
                 rsw_modulus_n: None,
@@ -4572,7 +4572,7 @@ mod tests {
         let counter = solve_for_test(&issued.record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut issued.record.clone(),
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4610,7 +4610,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4655,11 +4655,11 @@ mod tests {
         // issued for another region.
         let mut record = make_record(8);
         record.region = Some("eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4700,7 +4700,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4736,12 +4736,12 @@ mod tests {
     fn matching_region_verifies_and_unmatched_expectation_never_fires() {
         let mut record = make_record(8);
         record.region = Some("us".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // region is signed into the canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // region is signed into the canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4775,7 +4775,7 @@ mod tests {
         // No expected region → the record's region is ignored entirely.
         let mut ctx_none = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             rsw_proof: None,
             rsw_modulus_n: None,
@@ -4816,11 +4816,11 @@ mod tests {
         // challenges issued by another issuer.
         let mut record = make_record(8);
         record.issuer = Some("auth-gw-eu".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4862,7 +4862,7 @@ mod tests {
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4898,12 +4898,12 @@ mod tests {
     fn matching_issuer_verifies_and_no_expectation_never_fires() {
         let mut record = make_record(8);
         record.issuer = Some("auth-gw".into());
-        resign_v2(&mut record, "test-key-16-bytes!"); // issuer is signed into the v2 canonical payload
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd"); // issuer is signed into the v2 canonical payload
         let counter = solve_for_test(&record).unwrap();
 
         let mut ctx_match = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -4937,7 +4937,7 @@ mod tests {
         // No expected issuer → the record's issuer is ignored entirely.
         let mut ctx_none = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -5034,7 +5034,7 @@ mod tests {
         secrets.insert(2, key_b.to_string());
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
             tenant: None,
             secrets_by_kid: Some(&secrets),
             revoked_kids: None,
@@ -5068,10 +5068,10 @@ mod tests {
         // The same kid with a different secret → BadSignature (the secret
         // selection is real, not cosmetic).
         let mut wrong: HashMap<u32, String> = HashMap::new();
-        wrong.insert(2, "WRONG-KEY-16-bytes!".to_string());
+        wrong.insert(2, "WRONG-KEY-32-bytes-0123456789abc".to_string());
         let mut ctx_wrong = VerifyContext {
             record: &mut record,
-            secret_key: "WRONG-KEY-16-bytes!",
+            secret_key: "WRONG-KEY-32-bytes-0123456789abc",
             tenant: None,
             secrets_by_kid: Some(&wrong),
             revoked_kids: None,
@@ -5689,11 +5689,11 @@ mod tests {
         let mut record = make_record(8);
         record.issued_at = NOW_UNIX + 62; // > now + 60 → anomaly
         record.expires_at = record.issued_at + 120;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -5729,11 +5729,11 @@ mod tests {
         let mut record = make_record(8);
         record.issued_at = NOW_UNIX + 61; // == now + 60
         record.expires_at = record.issued_at + 120;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -5780,7 +5780,7 @@ mod tests {
         // Cheap phase + derive + final re-check all pass just before expiry.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -5838,7 +5838,7 @@ mod tests {
         let now_unix = NOW_UNIX + 1;
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -5957,7 +5957,7 @@ mod tests {
         // intdiv semantics): 1234.567 ms -> 1234.
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -6002,7 +6002,7 @@ mod tests {
         let counter = solve_for_test(&record).expect("8-bit sha solves");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -6048,11 +6048,11 @@ mod tests {
         // its duration — a second, later read would report a larger span.
         let mut record = make_record(8);
         record.min_duration_ms = 5000;
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         let counter = solve_for_test(&record).expect("8-bit sha solves");
         let mut ctx = VerifyContext {
             record: &mut record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -6141,7 +6141,7 @@ mod tests {
                 "t" => record.t = value,
                 _ => unreachable!(),
             }
-            resign_v2(&mut record, "test-key-16-bytes!");
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
             assert_eq!(
                 verify(&mut record, 0, 5000),
                 VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params),
@@ -6158,7 +6158,7 @@ mod tests {
         let mut record = make_argon2_record(4, 64);
         record.p = 4;
         record.m_kib = 64; // >= 8 * 4
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         assert!(record.p <= crate::challenge::MAX_PARALLELISM);
         let counter = solve_for_test(&record).expect("p=4 argon solve finds a counter");
         assert!(
@@ -6174,7 +6174,7 @@ mod tests {
     fn signed_argon2_record_above_max_parallelism_is_rejected() {
         let mut record = make_argon2_record(4, 128);
         record.p = 5; // above the parallelism ceiling
-        resign_v2(&mut record, "test-key-16-bytes!");
+        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         assert_eq!(
             verify(&mut record, 0, 5000),
             VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
@@ -6428,7 +6428,7 @@ mod tests {
 
     fn make_rsw_record(t: u32) -> ChallengeRecord {
         let mut config = crate::challenge::ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: None,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
@@ -6463,7 +6463,7 @@ mod tests {
         let mut record = issued.record;
         if t == 0 {
             record.t = 0;
-            resign_v2(&mut record, "test-key-16-bytes!");
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
         }
         record
     }
@@ -6477,7 +6477,7 @@ mod tests {
     ) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,
@@ -6606,7 +6606,7 @@ mod tests {
     /// token carries the digest:trace evidence AND the rsw final value.
     fn make_rsw_execution_record() -> ChallengeRecord {
         let config = ChallengeConfig {
-            secret_key: "test-key-16-bytes!".into(),
+            secret_key: "test-key-32-bytes-0123456789abcd".into(),
             kid: 1,
             execution_key: Some("0123456789abcdef0123456789abcdef".into()),
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
@@ -6683,7 +6683,7 @@ mod tests {
     ) -> VerifyOutcome {
         let mut ctx = VerifyContext {
             record,
-            secret_key: "test-key-16-bytes!",
+            secret_key: "test-key-32-bytes-0123456789abcd",
             tenant: None,
             secrets_by_kid: None,
             revoked_kids: None,

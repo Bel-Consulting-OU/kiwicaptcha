@@ -331,15 +331,22 @@ final class TwigRuntimeTest extends TestCase
         // binding). The binding path stays attribute-only (asserted
         // above).
         self::assertSame(0, substr_count($driver, 'getRandomValues'), 'the eager core must not draw decoy strategies — the decoy machinery is the lazy widget-risk.js module');
-        self::assertSame(1, substr_count($risk, 'crypto.getRandomValues(buf)'), 'crypto.getRandomValues must be limited to the decoy-strategy draw — bindings are never synthesized client-side');
+        // widget-risk.js has exactly two crypto.getRandomValues draws:
+        // the presentation-only decoy-strategy draw and the solve
+        // correlation request id (128 random bits; the worker echoes the
+        // id and uncorrelated replies are ignored). Neither is a
+        // binding: bindings are never synthesized client-side.
+        self::assertSame(2, substr_count($risk, 'crypto.getRandomValues(buf)'), 'crypto.getRandomValues must be limited to the decoy-strategy draw and the solve-correlation request id — bindings are never synthesized client-side');
+        self::assertStringContainsString('function kiwiCorrelationWords()', $risk, 'the correlation request id comes from its own strict CSPRNG helper');
+        self::assertStringContainsString('if (!window.crypto || typeof window.crypto.getRandomValues !== "function") return null;', $risk, 'the correlation helper must fail closed (null) instead of degrading to Math.random');
         // Math.random exists exactly twice in the eager core — the
         // per-widget data-kiwi-instance debugging marker and the
         // per-widget hCaptcha response-key marker — plus once in the
         // lazy widget-risk.js module (the presentation-only fallback of
         // the decoy-strategy draw on engines without
-        // crypto.getRandomValues). It must never appear in the binding
-        // path: the binding is assigned from the container attribute
-        // only (asserted above).
+        // crypto.getRandomValues; the correlation draw has NO fallback).
+        // It must never appear in the binding path: the binding is
+        // assigned from the container attribute only (asserted above).
         self::assertSame(2, substr_count($driver, 'Math.random'), 'Math.random in the eager core must be limited to the instance-id and response-key markers — bindings are never synthesized client-side');
         self::assertSame(1, substr_count($risk, 'Math.random'), 'Math.random in widget-risk.js must be limited to the decoy-strategy fallback — bindings are never synthesized client-side');
     }

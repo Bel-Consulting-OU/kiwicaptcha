@@ -31,21 +31,37 @@ final class Config
 {
     /**
      * Hard ceiling for SHA-256 target bits. The browser/wasm solver caps
-     * at 20 bits (5,000,000 hashes), so higher difficulties would be
-     * unsolvable for legit clients and are rejected at construction.
+     * its search at 20,000,000 hashes (protocol/limits.json), so higher
+     * difficulties would be unsolvable for legit clients and are rejected
+     * at construction.
      *
      * The ceiling is not the baseline: 18 is the ordinary default,
      * converged across the core, the Symfony bundle and the documented
      * examples. The 16-vs-18 choice is benchmark-driven: the
      * client-performance lab measures the SHA 16/18/20 ladder, and 18
      * is the benchmark-selected ordinary baseline (mean ≈ 262k hashes,
-     * p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap
-     * ≈ 5.2×10⁻⁹). SHA20 stays the elevated rung, reached via adaptive
+     * p99 ≈ 1.21M, exhaustion within the 20,000,000-hash cap
+     * ≈ 2.4×10⁻¹⁰). SHA20 stays the elevated rung, reached via adaptive
      * risk escalation: at 20 a legitimate solve still fails within the
-     * 5,000,000-hash cap with probability ≈ 0.8494% (about 1 in 118),
-     * so 20 is never the default.
+     * 20,000,000-hash cap with probability ≈ 5.2×10⁻⁹, so 20 is never
+     * the default.
      */
     public const MAX_SHA_TARGET_BITS = 20;
+
+    /**
+     * The minimum secret-key length in bytes: 32 text bytes, so even the
+     * worst-case 32-character hex spelling still carries 128 bits of
+     * entropy. Shared with the Rust core (`keys::MIN_MASTER_BYTES`) and
+     * asserted by `tools/ci/limits-parity-check.sh`.
+     */
+    public const MIN_SECRET_BYTES = 32;
+
+    /**
+     * The minimum execution-key length in bytes: the same 32-byte
+     * contract as the secret key, shared with the Rust core
+     * (`keys::MIN_EXECUTION_KEY_BYTES`).
+     */
+    public const MIN_EXECUTION_KEY_BYTES = 32;
 
     /** Ceiling for Argon2id target bits (browser-solvable range). */
     public const MAX_ARGON2_TARGET_BITS = 10;
@@ -218,7 +234,7 @@ final class Config
         public readonly int $argon2TargetBits = 4,
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,
-        public readonly int $solverMaxHashes = 5_000_000,
+        public readonly int $solverMaxHashes = 20_000_000,
         public readonly BindingMode $bindingMode = BindingMode::Bound,
         public readonly int $policyVersion = 1,
         public readonly ?string $issuer = null,
@@ -232,10 +248,10 @@ final class Config
         // 16 random bytes is only 128 bits of HMAC key, and 16 HEX
         // characters ("0123456789abcdef") is just 64 bits while still
         // passing a 16-byte floor. The floor is 32 text bytes.
-        if (\strlen($secretKey) < 32) {
+        if (\strlen($secretKey) < self::MIN_SECRET_BYTES) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 32 bytes');
         }
-        if ($executionKey !== null && \strlen($executionKey) < 32) {
+        if ($executionKey !== null && \strlen($executionKey) < self::MIN_EXECUTION_KEY_BYTES) {
             throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 32 bytes');
         }
         if ($kid < 1 || $kid > 4_294_967_295) {

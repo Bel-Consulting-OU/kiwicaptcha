@@ -33,7 +33,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -590,6 +590,59 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
       fail('custom --php: environment.phpBinary must be the selected binary', JSON.stringify(payload.environment));
     } else {
       ok('a custom --php binary is resolved, hashed and reported');
+    }
+  }
+}
+
+// A --php wrapper that delegates cleanly for the discovery probe
+// (`-r 'echo PHP_BINARY;'`) but behaves differently for `-S` must never
+// serve the fixture. Certifying execution launches ONLY the resolved,
+// hashed binary, so the wrapper's -S branch is unreachable; a harness
+// that re-launched the --php selector would trip the sentinel (or let
+// the wrapper inject -d auto_prepend_file into the benchmark).
+{
+  const which = spawnSync('bash', ['-lc', 'command -v php'], { encoding: 'utf8' });
+  const realPhp = which.stdout.trim();
+  if (!realPhp) {
+    ok('no php on PATH; the --php wrapper bypass case is covered by the runtime smoke');
+  } else {
+    const sentinel = join(FIXTURE_DIR, 'wrapper-s-sentinel');
+    const wrapper = join(FIXTURE_DIR, 'php-wrapper.sh');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+# Discovery (-r echo PHP_BINARY) delegates cleanly to the real binary;
+# every other invocation is the fixture-server path and must never run
+# in a certifying harness.
+case "$*" in
+  *"echo PHP_BINARY;"*)
+    exec ${JSON.stringify(realPhp)} "$@"
+    ;;
+esac
+echo "wrapper -S branch executed: $*" >> ${JSON.stringify(sentinel)}
+exec ${JSON.stringify(realPhp)} -d auto_prepend_file= "$@"
+`,
+    );
+    chmodSync(wrapper, 0o755);
+    const out = join(FIXTURE_DIR, 'wrapper-php.json');
+    const state = spawnSync(process.execPath, [HARNESS, ...HARNESS_ARGS, '--php', wrapper, '--fixture-port', String(await freePort()), '--out', out], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    });
+    const payload = readRun(out);
+    const expectedReal = realpathSync(realPhp);
+    if (existsSync(sentinel)) {
+      fail('--php wrapper: the wrapper -S branch executed', readFileSync(sentinel, 'utf8'));
+    } else if (state.status !== 0 || payload?.completion?.status !== 'completed') {
+      fail('--php wrapper: the resolved run must complete', `${state.status}\n${(state.stderr || '').slice(0, 600)}`);
+    } else if (payload.runtimeIdentity?.php?.realpath !== expectedReal) {
+      fail('--php wrapper: the recorded identity must be the resolved underlying binary', JSON.stringify(payload.runtimeIdentity?.php));
+    } else if (payload.environment?.phpBinary !== expectedReal) {
+      fail('--php wrapper: environment.phpBinary must be the resolved underlying binary', JSON.stringify(payload.environment));
+    } else if (payload.fixture?.php !== expectedReal) {
+      fail('--php wrapper: the fixture payload must name the executed binary, not the selector', JSON.stringify(payload.fixture));
+    } else {
+      ok('a --php wrapper is used for discovery only; the fixture executes the resolved hashed binary');
     }
   }
 }

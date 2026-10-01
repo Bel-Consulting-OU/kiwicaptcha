@@ -72,37 +72,43 @@ final class SolutionTokenTest extends TestCase
 
     public function testRejectsCounterAboveSolverMaximum(): void
     {
-        // The browser/wasm solver caps at 5,000,000 hashes; 5,000,001
+        // The browser/wasm solver caps at 20,000,000 hashes; 20,000,001
         // cannot come from a legit solve.
         $this->expectException(DecodeError::class);
         $this->expectExceptionMessage('counter exceeds solver maximum');
-        SolutionToken::decode(base64_encode(self::NONCE.'.5000001.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.20000001.100.{}'));
     }
 
     public function testRejectsCounterAtSolverMaximum(): void
     {
-        // The JS solver searches counter < 5,000,000 (5M attempts), so
-        // the largest legitimate counter is 4,999,999; exactly 5,000,000
+        // The JS solver searches counter < 20,000,000 (20M attempts), so
+        // the largest legitimate counter is 19,999,999; exactly 20,000,000
         // was never minted by a real solve (off-by-one parity with
         // Rust).
         $this->expectException(DecodeError::class);
-        SolutionToken::decode(base64_encode(self::NONCE.'.5000000.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.20000000.100.{}'));
     }
 
     public function testAcceptsCounterJustBelowSolverMaximum(): void
     {
-        $token = SolutionToken::decode(base64_encode(self::NONCE.'.4999999.100.{}'));
-        self::assertSame(4_999_999, $token->counter);
+        // The four-way boundary: 4,999,999 (the 5M ceiling's last valid
+        // counter), 5,000,000 (the first counter the 5M contract refused
+        // but the 20M solver can mint) and 19,999,999 (the 20M last valid
+        // counter) all decode; 20,000,000 is refused by the sibling tests.
+        foreach ([4_999_999, 5_000_000, 19_999_999] as $counter) {
+            $token = SolutionToken::decode(base64_encode(self::NONCE.".{$counter}.100.{}"));
+            self::assertSame($counter, $token->counter);
+        }
     }
 
-    public function testRejectsCounterLongerThanSevenDigits(): void
+    public function testRejectsCounterLongerThanEightDigits(): void
     {
-        // 8 canonical digits — rejected by the digit-length bound before
+        // 9 canonical digits — rejected by the digit-length bound before
         // the value could clamp in the integer cast (the canonical rule
-        // leaves no 8-digit spelling below the maximum).
+        // leaves no 8-digit spelling at or above the 20M maximum).
         $this->expectException(DecodeError::class);
         $this->expectExceptionMessage('counter exceeds solver maximum');
-        SolutionToken::decode(base64_encode(self::NONCE.'.99999999.100.{}'));
+        SolutionToken::decode(base64_encode(self::NONCE.'.999999999.100.{}'));
     }
 
     public function testRejectsAllZeroCounterThatIsNotExactlyZero(): void

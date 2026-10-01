@@ -44,8 +44,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const HKDF_DEPLOY_SALT: &[u8] = b"kiwicaptcha/deploy-salt/v1";
 
 /// The minimum master-secret length at the derivation boundary: the same
-/// 16-byte core Config contract PHP enforces.
-pub const MIN_MASTER_BYTES: usize = 16;
+/// 32-byte core Config contract PHP enforces (`Config::__construct`
+/// rejects a secret key shorter than 32 bytes). Every signature, binding
+/// and token path routes its length gate through this single constant.
+pub const MIN_MASTER_BYTES: usize = 32;
+
+/// The minimum execution-key length at the execution-generation boundary:
+/// the same 32-byte contract PHP enforces in
+/// `ExecutionChallengeGenerator::validateKey`.
+pub const MIN_EXECUTION_KEY_BYTES: usize = 32;
 
 /// The derivation boundary refused the master secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +161,7 @@ impl DerivedKeys {
     /// [`DerivedKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &str, tenant: Option<&str>) -> DerivedKeys {
         Self::try_from_master(master, tenant).expect(
-            "the master secret must be at least 16 bytes; use try_from_master for a fallible path",
+            "the master secret must be at least 32 bytes; use try_from_master for a fallible path",
         )
     }
 
@@ -284,10 +291,11 @@ mod tests {
             DerivedKeysError::MasterTooShort { got: 0 }
         );
         assert_eq!(
-            DerivedKeys::try_from_master(&"s".repeat(15), None).unwrap_err(),
-            DerivedKeysError::MasterTooShort { got: 15 }
+            DerivedKeys::try_from_master(&"s".repeat(31), None).unwrap_err(),
+            DerivedKeysError::MasterTooShort { got: 31 }
         );
-        assert!(DerivedKeys::try_from_master(&"s".repeat(16), None).is_ok());
+        assert!(DerivedKeys::try_from_master(&"s".repeat(31), None).is_err());
+        assert!(DerivedKeys::try_from_master(&"s".repeat(32), None).is_ok());
     }
 
     #[test]
@@ -295,7 +303,7 @@ mod tests {
         let a = DerivedKeys::from_master(MASTER, None);
         let b = DerivedKeys::from_master(MASTER, None);
         assert_eq!(a, b);
-        let c = DerivedKeys::from_master("another-master-16-bytes!", None);
+        let c = DerivedKeys::from_master("another-master-32-bytes-0123456789", None);
         assert_ne!(a, c, "a different master must derive different keys");
     }
 

@@ -43,12 +43,21 @@
  *      client asset digest (sha256 over the canonical JSON of the
  *      canonical client assets), binding the record to the release
  *      bytes themselves rather than a commit string;
- *   8. a pass row is SIGNED: the evidence object carries tester_id, the
- *      tester must appear in the public-key allowlist
- *      (tests/browser/qualification/tester-keys.json by default) and the
- *      row carries an Ed25519 signature over the canonical JSON of the
- *      evidence object. A missing signature, an unknown tester and any
- *      post-signing modification of the evidence are refused.
+ *   8. a pass row is SIGNED: the row carries a domain-separated
+ *      attestation envelope
+ *      (domain "kiwicaptcha.accessibility-attestation/v1", schema, row
+ *      id, row platform, tested_at and the evidence object) and an
+ *      Ed25519 signature over the canonical JSON of that WHOLE
+ *      envelope. The evidence carries tester_id, the tester must appear
+ *      in the public-key allowlist
+ *      (tests/browser/qualification/tester-keys.json by default), and
+ *      the allowlisted key must be an Ed25519 key. A missing signature,
+ *      an unknown tester, a non-Ed25519 key, and any post-signing
+ *      modification of the evidence, the tested_at freshness stamp, the
+ *      row id or the row platform are all refused. Signing the envelope
+ *      rather than the bare evidence object is what makes the freshness
+ *      window (item 3) tamper-evident: tested_at is inside the signed
+ *      payload.
  *
  * Scope is desktop only: no physical mobile device appears in this
  * gate. The automated mobile-width, RTL and text-scale reflow coverage
@@ -72,6 +81,7 @@ const DEFAULT_MATRIX = join(REPO_ROOT, 'tests', 'browser', 'qualification', 'acc
 const DEFAULT_TESTER_KEYS = join(REPO_ROOT, 'tests', 'browser', 'qualification', 'tester-keys.json');
 
 const SCHEMA = 'kiwicaptcha.accessibility-qualification/1';
+const ATTESTATION_DOMAIN = 'kiwicaptcha.accessibility-attestation/v1';
 const REQUIRED_SURFACES = {
   'nvda-chrome-windows': { platform: 'windows', browserFamily: 'chrome', assistiveTechnologyFamily: 'nvda' },
   'nvda-firefox-windows': { platform: 'windows', browserFamily: 'firefox', assistiveTechnologyFamily: 'nvda' },
@@ -117,12 +127,40 @@ function loadTesterKeys(keysPath) {
       continue;
     }
     try {
-      keys.set(tester, createPublicKey(pem));
+      const key = createPublicKey(pem);
+      // The contract is specifically Ed25519, never "any SPKI key that
+      // happens to work with the crypto API": an RSA or EC key accepted
+      // here would silently broaden the signature algorithm the release
+      // gate trusts.
+      if (key.asymmetricKeyType !== 'ed25519') {
+        reasons.push(`tester key allowlist ${keysPath}: ${JSON.stringify(tester)} is ${JSON.stringify(key.asymmetricKeyType ?? null)}, not an Ed25519 key`);
+        continue;
+      }
+      keys.set(tester, key);
     } catch (e) {
       reasons.push(`tester key allowlist ${keysPath}: ${JSON.stringify(tester)} public key is unusable (${e.message})`);
     }
   }
   return keys;
+}
+
+/**
+ * The domain-separated attestation envelope. The signature covers this
+ * WHOLE canonical object — the domain and schema (so a signature can
+ * never be replayed into another evidence format), the row id and
+ * platform (so a signature can never be replayed across rows) and
+ * tested_at (so the freshness stamp can never be renewed without the
+ * tester signing again).
+ */
+function attestationEnvelope(row) {
+  return {
+    domain: ATTESTATION_DOMAIN,
+    schema: SCHEMA,
+    id: row.id,
+    platform: row.platform,
+    tested_at: row.tested_at,
+    evidence: row.evidence,
+  };
 }
 
 function verifyAttestation(row, where, testerKeys) {
@@ -137,7 +175,7 @@ function verifyAttestation(row, where, testerKeys) {
     return;
   }
   if (typeof row.signature !== 'string' || row.signature.trim() === '') {
-    reasons.push(`${where} is marked pass without a signature (Ed25519 over the canonical JSON of the evidence object)`);
+    reasons.push(`${where} is marked pass without a signature (Ed25519 over the canonical JSON of the domain-separated attestation envelope: domain, schema, id, platform, tested_at, evidence)`);
     return;
   }
   let signature;
@@ -147,7 +185,7 @@ function verifyAttestation(row, where, testerKeys) {
     reasons.push(`${where} signature is not valid base64 (${e.message})`);
     return;
   }
-  const payload = Buffer.from(canonicalJson(evidence), 'utf8');
+  const payload = Buffer.from(canonicalJson(attestationEnvelope(row)), 'utf8');
   let valid = false;
   try {
     valid = cryptoVerify(null, payload, publicKey, signature);
@@ -156,7 +194,7 @@ function verifyAttestation(row, where, testerKeys) {
     return;
   }
   if (!valid) {
-    reasons.push(`${where} signature does not verify against ${JSON.stringify(evidence.tester_id)}: the evidence was modified after signing or signed by another key`);
+    reasons.push(`${where} signature does not verify against ${JSON.stringify(evidence.tester_id)}: the envelope (evidence, tested_at, id or platform) was modified after signing or signed by another key`);
   }
 }
 

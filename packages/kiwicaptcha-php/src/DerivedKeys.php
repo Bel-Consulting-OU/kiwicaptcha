@@ -145,13 +145,14 @@ final class DerivedKeys
     public static function fromMaster(string $master, ?string $tenantId = null): self
     {
         // The derivation boundary carries the entropy invariant too: the
-        // supported Config path already requires 16 bytes, and a direct
+        // supported Config path already requires 32 bytes, and a direct
         // caller with a shorter secret must not derive usable keys.
-        // 16 bytes of master is only 128 bits, and a 16-character hex
-        // string is 64 bits while still passing a 16-byte floor.
-        if (\strlen($master) < 32) {
+        // 32 bytes of master is 256 bits, so even a 32-character hex
+        // string still carries 128 bits.
+        if (\strlen($master) < Config::MIN_SECRET_BYTES) {
             throw new \InvalidArgumentException(sprintf(
-                'The master secret must be at least 32 bytes (got %d)',
+                'The master secret must be at least %d bytes (got %d)',
+                Config::MIN_SECRET_BYTES,
                 \strlen($master),
             ));
         }

@@ -313,9 +313,11 @@ impl SolutionToken {
             .parse()
             .map_err(|_| DecodeError::InvalidCounter)?;
         // The counter must be within what any solver can produce: the JS
-        // solver searches counters below the solver maximum (5,000,000
-        // attempts), so the largest legitimate counter is 4,999,999 — anything >= 5M
-        // was not minted by a real solve (matches PHP exactly).
+        // solver searches counters below the solver maximum (20,000,000
+        // attempts, the protocol/limits.json authority shared with PHP and
+        // the widget), so the largest legitimate counter is 19,999,999 —
+        // anything at or above 20M was not minted by a real solve (matches
+        // PHP exactly).
         if counter >= crate::challenge::SOLVER_MAX_HASHES {
             return Err(DecodeError::InvalidCounter);
         }
@@ -430,7 +432,7 @@ pub enum DecodeError {
     TooLarge,
     #[error("token is malformed (expected nonce.counter.duration.telemetry)")]
     Malformed,
-    #[error("counter is invalid or exceeds the solver maximum (5_000_000)")]
+    #[error("counter is invalid or exceeds the solver maximum (20_000_000)")]
     InvalidCounter,
     #[error("duration segment is not a valid integer")]
     InvalidDuration,
@@ -545,8 +547,8 @@ mod tests {
     #[test]
     fn decode_rejects_counter_at_and_beyond_solver_max() {
         // The JS solver searches counters below the solver maximum
-        // (5,000,000 attempts), so the largest legitimate counter is
-        // 4,999,999 — the cap value itself is never minted by a real solve
+        // (20,000,000 attempts), so the largest legitimate counter is
+        // 19,999,999 — the cap value itself is never minted by a real solve
         // (off-by-one parity with PHP).
         for counter in [
             crate::challenge::SOLVER_MAX_HASHES,
@@ -573,16 +575,30 @@ mod tests {
 
     #[test]
     fn decode_accepts_counter_just_below_solver_max() {
-        let token = SolutionToken {
-            nonce: VALID_NONCE.to_string(),
-            counter: crate::challenge::SOLVER_MAX_HASHES - 1,
-            duration_ms: 2,
-            telemetry: serde_json::json!({}),
-            execution_digest: None,
-            execution_trace: None,
-            rsw_proof: None,
-        };
-        assert!(SolutionToken::decode(&token.encode()).is_ok());
+        // The four-way boundary: 4,999,999 (the 5M ceiling's last valid
+        // counter), 5,000,000 (the first counter the 5M contract refused
+        // but the 20M solver can mint) and 19,999,999 (the 20M last valid
+        // counter) all decode; the cap itself is covered by the sibling
+        // rejection test. The shared protocol/solution-token-v1 fixture
+        // pins the same vectors against the PHP decoder.
+        for counter in [
+            4_999_999u64,
+            5_000_000,
+            crate::challenge::SOLVER_MAX_HASHES - 1,
+        ] {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter,
+                duration_ms: 2,
+                telemetry: serde_json::json!({}),
+                execution_digest: None,
+                execution_trace: None,
+                rsw_proof: None,
+            };
+            let decoded = SolutionToken::decode(&token.encode())
+                .unwrap_or_else(|e| panic!("counter {counter}: {e:?}"));
+            assert_eq!(decoded.counter, counter);
+        }
     }
 
     #[test]

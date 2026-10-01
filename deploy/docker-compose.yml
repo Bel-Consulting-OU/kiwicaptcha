@@ -9,7 +9,11 @@
 # captcha port stays published for the widget.
 services:
   valkey:
-    image: valkey/valkey:8-alpine
+    # Pinned by digest: the reference stack must not silently change
+    # bytes between two runs at the same commit. Bump the tag+digest
+    # pair deliberately (tools/ci/deploy-image-pin-check.sh rejects an
+    # unpinned upstream image).
+    image: valkey/valkey:8-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
     command: ["valkey-server", "--appendonly", "yes", "--requirepass", "${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set in the environment or deploy/.env (any non-empty random string, e.g. openssl rand -hex 16)}"]
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set in the environment or deploy/.env}

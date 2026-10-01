@@ -24,6 +24,13 @@
   // error state. data-kiwi-fetch-timeout-ms overrides per widget.
   var KIWI_FETCH_TIMEOUT_MS = 15000;
 
+  // ── Telemetry initialization budget ──
+  // The pre-fetch telemetry wait is bounded by its own 2 s deadline and
+  // is completely independent of the challenge fetch timeout: an
+  // enabled telemetry mode must never consume (or abort) the challenge
+  // request's clock.
+  var KIWI_TELEMETRY_INIT_TIMEOUT_MS = 2000;
+
   // ── Solve deadline margin ──
   // The solver stops at (expiry estimate − this margin): a solve that
   // would outlive the challenge is waste. 500 ms covers the final chunk
@@ -1245,25 +1252,46 @@
         var timeoutAttr = kiwiConfigValue(W, container, "data-kiwi-fetch-timeout-ms") || "";
         var fetchTimeoutMs = parseInt(timeoutAttr, 10);
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
-        var abortController = new AbortController();
-        var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
-        var rw = kiwiWidgets[widgetId];
-        if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         // Attach telemetry before sending (bounded wait; a module that
-        // never arrives leaves the token empty instead of blocking).
+        // never arrives leaves the token empty instead of blocking). The
+        // telemetry wait carries its OWN budget and must never consume
+        // the configured challenge-fetch timeout: the fetch deadline is
+        // created below, immediately before fetch(), so telemetry
+        // initialization cannot start a clock it does not own.
         if (telemetryMode !== "off" && !kiwiTelemetrySession) {
           try {
+            var telemetryFallbackTimer = null;
             await Promise.race([
               kiwiEnsureModule("telemetry", container, W),
-              new Promise(function (res) { setTimeout(res, 2000); }),
+              new Promise(function (res) {
+                telemetryFallbackTimer = setTimeout(res, KIWI_TELEMETRY_INIT_TIMEOUT_MS);
+              }),
             ]);
+            // The module won (or the race settled): retire the fallback
+            // timer so no useless timer stays queued.
+            if (telemetryFallbackTimer !== null) {
+              clearTimeout(telemetryFallbackTimer);
+              telemetryFallbackTimer = null;
+            }
           } catch (e) {}
           if (kiwiGenerationCurrent(widgetId, gen)) kiwiCreateTelemetrySession();
         }
+        // A reset/destroy during the telemetry wait supersedes this
+        // generation: the stale continuation must return before the
+        // request is sent (or the controller created), never POST a
+        // challenge for a widget that no longer exists.
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // The request is SENT from here on: a telemetry module
         // registering after this point is refused for this generation,
         // so the token never carries a half-session.
         requestSent = true;
+        // The challenge fetch deadline starts HERE, immediately before
+        // the request: data-kiwi-fetch-timeout-ms bounds the challenge
+        // POST itself, never the widget initialization ahead of it.
+        var abortController = new AbortController();
+        var abortTimer = setTimeout(function () { abortController.abort(); }, fetchTimeoutMs);
+        var rw = kiwiWidgets[widgetId];
+        if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         var resp, data;
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers: reqHeaders, body: JSON.stringify(reqBody), signal: abortController.signal });

@@ -14,7 +14,10 @@
  * asset digest, missing observation fields, pending status on a
  * required row, duplicate rows, missing required rows, a demoted
  * required row, malformed schema, a pass without evidence, a missing
- * signature, an unknown tester and evidence modified after signing.
+ * signature, an unknown tester, evidence modified after signing, a
+ * freshness stamp renewed after signing (the tested_at mutation), a
+ * signature replayed under another row id/platform, and a non-Ed25519
+ * tester key.
  *
  * Usage: node tools/ci/test-validate-accessibility-qualification.mjs
  * Exit status: 0 when every case behaved as expected, 1 otherwise.
@@ -59,8 +62,21 @@ writeFileSync(
 let cases = 0;
 let failures = 0;
 
-function signEvidence(evidence) {
-  return cryptoSign(null, Buffer.from(canonicalJson(evidence), 'utf8'), privateKey).toString('base64');
+const ATTESTATION_DOMAIN = 'kiwicaptcha.accessibility-attestation/v1';
+
+function attestationEnvelope(row) {
+  return {
+    domain: ATTESTATION_DOMAIN,
+    schema: 'kiwicaptcha.accessibility-qualification/1',
+    id: row.id,
+    platform: row.platform,
+    tested_at: row.tested_at,
+    evidence: row.evidence,
+  };
+}
+
+function signRow(row) {
+  return cryptoSign(null, Buffer.from(canonicalJson(attestationEnvelope(row)), 'utf8'), privateKey).toString('base64');
 }
 
 function evidenceFor(id, overrides = {}) {
@@ -87,7 +103,7 @@ function evidenceFor(id, overrides = {}) {
 
 function goodRow(id, overrides = {}) {
   const evidence = evidenceFor(id, overrides.evidence || {});
-  return {
+  const row = {
     id,
     product: id,
     platform: overrides.platform || PLATFORMS[id],
@@ -95,8 +111,10 @@ function goodRow(id, overrides = {}) {
     status: 'pass',
     tested_at: overrides.tested_at || nowIso,
     evidence,
-    signature: overrides.signature !== undefined ? overrides.signature : signEvidence(evidence),
+    signature: null,
   };
+  row.signature = overrides.signature !== undefined ? overrides.signature : signRow(row);
+  return row;
 }
 
 function goodMatrix() {
@@ -113,16 +131,16 @@ function withRow(matrix, index, mutator) {
   return clone;
 }
 
-function runValidator(matrix) {
+function runValidator(matrix, keysFile = KEYS_FILE) {
   const file = join(TMP, `matrix-${cases}-${Date.now()}.json`);
   writeFileSync(file, JSON.stringify(matrix, null, 2));
-  const result = spawnSync(process.execPath, [VALIDATOR, file, KEYS_FILE], { cwd: REPO_ROOT, encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [VALIDATOR, file, keysFile], { cwd: REPO_ROOT, encoding: 'utf8' });
   return { status: result.status, output: `${result.stdout || ''}${result.stderr || ''}` };
 }
 
-function expect(label, matrix, { status, includes = [] }) {
+function expect(label, matrix, { status, includes = [], keysFile }) {
   cases += 1;
-  const result = runValidator(matrix);
+  const result = runValidator(matrix, keysFile);
   if (result.status !== status) {
     failures += 1;
     process.stderr.write(`FAIL ${label}: expected exit ${status}, got ${result.status}\n${result.output.slice(0, 600)}\n`);
@@ -143,7 +161,7 @@ expect('good matrix passes', goodMatrix(), { status: 0, includes: ['PASS'] });
 expect('real switch-access evidence passes', withRow(goodMatrix(), 3, (row) => {
   row.evidence.interaction_mode = 'switch-access';
   row.evidence.assistive_technology = 'Switch Control';
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 0 });
 expect('Firefox + NVDA with the contract families passes', (() => {
   const matrix = goodMatrix();
@@ -160,20 +178,20 @@ expect('Firefox + NVDA with the contract families passes', (() => {
 // ── Evidence substitution between rows. ──────────────────────────────
 expect('nvda-chrome id with Safari/VoiceOver evidence is rejected', withRow(goodMatrix(), 0, (row) => {
   Object.assign(row.evidence, { browser: 'Safari', browser_family: 'safari', assistive_technology: 'VoiceOver', assistive_technology_family: 'voiceover', assistive_technology_version: '26.0' });
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['browser_family "safari" does not match the row contract family "chrome"', 'assistive_technology_family "voiceover" does not match'] });
 expect('nvda-firefox id with Chrome/NVDA evidence is rejected', withRow(goodMatrix(), 1, (row) => {
   Object.assign(row.evidence, { browser: 'Google Chrome', browser_family: 'chrome' });
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['browser_family "chrome" does not match the row contract family "firefox"'] });
 expect('voiceover-safari id with Chrome/NVDA evidence is rejected', withRow(goodMatrix(), 2, (row) => {
   Object.assign(row.evidence, { browser: 'Google Chrome', browser_family: 'chrome', assistive_technology: 'NVDA', assistive_technology_family: 'nvda', assistive_technology_version: '2025.3' });
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['browser_family "chrome" does not match the row contract family "safari"', 'assistive_technology_family "nvda" does not match'] });
 expect('speech/switch id without an interaction mode is rejected', withRow(goodMatrix(), 3, (row) => {
   delete row.evidence.interaction_mode;
   Object.assign(row.evidence, { assistive_technology: 'NVDA', assistive_technology_version: '2025.3' });
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['interaction_mode null is not one of speech-recognition|switch-access'] });
 expect('a Windows row with platform macos is rejected', withRow(goodMatrix(), 0, (row) => {
   row.platform = 'macos';
@@ -182,11 +200,11 @@ expect('a Windows row with platform macos is rejected', withRow(goodMatrix(), 0,
 // ── Freshness, window authority and strict instants. ─────────────────
 expect('missing 200% zoom is rejected', withRow(goodMatrix(), 0, (row) => {
   row.evidence.zoom_percent = 100;
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['zoom_percent 100 is not 200'] });
 expect('placeholder browser version is rejected', withRow(goodMatrix(), 0, (row) => {
   row.evidence.browser_version = 'CURRENT';
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['browser_version "CURRENT" is a placeholder'] });
 expect('stale tested_at is rejected', withRow(goodMatrix(), 0, (row) => {
   row.tested_at = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString();
@@ -211,12 +229,12 @@ for (const [offset, label] of [['+99:99', 'impossible offset +99:99'], ['+24:00'
 // ── Evidence quality. ────────────────────────────────────────────────
 expect('wrong release asset digest is rejected', withRow(goodMatrix(), 0, (row) => {
   row.evidence.asset_identity = 'a'.repeat(64);
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['is not the current release asset identity'] });
 for (const field of ['keyboard', 'live_region', 'focus', 'content_loss']) {
   expect(`missing ${field} observation is rejected`, withRow(goodMatrix(), 0, (row) => {
     delete row.evidence[field];
-    row.signature = signEvidence(row.evidence);
+    row.signature = signRow(row);
   }), { status: 1, includes: [`evidence.${field} null is not "pass"`] });
 }
 expect('pending status on a required row is rejected', withRow(goodMatrix(), 2, (row) => {
@@ -232,11 +250,59 @@ expect('a pass without a signature is rejected', withRow(goodMatrix(), 0, (row) 
 }), { status: 1, includes: ['marked pass without a signature'] });
 expect('an unknown tester is rejected', withRow(goodMatrix(), 0, (row) => {
   row.evidence.tester_id = 'someone-else';
-  row.signature = signEvidence(row.evidence);
+  row.signature = signRow(row);
 }), { status: 1, includes: ['is not in the tester public-key allowlist'] });
 expect('evidence modified after signing is rejected', withRow(goodMatrix(), 0, (row) => {
   row.evidence.browser_version = '141.0.7390.99';
 }), { status: 1, includes: ['signature does not verify against'] });
+expect('tested_at renewed after signing is rejected (the freshness stamp is signed)', withRow(goodMatrix(), 0, (row) => {
+  // The row's signature is left untouched: only the freshness stamp is
+  // changed to a fresh, clearly in-window instant. If tested_at were
+  // outside the signed envelope the signature would still verify and the
+  // stale qualification could be renewed indefinitely.
+  const signedTestedAt = row.tested_at;
+  row.tested_at = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  if (row.tested_at === signedTestedAt) {
+    failures += 1;
+    process.stderr.write('FAIL tested_at mutation case could not change the stamp\n');
+  }
+}), { status: 1, includes: ['signature does not verify against'] });
+expect('row signatures cannot be replayed across swapped row ids', (() => {
+  // Swap the ids (and documentary products) of the two NVDA rows while
+  // leaving both signatures untouched. Both required ids still exist
+  // and no duplicate appears, so the signed id binding is what refuses
+  // each replayed signature.
+  const matrix = goodMatrix();
+  const a = matrix.rows[0];
+  const b = matrix.rows[1];
+  [a.id, b.id] = [b.id, a.id];
+  [a.product, b.product] = [b.product, a.product];
+  return matrix;
+})(), { status: 1, includes: ['signature does not verify against'] });
+expect('a signature replayed with another platform is rejected', withRow(goodMatrix(), 2, (row) => {
+  // The VoiceOver row is re-signed, then only its platform changes from
+  // macos to windows (evidence still says safari/voiceover, so the
+  // contract still reads the row as a macos row rewritten to windows):
+  // the envelope platform is inside the signed payload and the signature
+  // must fail even before the contract mismatch is considered.
+  row.platform = 'windows';
+}), { status: 1, includes: ['signature does not verify against'] });
+{
+  // A non-Ed25519 allowlisted key is refused at load time: the release
+  // contract names Ed25519, so accepting any SPKI key that happens to
+  // work would silently broaden the trusted algorithm.
+  const { publicKey: ecPublic } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const ecKeysFile = join(TMP, 'tester-keys-ec.json');
+  writeFileSync(
+    ecKeysFile,
+    JSON.stringify({ schema: 'kiwicaptcha.tester-keys/1', testers: { [TESTER_ID]: ecPublic.export({ type: 'spki', format: 'pem' }) } }, null, 2),
+  );
+  expect('a non-Ed25519 (P-256) tester key is rejected', goodMatrix(), {
+    status: 1,
+    includes: ['not an Ed25519 key'],
+    keysFile: ecKeysFile,
+  });
+}
 
 // ── Matrix structure. ────────────────────────────────────────────────
 {

@@ -18,9 +18,14 @@
 # the budget cannot be enforced from a second authority that does not
 # exist.
 #
-# Soft warnings: every measured size at or above 90% of its hard cap
-# prints a warning line (the regression has not failed yet, but the
-# budget headroom is nearly gone); a size above the cap fails.
+# Near-cap engineering check: every measured size at or above 95% of
+# its hard cap (size*20 >= cap*19) fails the budget unless the row
+# records a non-empty "headroom_review" string (a deliberately reviewed,
+# documented exemption); 90-95% prints the soft warning. A size above
+# the cap always fails. The 95% failure exists so an unrelated one-line
+# change can never silently be the change that pushes a nearly-full
+# asset over the cliff: an asset that close to its cap must either
+# recover headroom or carry a reviewed exemption.
 #
 # Measured-byte equality: the budgets section records the measured
 # sizes (raw_bytes of the driver core, the widget modules, the worker,
@@ -97,6 +102,22 @@ json_get() {
   printf '%s' "$value"
 }
 
+# json_get_string file dot.path — read a string leaf; prints nothing
+# when the path is absent (used for the optional headroom_review note).
+json_get_string() {
+  "$PHP_BIN" -r '
+    $raw = @file_get_contents($argv[1]);
+    if ($raw === false) { exit(0); }
+    $data = json_decode($raw, true);
+    $cursor = $data;
+    foreach (explode(".", $argv[2]) as $k) {
+      if (!is_array($cursor) || !array_key_exists($k, $cursor)) { exit(0); }
+      $cursor = $cursor[$k];
+    }
+    if (is_string($cursor)) { echo $cursor; }
+  ' "$1" "$2"
+}
+
 brotli_size() {
   local file="$1"
   if command -v brotli >/dev/null 2>&1; then
@@ -135,15 +156,28 @@ print(len(c.compress(data) + c.flush()))
 # keys are "<key>.raw_cap_bytes", "<key>.gzip_cap_bytes" and
 # "<key>.brotli_cap_bytes".
 # budget_asset <budgets key> <label> — enforce the raw/gzip/brotli caps
-# of one widget asset across its three byte-identical copies, with a
-# soft warning (not a failure) when a measured size reaches 90% of its
-# hard cap. The cap keys are "<key>.raw_cap_bytes",
-# "<key>.gzip_cap_bytes" and "<key>.brotli_cap_bytes".
-soft_cap_warning() {
-  local kind="$1" size="$2" cap="$3"
-  # At or above 90% of the cap (size*10 >= cap*9): warn without failing.
-  if [ "$((size * 10))" -ge "$((cap * 9))" ]; then
-    echo "perf-budget soft-warning: $kind is $size bytes, at or above 90% of the ${cap}-byte hard cap (a regression here fails the budget)" >&2
+# of one widget asset across its three byte-identical copies. The cap
+# keys are "<key>.raw_cap_bytes", "<key>.gzip_cap_bytes" and
+# "<key>.brotli_cap_bytes".
+#
+# near_cap_check <key> <metric> <label> <size> <cap> <copy> — the 95%
+# engineering check: at or above 95% of the cap that metric must carry a
+# non-empty "headroom_review" note on the budget row (a reviewed,
+# printed-on-every-run exemption); without it the budget fails. 90-95%
+# warns. Sizes above the cap are rejected by the caller before this
+# runs.
+near_cap_check() {
+  local key="$1" metric="$2" label="$3" size="$4" cap="$5" copy="$6" review
+  if [ "$((size * 20))" -ge "$((cap * 19))" ]; then
+    review=$(json_get_string "$BASELINES_FILE" "budgets.$key.headroom_review.$metric")
+    if [ -n "$review" ]; then
+      echo "perf-budget near-cap REVIEWED: $label $metric ($copy) is $size bytes, at or above 95% of the ${cap}-byte hard cap; reviewed headroom: $review" >&2
+    else
+      echo "perf budget FAILED: $label $metric ($copy) is $size bytes, at or above 95% of the ${cap}-byte hard cap with no headroom_review.$metric recorded; recover headroom (split/lazy-load the functionality) or record a reviewed exemption deliberately in $BASELINES_FILE" >&2
+      FAILED=1
+    fi
+  elif [ "$((size * 10))" -ge "$((cap * 9))" ]; then
+    echo "perf-budget soft-warning: $label $metric ($copy) is $size bytes, at or above 90% of the ${cap}-byte hard cap (95% now fails unless a headroom_review is recorded)" >&2
   fi
 }
 budget_asset() {
@@ -161,7 +195,7 @@ budget_asset() {
       FAILED=1
     else
       echo "$label budget OK: $copy $size bytes (cap $raw_cap)"
-      soft_cap_warning "$label raw ($copy)" "$size" "$raw_cap"
+      near_cap_check "$key" raw "$label" "$size" "$raw_cap" "$copy"
     fi
 
     gzip_size=$(gzip_size "$copy")
@@ -170,7 +204,7 @@ budget_asset() {
       FAILED=1
     else
       echo "$label gzip budget OK: $copy $gzip_size bytes (cap $gzip_cap)"
-      soft_cap_warning "$label gzip ($copy)" "$gzip_size" "$gzip_cap"
+      near_cap_check "$key" gzip "$label" "$gzip_size" "$gzip_cap" "$copy"
     fi
 
     br_size=$(brotli_size "$copy")
@@ -183,7 +217,7 @@ budget_asset() {
         FAILED=1
       else
         echo "$label brotli budget OK: $copy $br_size bytes (cap $brotli_cap)"
-        soft_cap_warning "$label brotli ($copy)" "$br_size" "$brotli_cap"
+        near_cap_check "$key" brotli "$label" "$br_size" "$brotli_cap" "$copy"
       fi
     fi
   done

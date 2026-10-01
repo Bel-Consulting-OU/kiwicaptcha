@@ -54,14 +54,15 @@ final class SolutionToken
     }
 
     /**
-     * The browser/wasm solver caps at 5,000,000 hashes, so a counter
-     * above it cannot come from a legit solve. 5,000,000 is 7 digits;
-     * the length bound rejects absurdly long digit strings before the
-     * integer cast could hide them.
+     * The browser/wasm solver caps its search at 20,000,000 hashes (the
+     * protocol/limits.json authority shared with the Rust core and the
+     * widget), so a counter above it cannot come from a legit solve.
+     * 20,000,000 is 8 digits; the length bound rejects absurdly long
+     * digit strings before the integer cast could hide them.
      */
-    private const MAX_SOLVER_COUNTER = 5_000_000;
+    private const MAX_SOLVER_COUNTER = 20_000_000;
 
-    /** The solver-cap ceiling (5M), exposed for tests. */
+    /** The solver-cap ceiling (20M), exposed for tests. */
     public static function maxSolverCounter(): int
     {
         return self::MAX_SOLVER_COUNTER;
@@ -240,11 +241,11 @@ final class SolutionToken
         if (\strlen($counterStr) > 1 && $counterStr[0] === '0') {
             throw DecodeError::invalidCounter();
         }
-        // Counter bound: the JS solver searches counter < 5,000,000
+        // Counter bound: the JS solver searches counter < 20,000,000
         // attempts, so the largest counter it can ever produce is
-        // 4,999,999; anything >= 5,000,000 was not minted by a real
-        // solve.
-        if (\strlen($counterStr) > 7 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
+        // 19,999,999; anything >= 20,000,000 was not minted by a real
+        // solve. Canonical 8-digit spellings below the ceiling are valid.
+        if (\strlen($counterStr) > 8 || (int) $counterStr >= self::MAX_SOLVER_COUNTER) {
             throw DecodeError::counterExceedsSolverMaximum();
         }
         $counter = (int) $counterStr;

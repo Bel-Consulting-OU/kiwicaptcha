@@ -1443,6 +1443,18 @@ jobs:
         # interpreter asset) on every push: the gate runs on plain
         # `POSIX` tooling with no network, composer or cargo.
         run: bash tools/ci/protocol-manifest-check.sh
+      - name: limits parity check (shared security/solver register)
+        # The solver-hash ceiling, the secret/execution-key floors and
+        # the browser challenge-contract bounds must be identical in
+        # PHP, Rust and the widget/worker; the register gate reads each
+        # implementation's own declarations, so a split (a 20M browser
+        # vs 5M server, a 16-byte vs 32-byte key floor) cannot pass.
+        run: bash tools/ci/limits-parity-check.sh
+      - name: deploy image pin check (immutable reference stack)
+        # Two builds at the same commit must execute the same
+        # PHP/Alpine/Valkey bytes: every upstream image reference in
+        # deploy/ must carry a sha256 digest.
+        run: bash tools/ci/deploy-image-pin-check.sh
       - name: release governance fixtures (tag-ruleset parser matrix)
         run: bash tools/ci/release-governance-fixture.sh
       - name: version prose lint (stale execution-version/bypass claims)

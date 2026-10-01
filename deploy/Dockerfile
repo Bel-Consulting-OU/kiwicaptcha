@@ -12,12 +12,12 @@
 # kiwicaptcha-php") resolves the same way it does in a developer
 # checkout.
 #
-# The base tag stays pinned to php:8.4-cli-alpine; digest-pinning the
-# base image is the release posture and belongs to the deployment
-# that publishes the image (a digest is recorded at release time from
-# the exact image the release pipeline built against, never invented
-# here).
-FROM php:8.4-cli-alpine
+# The base image is pinned by digest, not by the mutable tag alone: two
+# builds of this repository must execute the same PHP/Alpine bytes. The
+# tag stays alongside the digest for readability; bump BOTH deliberately
+# in lockstep (tools/ci/deploy-image-pin-check.sh rejects any unpinned
+# FROM/image: in deploy/).
+FROM php:8.4-cli-alpine@sha256:37c8c64177612b72e7f9d2c00481739c166a3708bea27c1cfd27fea1291d82d1
 
 # The sha384 of https://getcomposer.org/installer, pinned in the build
 # argument and verified before the installer runs; bump the value in

@@ -1054,7 +1054,25 @@ async function bootFixture(opts, snapshot, runtime) {
     );
     process.exit(3);
   }
-  const child = spawn(opts.php, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, router], {
+  // Execute ONLY the resolved, hash-recorded absolute binary. opts.php is
+  // a discovery selector (`php`, a PATH name or a wrapper): it was invoked
+  // exactly once to resolve PHP_BINARY, and the resolved real path was
+  // hashed, versioned and configuration-probed. Re-launching opts.php
+  // here would let a wrapper behave cleanly for `-r 'echo PHP_BINARY;'`
+  // and differently for `-S` (inject `-d auto_prepend_file`, rewrite
+  // arguments or exec another binary), so the recorded runtime identity
+  // could describe bytes the benchmark never executed. A missing resolved
+  // binary is a hard refusal, never a fallback to the selector.
+  const phpBinary = runtime && runtime.php ? runtime.php.realpath : null;
+  if (typeof phpBinary !== 'string' || phpBinary === '' || !existsSync(phpBinary)) {
+    removeMeasurementSnapshot(snapshot);
+    console.error(
+      'client-perf: refusing to launch the fixture: the resolved PHP binary from the runtime identity is unavailable. ' +
+        'A certifying run must execute exactly the hash-recorded binary (runtime.php.realpath), never the --php selector.',
+    );
+    process.exit(2);
+  }
+  const child = spawn(phpBinary, ['-d', 'opcache.jit=off', '-S', `127.0.0.1:${port}`, router], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     // The fixture server launches against the FROZEN PHP configuration
@@ -2341,7 +2359,7 @@ function buildPayload(opts, ctx, completion) {
       owned: ctx.fixtureMode === 'owned-snapshot',
       router: 'tests/browser/router.php',
       port: opts.fixturePort,
-      php: opts.php,
+      php: ctx.runtime && ctx.runtime.php ? ctx.runtime.php.realpath : opts.php,
       servedFrom: ctx.snapshot.snapshotRoot ? 'immutable-snapshot-copy' : null,
       note: 'opt-in difficulty knobs (bits/argon_bits/m_kib, algorithm=rsw with rsw_t for the time-lock rungs), the assets=files knob, and the execution arms (?execution=1 armed challenges raised to the live grammar by ?exec_cap=<manifest max>, ?escalate=argon chained escalation); the fixture default behavior is unchanged',
     },

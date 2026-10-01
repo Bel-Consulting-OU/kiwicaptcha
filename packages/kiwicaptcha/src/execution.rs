@@ -422,7 +422,7 @@ pub fn generate(
     action: &str,
     version: u8,
 ) -> Result<String, GenerateError> {
-    if execution_key.len() < 16 {
+    if execution_key.len() < crate::keys::MIN_EXECUTION_KEY_BYTES {
         return Err(GenerateError::KeyTooShort);
     }
     if !is_identifier(action, 32) {
@@ -2476,7 +2476,7 @@ pub(crate) fn expected_digest_over_trace_decoded(
 /// Errors of the program generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GenerateError {
-    #[error("execution key must be at least 16 bytes")]
+    #[error("execution key must be at least 32 bytes (the same floor PHP enforces)")]
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
@@ -2577,6 +2577,18 @@ mod tests {
             generate(b"short", NONCE, "login", "login-action", 1),
             Err(GenerateError::KeyTooShort)
         );
+        // The floor is 32 bytes, exactly PHP's
+        // ExecutionChallengeGenerator::validateKey contract: 31 bytes is
+        // rejected, 32 bytes accepted.
+        let short = b"0123456789abcdef0123456789abcde"; // 31
+        let floor = b"0123456789abcdef0123456789abcdef"; // 32
+        assert_eq!(short.len(), 31, "precondition: one byte below the floor");
+        assert_eq!(floor.len(), 32, "precondition: exactly at the floor");
+        assert_eq!(
+            generate(short, NONCE, "login", "login-action", 1),
+            Err(GenerateError::KeyTooShort)
+        );
+        assert!(generate(floor, NONCE, "login", "login-action", 1).is_ok());
     }
 
     #[test]

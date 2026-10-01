@@ -495,6 +495,11 @@
         worker.onmessage = function(ev) {
           var msg = ev.data;
           if (!msg || typeof msg !== "object" || msg.v !== 1) return;
+          // One settle per solve: after the first terminal frame (done,
+          // failed, mismatch, deadline) every later message — a
+          // duplicate done, a stale progress or a foreign reply — is
+          // ignored.
+          if (settled) return;
           if (msg.type === "ready") {
             // Startup handshake: a stale cached worker must report the
             // SAME solver protocol id; otherwise it is refused and never
@@ -526,7 +531,13 @@
                 if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
                 return;
               }
-            } else if (typeof msg.counter !== "number" || !isFinite(msg.counter)) {
+            } else if (typeof msg.counter !== "number" || !Number.isFinite(msg.counter)
+              || !Number.isInteger(msg.counter) || msg.counter < 0 || msg.counter >= MAX_SHA_HASHES) {
+              // A settle-shaped done must also be a real solution shape:
+              // the counter is an integer inside the solver's own search
+              // range [0, MAX_SHA_HASHES). Nonsense counters are ignored
+              // (the server would refuse them anyway), so a false client
+              // success is never painted from a malformed frame.
               return;
             }
             settled = true;
@@ -575,8 +586,18 @@
         // reply and the listener accepts correlated replies only, so a
         // page script posting a crafted solve+done pair into the worker
         // can never settle this solve (the reply it provokes carries the
-        // other request's id, or none at all).
-        var solveReqId = "q" + kiwiCspUint32().toString(36) + kiwiCspUint32().toString(36) + performance.now().toString(36).replace(".", "");
+        // other request's id, or none at all). The id comes from the
+        // correlation CSPRNG (128 random bits) and NEVER from the
+        // presentation fallback: a defense against false settlement must
+        // not silently become predictable. Missing crypto fails the
+        // worker path closed into the controlled unavailable state (the
+        // driver then solves in-page).
+        var reqWords = kiwiCorrelationWords();
+        if (reqWords === null) {
+          if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "no-csprng" }); }
+          return;
+        }
+        var solveReqId = "q" + reqWords[0].toString(36) + reqWords[1].toString(36) + reqWords[2].toString(36) + reqWords[3].toString(36);
         try {
           // Hand the runtime URL to the worker BEFORE the solve: it
           // importScripts the URL, verifies the wasm protocol version and
@@ -639,6 +660,18 @@
       return buf[0] >>> 0;
     }
     return Math.floor(Math.random() * 4294967296) >>> 0;
+  }
+  // The correlation CSPRNG: the solve request id gates which worker
+  // replies may settle a solve, so it must NEVER degrade to the
+  // presentation fallback. Unlike kiwiCspUint32 it has no non-crypto
+  // path: missing getRandomValues returns null and the caller fails the
+  // worker path closed into the controlled unavailable state. 128 random
+  // bits make a guessed/colliding request id infeasible.
+  function kiwiCorrelationWords() {
+    if (!window.crypto || typeof window.crypto.getRandomValues !== "function") return null;
+    var buf = new Uint32Array(4);
+    window.crypto.getRandomValues(buf);
+    return buf;
   }
   function kiwiDecoyVariantFor(data) {
     var hint = data && typeof data.strategy === "number" ? data.strategy : null;

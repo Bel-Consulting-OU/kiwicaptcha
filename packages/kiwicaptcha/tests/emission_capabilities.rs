@@ -29,7 +29,7 @@ fn base_config() -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
-        execution_key: Some("execution-key-0123456789abcdef".into()),
+        execution_key: Some("execution-key-32-bytes-0123456789ab".into()),
         rsw_modulus_n: None,
         rsw_lambda: None,
         rsw_t: kiwicaptcha::challenge::MIN_RSW_T,
