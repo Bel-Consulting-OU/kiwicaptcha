@@ -61,7 +61,19 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose ps\ndocker compose logs captcha\necho \"healthz never answered 200 within 120s\" >&2\nexit 1"
+  - |
+      set -euo pipefail
+      for attempt in $(seq 1 60); do
+        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+          echo "healthz answered 200 on attempt $attempt"
+          exit 0
+        fi
+        sleep 2
+      done
+      docker compose ps
+      docker compose logs captcha
+      echo "healthz never answered 200 within 120s" >&2
+      exit 1
 - name: post-/challenge-and-capture-the-challenge-document
   image: docker:28-cli
   volumes:
@@ -69,7 +81,10 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://127.0.0.1:8080/challenge"
+  - |
+      set -euo pipefail
+      curl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \
+        -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
 - name: solve-the-sha-256-proof-inside-the-captcha-container
   image: docker:28-cli
   volumes:
@@ -93,7 +108,13 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify1.json\nphp -r 'exit(json_decode(file_get_contents(\"$CI_WORKSPACE/.ci-run-tmp/verify1.json\"), true)[\"ok\"] === true ? 0 : 1);'"
+  - |
+      set -euo pipefail
+      TOKEN="$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
+      curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+        http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify1.json
+      php -r 'exit(json_decode(file_get_contents("$CI_WORKSPACE/.ci-run-tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
 - name: post-the-same-/verify-again-(replay-rejection)
   image: docker:28-cli
   volumes:
@@ -101,7 +122,14 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/replay.json\n# shellcheck disable=SC2016 # PHP variables inside single-quoted code\nphp -r '$d = json_decode(file_get_contents(\"$CI_WORKSPACE/.ci-run-tmp/replay.json\"), true); exit($d[\"ok\"] === false && $d[\"code\"] === \"already_consumed\" ? 0 : 1);'"
+  - |
+      set -euo pipefail
+      TOKEN="$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
+      curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+        http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/replay.json
+      # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+      php -r '$d = json_decode(file_get_contents("$CI_WORKSPACE/.ci-run-tmp/replay.json"), true); exit($d["ok"] === false && $d["code"] === "already_consumed" ? 0 : 1);'
 - name: f1-algorithm-ownership-table-(sha256-profile-rows)
   image: docker:28-cli
   volumes:
@@ -109,7 +137,24 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nchallenge_row() {  # $1 = request body; asserts a 200 challenge\n  curl -fsS -X POST -H 'Content-Type: application/json' \\\n    -d \"$1\" http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n}\nchallenge_row '{\"scope\":\"login\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\nchallenge_row '{\"scope\":\"login\",\"algorithm\":\"sha256\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n# The field stays accepted but only validated: a nonsense value\n# is refused with a 422 before any issuance.\nSTATUS=\"$(curl -sS -o $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json -w '%{http_code}' -X POST \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\",\"algorithm\":\"nonsense\"}' \\\n  http://127.0.0.1:8080/challenge)\"\ntest \"$STATUS\" = \"422\"\ngrep -q '\"code\":\"INVALID_ALGORITHM\"' $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json"
+  - |
+      set -euo pipefail
+      challenge_row() {  # $1 = request body; asserts a 200 challenge
+        curl -fsS -X POST -H 'Content-Type: application/json' \
+          -d "$1" http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+      }
+      challenge_row '{"scope":"login"}'
+      grep -q '"algorithm":"sha256"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+      challenge_row '{"scope":"login","algorithm":"sha256"}'
+      grep -q '"algorithm":"sha256"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+      # The field stays accepted but only validated: a nonsense value
+      # is refused with a 422 before any issuance.
+      STATUS="$(curl -sS -o $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' \
+        -d '{"scope":"login","algorithm":"nonsense"}' \
+        http://127.0.0.1:8080/challenge)"
+      test "$STATUS" = "422"
+      grep -q '"code":"INVALID_ALGORITHM"' $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json
 - name: f1-algorithm-ownership-table-(argon2id-profile-rows)
   image: docker:28-cli
   volumes:
@@ -117,7 +162,33 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=argon2id\\n'\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n} > .env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt under the argon2id profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\"}' '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"sha256\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"argon2id\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone"
+  - |
+      set -euo pipefail
+      SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+      VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      test -n "$SECRET"
+      test -n "$VALKEY_PASSWORD"
+      {
+        printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+        printf 'KIWI_SHA_TARGET_BITS=8\n'
+        printf 'KIWI_ALGORITHM=argon2id\n'
+        printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+      } > .env
+      docker compose up -d --force-recreate captcha
+      for attempt in $(seq 1 60); do
+        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+          echo "healthz answered 200 on attempt $attempt under the argon2id profile"
+          break
+        fi
+        sleep 1
+      done
+      test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      for body in '{"scope":"login"}' '{"scope":"login","algorithm":"argon2id"}' \
+        '{"scope":"login","algorithm":"sha256"}'; do
+        curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+          http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+        grep -q '"algorithm":"argon2id"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+      done
 - name: f1-algorithm-ownership-table-(rsw-profile-rows)
   image: docker:28-cli
   volumes:
@@ -125,7 +196,46 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)\"\ntest -n \"$SECRET\"\n# The committed rsw fixture pair (packages/kiwicaptcha-php\n# tests/Support/RswFixture.php) supplies the trapdoor values\n# for the CI-only profile rows; the container's php reads them.\ndocker compose cp ../packages/kiwicaptcha-php/tests/Support/RswFixture.php \\\n  captcha:/tmp/RswFixture.php\nMODULUS_N=\"$(docker compose exec -T captcha php -r \\\n  'require \"$CI_WORKSPACE/.ci-run-tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::MODULUS_N_B64;')\"\nLAMBDA=\"$(docker compose exec -T captcha php -r \\\n  'require \"$CI_WORKSPACE/.ci-run-tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::LAMBDA_B64;')\"\ntest -n \"$MODULUS_N\"\ntest -n \"$LAMBDA\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=rsw\\n'\n  printf 'KIWI_RSW_MODULUS_N=%s\\n' \"$MODULUS_N\"\n  printf 'KIWI_RSW_LAMBDA=%s\\n' \"$LAMBDA\"\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n} > .env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt under the rsw profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\",\"algorithm\":\"sha256\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"rsw\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone"
+  - |
+      set -euo pipefail
+      SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+      test -n "$SECRET"
+      # The committed rsw fixture pair (packages/kiwicaptcha-php
+      # tests/Support/RswFixture.php) supplies the trapdoor values
+      # for the CI-only profile rows; the container's php reads them.
+      docker compose cp ../packages/kiwicaptcha-php/tests/Support/RswFixture.php \
+        captcha:/tmp/RswFixture.php
+      MODULUS_N="$(docker compose exec -T captcha php -r \
+        'require "$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
+      LAMBDA="$(docker compose exec -T captcha php -r \
+        'require "$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
+      test -n "$MODULUS_N"
+      test -n "$LAMBDA"
+      VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      test -n "$VALKEY_PASSWORD"
+      {
+        printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+        printf 'KIWI_SHA_TARGET_BITS=8\n'
+        printf 'KIWI_ALGORITHM=rsw\n'
+        printf 'KIWI_RSW_MODULUS_N=%s\n' "$MODULUS_N"
+        printf 'KIWI_RSW_LAMBDA=%s\n' "$LAMBDA"
+        printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+      } > .env
+      docker compose up -d --force-recreate captcha
+      for attempt in $(seq 1 60); do
+        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+          echo "healthz answered 200 on attempt $attempt under the rsw profile"
+          break
+        fi
+        sleep 1
+      done
+      test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      for body in '{"scope":"login","algorithm":"sha256"}' \
+        '{"scope":"login","algorithm":"argon2id"}'; do
+        curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+          http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+        grep -q '"algorithm":"rsw"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+      done
 - name: f1-table-done:-restore-the-default-sha256-profile
   image: docker:28-cli
   volumes:
@@ -133,7 +243,26 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n} > .env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the profile restore\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)\" = \"200\""
+  - |
+      set -euo pipefail
+      SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+      VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      test -n "$SECRET"
+      test -n "$VALKEY_PASSWORD"
+      {
+        printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+        printf 'KIWI_SHA_TARGET_BITS=8\n'
+        printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+      } > .env
+      docker compose up -d --force-recreate captcha
+      for attempt in $(seq 1 60); do
+        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+          echo "healthz answered 200 on attempt $attempt after the profile restore"
+          break
+        fi
+        sleep 1
+      done
+      test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
 - name: f2-request-binding-table-(real-/verify,-one-challenge-per-ro
   image: docker:28-cli
   volumes:
@@ -141,7 +270,83 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nissue() {  # $1 = issue binding (empty = unbound)\n  local body='{\"scope\":\"login\"}'\n  if [ -n \"$1\" ]; then\n    body=\"{\\\"scope\\\":\\\"login\\\",\\\"request_binding\\\":\\\"$1\\\"}\"\n  fi\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json\n  docker compose cp $CI_WORKSPACE/.ci-run-tmp/$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json\n  docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \\\n    $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json > $CI_WORKSPACE/.ci-run-tmp/f2-token.txt\n  test -s $CI_WORKSPACE/.ci-run-tmp/f2-token.txt\n  tr -d '\\r\\n' < $CI_WORKSPACE/.ci-run-tmp/f2-token.txt > $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt\n  sleep 0.15\n}\nverify() {  # $1 = presented binding (empty = absent)\n  local token\n  token=\"$(cat $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt)\"\n  local body=\"{\\\"token\\\":\\\"$token\\\",\\\"scope\\\":\\\"login\\\"}\"\n  if [ -n \"$1\" ]; then\n    body=\"{\\\"token\\\":\\\"$token\\\",\\\"scope\\\":\\\"login\\\",\\\"request_binding\\\":\\\"$1\\\"}\"\n  fi\n  curl -sS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://127.0.0.1:8080/verify > $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n}\n# Issue bound to txn-A, verify with txn-A -> success.\nissue txn-A\nverify txn-A\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue bound to txn-A, verify with txn-B -> request_binding_mismatch.\nissue txn-A\nverify txn-B\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue bound to txn-A, verify with no binding -> request_binding_mismatch.\nissue txn-A\nverify ''\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue unbound, verify with no binding -> success.\nissue ''\nverify ''\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue unbound, verify with txn-A -> request_binding_mismatch.\n# The mismatch is the core verifier's own hard cheap-phase\n# verdict, which retires the pending record (one-shot\n# anti-oracle semantics): the same token is then gone.\nissue ''\nverify txn-A\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify ''\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"record_not_found\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Correct binding, second redemption -> already_consumed.\nissue txn-A\nverify txn-A\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify txn-A\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"already_consumed\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# One-shot row: a wrong-binding attempt is a hard cheap-phase\n# verdict that retires the pending record, so the same token\n# can never be re-tried against the correct binding. The\n# pinned core outcome of the corrected retry is\n# record_not_found (verified locally against the real core on\n# PHP 8.5: the mismatch answers first, then the record is\n# gone). No adapter-level preflight may keep the record\n# alive for a free retry oracle.\nissue txn-A\nverify txn-B\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify txn-A\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"record_not_found\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json"
+  - |
+      set -euo pipefail
+      issue() {  # $1 = issue binding (empty = unbound)
+        local body='{"scope":"login"}'
+        if [ -n "$1" ]; then
+          body="{\"scope\":\"login\",\"request_binding\":\"$1\"}"
+        fi
+        curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+          http://127.0.0.1:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json
+        docker compose cp $CI_WORKSPACE/.ci-run-tmp/$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
+        docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \
+          $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json > $CI_WORKSPACE/.ci-run-tmp/f2-token.txt
+        test -s $CI_WORKSPACE/.ci-run-tmp/f2-token.txt
+        tr -d '\r\n' < $CI_WORKSPACE/.ci-run-tmp/f2-token.txt > $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt
+        sleep 0.15
+      }
+      verify() {  # $1 = presented binding (empty = absent)
+        local token
+        token="$(cat $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt)"
+        local body="{\"token\":\"$token\",\"scope\":\"login\"}"
+        if [ -n "$1" ]; then
+          body="{\"token\":\"$token\",\"scope\":\"login\",\"request_binding\":\"$1\"}"
+        fi
+        curl -sS -X POST -H 'Content-Type: application/json' -d "$body" \
+          http://127.0.0.1:8080/verify > $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      }
+      # Issue bound to txn-A, verify with txn-A -> success.
+      issue txn-A
+      verify txn-A
+      grep -q '"ok":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # Issue bound to txn-A, verify with txn-B -> request_binding_mismatch.
+      issue txn-A
+      verify txn-B
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"request_binding_mismatch"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # Issue bound to txn-A, verify with no binding -> request_binding_mismatch.
+      issue txn-A
+      verify ''
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"request_binding_mismatch"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # Issue unbound, verify with no binding -> success.
+      issue ''
+      verify ''
+      grep -q '"ok":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # Issue unbound, verify with txn-A -> request_binding_mismatch.
+      # The mismatch is the core verifier's own hard cheap-phase
+      # verdict, which retires the pending record (one-shot
+      # anti-oracle semantics): the same token is then gone.
+      issue ''
+      verify txn-A
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"request_binding_mismatch"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      verify ''
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"record_not_found"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # Correct binding, second redemption -> already_consumed.
+      issue txn-A
+      verify txn-A
+      grep -q '"ok":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      verify txn-A
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"already_consumed"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      # One-shot row: a wrong-binding attempt is a hard cheap-phase
+      # verdict that retires the pending record, so the same token
+      # can never be re-tried against the correct binding. The
+      # pinned core outcome of the corrected retry is
+      # record_not_found (verified locally against the real core on
+      # PHP 8.5: the mismatch answers first, then the record is
+      # gone). No adapter-level preflight may keep the record
+      # alive for a free retry oracle.
+      issue txn-A
+      verify txn-B
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"request_binding_mismatch"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      verify txn-A
+      grep -q '"ok":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -q '"code":"record_not_found"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json
 - name: restart-the-captcha-container
   image: docker:28-cli
   volumes:
@@ -157,7 +362,18 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the restart\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose logs captcha\necho \"healthz never answered 200 after the restart\" >&2\nexit 1"
+  - |
+      set -euo pipefail
+      for attempt in $(seq 1 60); do
+        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+          echo "healthz answered 200 on attempt $attempt after the restart"
+          exit 0
+        fi
+        sleep 2
+      done
+      docker compose logs captcha
+      echo "healthz never answered 200 after the restart" >&2
+      exit 1
 - name: issue,-solve-and-verify-again-against-the-persistent-store
   image: docker:28-cli
   volumes:
@@ -165,7 +381,18 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://127.0.0.1:8080/challenge\ndocker compose cp $CI_WORKSPACE/.ci-run-tmp/$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json\ndocker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > /tmp/token2.txt\nTOKEN2=\"$(tr -d '\\r\\n' < $CI_WORKSPACE/.ci-run-tmp/token2.txt)\"\ntest -n \"$TOKEN2\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN2\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify2.json\nphp -r 'exit(json_decode(file_get_contents(\"$CI_WORKSPACE/.ci-run-tmp/verify2.json\"), true)[\"ok\"] === true ? 0 : 1);'"
+  - |
+      set -euo pipefail
+      curl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
+        -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+      docker compose cp $CI_WORKSPACE/.ci-run-tmp/$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json
+      docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > /tmp/token2.txt
+      TOKEN2="$(tr -d '\r\n' < $CI_WORKSPACE/.ci-run-tmp/token2.txt)"
+      test -n "$TOKEN2"
+      curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"token\":\"$TOKEN2\",\"scope\":\"login\"}" \
+        http://127.0.0.1:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify2.json
+      php -r 'exit(json_decode(file_get_contents("$CI_WORKSPACE/.ci-run-tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
 - name: docker-compose-down
   image: docker:28-cli
   volumes:

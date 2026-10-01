@@ -49,7 +49,7 @@ steps:
 
     '
   environment:
-    BUNDLE_VERSION: ${{ inputs.bundle_version }}
+    BUNDLE_VERSION: ${{ vars.bundle_version }}
 - name: the-application-boots-(console-about)
   image: php:8.3-cli
   commands:
@@ -91,7 +91,7 @@ steps:
 - name: application-journey-and-reinstall-cycle
   image: php:8.3-cli
   environment:
-    BUNDLE_VERSION: ${{ inputs.bundle_version }}
+    BUNDLE_VERSION: ${{ vars.bundle_version }}
   commands:
   - set -euo pipefail
   - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"

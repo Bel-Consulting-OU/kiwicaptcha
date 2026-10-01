@@ -21,18 +21,18 @@ steps:
         set -euo pipefail
         KIWI_HDR='# KiwiCaptcha'
         APEX_HDR='# ApexM''ail'
-        grep -q "^$KIWI_HDR" README.md
-        ! grep -q "^$APEX_HDR" README.md
+        grep -q "^$$KIWI_HDR" README.md
+        ! grep -q "^$$APEX_HDR" README.md
         grep -q 'packages/kiwicaptcha' README.md
         grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json
         grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml
         while IFS= read -r asset; do
-          [ -n "$asset" ] || continue
-          test -f "packages/kiwicaptcha-wasm/assets/$asset"
+          [ -n "$$asset" ] || continue
+          test -f "packages/kiwicaptcha-wasm/assets/$$asset"
         done < packages/kiwicaptcha-wasm/release-assets.txt
         test -f tests/browser/compat-capabilities.json
         for d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do
-          test ! -d "$d"
+          test ! -d "$$d"
         done
         echo "product identity OK"
       - |
@@ -45,25 +45,25 @@ steps:
       - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
       - |
         set -euo pipefail
-        base="${CI_COMMIT_BEFORE_SHA:-}"
-        if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
-          if [ "${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "${CI_COMMIT_TARGET_SHA:-}" ]; then
-            base="$CI_COMMIT_TARGET_SHA"
+        base="$${CI_COMMIT_BEFORE_SHA:-}"
+        if [ -z "$$base" ] || [ "$$base" = "0000000000000000000000000000000000000000" ]; then
+          if [ "$${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "$${CI_COMMIT_TARGET_SHA:-}" ]; then
+            base="$$CI_COMMIT_TARGET_SHA"
           else
-            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+            base="$$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
           fi
         fi
-        [ -n "$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }
-        git cat-file -e "$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null \
-          || { echo "no baseline file at $base" >&2; exit 1; }
-        git show "$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+        [ -n "$$base" ] || { echo "baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)" >&2; exit 1; }
+        git cat-file -e "$$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null \
+          || { echo "no baseline file at $$base" >&2; exit 1; }
+        git show "$$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
         while IFS= read -r entry; do
-          entry="${entry#"${entry%%[![:space:]]*}"}"
-          entry="${entry%%#*}"
-          entry="${entry%"${entry##*[![:space:]]}"}"
-          [ -n "$entry" ] || continue
-          if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
-            echo "stale adoption manifest entry: $entry already has a baseline row" >&2
+          entry="$${entry#"$${entry%%[![:space:]]*}"}"
+          entry="$${entry%%#*}"
+          entry="$${entry%"$${entry##*[![:space:]]}"}"
+          [ -n "$$entry" ] || continue
+          if awk -v p="$$entry" '!/^TOTAL[ \t]/ && $$2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
+            echo "stale adoption manifest entry: $$entry already has a baseline row" >&2
             exit 1
           fi
         done < packages/kiwicaptcha/tools/docs-lint-adopted.txt
@@ -79,11 +79,11 @@ steps:
         for f in risk-v1.lua calibration.lua confirm.lua correction.lua \
                   outcome_confirm.lua outcome_correct.lua outcome_register.lua \
                   register_decision.lua sampling_metrics.lua; do
-          test -f "protocol/risk-v1/$f"
-          test -f "packages/kiwicaptcha-risk/resources/$f"
-          test -f "packages/kiwicaptcha-risk-php/resources/$f"
-          cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk/resources/$f"
-          cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk-php/resources/$f"
+          test -f "protocol/risk-v1/$$f"
+          test -f "packages/kiwicaptcha-risk/resources/$$f"
+          test -f "packages/kiwicaptcha-risk-php/resources/$$f"
+          cmp -s "protocol/risk-v1/$$f" "packages/kiwicaptcha-risk/resources/$$f"
+          cmp -s "protocol/risk-v1/$$f" "packages/kiwicaptcha-risk-php/resources/$$f"
         done
         echo "all canonical Lua copies byte-identical"
       - |
@@ -95,7 +95,7 @@ steps:
           --glob '!**/vendor/**' \
           --glob '!**/node_modules/**' \
           --glob '!**/target/**' \
-          "$PATTERN" \
+          "$$PATTERN" \
           packages tests README.md SECURITY.md .github/workflows .woodpecker; then
           echo "internal-history commentary found in product source/docs" >&2
           exit 1
@@ -113,8 +113,8 @@ steps:
         # checksums file (actionlint_1.7.12_checksums.txt).
         ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         cd /tmp
-        curl -sSfLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-        echo "${ACTIONLINT_SHA256}  actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
-        tar -xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
+        curl -sSfLO "https://github.com/rhysd/actionlint/releases/download/v$${ACTIONLINT_VERSION}/actionlint_$${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+        echo "$${ACTIONLINT_SHA256}  actionlint_$${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
+        tar -xzf "actionlint_$${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
         /tmp/actionlint -version
         /tmp/actionlint -color=never
