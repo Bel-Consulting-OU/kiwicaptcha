@@ -59,6 +59,7 @@ steps:
         curl -sSfO "https://nodejs.org/dist/$${NODE_VERSION}/SHASUMS256.txt"
         grep "node-$${NODE_VERSION}-linux-x64.tar.xz\$$" SHASUMS256.txt | sha256sum -c -
         tar -xJf "node-$${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1
+        cd "$$CI_WORKSPACE"
       - |
         set -eu
         (cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)
