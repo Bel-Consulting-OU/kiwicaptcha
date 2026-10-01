@@ -123,4 +123,4 @@ steps:
         echo "$${ACTIONLINT_SHA256}  actionlint_$${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
         tar -xzf "actionlint_$${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
         /tmp/actionlint -version
-        /tmp/actionlint -color=never
+        /tmp/actionlint -color=never .github/workflows/*.yml
