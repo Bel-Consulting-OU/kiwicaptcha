@@ -22,6 +22,14 @@ steps:
     image: node:22-alpine
     commands:
       - apk add --no-cache bash git
+      - |
+        set -eu
+        # The validators compute the current measurement context, which
+        # binds the exact Playwright trees; install them from the
+        # committed lockfile exactly like the GitHub job does.
+        cd tests/browser
+        npm ci --no-audit --no-fund --ignore-scripts
+        cd ../..
       - node tools/ci/test-validate-release-baseline.mjs
       - node tools/ci/test-validate-autofill-qualification.mjs
       - node tools/ci/test-validate-accessibility-qualification.mjs
