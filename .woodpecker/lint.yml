@@ -52,6 +52,10 @@ steps:
           if [ "$${CI_PIPELINE_EVENT:-}" = "pull_request" ] && [ -n "$${CI_COMMIT_TARGET_SHA:-}" ]; then
             base="$$CI_COMMIT_TARGET_SHA"
           else
+            # A manual pipeline has no before-SHA and the clone is
+            # shallow (depth 1, tree-filtered): deepen to the parent
+            # commit so the integrity diff has a real base.
+            git fetch --depth=2 --no-filter origin "$$CI_COMMIT_SHA" >/dev/null 2>&1 || true
             base="$$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
           fi
         fi
