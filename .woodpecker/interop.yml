@@ -22,11 +22,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp sodium
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
         mkdir -p .ci-cross-language
@@ -49,7 +49,7 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
-        docker-php-ext-install -j"$(nproc)" gmp sodium
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
       - |
         set -euo pipefail
         cd /tmp
@@ -58,7 +58,7 @@ steps:
         sha256sum -c rustup-init.sha256
         chmod +x rustup-init
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
-        . "$HOME/.cargo/env"
+        . "$$HOME/.cargo/env"
       - |
         set -euo pipefail
         KC_PHP_RECORD=.ci-cross-language/php-sha.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
@@ -76,7 +76,7 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git curl
-        docker-php-ext-install -j"$(nproc)" gmp sodium
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
       - |
         set -euo pipefail
         cd /tmp
@@ -85,7 +85,7 @@ steps:
         sha256sum -c rustup-init.sha256
         chmod +x rustup-init
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
-        . "$HOME/.cargo/env"
+        . "$$HOME/.cargo/env"
       - |
         set -euo pipefail
         KC_RUST_RECORD=.ci-cross-language/rust-sha.json cargo test --test cross_language rust_issues_record_for_php -- --nocapture
@@ -105,11 +105,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp sodium
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |

@@ -32,10 +32,10 @@ steps:
           .ci-asset-refresh/packages/kiwicaptcha/resources \
           .ci-asset-refresh/packages/kiwicaptcha/integrations/symfony/Resources/public
         while IFS= read -r asset; do
-          [ -n "$asset" ] || continue
-          cp "packages/kiwicaptcha-wasm/assets/$asset" .ci-asset-refresh/packages/kiwicaptcha-wasm/assets/
-          cp "packages/kiwicaptcha/resources/$asset" .ci-asset-refresh/packages/kiwicaptcha/resources/
-          cp "packages/kiwicaptcha/integrations/symfony/Resources/public/$asset" .ci-asset-refresh/packages/kiwicaptcha/integrations/symfony/Resources/public/
+          [ -n "$$asset" ] || continue
+          cp "packages/kiwicaptcha-wasm/assets/$$asset" .ci-asset-refresh/packages/kiwicaptcha-wasm/assets/
+          cp "packages/kiwicaptcha/resources/$$asset" .ci-asset-refresh/packages/kiwicaptcha/resources/
+          cp "packages/kiwicaptcha/integrations/symfony/Resources/public/$$asset" .ci-asset-refresh/packages/kiwicaptcha/integrations/symfony/Resources/public/
         done < packages/kiwicaptcha-wasm/release-assets.txt
         echo "refreshed copies staged under .ci-asset-refresh/"
       - |

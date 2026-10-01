@@ -16,10 +16,10 @@ steps:
         apt-get update -qq
         apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
         php -r 'if (!extension_loaded("gmp")) { fwrite(STDERR, "gmp missing\n"); exit(1); }'
-        EXPECTED="$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        EXPECTED="$$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php8.3 -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php8.3 -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php8.3 -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
@@ -43,10 +43,10 @@ steps:
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
-        EXPECTED="$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        EXPECTED="$$(php8.3 -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php8.3 -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php8.3 -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php8.3 -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |

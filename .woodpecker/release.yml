@@ -16,34 +16,34 @@ steps:
     environment:
       GH_TOKEN:
         from_secret: github_token
-      GITHUB_REPOSITORY: ${CI_REPO}
+      GITHUB_REPOSITORY: $${CI_REPO}
     commands:
       - |
         set -euo pipefail
         apk add --no-cache bash curl github-cli
         ruleset_id="20868582"
-        if ! ruleset_json="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"; then
-          echo "refusing to release: cannot read the v* tag ruleset $ruleset_id (ruleset preflight fails closed on 403/404/unreadable)" >&2
+        if ! ruleset_json="$$(gh api "repos/$$GITHUB_REPOSITORY/rulesets/$$ruleset_id")"; then
+          echo "refusing to release: cannot read the v* tag ruleset $$ruleset_id (ruleset preflight fails closed on 403/404/unreadable)" >&2
           exit 1
         fi
-        printf '%s\n' "$ruleset_json" | bash "$CI_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$ruleset_id"
+        printf '%s\n' "$$ruleset_json" | bash "$$CI_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$$ruleset_id"
 
   - name: gate-authorization
     image: alpine:3.20
     environment:
       GH_TOKEN:
         from_secret: github_token
-      GITHUB_REPOSITORY: ${CI_REPO}
+      GITHUB_REPOSITORY: $${CI_REPO}
     commands:
       - |
         set -euo pipefail
         apk add --no-cache bash curl github-cli git
-        tag="${CI_COMMIT_TAG:?a tag event is required}"
-        if gh release view "$tag" >/dev/null 2>&1; then
-          echo "refusing to publish: release $tag already exists (releases are immutable)" >&2
+        tag="$${CI_COMMIT_TAG:?a tag event is required}"
+        if gh release view "$$tag" >/dev/null 2>&1; then
+          echo "refusing to publish: release $$tag already exists (releases are immutable)" >&2
           exit 1
         fi
-        echo "release $tag does not exist yet"
+        echo "release $$tag does not exist yet"
       - |
         set -euo pipefail
         # The GitHub gate proves exact-tag CI and authorized-HEAD
@@ -51,9 +51,9 @@ steps:
         # pipeline itself is the exact-tag CI run, and the annotated
         # signed tag check is portable.
         git fetch --tags --force >/dev/null 2>&1 || true
-        test "$(git cat-file -t "$CI_COMMIT_TAG")" = "tag" \
-          || { echo "refusing to release: $CI_COMMIT_TAG must be an annotated tag" >&2; exit 1; }
-        echo "$CI_COMMIT_TAG is an annotated tag at $(git rev-parse "$CI_COMMIT_TAG^{commit}")"
+        test "$$(git cat-file -t "$$CI_COMMIT_TAG")" = "tag" \
+          || { echo "refusing to release: $$CI_COMMIT_TAG must be an annotated tag" >&2; exit 1; }
+        echo "$$CI_COMMIT_TAG is an annotated tag at $$(git rev-parse "$$CI_COMMIT_TAG^{commit}")"
 
   - name: strict-build
     image: rust:1.96
@@ -103,7 +103,7 @@ steps:
       - |
         set -euo pipefail
         apk add --no-cache bash git grep
-        bash "$CI_WORKSPACE/tools/ci/release-asset-contract.sh"
+        bash "$$CI_WORKSPACE/tools/ci/release-asset-contract.sh"
 
   - name: release-baseline-gate
     image: node:22-alpine

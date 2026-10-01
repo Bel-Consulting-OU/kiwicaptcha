@@ -21,16 +21,16 @@ steps:
         set -euo pipefail
         apt-get update -qq && apt-get install -y -qq git
         while IFS= read -r f; do
-          [ -n "$f" ] || continue
-          cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
-            "packages/kiwicaptcha/resources/$f" \
-            || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh" >&2; exit 1; }
+          [ -n "$$f" ] || continue
+          cmp -s "packages/kiwicaptcha-wasm/assets/$$f" \
+            "packages/kiwicaptcha/resources/$$f" \
+            || { echo "stale $$f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh" >&2; exit 1; }
         done < packages/kiwicaptcha-wasm/release-assets.txt
         while IFS= read -r f; do
-          [ -n "$f" ] || continue
-          cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
-            "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
-            || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh" >&2; exit 1; }
+          [ -n "$$f" ] || continue
+          cmp -s "packages/kiwicaptcha-wasm/assets/$$f" \
+            "packages/kiwicaptcha/integrations/symfony/Resources/public/$$f" \
+            || { echo "stale $$f in the Symfony bundle — run bin/sync-assets.sh" >&2; exit 1; }
         done < packages/kiwicaptcha-wasm/release-assets.txt
         echo "generated copies byte-identical to the canonical assets"
       - |
@@ -48,27 +48,27 @@ steps:
         cd packages/kiwicaptcha-wasm
         # First clean strict build.
         bash build.sh
-        mkdir -p "$CI_WORKSPACE/.ci-build-repro/repro-a"
+        mkdir -p "$$CI_WORKSPACE/.ci-build-repro/repro-a"
         while IFS= read -r asset; do
-          [ -n "$asset" ] || continue
-          cp "assets/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-a/"
+          [ -n "$$asset" ] || continue
+          cp "assets/$$asset" "$$CI_WORKSPACE/.ci-build-repro/repro-a/"
         done < release-assets.txt
         # Second clean strict build with fresh cache and target.
         cargo clean
         rm -rf pkg
-        rm -rf "$HOME/.cache/kiwicaptcha-wasm"
+        rm -rf "$$HOME/.cache/kiwicaptcha-wasm"
         bash build.sh
-        mkdir -p "$CI_WORKSPACE/.ci-build-repro/repro-b"
+        mkdir -p "$$CI_WORKSPACE/.ci-build-repro/repro-b"
         while IFS= read -r asset; do
-          [ -n "$asset" ] || continue
-          cp "assets/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-b/"
+          [ -n "$$asset" ] || continue
+          cp "assets/$$asset" "$$CI_WORKSPACE/.ci-build-repro/repro-b/"
         done < release-assets.txt
         # Byte-compare the two builds over the canonical manifest.
         while IFS= read -r asset; do
-          [ -n "$asset" ] || continue
-          cmp "$CI_WORKSPACE/.ci-build-repro/repro-a/$asset" "$CI_WORKSPACE/.ci-build-repro/repro-b/$asset" \
-            || { echo "independent builds differ on $asset" >&2; exit 1; }
-          sha256sum "$CI_WORKSPACE/.ci-build-repro/repro-a/$asset"
+          [ -n "$$asset" ] || continue
+          cmp "$$CI_WORKSPACE/.ci-build-repro/repro-a/$$asset" "$$CI_WORKSPACE/.ci-build-repro/repro-b/$$asset" \
+            || { echo "independent builds differ on $$asset" >&2; exit 1; }
+          sha256sum "$$CI_WORKSPACE/.ci-build-repro/repro-a/$$asset"
         done < release-assets.txt
-        rm -rf "$CI_WORKSPACE/.ci-build-repro"
+        rm -rf "$$CI_WORKSPACE/.ci-build-repro"
         echo "two clean isolated strict builds produce identical asset hashes"

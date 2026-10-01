@@ -34,11 +34,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
@@ -59,11 +59,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
-        docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp sodium pcntl posix
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
@@ -84,11 +84,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp sodium
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |

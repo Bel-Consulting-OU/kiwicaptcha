@@ -27,14 +27,14 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp sodium
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
         pecl install redis && docker-php-ext-enable redis
       - &composer_install |
         set -euo pipefail
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - &composer_audit |
@@ -43,7 +43,7 @@ steps:
           if composer audit --locked; then
             break
           fi
-          echo "composer audit attempt $i failed — retrying in 30s" >&2
+          echo "composer audit attempt $$i failed — retrying in 30s" >&2
           sleep 30
         done
         composer audit --locked

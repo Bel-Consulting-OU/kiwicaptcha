@@ -22,11 +22,11 @@ steps:
         set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-        docker-php-ext-install -j"$(nproc)" gmp sodium
-        EXPECTED="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
+        docker-php-ext-install -j"$$(nproc)" gmp sodium
+        EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-        ACTUAL="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+        ACTUAL="$$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
+        [ "$$EXPECTED" = "$$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
         rm -f /tmp/composer-setup.php
       - |
@@ -37,10 +37,10 @@ steps:
         set -euo pipefail
         php -r '
           require "packages/kiwicaptcha-php/vendor/autoload.php";
-          $url = getenv("KC_REDIS_URL") ?: "redis://redis:6399";
-          $client = new Predis\Client($url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
-          $client->ping();
-          echo "manual-benchmark preflight: Redis answers at $url\n";
+          $$url = getenv("KC_REDIS_URL") ?: "redis://redis:6399";
+          $$client = new Predis\Client($$url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
+          $$client->ping();
+          echo "manual-benchmark preflight: Redis answers at $$url\n";
         '
       - php packages/kiwicaptcha/tools/perf-bench.php
       - php packages/kiwicaptcha/tools/perf-bench.php --redis

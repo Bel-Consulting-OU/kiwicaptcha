@@ -21,8 +21,17 @@ steps:
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ncurl -fsSL -o /tmp/symfony-cli.tar.gz \\\n  \"https://github.com/symfony-cli/symfony-cli/releases/download/v${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz\"\necho \"${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz\" | sha256sum -c -\nmkdir -p \"$HOME/.symfony5/bin\"\ntar -xzf /tmp/symfony-cli.tar.gz -C \"$HOME/.symfony5/bin\" symfony\n\"$HOME/.symfony5/bin/symfony\" --version\necho \"$HOME/.symfony5/bin\" >> \"$GITHUB_PATH\"\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      curl -fsSL -o /tmp/symfony-cli.tar.gz \
+        "https://github.com/symfony-cli/symfony-cli/releases/download/v$${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz"
+      echo "$${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz" | sha256sum -c -
+      mkdir -p "$$HOME/.symfony5/bin"
+      tar -xzf /tmp/symfony-cli.tar.gz -C "$$HOME/.symfony5/bin" symfony
+      "$$HOME/.symfony5/bin/symfony" --version
+      echo "$$HOME/.symfony5/bin" >> "$$GITHUB_PATH"
+
   environment:
     SYMFONY_CLI_VERSION: 5.20.0
     SYMFONY_CLI_SHA256: f50bfbbc1825a2f12a125ea4391f6f7c5b3d7e656901aeeeece0dd8bba135f36
@@ -30,7 +39,7 @@ steps:
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
     symfony new kiwi-smoke --version=lts --webapp
@@ -40,10 +49,10 @@ steps:
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
-    composer require "bel-consulting/kiwicaptcha-symfony:$BUNDLE_VERSION" --no-interaction --no-progress
+    composer require "bel-consulting/kiwicaptcha-symfony:$$BUNDLE_VERSION" --no-interaction --no-progress
 
     composer show bel-consulting/kiwicaptcha-symfony
 
@@ -54,21 +63,29 @@ steps:
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - php bin/console about
 - name: write-the-documented-minimum-configuration-(secret,-public-u
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\n{\n  echo \"KIWI_SECRET_KEY=${KIWI_SECRET_KEY}\"\n  echo \"KIWI_PUBLIC_URL=http://127.0.0.1:8000\"\n  echo \"KIWI_REDIS_DSN=redis://127.0.0.1:6379/0\"\n} >> .env.local\ncat .env.local\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      {
+        echo "KIWI_SECRET_KEY=$${KIWI_SECRET_KEY}"
+        echo "KIWI_PUBLIC_URL=http://127.0.0.1:8000"
+        echo "KIWI_REDIS_DSN=redis://127.0.0.1:6379/0"
+      } >> .env.local
+      cat .env.local
+
   environment:
     KIWI_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 - name: kiwicaptcha:doctor-must-exit-cleanly-on-the-documented-minim
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
     php bin/console kiwicaptcha:doctor
@@ -80,28 +97,162 @@ steps:
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ntest -f config/packages/kiwicaptcha.yaml \\\n  || { echo \"the Flex recipe has not been applied (checklist steps 4-5 outstanding)\"; exit 1; }\nphp bin/console debug:router | grep -q kiwicaptcha \\\n  || { echo \"the recipe's kiwicaptcha routes are missing\"; exit 1; }\necho \"recipe config + routes present\"\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      test -f config/packages/kiwicaptcha.yaml \
+        || { echo "the Flex recipe has not been applied (checklist steps 4-5 outstanding)"; exit 1; }
+      php bin/console debug:router | grep -q kiwicaptcha \
+        || { echo "the recipe's kiwicaptcha routes are missing"; exit 1; }
+      echo "recipe config + routes present"
+
 - name: add-the-demo-page-(form-widget)-to-the-smoke-application
   image: php:8.3-cli
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nmkdir -p src/Form src/Controller templates\ncat > src/Form/CaptchaDemoType.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse BelConsulting\\KiwiCaptchaBundle\\Form\\Type\\KiwiCaptchaType;\nuse Symfony\\Component\\Form\\AbstractType;\nuse Symfony\\Component\\Form\\FormBuilderInterface;\n\nfinal class CaptchaDemoType extends AbstractType\n{\n    public function buildForm(FormBuilderInterface $builder, array $options): void\n    {\n        $builder->add('captcha', KiwiCaptchaType::class, ['scope' => 'login']);\n    }\n}\nPHP\ncat > src/Form/CaptchaDemoInput.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse Symfony\\Component\\Validator\\Constraints as Assert;\n\nfinal class CaptchaDemoInput\n{\n    #[Assert\\NotBlank]\n    public ?string $captcha = null;\n}\nPHP\ncat > src/Controller/CaptchaDemoController.php <<'PHP'\n<?php\n\nnamespace App\\Controller;\n\nuse App\\Form\\CaptchaDemoInput;\nuse App\\Form\\CaptchaDemoType;\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\nuse Symfony\\Component\\HttpFoundation\\Request;\nuse Symfony\\Component\\HttpFoundation\\Response;\nuse Symfony\\Component\\Routing\\Attribute\\Route;\n\nfinal class CaptchaDemoController extends AbstractController\n{\n    #[Route('/captcha-demo', name: 'captcha_demo', methods: ['GET', 'POST'])]\n    public function __invoke(Request $request): Response\n    {\n        $form = $this->createForm(CaptchaDemoType::class, new CaptchaDemoInput());\n        $form->handleRequest($request);\n        $result = null;\n        if ($form->isSubmitted()) {\n            $result = json_encode([\n                'ok' => $form->isValid(),\n                'errors' => array_map(\n                    static fn ($violation): string => (string) $violation->getMessage(),\n                    iterator_to_array($form->getErrors(true)),\n                ),\n            ], JSON_THROW_ON_ERROR);\n        }\n\n        return $this->render('captcha_demo.html.twig', ['form' => $form, 'result' => $result]);\n    }\n}\nPHP\ncat > templates/captcha_demo.html.twig <<'TWIG'\n<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>KiwiCaptcha smoke</title></head>\n<body{% if result %} data-result=\"{{ result|e('html_attr') }}\"{% endif %}>\n{{ form_start(form) }}\n{{ form_widget(form) }}\n<button id=\"demo-submit\" type=\"submit\">Verify</button>\n{{ form_end(form) }}\n</body>\n</html>\nTWIG\ncat > config/packages/kiwicaptcha_widget.yaml <<'YAML'\ntwig:\n    form_themes:\n        - '@KiwiCaptcha/form_div_layout.html.twig'\nYAML\nphp bin/console cache:clear\nphp bin/console debug:router | grep -q captcha_demo\necho \"demo page wired\"\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      mkdir -p src/Form src/Controller templates
+      cat > src/Form/CaptchaDemoType.php <<'PHP'
+      <?php
+
+      namespace App\Form;
+
+      use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
+      use Symfony\Component\Form\AbstractType;
+      use Symfony\Component\Form\FormBuilderInterface;
+
+      final class CaptchaDemoType extends AbstractType
+      {
+          public function buildForm(FormBuilderInterface $$builder, array $$options): void
+          {
+              $$builder->add('captcha', KiwiCaptchaType::class, ['scope' => 'login']);
+          }
+      }
+      PHP
+      cat > src/Form/CaptchaDemoInput.php <<'PHP'
+      <?php
+
+      namespace App\Form;
+
+      use Symfony\Component\Validator\Constraints as Assert;
+
+      final class CaptchaDemoInput
+      {
+          #[Assert\NotBlank]
+          public ?string $$captcha = null;
+      }
+      PHP
+      cat > src/Controller/CaptchaDemoController.php <<'PHP'
+      <?php
+
+      namespace App\Controller;
+
+      use App\Form\CaptchaDemoInput;
+      use App\Form\CaptchaDemoType;
+      use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+      use Symfony\Component\HttpFoundation\Request;
+      use Symfony\Component\HttpFoundation\Response;
+      use Symfony\Component\Routing\Attribute\Route;
+
+      final class CaptchaDemoController extends AbstractController
+      {
+          #[Route('/captcha-demo', name: 'captcha_demo', methods: ['GET', 'POST'])]
+          public function __invoke(Request $$request): Response
+          {
+              $$form = $$this->createForm(CaptchaDemoType::class, new CaptchaDemoInput());
+              $$form->handleRequest($$request);
+              $$result = null;
+              if ($$form->isSubmitted()) {
+                  $$result = json_encode([
+                      'ok' => $$form->isValid(),
+                      'errors' => array_map(
+                          static fn ($$violation): string => (string) $$violation->getMessage(),
+                          iterator_to_array($$form->getErrors(true)),
+                      ),
+                  ], JSON_THROW_ON_ERROR);
+              }
+
+              return $$this->render('captcha_demo.html.twig', ['form' => $$form, 'result' => $$result]);
+          }
+      }
+      PHP
+      cat > templates/captcha_demo.html.twig <<'TWIG'
+      <!doctype html>
+      <html lang="en">
+      <head><meta charset="utf-8"><title>KiwiCaptcha smoke</title></head>
+      <body{% if result %} data-result="{{ result|e('html_attr') }}"{% endif %}>
+      {{ form_start(form) }}
+      {{ form_widget(form) }}
+      <button id="demo-submit" type="submit">Verify</button>
+      {{ form_end(form) }}
+      </body>
+      </html>
+      TWIG
+      cat > config/packages/kiwicaptcha_widget.yaml <<'YAML'
+      twig:
+          form_themes:
+              - '@KiwiCaptcha/form_div_layout.html.twig'
+      YAML
+      php bin/console cache:clear
+      php bin/console debug:router | grep -q captcha_demo
+      echo "demo page wired"
+
 - name: application-journey-and-reinstall-cycle
   image: php:8.3-cli
   environment:
     BUNDLE_VERSION: ${{ vars.bundle_version }}
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nsymfony serve --no-tls --port=8000 --daemon\nfor _ in $(seq 1 60); do\n  if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then\n    echo \"application server answering on 127.0.0.1:8000\"\n    exit 0\n  fi\n  sleep 1\ndone\necho \"application server did not answer in 60 s\" >&2\nexit 1\n"
-  - "set -euo pipefail\nnpm init -y > /dev/null\nnpm install --no-audit --no-fund playwright@1.62.1 > /dev/null\nnpx playwright install --with-deps chromium > /dev/null\ncat > e2e.mjs <<'JS'\nimport { chromium } from 'playwright';\n\nconst base = 'http://127.0.0.1:8000';\nconst browser = await chromium.launch();\nconst page = await browser.newPage();\npage.on('console', (message) => console.log('[browser]', message.type(), message.text()));\nawait page.goto(`${base}/captcha-demo`, { waitUntil: 'load' });\nawait page.waitForSelector('.kiwi-widget[data-state=\"verified\"]', { timeout: 180000 });\nconst token = await page.locator('input[data-kiwi-token]').first().inputValue();\nif (!token) {\n  throw new Error('the widget reached verified without writing a token');\n}\nawait page.click('#demo-submit');\nawait page.waitForFunction(() => document.body.dataset.result !== undefined, { timeout: 60000 });\nconst result = JSON.parse(await page.evaluate(() => document.body.dataset.result));\nif (result.ok !== true) {\n  throw new Error(`server-side verification refused the token: ${JSON.stringify(result)}`);\n}\nconsole.log(`issue -> solve -> verify OK (token bytes: ${token.length})`);\nawait browser.close();\nJS\nnode e2e.mjs\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      symfony serve --no-tls --port=8000 --daemon
+      for _ in $$(seq 1 60); do
+        if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then
+          echo "application server answering on 127.0.0.1:8000"
+          exit 0
+        fi
+        sleep 1
+      done
+      echo "application server did not answer in 60 s" >&2
+      exit 1
+
+  - |
+      set -euo pipefail
+      npm init -y > /dev/null
+      npm install --no-audit --no-fund playwright@1.62.1 > /dev/null
+      npx playwright install --with-deps chromium > /dev/null
+      cat > e2e.mjs <<'JS'
+      import { chromium } from 'playwright';
+
+      const base = 'http://127.0.0.1:8000';
+      const browser = await chromium.launch();
+      const page = await browser.newPage();
+      page.on('console', (message) => console.log('[browser]', message.type(), message.text()));
+      await page.goto(`$${base}/captcha-demo`, { waitUntil: 'load' });
+      await page.waitForSelector('.kiwi-widget[data-state="verified"]', { timeout: 180000 });
+      const token = await page.locator('input[data-kiwi-token]').first().inputValue();
+      if (!token) {
+        throw new Error('the widget reached verified without writing a token');
+      }
+      await page.click('#demo-submit');
+      await page.waitForFunction(() => document.body.dataset.result !== undefined, { timeout: 60000 });
+      const result = JSON.parse(await page.evaluate(() => document.body.dataset.result));
+      if (result.ok !== true) {
+        throw new Error(`server-side verification refused the token: $${JSON.stringify(result)}`);
+      }
+      console.log(`issue -> solve -> verify OK (token bytes: $${token.length})`);
+      await browser.close();
+      JS
+      node e2e.mjs
+
   - 'set -euo pipefail
 
     composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
 
-    composer require "bel-consulting/kiwicaptcha-symfony:$BUNDLE_VERSION" --no-interaction --no-progress
+    composer require "bel-consulting/kiwicaptcha-symfony:$$BUNDLE_VERSION" --no-interaction --no-progress
 
     php bin/console about
 

@@ -19,7 +19,16 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nbase=\"$${LATENCY_BASE_REF:-head~1}\"\ngit fetch origin \"$$base\" --tags 2>/dev/null || true\nif ! git rev-parse --verify -q \"$$base\" >/dev/null 2>&1; then\n  echo \"base ref $$base does not resolve\" >&2\n  exit 1\nfi\necho \"$$base\" > .ci-run-tmp/base-ref\n"
+  - |
+      set -euo pipefail
+      base="$${LATENCY_BASE_REF:-head~1}"
+      git fetch origin "$$base" --tags 2>/dev/null || true
+      if ! git rev-parse --verify -q "$$base" >/dev/null 2>&1; then
+        echo "base ref $$base does not resolve" >&2
+        exit 1
+      fi
+      echo "$$base" > .ci-run-tmp/base-ref
+
 - name: check-out-the-base-tree-(same-session,-same-host)
   image: php:8.3-cli
   commands:
@@ -49,25 +58,108 @@ steps:
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nmkdir -p \"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\"\nevidence=\"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt\"\n{\n  echo \"captured_at=$$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"head_sha=$$(git rev-parse HEAD)\"\n  echo \"base_ref=$$BASE_REF\"\n  echo \"uname=$$(uname -a)\"\n  echo \"nproc=$$(nproc 2>/dev/null || true)\"\n  echo \"php=$$(php -r 'echo PHP_VERSION;')\"\n  if command -v redis-cli >/dev/null 2>&1; then\n    echo \"redis=$$(redis-cli -u \"$$KC_REDIS_URL\" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\\r')\"\n  fi\n  if [ -r /proc/cpuinfo ]; then\n    echo \"cpu_model=$$(awk -F: '/model name/ { gsub(/^ +/, \"\", $$2); print $$2; exit }' /proc/cpuinfo)\"\n  fi\n  if command -v lscpu >/dev/null 2>&1; then\n    lscpu | sed -n 's/^ *\\(Model name\\|CPU(s)\\|CPU max MHz\\|CPU min MHz\\|Thread(s) per core\\|Core(s) per socket\\): */lscpu_\\1=/p'\n  fi\n  for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do\n    [ -r \"$$cpu\" ] || continue\n    echo \"$$cpu=$$(cat \"$$cpu\")\"\n  done\n  echo \"uptime=$$(uptime 2>/dev/null || true)\"\n  echo \"loadavg=$$(cat /proc/loadavg 2>/dev/null || true)\"\n} | tee \"$$evidence\"\n"
+  - |
+      set -euo pipefail
+      mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency"
+      evidence="$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt"
+      {
+        echo "captured_at=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "head_sha=$$(git rev-parse HEAD)"
+        echo "base_ref=$$BASE_REF"
+        echo "uname=$$(uname -a)"
+        echo "nproc=$$(nproc 2>/dev/null || true)"
+        echo "php=$$(php -r 'echo PHP_VERSION;')"
+        if command -v redis-cli >/dev/null 2>&1; then
+          echo "redis=$$(redis-cli -u "$$KC_REDIS_URL" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\r')"
+        fi
+        if [ -r /proc/cpuinfo ]; then
+          echo "cpu_model=$$(awk -F: '/model name/ { gsub(/^ +/, "", $$2); print $$2; exit }' /proc/cpuinfo)"
+        fi
+        if command -v lscpu >/dev/null 2>&1; then
+          lscpu | sed -n 's/^ *\(Model name\|CPU(s)\|CPU max MHz\|CPU min MHz\|Thread(s) per core\|Core(s) per socket\): */lscpu_\1=/p'
+        fi
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+          [ -r "$$cpu" ] || continue
+          echo "$$cpu=$$(cat "$$cpu")"
+        done
+        echo "uptime=$$(uptime 2>/dev/null || true)"
+        echo "loadavg=$$(cat /proc/loadavg 2>/dev/null || true)"
+      } | tee "$$evidence"
+
 - name: host-warm-up-runs-(both-trees,-discarded;-settles-governor,-
   image: php:8.3-cli
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nfor _ in 1 2; do\n  for root in \"$$CI_WORKSPACE/base\" \"$$CI_WORKSPACE\"; do\n    (cd \"$$root\" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true\n  done\ndone\necho \"warm-up runs done (base and head, two interleaved passes)\"\n"
+  - |
+      set -euo pipefail
+      for _ in 1 2; do
+        for root in "$$CI_WORKSPACE/base" "$$CI_WORKSPACE"; do
+          (cd "$$root" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true
+        done
+      done
+      echo "warm-up runs done (base and head, two interleaved passes)"
+
 - name: balanced-repeated-benchmark-runs-(balanced-alternating-order
   image: php:8.3-cli
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nrepeats=\"$${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"$${LATENCY_REGRESSION_MODES:-array}\"\nif (( repeats < 2 || repeats % 2 != 0 )); then\n  echo \"LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $$repeats)\" >&2\n  exit 1\nfi\nmkdir -p \"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base\" \"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head\"\nfor mode in $$modes; do\n  case \"$$mode\" in\n    array) flags=() ;;\n    redis) flags=(--redis) ;;\n    argon) flags=(--argon) ;;\n    *) echo \"unknown LATENCY_REGRESSION_MODES entry: $$mode\" >&2; exit 1 ;;\n  esac\n  for ((repeat = 1; repeat <= repeats; repeat++)); do\n    if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi\n    for side in \"$${order[@]}\"; do\n      if [ \"$$side\" = base ]; then\n        root=\"$$CI_WORKSPACE/base\"\n        out=\"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base/$$mode-$$repeat.log\"\n      else\n        root=\"$$CI_WORKSPACE\"\n        out=\"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head/$$mode-$$repeat.log\"\n      fi\n      (cd \"$$root\" && php packages/kiwicaptcha/tools/perf-bench.php \"$${flags[@]}\") >\"$$out\" 2>&1 || true\n      echo \"$$side $$mode repeat $$repeat (order $$repeat%2): $$(sed -n 's/perf-bench: \\(SHA-256 [a-z]*\\|Argon2id admission\\) issuance.*/bench line recorded/p' \"$$out\" || true)\"\n    done\n  done\ndone\n"
+  - |
+      set -euo pipefail
+      repeats="$${LATENCY_REGRESSION_REPEATS:-6}"
+      modes="$${LATENCY_REGRESSION_MODES:-array}"
+      if (( repeats < 2 || repeats % 2 != 0 )); then
+        echo "LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $$repeats)" >&2
+        exit 1
+      fi
+      mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base" "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head"
+      for mode in $$modes; do
+        case "$$mode" in
+          array) flags=() ;;
+          redis) flags=(--redis) ;;
+          argon) flags=(--argon) ;;
+          *) echo "unknown LATENCY_REGRESSION_MODES entry: $$mode" >&2; exit 1 ;;
+        esac
+        for ((repeat = 1; repeat <= repeats; repeat++)); do
+          if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi
+          for side in "$${order[@]}"; do
+            if [ "$$side" = base ]; then
+              root="$$CI_WORKSPACE/base"
+              out="$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base/$$mode-$$repeat.log"
+            else
+              root="$$CI_WORKSPACE"
+              out="$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head/$$mode-$$repeat.log"
+            fi
+            (cd "$$root" && php packages/kiwicaptcha/tools/perf-bench.php "$${flags[@]}") >"$$out" 2>&1 || true
+            echo "$$side $$mode repeat $$repeat (order $$repeat%2): $$(sed -n 's/perf-bench: \(SHA-256 [a-z]*\|Argon2id admission\) issuance.*/bench line recorded/p' "$$out" || true)"
+          done
+        done
+      done
+
 - name: compare-base-vs-head-(paired-distributions,-balanced-order)
   image: php:8.3-cli
   commands:
   - set -euo pipefail
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\nrepeats=\"$${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"$${LATENCY_REGRESSION_MODES:-array}\"\nrel_max=\"$${LATENCY_REGRESSION_MAX_REL_PCT:-20}\"\nabs_max=\"$${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}\"\nspread_max=\"$${LATENCY_REGRESSION_MAX_SPREAD:-10}\"\nbash tools/ci/latency-compare.sh \\\n  \"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\" \"$$repeats\" \"$$modes\" \"$$rel_max\" \"$$abs_max\" \"$$spread_max\"\nif [ -f \"$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/ambiguous\" ]; then\n  {\n    echo \"Latency regression: ambiguous\"\n    echo \"\"\n    echo \"An over-threshold signal without paired-distribution agreement was recorded.\"\n    echo \"It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence.\"\n  } >>\"$$CI_WORKSPACE/.ci-run-tmp/step-summary.txt\"\nfi\n"
+  - |
+      set -euo pipefail
+      repeats="$${LATENCY_REGRESSION_REPEATS:-6}"
+      modes="$${LATENCY_REGRESSION_MODES:-array}"
+      rel_max="$${LATENCY_REGRESSION_MAX_REL_PCT:-20}"
+      abs_max="$${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}"
+      spread_max="$${LATENCY_REGRESSION_MAX_SPREAD:-10}"
+      bash tools/ci/latency-compare.sh \
+        "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency" "$$repeats" "$$modes" "$$rel_max" "$$abs_max" "$$spread_max"
+      if [ -f "$$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/ambiguous" ]; then
+        {
+          echo "Latency regression: ambiguous"
+          echo ""
+          echo "An over-threshold signal without paired-distribution agreement was recorded."
+          echo "It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence."
+        } >>"$$CI_WORKSPACE/.ci-run-tmp/step-summary.txt"
+      fi
+
 - name: reverse-order-validation-note
   image: php:8.3-cli
   commands:

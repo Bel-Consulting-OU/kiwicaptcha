@@ -13,41 +13,105 @@ steps:
   image: rust:1.96
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
-    rm -rf "$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+    rm -rf "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
-    cargo init --name kiwi-cargo-smoke "$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+    cargo init --name kiwi-cargo-smoke "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
     '
 - name: add-the-exact-crates.io-version-(=)-and-check-(no-path,-no-g
   image: rust:1.96
   commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"$CRATE\" --depth 0\n# Read the resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want} from {source}')\nPY\necho \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+      # `=X.Y.Z` is the only requirement that cannot resolve to a
+      # newer compatible release: a caret requirement would accept
+      # 1.7.1 for a requested 1.7.0 and the smoke would still pass.
+      cargo add "$$CRATE@=$$RUST_VERSION"
+      cargo check
+      cargo tree -p "$$CRATE" --depth 0
+      # Read the resolution back: exactly one package of that name,
+      # the requested version, a crates.io registry source, and no
+      # path/git replacement (a replacement has source null).
+      cargo metadata --format-version 1 > "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json"
+      python3 - "$$CRATE" "$$RUST_VERSION" "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json" <<'PY'
+      import json
+      import sys
+
+      crate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]
+      meta = json.load(open(path))
+      named = [p for p in meta['packages'] if p['name'] == crate]
+      exact = [p for p in named if p['version'] == want]
+      assert len(exact) == 1, (
+          f'{crate}@{want} must resolve to exactly one package, got '
+          f'{[p["version"] for p in named]}'
+      )
+      source = exact[0].get('source') or ''
+      assert source.startswith('registry+') and 'crates.io' in source, (
+          f'{crate}@{want} resolved from {source!r}, not the crates.io registry'
+      )
+      print(f'cargo smoke: verified {crate}@{want} from {source}')
+      PY
+      echo "cargo smoke: $$CRATE@$$RUST_VERSION resolved and checked from crates.io"
+
   environment:
     CRATE: kiwicaptcha
-    RUST_VERSION: ${KIWICAPTCHA_VERSION:?set KIWICAPTCHA_VERSION}
+    RUST_VERSION: $${KIWICAPTCHA_VERSION:?set KIWICAPTCHA_VERSION}
 - commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -euo pipefail
 
-    rm -rf "$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+    rm -rf "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
-    cargo init --name kiwi-cargo-smoke "$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+    cargo init --name kiwi-cargo-smoke "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
 
     '
   image: rust:1.96
   name: risk-init-an-empty-crate-in-a-temp-dir-(no-repo-checkout)
 - commands:
   - set -euo pipefail
-  - mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
-  - "set -euo pipefail\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"$CRATE\" --depth 0\n# Read the resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want} from {source}')\nPY\necho \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
+  - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
+  - |
+      set -euo pipefail
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke"
+      # `=X.Y.Z` is the only requirement that cannot resolve to a
+      # newer compatible release: a caret requirement would accept
+      # 1.7.1 for a requested 1.7.0 and the smoke would still pass.
+      cargo add "$$CRATE@=$$RUST_VERSION"
+      cargo check
+      cargo tree -p "$$CRATE" --depth 0
+      # Read the resolution back: exactly one package of that name,
+      # the requested version, a crates.io registry source, and no
+      # path/git replacement (a replacement has source null).
+      cargo metadata --format-version 1 > "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json"
+      python3 - "$$CRATE" "$$RUST_VERSION" "$$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json" <<'PY'
+      import json
+      import sys
+
+      crate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]
+      meta = json.load(open(path))
+      named = [p for p in meta['packages'] if p['name'] == crate]
+      exact = [p for p in named if p['version'] == want]
+      assert len(exact) == 1, (
+          f'{crate}@{want} must resolve to exactly one package, got '
+          f'{[p["version"] for p in named]}'
+      )
+      source = exact[0].get('source') or ''
+      assert source.startswith('registry+') and 'crates.io' in source, (
+          f'{crate}@{want} resolved from {source!r}, not the crates.io registry'
+      )
+      print(f'cargo smoke: verified {crate}@{want} from {source}')
+      PY
+      echo "cargo smoke: $$CRATE@$$RUST_VERSION resolved and checked from crates.io"
+
   environment:
     CRATE: kiwicaptcha-risk
-    RUST_VERSION: ${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}
+    RUST_VERSION: $${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}
   image: rust:1.96
   name: risk-add-the-exact-crates.io-version-(=)-and-check-(no-path,-no-g
