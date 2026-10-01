@@ -67,15 +67,15 @@
       "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
     },
     "widget_risk": {
-      "raw_bytes": 40373,
-      "brotli_bytes": 10118,
+      "raw_bytes": 40397,
+      "brotli_bytes": 10121,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner and the decoy/honeypot machinery. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 11783,
-      "gzip_bytes_zlib13": 11783
+      "gzip_bytes_zlib12": 11781,
+      "gzip_bytes_zlib13": 11781
     },
     "widget_telemetry": {
       "raw_bytes": 2922,

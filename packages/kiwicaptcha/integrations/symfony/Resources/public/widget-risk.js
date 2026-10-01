@@ -576,7 +576,7 @@
         // page script posting a crafted solve+done pair into the worker
         // can never settle this solve (the reply it provokes carries the
         // other request's id, or none at all).
-        var solveReqId = "q" + Math.random().toString(36).slice(2) + performance.now().toString(36).replace(".", "");
+        var solveReqId = "q" + kiwiCspUint32().toString(36) + kiwiCspUint32().toString(36) + performance.now().toString(36).replace(".", "");
         try {
           // Hand the runtime URL to the worker BEFORE the solve: it
           // importScripts the URL, verifies the wasm protocol version and
