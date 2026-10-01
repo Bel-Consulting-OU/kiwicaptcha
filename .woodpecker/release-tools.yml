@@ -43,7 +43,7 @@ steps:
       - |
         set -eu
         apt-get update -qq
-        apt-get install -y -qq libgmp-dev unzip git brotli curl
+        apt-get install -y -qq libgmp-dev unzip git brotli curl python3
         docker-php-ext-install -j"$$(nproc)" gmp
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
