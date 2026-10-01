@@ -18,7 +18,7 @@ steps:
   - name: lint-repo
     image: alpine:3.20
     commands:
-      - apk add --no-cache bash git gawk ripgrep coreutils
+      - apk add --no-cache bash git gawk ripgrep coreutils jq
       - |
         set -eu
         KIWI_HDR='# KiwiCaptcha'
