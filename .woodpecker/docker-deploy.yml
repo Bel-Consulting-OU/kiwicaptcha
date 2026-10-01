@@ -11,6 +11,9 @@
 # pipeline.
 labels:
   capability: docker
+environment:
+  COMPOSE_FILE: deploy/docker-compose.yml
+  COMPOSE_ENV_FILES: deploy/.env
 when:
 - event:
   - push
@@ -37,9 +40,9 @@ steps:
 
     umask 077
 
-    printf ''KIWI_SECRET_KEY=%s\n'' "$$(openssl rand -hex 32)" > .env
+    printf ''KIWI_SECRET_KEY=%s\n'' "$$(openssl rand -hex 32)" > deploy/.env
 
-    printf ''KIWI_SHA_TARGET_BITS=8\n'' >> .env
+    printf ''KIWI_SHA_TARGET_BITS=8\n'' >> deploy/.env
 
     # The Valkey requirepass credential of the compose stack: a
 
@@ -47,7 +50,7 @@ steps:
 
     # every later .env rewrite in this lane.
 
-    printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> .env'
+    printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> deploy/.env'
 - name: docker-compose-up-(valkey-+-captcha)
   image: docker:28-cli
   volumes:
@@ -96,7 +99,7 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
 
-    docker compose cp $$CI_WORKSPACE/.ci-run-tmp/$$CI_WORKSPACE/.ci-run-tmp/challenge.json captcha:/tmp/challenge.json
+    docker compose cp $$CI_WORKSPACE/.ci-run-tmp/challenge.json captcha:/tmp/challenge.json
 
     docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge.json > /tmp/token.txt
 
@@ -166,8 +169,8 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
-      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
-      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)"
+      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)"
       test -n "$$SECRET"
       test -n "$$VALKEY_PASSWORD"
       {
@@ -175,7 +178,7 @@ steps:
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'KIWI_ALGORITHM=argon2id\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-      } > .env
+      } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
         if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
@@ -200,12 +203,12 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
-      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)"
       test -n "$$SECRET"
       # The committed rsw fixture pair (packages/kiwicaptcha-php
       # tests/Support/RswFixture.php) supplies the trapdoor values
       # for the CI-only profile rows; the container's php reads them.
-      docker compose cp ../packages/kiwicaptcha-php/tests/Support/RswFixture.php \
+      docker compose cp packages/kiwicaptcha-php/tests/Support/RswFixture.php \
         captcha:/tmp/RswFixture.php
       MODULUS_N="$$(docker compose exec -T captcha php -r \
         'require "$$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
@@ -213,7 +216,7 @@ steps:
         'require "$$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
       test -n "$$MODULUS_N"
       test -n "$$LAMBDA"
-      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)"
       test -n "$$VALKEY_PASSWORD"
       {
         printf 'KIWI_SECRET_KEY=%s\n' "$$SECRET"
@@ -222,7 +225,7 @@ steps:
         printf 'KIWI_RSW_MODULUS_N=%s\n' "$$MODULUS_N"
         printf 'KIWI_RSW_LAMBDA=%s\n' "$$LAMBDA"
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-      } > .env
+      } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
         if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
@@ -247,15 +250,15 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
-      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
-      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+      SECRET="$$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)"
+      VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)"
       test -n "$$SECRET"
       test -n "$$VALKEY_PASSWORD"
       {
         printf 'KIWI_SECRET_KEY=%s\n' "$$SECRET"
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-      } > .env
+      } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
         if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
