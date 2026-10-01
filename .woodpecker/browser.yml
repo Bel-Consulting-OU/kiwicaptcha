@@ -3,6 +3,8 @@
 # three engines for the pinned lockfile version; PHP is installed for
 # the fixture router, which serves /kiwi-captcha/api.js and
 # /kiwi-captcha/widget.css through the real Symfony controller.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

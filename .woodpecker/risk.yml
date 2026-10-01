@@ -2,6 +2,8 @@
 # risk-rust and risk-parity). A separate workflow file: the parity step
 # installs both a composer vendor tree and a Rust toolchain into the
 # shared workspace, so it must not race the PHP or Rust lanes.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

@@ -8,6 +8,8 @@
 # The actionlint binary is fetched from its versioned release and
 # verified against the published sha256, the same pinned-tool shape the
 # primary pipeline uses.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

@@ -3,6 +3,8 @@
 # file: cargo builds write target/ inside the shared workspace, so the
 # two steps run ordered in this workflow and never alongside another
 # lane's cargo invocation.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

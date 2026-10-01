@@ -5,6 +5,8 @@
 # verifier to the Rust issuer and back to the PHP verifier, and every
 # step reuses the vendor tree an earlier step installed. The chain is
 # fully modelled here, and no other workflow touches this directory.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

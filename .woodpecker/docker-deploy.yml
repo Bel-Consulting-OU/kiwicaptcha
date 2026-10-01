@@ -9,6 +9,8 @@
 # algorithm-ownership tables, the F2 request-binding table and the
 # restart-persistence pass all run here exactly as in the primary
 # pipeline.
+labels:
+  platform: linux/amd64
 when:
 - event:
   - push

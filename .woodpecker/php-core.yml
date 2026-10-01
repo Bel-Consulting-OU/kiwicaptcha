@@ -7,6 +7,8 @@
 #
 # The composer installer is verified against the published sha384
 # signature before it runs, never piped straight from the network.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

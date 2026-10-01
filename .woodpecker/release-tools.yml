@@ -6,6 +6,8 @@
 # A separate workflow file: the perf step installs two composer vendor
 # trees and a Node toolchain, so it must not race another lane in the
 # shared workspace.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

@@ -2,6 +2,8 @@
 # GitHub job redis: consumed transitions, leases and rate limits
 # against a real server, plus the protocol-v3 timeline walk). A
 # separate workflow: it mutates the symfony vendor tree.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

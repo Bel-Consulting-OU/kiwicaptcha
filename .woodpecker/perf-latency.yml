@@ -3,6 +3,8 @@
 # the primary lane: the ratchet is meaningful on a quiet, dedicated
 # host. The fenced Redis service feeds the --redis modes; the preflight
 # proves reachability before the first hard-ratchet gate.
+labels:
+  platform: linux/amd64
 when:
   - event: [manual]
 

@@ -10,6 +10,8 @@
 # share only the workspace and not scratch filesystems. The
 # generated-copy parity and the worker-glue drift check close the
 # asset-integrity surface.
+labels:
+  platform: linux/amd64
 when:
   - event: [push, pull_request, tag, manual]
 

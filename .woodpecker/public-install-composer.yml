@@ -11,6 +11,8 @@
 # server-dependent steps run in ONE step (a background server does not
 # survive between Woodpecker steps), and the clean-room app lives
 # under .ci-run-tmp/ in the workspace.
+labels:
+  platform: linux/amd64
 when:
 - event:
   - manual
