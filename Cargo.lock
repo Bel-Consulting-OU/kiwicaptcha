@@ -318,6 +318,7 @@ dependencies = [
  "hmac",
  "kiwicaptcha",
  "num-bigint",
+ "num-integer",
  "r2d2",
  "rand",
  "redis",

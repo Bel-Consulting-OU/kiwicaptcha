@@ -14,31 +14,23 @@ namespace KiwiCaptcha;
  *   binding_tag = HMAC-SHA256 over the canonical IP, see
  *                {@see self::bindingTag()}; nonce-bound, so the stored
  *                binding is never a stable IP-derived identifier.
- *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
- *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
- *                {min_duration_ms}|{region}|{policy_version}|
-  *                {request_binding}|{issuer}|{kid}". Region,
- *                request_binding and issuer render as the empty segment
- *                when unset; policy_version as the configured
+ *   canonical  = "v3|{protocol_version}|{nonce}|{scope}|{binding_tag}|
+ *                {issued_at}|{expires_at}|{algorithm}|{m_kib}|{t}|{p}|
+ *                {target_bits}|{salt}|{min_duration_ms}|{region}|
+ *                {policy_version}|{request_binding}|{issuer}|{kid}".
+ *                Region, request_binding and issuer render as the empty
+ *                segment when unset; policy_version as the configured
  *                security-policy epoch; kid as the configured signing
- *                key id, the final canonical field. Protocol v3 is the
- *                decoy-capable canonical: when a decoy (honeypot) field
- *                is armed, see {@see self::issueWithDecoyField()},
- *                exactly one more segment is appended after the kid,
- *                ...|{issuer}|{kid}|{decoy_field}, and the stored
- *                record's protocol_version is 3 — see
- *                {@see self::canonicalPayload()}. Unarmed issuance
- *                stays protocol v2, byte-identical to the pre-decoy
- *                format. Protocol v4 is the execution-capable
- *                canonical: when the ExecutionChallengeV1 dimension is
- *                armed, see {@see self::issueWithExecutionField()}, the
- *                execution commitment segments are appended after the
- *                decoy segment (or after the kid when no decoy is
- *                armed).
- *                Then the canonical ends
- *                ...|{kid}|{decoy_field}|
- *                {execution_version}|{execution_commitment}, and the
- *                stored record's protocol_version is 4.
+ *                key id, the final base field. The protocol version is
+ *                signed, and every armed extension is appended tagged:
+ *                d={decoy_field} (protocol v3+), e={version},
+ *                {commitment} (protocol v4+), r={modulus_sha256}
+ *                (protocol v5). The tags make the encoding injective.
+ *                Revision 2 appended the same values untagged, so a v5
+ *                rsw identity could collide with a v3 decoy name. A
+ *                stored version flip or extension swap now always
+ *                breaks the signature. Unarmed issuance stays protocol
+ *                v2 with the same revision-3 base shape.
  *                The commitment is the hex SHA-256 of the program's
  *                base64 wire string, so the signed canonical is the
  *                exact mirror of the stored program. Stripping,
@@ -735,7 +727,16 @@ final class Issuer
         ) {
             $rswIdentity = self::rswModulusSha256($this->config->rswModulusN);
         }
+        // The protocol version is part of the signed canonical (revision
+        // 3): a stored version flip must break the signature. Compute it
+        // before signing and reuse the exact value in the stored record.
+        $issuedProtocolVersion = $rswIdentity !== null
+            ? ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
+            : ($executionProgram !== null
+                ? ChallengeRecord::EXECUTION_PROTOCOL_VERSION
+                : ($decoyField !== null ? ChallengeRecord::DECOY_PROTOCOL_VERSION : ChallengeRecord::BASE_PROTOCOL_VERSION));
         $payload = self::canonicalPayload(
+            $issuedProtocolVersion,
             $nonce,
             $scope,
             $bindingTag,
@@ -802,7 +803,7 @@ final class Issuer
             // segment after the kid), so it is protocol v3; an unarmed
             // record keeps protocol v2 with the byte-identical 18-field
             // canonical.
-            protocolVersion: $rswIdentity !== null ? 5 : ($executionProgram !== null ? 4 : ($decoyField !== null ? 3 : 2)),
+            protocolVersion: $issuedProtocolVersion,
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -1094,103 +1095,56 @@ final class Issuer
     }
 
     /**
-     * Canonical protocol v2 payload: the exact byte string that is signed
-     * and base64-encoded into the challenge. Shared with the verifier so
-     * issuance and verification can never drift apart.
+     * Canonical payload (revision 3): the exact byte string that is
+     * signed and base64-encoded into the challenge. Shared with the
+     * verifier so issuance and verification can never drift apart.
      *
-     * The v2 layout is byte-identical to the Rust crate's
-     * `canonical_signing_input_v2`:
+     * Byte-identical to the Rust `canonical_signing_input_v2`:
      *
-     *     v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|
-     *       p|target_bits|salt|min_duration_ms|region|policy_version|
-     *       request_binding|issuer|kid
+     *     v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|
+     *       algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|
+     *       policy_version|request_binding|issuer|kid
      *
-     * `region`, `request_binding` and `issuer` render as the empty segment
-     * when unset. A null region + policy 1 + null binding + null issuer +
-     * kid 1 ends the canonical with `|0||1|||1`. `kid` is the final
-     * field, appended after `issuer`; it is always present (the
-     * configured signing key id, default 1).
+     * `region`, `request_binding` and `issuer` render as the empty
+     * segment when unset; `kid` is the final base field (always present,
+     * the configured signing key id, default 1).
      *
-     * # The decoy-field extension (protocol v3)
+     * # Armed extensions (tagged)
      *
-     * When the issuer arms a decoy (honeypot) form field, the field
-     * name is appended as one extra final segment after the `kid`; see
-     * {@see self::issueWithDecoyField()}. Armed records are protocol
-     * v3; unarmed records stay protocol v2, byte-identical to the
-     * pre-decoy format.
+     * Each armed extension is appended after the base with an explicit
+     * tag, in capability order:
      *
-     * ```text
-     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
-     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-     *   issuer|kid|decoy_field
-     * ```
+     *     ...|kid|d={decoy_field}|e={version},{commitment}|r={modulus_sha256}
      *
-     * - `decoy_field` is the literal armed decoy name: a grammar prefix
-     * plus the 16-hex `CSPRNG` suffix (e.g.
-     * `billing_address_line_a3f9c21d8e5b7401`), see
-     * {@see self::composeDecoyName()}, so it can never contain
-     * the `|` separator (the alphabet is `[a-z_0-9]`; validation
-     * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-     * - The segment is appended only when a decoy is armed, and the
-     * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy
-     * present. `null` renders
-     * nothing extra, so the canonical string is byte-identical to the
-     * pre-extension format. Outstanding unarmed challenges and
-     * cross-language records keep verifying unchanged across the
-     * upgrade, and the extension is invisible until a deployment opts
-     * in. The exact recipe: build the same 18-field base string, then
-     * append `'|' . $decoyField` if and only if the record carries a
-     * non-null `decoy_field`; sign/HMAC-verify the result with the
-     * `HKDF`-derived challenge key (`K_challenge`) exactly as before.
-     * The stored record JSON carries the optional string key
-     * `decoy_field` (absent when null — not a JSON `null` key); the
-     * client-facing challenge response carries the optional key
-     * `decoy_field` with the same value.
-     * - Wire compatibility: unarmed records are byte-identical in both
-     * directions; armed records are protocol v3 and require a
-     * v3-capable verifier (an old verifier rejects version 3 as
-     * unknown — the capability becomes inferable from
-     * protocol_version, which is the point). The grammar is enforced on
-     * both acceptance surfaces: a v2 record carrying `decoy_field` is
-     * malformed, and a v3 record without one is malformed too. The
-     * decoy is mandatory on v3, so a stored version flip can never
-     * change the effective protocol.
+     * - `d=` (protocol v3): the armed decoy name, see
+     *   {@see self::issueWithDecoyField()}. `null` renders no segment.
+     * - `e=` (protocol v4): the ExecutionChallengeV1 version and the hex
+     *   SHA-256 of the program's base64 wire string, see
+     *   {@see self::issueWithExecutionField()}. Both are always present
+     *   together; the signed commitment is the exact mirror of the stored
+     *   program, and the verifier additionally checks
+     *   SHA256(stored program) == commitment.
+     * - `r=` (protocol v5): the canonical-byte rsw modulus fingerprint.
      *
-     * # The execution-commitment extension (protocol v4)
+     * # Why the tags and the signed version
      *
-     * When the issuer arms the ExecutionChallengeV1 dimension, the
-     * execution version and the program commitment are appended as two
-     * more final segments after the decoy segment (or after the `kid`
-     * when no decoy is armed).
-     * See {@see self::issueWithExecutionField()}.
-     * Execution-armed records are protocol v4.
-     *
-     * ```text
-     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
-     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-     *   issuer|kid[|decoy_field]|execution_version|execution_commitment
-     * ```
-     *
-     * - `execution_version` is the canonical numeric byte carrying the
-     *   execution grammar version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
-     *   when armed (decimal on the wire; never `|`-capable).
-     * - `execution_commitment` is the hex SHA-256 of the stored
-     *   program's base64 wire string: 64 lowercase hex characters,
-     *   never `|`-capable.
-     * - The segments are appended only when the record carries an
-     *   execution program, and the protocol-vs-execution grammar is
-     *   total: v2/v3 => no execution, v4 => execution present. The
-     *   signed commitment is therefore the exact mirror of the stored
-     *   program: a stored/tampered record cannot strip, substitute or
-     *   inject a program without breaking the signature (the
-     *   equivalence is additionally enforced by the verifier's
-     *   SHA256(stored program) == commitment check).
-     * - Wire compatibility: unarmed and decoy-only records are
-     *   byte-identical in both directions; execution-armed records are
-     *   protocol v4 and require a v4-capable verifier (an old verifier
-     *   rejects version 4 as unknown).
+     * Revision 2 signed `v2|...` for every protocol version and appended
+     * the extensions as bare positional segments, so the encoding was
+     * not injective. A v5 rsw record with identity `H` and no decoy
+     * signed the same bytes as a v3 record with decoy `H`. A v4
+     * execution pair signed the same bytes as a v5 decoy plus identity
+     * pair. An attacker who can write challenge storage could therefore
+     * reshape a record while keeping a valid signature, for example
+     * downgrading v5 to v3 and stripping the rsw identity pinning.
+     * Revision 3 signs `protocol_version` and tags every extension, so
+     * distinct capability shapes can never collide. The shared grammar
+     * gate still enforces which shape each version allows. Supporting
+     * both layouts by version would keep the attack alive for stored
+     * records, so revision 3 is a hard cutover: a challenge issued by a
+     * revision-2 node does not verify after a rolling deploy.
      */
     public static function canonicalPayload(
+        int $protocolVersion,
         string $nonce,
         string $scope,
         string $bindingTag,
@@ -1214,7 +1168,8 @@ final class Issuer
         ?string $rswModulusSha256 = null,
     ): string {
         $base = sprintf(
-            'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
+            'v3|%d|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
+            $protocolVersion,
             $nonce,
             $scope,
             $bindingTag,
@@ -1238,7 +1193,7 @@ final class Issuer
         // nothing extra, so the unarmed canonical stays byte-identical to
         // the legacy 18-field format.
         if ($decoyField !== null) {
-            $base .= '|'.$decoyField;
+            $base .= '|d='.$decoyField;
         }
         // The execution commitment segments are appended only when the
         // record carries an execution program — and only as the exact
@@ -1251,14 +1206,14 @@ final class Issuer
                     'execution_version and execution_commitment must be passed together'
                 );
             }
-            $base .= '|'.$executionVersion.'|'.$executionCommitment;
+            $base .= '|e='.$executionVersion.','.$executionCommitment;
         }
         // The rsw trapdoor identity is appended only when the record
         // carries it: a legacy rsw record (bound before the identity
         // existed) signs the canonical it always signed, and a
         // post-binding record authenticates its modulus.
         if ($rswModulusSha256 !== null) {
-            $base .= '|'.$rswModulusSha256;
+            $base .= '|r='.$rswModulusSha256;
         }
 
         return $base;

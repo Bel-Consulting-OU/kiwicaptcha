@@ -534,6 +534,65 @@ final class ValidatorTest extends TestCase
         self::assertSame([RiskEventKind::MalformedToken], $events, 'an undecodable token must record the MalformedToken event, never a 500');
     }
 
+    public function testARiskOutageDuringPostSolveFeedbackStillPassesAValidVerification(): void
+    {
+        // The token is valid and consumed; the post-solve feedback
+        // (solveOutcome -> risk engine observe) hits a store outage. The
+        // feedback is evidence only: the verification must still pass,
+        // never surface as a 500 or as a retryable provider error.
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $risk['store']->throwing = true;
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway']);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(0, $violations, 'a risk-store outage on the post-solve feedback must never fail a valid token');
+        self::assertSame($challenge->nonce, $validator->verifiedJti());
+        self::assertSame([], $risk['store']->observations, 'the outage happened before any observation landed');
+    }
+
+    public function testARiskOutageDuringFailureFeedbackStillReportsTheViolation(): void
+    {
+        // Failure-path feedback is evidence only too: an outage must not
+        // replace the ordinary invalid-token violation with a 500.
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $risk['store']->throwing = true;
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveInsufficientWorkToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway']);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+    }
+
     public function testFailedSolveWithoutClientIpRecordsNoRiskFeedbackButStillViolates(): void
     {
         $storage = new ArrayStorage();

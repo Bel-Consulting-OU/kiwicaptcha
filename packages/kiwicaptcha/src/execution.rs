@@ -265,12 +265,28 @@ pub const OP_DOM_EVENT_PHASE: u8 = 41;
 /// The version-5 URL canon: the SHA-256 of the canonicalized sandboxed
 /// document URL, the one browser-observed entry of the rung.
 pub const OP_DOM_URL_CANON: u8 = 42;
+
+/// The SHA-256 hex of the canonical sandboxed document URL the widget
+/// execution sandbox always has: `about:srcdoc`. The version-5
+/// URL-canon probe reports this value, and the trace walker pins it
+/// (exact equality, not a shape check): the environment evidence is a
+/// constant, so any other digest is fabricated.
+pub const SRCDOC_URL_DIGEST: &str =
+    "4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2";
 /// The version-5 text mutate: sets the current node's textContent to
 /// the value operand.
 pub const OP_DOM_TEXT_MUTATE: u8 = 43;
 /// The version-5 select-depth: descends by the three child-index
 /// bytes; the entry is the number of descents completed.
 pub const OP_DOM_SELECT_DEP: u8 = 44;
+
+/// The number of elements already present in the srcdoc body before the
+/// program's own nodes: the harness template always carries exactly one
+/// `<script>` element (the interpreter bootstrap), so the browser's
+/// sibling index of a program-built node is its append rank plus this
+/// constant. Shared by the verify walker and the browser-equivalent
+/// synthesizer so the two can never disagree about the template shape.
+pub const SRCDOC_PREEXISTING_BODY_ELEMENTS: usize = 1;
 pub const OP_COUNT: u8 = 45;
 
 /// The trace entry names, one per opcode (index = opcode).
@@ -674,10 +690,17 @@ pub fn generate(
         let opcode = cursor.next_byte() % 28;
         ops.push((opcode, draw_operands(&mut cursor, opcode)));
     }
-    // The count byte is drawn before the extra probes, so the op list
-    // can overshoot it on the smallest counts; the emission is capped
-    // at the stamped count, the exact number every decoder reads, so
-    // each minted blob ends at EOF and stays inside the grammar.
+    // The fill loop adds one op per iteration and checks the bound
+    // before each push, so the list lands on exactly the stamped count.
+    // There is no truncation: correctness rests on the fill arithmetic,
+    // and this assertion pins it so a future skeleton change that starts
+    // above the count fails loudly instead of minting a blob whose
+    // count byte disagrees with its body.
+    debug_assert_eq!(
+        ops.len() as u8,
+        op_count,
+        "the emitted op list must equal the stamped count byte exactly"
+    );
     for (opcode, operands) in ops.iter() {
         program.push(*opcode);
         program.extend_from_slice(operands);
@@ -2029,14 +2052,13 @@ pub mod fixtures {
     /// measurement.
     pub const OBSERVED_HEIGHT: u8 = 10;
 
-    /// The fabricated canonical-URL digest of the version-5 URL-canon
-    /// probe. The real entry is the SHA-256 of the canonicalized
-    /// sandboxed document URL, environment evidence the verifier
-    /// shape-validates and replays, never predicts. The synthesizer
-    /// uses this fixed hex reference value exactly like the fixed
-    /// observed height above, a fabricated reference value.
-    pub const FABRICATED_URL_DIGEST: &str =
-        "e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7";
+    /// The canonical-URL digest reference of the version-5 URL-canon
+    /// probe, [`SRCDOC_URL_DIGEST`]. The browser entry is the SHA-256 of
+    /// the canonicalized sandboxed document URL, which for the srcdoc
+    /// iframe is always `about:srcdoc`; the verifier pins the walker to
+    /// that exact constant, and the synthesizer uses the same fixed
+    /// reference value.
+    pub const FABRICATED_URL_DIGEST: &str = SRCDOC_URL_DIGEST;
 
     /// The browser-equivalent executed trace of a program: the canonical
     /// trace with the layout-probe placeholders replaced by valid
@@ -2142,7 +2164,7 @@ pub mod fixtures {
                     append_rank
                         .get(&operand_bytes(op, "id"))
                         .copied()
-                        .map(|rank| rank + 1)
+                        .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS)
                         .unwrap_or(usize::MAX)
                 ));
             } else if op.opcode == OP_DOM_OBSERVE {
@@ -2356,7 +2378,7 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 let expected = append_rank
                     .get(&operand_bytes(op, "id"))
                     .copied()
-                    .map(|rank| rank + 1);
+                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS);
                 let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
                 let end = rest.find(')')?;
                 let value: usize = rest[..end].parse().ok()?;
@@ -2399,9 +2421,7 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 // byte, so no u8 write follows the obs replay rule.
                 let end = pos + 64;
                 if end + 1 > bytes.len()
-                    || !bytes[pos..end]
-                        .iter()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    || &bytes[pos..end] != SRCDOC_URL_DIGEST.as_bytes()
                     || bytes[end] != b')'
                 {
                     return None;

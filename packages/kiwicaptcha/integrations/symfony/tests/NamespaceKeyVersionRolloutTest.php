@@ -200,7 +200,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         self::assertSame(503, $response->getStatusCode(), 'the epoch-6 node must not be admitted while the legacy floor is 7');
         $body = json_decode((string) $response->getContent(), true);
         self::assertStringContainsString(
-            'security_policy_incompatible:min_policy_epoch_'.self::CENTRAL_EPOCH,
+            'security_policy_incompatible',
             (string) ($body['reason'] ?? ''),
             'the readiness reason names the legacy revocation',
         );
@@ -1144,7 +1144,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         ]);
         $storeA = new RedisSiteVerifyIdempotencyStore($client, '/srv/prod-a');
         $storeB = new RedisSiteVerifyIdempotencyStore($client, '/srv/prod-b');
-        $backendId = hash('sha256', 'shared-secret|login|'.self::CONFIGURED_EPOCH.'|shared-context-digest');
+        $backendId = hash_hmac('sha256', 'login|'.self::CONFIGURED_EPOCH.'|shared-context-digest', 'shared-secret');
         $uuid = 'rollout-shared-'.bin2hex(random_bytes(8));
         $responseHash = hash('sha256', 'canonical-response');
         $keyA = '{kiwi:'.RedisNamespace::derive('/srv/prod-a').'}:siteverify-idem:'.$backendId.':'.$uuid;

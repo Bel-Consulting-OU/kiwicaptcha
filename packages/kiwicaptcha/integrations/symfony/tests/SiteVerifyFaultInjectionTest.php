@@ -343,7 +343,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $token = SolutionToken::create($challenge->nonce, $solution, 5000, [])->encode();
         usleep(($challenge->minDurationMs + 10) * 1000);
         $uuid = 'a1b2c3d4-1111-4a2b-8c3d-000000000001';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $probe->disconnect();
@@ -624,7 +624,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $uuidK = 'b2c3d4e5-2222-4b3c-9d4e-111111111111';
         $uuidK2 = 'c3d4e5f6-3333-4c4d-ae5f-222222222222';
         $uuidK3 = 'd4e5f6a7-4444-4d5e-bf6a-333333333333';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $idemK = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK;
         $idemK2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK2;
         $idemK3 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuidK3;
@@ -722,8 +722,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $secret1 = 'secret-one-'.str_repeat('a', 16);
         $secret2 = 'secret-two-'.str_repeat('b', 16);
         $uuid = 'e5f6a7b8-5555-4e6f-ca7b-444444444444';
-        $backendId1 = hash('sha256', $secret1.'|login|0|');
-        $backendId2 = hash('sha256', $secret2.'|login|0|');
+        $backendId1 = hash_hmac('sha256', 'login|0|', $secret1);
+        $backendId2 = hash_hmac('sha256', 'login|0|', $secret2);
         $idemKey1 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId1.':'.$uuid;
         $idemKey2 = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId2.':'.$uuid;
         $probe->del([$idemKey1, $idemKey2]);
@@ -798,11 +798,11 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         }
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage);
-        $digestA = hash('sha256', 'issuer-a|region-a|[]|[]');
-        $digestB = hash('sha256', 'issuer-b|region-a|[]|[]');
+        $digestA = hash_hmac('sha256', 'region-a|[]|[]', 'issuer-a');
+        $digestB = hash_hmac('sha256', 'region-a|[]|[]', 'issuer-b');
         $uuid = 'f6a7b8c9-6666-4f7a-db8c-555555555555';
-        $backendIdA = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestA);
-        $backendIdB = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|'.$digestB);
+        $backendIdA = hash_hmac('sha256', 'login|0|'.$digestA, self::SITEVERIFY_SECRET);
+        $backendIdB = hash_hmac('sha256', 'login|0|'.$digestB, self::SITEVERIFY_SECRET);
         $idemKeyA = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendIdA.':'.$uuid;
         $idemKeyB = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendIdB.':'.$uuid;
         $probe->del([$idemKeyA, $idemKeyB]);
@@ -863,8 +863,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         [$token] = $this->issuedToken($storage, policyVersion: 0);
         $store = new ArraySiteVerifyIdempotencyStore();
         $uuid = 'a7b8c9d0-7777-4a8b-ec9d-666666666666';
-        $backendId0 = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $backendId1 = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $backendId0 = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $backendId1 = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
 
         $verifier0 = new Verifier($storage);
         $verifier0->setExpectedPolicyVersion(0);
@@ -909,8 +909,8 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         [$token] = $this->issuedToken($storage, policyVersion: 0);
         $store = new ArraySiteVerifyIdempotencyStore();
         $uuid = 'b8c9d0e1-8888-4b9c-fd0e-777777777777';
-        $backendId0 = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
-        $backendId1 = hash('sha256', self::SITEVERIFY_SECRET.'|login|1|');
+        $backendId0 = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
+        $backendId1 = hash_hmac('sha256', 'login|1|', self::SITEVERIFY_SECRET);
 
         $redisA = new FakePredisClient();
         $redisA->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '0');
@@ -963,7 +963,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $store = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $store, storage: $storage);
         $uuid = 'c9d0e1f2-9999-4cad-ae1f-888888888888';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
 
         $first = (string) $controller->siteverify($this->siteverifyRequest([
             'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'idempotency_key' => $uuid,
@@ -1016,7 +1016,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $idemStore = new ArraySiteVerifyIdempotencyStore();
         $controller = $this->controller(idempotencyStore: $idemStore, riskGateway: $gateway);
         $uuid = 'd0e1f2a3-aaaa-4dbe-bf2a-999999999999';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $malformed = 'not-a-kiwi-solution-token';
 
         // No remoteip: the MalformedToken feedback has no source to
@@ -1085,7 +1085,7 @@ final class SiteVerifyFaultInjectionTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, , $nonce] = $this->issueSha($storage, 180);
         $uuid = 'f2a3b4c5-cccc-4fd0-db4c-bbbbbbbbcccc';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $probe->disconnect();

@@ -14,7 +14,9 @@
   // No device-capability or screen-size signals are ever collected, and
   // scrolling/touch interactions are not tracked; navigator.webdriver is
   // only reported in "full" mode. Event timings are only recorded in
-  // "full" mode, capped at 20 entries and quantized to 250 ms buckets.
+  // "full" mode, capped at 32 entries (the verifier's entropy check
+  // needs at least 24 discrete events, so a 20-entry cap could never
+  // reach it) and quantized to 250 ms buckets.
   function telemetrySession(container, W, mode) {
     var mouseEvents = 0, keyEvents = 0, eventTimings = [];
     function onEvent(e) {
@@ -24,7 +26,7 @@
       } else {
         mouseEvents++;
       }
-      if (mode === "full" && eventTimings.length < 20) {
+      if (mode === "full" && eventTimings.length < 32) {
         eventTimings.push(Math.round(performance.now() / 250) * 250);
       }
     }

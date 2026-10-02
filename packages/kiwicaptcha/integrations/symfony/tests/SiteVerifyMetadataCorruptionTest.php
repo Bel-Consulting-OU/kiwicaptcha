@@ -132,7 +132,7 @@ final class SiteVerifyMetadataCorruptionTest extends TestCase
         }
         $client = new \Predis\Client(['host' => parse_url($url, PHP_URL_HOST) ?: '127.0.0.1', 'port' => parse_url($url, PHP_URL_PORT) ?: 6379]);
         $store = new RedisSiteVerifyIdempotencyStore($client, 'kiwitest:result-corrupt:'.getmypid());
-        $backendId = hash('sha256', 'secret|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'secret');
         $uuid = 'eeeeeeee-cach-4b2c-8c3d-000000000c05';
         $hash = hash('sha256', 'response');
         // Seed a legitimate completed record directly (the exact

@@ -56,7 +56,7 @@ final class RealRedisPresentEmptyStateTest extends TestCase
     public function testASubSecondLifetimeIsLiveNotStrippedCorruption(): void
     {
         $store = new RedisSiteVerifyIdempotencyStore($this->client, 'kiwicaptcha-emptystate');
-        $backendId = hash('sha256', 'emptystate|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'emptystate');
         $uuid = 'a1b2c3d4-1111-4000-8000-00000000000a';
         $key = '{kiwi:kiwicaptcha-emptystate}:siteverify-idem:'.$backendId.':'.$uuid;
         $this->client->del([$key]);
@@ -162,7 +162,7 @@ final class RealRedisPresentEmptyStateTest extends TestCase
     public function testAPresentEmptySiteVerifyRecordFailsClosedAndIsNeverHealed(): void
     {
         $store = new RedisSiteVerifyIdempotencyStore($this->client, 'kiwicaptcha-emptystate');
-        $backendId = hash('sha256', 'emptystate|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'emptystate');
         $uuid = 'a1b2c3d4-2222-4000-8000-00000000000b';
         $key = '{kiwi:kiwicaptcha-emptystate}:siteverify-idem:'.$backendId.':'.$uuid;
         $this->client->set($key, '', 'EX', 60);
@@ -264,7 +264,7 @@ final class RealRedisPresentEmptyStateTest extends TestCase
         // The counterpart rule: a deleted key is genuinely absent, so a
         // fresh claim/disposition/chain may start exactly as before.
         $store = new RedisSiteVerifyIdempotencyStore($this->client, 'kiwicaptcha-emptystate');
-        $backendId = hash('sha256', 'emptystate|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'emptystate');
         $uuid = 'a1b2c3d4-3333-4000-8000-00000000000c';
         $key = '{kiwi:kiwicaptcha-emptystate}:siteverify-idem:'.$backendId.':'.$uuid;
         $this->client->del([$key]);

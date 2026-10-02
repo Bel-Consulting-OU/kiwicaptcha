@@ -248,6 +248,7 @@ final class ParityTest extends TestCase
         // The challenge is base64(canonical v2 payload) . "." . hex(hmac).
         [$payloadB64, $signature] = explode('.', $challenge->challenge, 2);
         $canonical = Issuer::canonicalPayload(
+            2,
             $challenge->nonce,
             'login',
             $bindingTag,

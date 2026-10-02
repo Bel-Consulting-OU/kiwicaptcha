@@ -44,8 +44,15 @@ use KiwiCaptcha\VerificationAdmissionGate;
  */
 final class RedisAdmissionSemaphore implements VerificationAdmissionGate
 {
-    /** Default lease lifetime in ms; expired leases are reaped by the next acquire. */
-    private const DEFAULT_LEASE_MS = 45_000;
+    /**
+     * Default lease lifetime in ms; expired leases are reaped by the
+     * next acquire. Must exceed the SiteVerify ownership lease (60 s,
+     * the documented maximum verification window): a derivation that
+     * outlives the 45 s legacy default would have its slot reaped while
+     * still running, oversubscribing the Argon cap. 90 s leaves the
+     * documented window plus a safety margin.
+     */
+    private const DEFAULT_LEASE_MS = 90_000;
 
     /**
      * Atomic acquire with the bounded saturation-pressure counter and the

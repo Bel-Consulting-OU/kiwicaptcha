@@ -157,6 +157,7 @@ final class RegionBindingTest extends TestCase
         self::assertNotSame($recordA->region, $recordB->region);
 
         $canonicalA = Issuer::canonicalPayload(
+            2,
             $recordA->nonce,
             $recordA->scope,
             $recordA->bindingTag,
@@ -174,6 +175,7 @@ final class RegionBindingTest extends TestCase
             $recordA->requestBinding,
         );
         $canonicalB = Issuer::canonicalPayload(
+            2,
             $recordB->nonce,
             $recordB->scope,
             $recordB->bindingTag,

@@ -220,6 +220,7 @@ final class KiwiHealthController
         private readonly int $executionRequiredVersion = 1,
         private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
         private readonly bool $readLegacyFallback = true,
+        private readonly ?\Psr\Log\LoggerInterface $logger = null,
     ) {
     }
 
@@ -234,34 +235,102 @@ final class KiwiHealthController
 
     /**
      * Readiness: the process may receive traffic. 503 (not ready) with a
-     * machine-readable reason when a leg fails.
+     * generic machine-readable reason when a leg fails; the actionable
+     * detail (the failing authority label, the required protocol/policy
+     * versions) is logged, never exposed on this unauthenticated route.
+     * The route is public by default and belongs behind an internal
+     * network or an allowlist; the result is cached for about a second so
+     * a burst of probes cannot turn into a Redis/authority check storm
+     * (APCu when available, otherwise per-process).
      */
     public function ready(): JsonResponse
     {
+        $now = (int) (microtime(true) * 1000);
+        $cached = $this->readinessCacheGet();
+        if ($cached !== null) {
+            return $this->json($cached['body'], $cached['status']);
+        }
+
+        [$status, $body, $detail] = $this->evaluateReadiness();
+        if ($detail !== null) {
+            $this->logReadinessDetail($detail);
+        }
+        $this->readinessCachePut(['body' => $body, 'status' => $status]);
+
+        return $this->json($body, $status);
+    }
+
+    /**
+     * The readiness evaluation, returning [http status, public body,
+     * optional private detail for the log].
+     *
+     * @return array{0: int, 1: array<string, string>, 2: ?string}
+     */
+    private function evaluateReadiness(): array
+    {
         if ($this->secretKey === '') {
-            return $this->json(['status' => 'not_ready', 'reason' => 'signing_keys_not_configured'], Response::HTTP_SERVICE_UNAVAILABLE);
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'signing_keys_not_configured'], null];
         }
         if (!$this->securityRedisReachable()) {
-            return $this->json(['status' => 'not_ready', 'reason' => 'security_redis_unreachable'], Response::HTTP_SERVICE_UNAVAILABLE);
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_redis_unreachable'], 'security redis unreachable'];
         }
         [$policyOk, $reason] = $this->securityPolicyCompatible();
         if (!$policyOk) {
-            return $this->json(['status' => 'not_ready', 'reason' => $reason ?? 'security_policy_incompatible'], Response::HTTP_SERVICE_UNAVAILABLE);
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_policy_incompatible'], 'security policy incompatible: '.($reason ?? 'unknown')];
         }
         if (!$this->memoryBudgetOk()) {
-            return $this->json(['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], Response::HTTP_SERVICE_UNAVAILABLE);
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], 'memory budget invariant failed'];
         }
         [$authorityOk, $authorityReason, $authorityLabel] = $this->authorityEligible();
         if (!$authorityOk) {
-            $data = ['status' => 'not_ready', 'reason' => $authorityReason];
-            if ($authorityLabel !== null) {
-                $data['authority'] = $authorityLabel;
-            }
-
-            return $this->json($data, Response::HTTP_SERVICE_UNAVAILABLE);
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'authority_not_eligible'], 'authority not eligible: '.$authorityReason.' ('.($authorityLabel ?? 'unknown').')'];
         }
 
-        return $this->json(['status' => 'ready']);
+        return [Response::HTTP_OK, ['status' => 'ready'], null];
+    }
+
+    private const READINESS_CACHE_APCU_KEY = 'kiwicaptcha.health.readiness';
+
+    /**
+     * The 1 s readiness cache is APCu-backed where available (the usual
+     * production setup). Without APCu the probe evaluates per request:
+     * a process-local static would leak a result across unrelated
+     * requests in long-lived runtimes (and across tests), and correctness
+     * beats the burst-saving.
+     *
+     * @return array{body: array<string,string>, status: int}|null
+     */
+    private function readinessCacheGet(): ?array
+    {
+        if (!function_exists('apcu_fetch')) {
+            return null;
+        }
+        $now = (int) (microtime(true) * 1000);
+        $hit = apcu_fetch(self::READINESS_CACHE_APCU_KEY);
+        if (\is_array($hit) && isset($hit['atMs'], $hit['body'], $hit['status']) && $now - (int) $hit['atMs'] < 1000) {
+            return ['body' => $hit['body'], 'status' => (int) $hit['status']];
+        }
+
+        return null;
+    }
+
+    /** @param array{body: array<string,string>, status: int} $result */
+    private function readinessCachePut(array $result): void
+    {
+        if (!function_exists('apcu_store')) {
+            return;
+        }
+        @apcu_store(self::READINESS_CACHE_APCU_KEY, ['body' => $result['body'], 'status' => $result['status'], 'atMs' => (int) (microtime(true) * 1000)], 1);
+    }
+
+    private function logReadinessDetail(string $detail): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->warning('KiwiCaptcha readiness failed: {detail}', ['detail' => $detail]);
+
+            return;
+        }
+        error_log('KiwiCaptcha readiness failed: '.$detail);
     }
 
     /**

@@ -123,7 +123,7 @@ final class RealRedisAdversarialSiteVerifyFaultInjectionTest extends TestCase
 
     private function backendId(string $secret, int $epoch = 0, ?string $digest = null): string
     {
-        return hash('sha256', $secret.'|login|'.$epoch.'|'.$digest);
+        return hash_hmac('sha256', 'login|'.$epoch.'|'.$digest, $secret);
     }
 
     private function operationFingerprint(string $backendId, string $uuid, string $token, ?string $remoteIp = '127.0.0.1', ?string $binding = null): string

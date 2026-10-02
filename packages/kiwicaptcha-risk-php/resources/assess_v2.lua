@@ -190,6 +190,17 @@ end
 if ttl_out_of_bounds(dedupe_ttl) then
     return redis.error_reply('assess_v2: dedupe_ttl_s must be a positive integer no greater than 2147483647 (a persistent or immediately-expired risk hash is not admissible)')
 end
+
+-- ── Numeric argument validation BEFORE any write. ──
+-- Redis does not roll back: a missing or non-numeric numeric ARGV used
+-- to error mid-transition AFTER the dedupe marker was written, losing
+-- the event and refusing an identical retry as a duplicate. Validate
+-- every numeric slot up front, before the first write.
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}) do
+    if tonumber(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric')
+    end
+end
 if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
     return redis.error_reply('assess_v2: outcome_ttl_s must be a positive integer no greater than 2147483647 (a persistent outcome ledger is not admissible)')
 end
@@ -434,7 +445,11 @@ end
 -- inside the non-duplicate branch here would be a strict subset of it:
 -- the same fields one HSET earlier, doubled for no effect).
 local g = read_state(KEYS[9], now)
-local prev_level = g.scope
+-- Corrupt or tampered stored levels above the hysteresis table are
+-- clamped into range (the Rust core applies the same .min(4)); a nil
+-- exit entry would otherwise error mid-transition after the dedupe
+-- marker was written.
+local prev_level = math.min(4, math.max(1, tonumber(g.scope) or 1))
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then

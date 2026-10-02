@@ -163,7 +163,7 @@ final class RealRedisSiteVerifyAbaTest extends TestCase
             return;
         }
         $namespace = 'aba-'.bin2hex(random_bytes(4));
-        $backendId = hash('sha256', 'aba|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'aba');
         $uuid = 'abababab-1111-4000-8000-000000000a01';
         $key = '{kiwi:'.$namespace.'}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$key]);
@@ -218,7 +218,7 @@ final class RealRedisSiteVerifyAbaTest extends TestCase
     {
         $storage = new ArrayStorage();
         $inner = new ArraySiteVerifyIdempotencyStore();
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $uuid = 'abababab-2222-4000-8000-000000000a02';
         $aba = function () use ($inner, $backendId, $uuid): void {
             // The key expired and a different operation reused it.
@@ -246,7 +246,7 @@ final class RealRedisSiteVerifyAbaTest extends TestCase
     {
         $storage = new ArrayStorage();
         $inner = new ArraySiteVerifyIdempotencyStore();
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $uuid = 'abababab-3333-4000-8000-000000000a03';
         $aba = function () use ($inner, $backendId, $uuid): void {
             [$claimB, $ownerB] = $inner->claim($backendId, $uuid, hash('sha256', 'token-B'), 300, 'no-ip', null, '');
@@ -275,7 +275,7 @@ final class RealRedisSiteVerifyAbaTest extends TestCase
     {
         $storage = new ArrayStorage();
         $inner = new ArraySiteVerifyIdempotencyStore();
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $uuid = 'abababab-4444-4000-8000-000000000a04';
         $aba = function () use ($inner, $backendId, $uuid): void {
             [$claimB, $ownerB] = $inner->claim($backendId, $uuid, hash('sha256', 'token-B'), 300, 'no-ip', null, '');

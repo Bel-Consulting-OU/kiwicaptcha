@@ -494,11 +494,17 @@ pub enum VerifyError {
     #[error("challenge store unavailable — the challenge is presumed intact and can be retried once the store recovers")]
     StorageUnavailable,
     /// The atomic consume (the pending→consumed transition) failed with
-    /// an uncertain I/O error —
-    /// the challenge may or may not have been consumed on the server. The
-    /// consumer MUST NOT retry the consume automatically (the record may
-    /// already be burned); treat the token as unknown instead of replaying
-    /// it. See the consume no-retry rule in `redis_verify`.
+    /// an uncertain I/O error — the challenge may or may not have been
+    /// consumed on the server. The verifier MUST NOT retry the consume
+    /// automatically (the reply may still be in flight and the record may
+    /// already be burned; a blind retry can corrupt the record the first
+    /// attempt did transition). What a caller may do depends on its
+    /// idempotency contract, see the consume no-retry rule in
+    /// `redis_verify`: an idempotent caller that recorded an operation
+    /// identity and key may re-present the same token, because a
+    /// completed consume replays its retained result and an unexecuted
+    /// one is still redeemable; a caller without that identity must treat
+    /// the token as unknown (re-issue) rather than replay it.
     #[error("challenge consumption is indeterminate (storage I/O failure) — the challenge may or may not have been consumed; do not blindly retry this token")]
     ConsumeIndeterminate,
     /// The challenge was already consumed by an earlier verification, and
@@ -1609,12 +1615,18 @@ fn telemetry_is_empty(telemetry: &serde_json::Value) -> bool {
 ///
 /// Hard rejection signals:
 /// - `webdriver` flag is set (Chrome DevTools Protocol / Selenium).
-/// - Solve completes in >30s with zero mouse/key events (headless solver).
-/// - Solve takes >300s total (well beyond the ~30s expected for targetBits=14).
+/// - Solve takes >300s total: well beyond any expected solve (the
+///   highest shipped profile is 20 target bits — ~1.05M expected
+///   hashes, seconds even on a slow device) while still allowing very
+///   slow hardware. There is deliberately NO "long solve with zero
+///   interaction" rule: the widget auto-solves and its listeners sit on
+///   the widget itself, so a real user on a slow device, or on an
+///   Argon2id profile, produces no events and must not be rejected.
+/// - A full synthetic event stream with near-zero timing variance
+///   (see the entropy check below).
 ///
-/// Soft signals (logged but NOT rejected):
-/// - `hardwareConcurrency=0` AND `deviceMemory=0` (likely headless browser).
-/// - `plugins.length=0` AND `hardwareConcurrency=0` (likely headless).
+/// The historical hc/dm/pl soft signals are gone: the widget never sends
+/// those fields, so they fired for every legitimate user.
 pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool {
     let wd = telemetry
         .get("wd")
@@ -1624,39 +1636,27 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         return true;
     }
 
-    let me = telemetry.get("me").and_then(|v| v.as_u64()).unwrap_or(0);
-    let ke = telemetry.get("ke").and_then(|v| v.as_u64()).unwrap_or(0);
-    let hc = telemetry.get("hc").and_then(|v| v.as_u64()).unwrap_or(0);
-    let dm = telemetry.get("dm").and_then(|v| v.as_u64()).unwrap_or(0);
-    let pl = telemetry.get("pl").and_then(|v| v.as_u64()).unwrap_or(0);
-
     // Hard rejection signals:
-    // 1. Solve completes in >30s with zero mouse/key events (headless solver).
-    if duration_ms > 30_000 && me == 0 && ke == 0 {
-        tracing::warn!(
-            duration_ms,
-            me,
-            ke,
-            "KiwiCaptcha: bot suspected — solve took >30s with zero interaction"
-        );
-        return true;
-    }
-
-    // 2. Solve takes >300s total (well beyond expected — a generous bound
-    //    that allows for very slow devices).
+    // 1. Solve takes >300s total (well beyond expected — a generous bound
+    //    that allows for very slow devices). There is deliberately NO
+    //    "long solve with zero interaction" rule: the widget auto-solves
+    //    and its listeners sit only on the widget, so a real user on a
+    //    slow device (or on an Argon2id profile) has no reason to
+    //    interact and would be misclassified as a bot.
     if duration_ms > 300_000 {
         tracing::warn!(duration_ms, "KiwiCaptcha: bot suspected — solve took >300s");
         return true;
     }
 
-    // 3. Entropy check: if there are interactions, check for timing variance.
+    // 2. Entropy check: if there are interactions, check for timing variance.
     //    Bots often simulate events with perfectly uniform intervals.
     //
     //    This check is deliberately conservative:
     //    - It only considers *discrete* events (the widget records pointerdown,
-    //      non-repeat keydown, wheel, and click — never coalesced mousemove or
-    //      OS key auto-repeat), so a uniform interval across 24+ discrete
-    //      human events is not something a person can produce.
+    //      non-repeat keydown, and click — never coalesced mousemove, wheel
+    //      scrolling, or OS key auto-repeat), so a uniform interval across 24+ discrete
+    //      human events is not something a person can produce. The widget
+    //      records up to 32 timings, so this 24-event floor is reachable.
     //    - The coefficient of variation must be near zero (< 2%) AND the mean
     //      interval must be ≥ 8 ms, so a burst of sub-frame events (which can
     //      round to identical millisecond timestamps) is never misclassified.
@@ -1701,23 +1701,9 @@ pub fn score_telemetry(telemetry: &serde_json::Value, duration_ms: u64) -> bool 
         }
     }
 
-    // Soft signals (logged but NOT rejected):
-    if hc == 0 && dm == 0 {
-        tracing::info!(
-            hc,
-            dm,
-            "KiwiCaptcha: possible headless client (hc=0, dm=0) — soft signal, not rejected"
-        );
-    }
-
-    if hc == 0 && pl == 0 {
-        tracing::info!(
-            hc,
-            pl,
-            "KiwiCaptcha: possible headless client (hc=0, pl=0) — soft signal, not rejected"
-        );
-    }
-
+    // The historical hc/dm/pl soft signals are gone: the widget never
+    // sends those fields (they would fire for every legitimate user),
+    // and this function returns true only for a real rejection.
     false
 }
 
@@ -3744,9 +3730,12 @@ mod tests {
         // Too slow rejection
         assert!(score_telemetry(&t1, 301_000));
 
-        // Zero interaction long solve rejection
+        // A long solve with zero interaction is NOT rejected: the widget
+        // auto-solves with widget-local listeners, so a slow device or an
+        // Argon2id profile legitimately produces no events.
         let t3 = json!({"wd": false, "me": 0, "ke": 0});
-        assert!(score_telemetry(&t3, 31_000));
+        assert!(!score_telemetry(&t3, 31_000));
+        assert!(!score_telemetry(&t3, 299_000));
 
         // Bot simulation rejection: 24+ discrete events at perfectly uniform
         // intervals (CV ~ 0, mean >= 8ms).
@@ -3991,14 +3980,16 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_rejects_long_headless_solve_without_interaction() {
+    fn telemetry_does_not_reject_long_auto_solve_without_interaction() {
         use serde_json::json;
         let t = json!({ "wd": false, "me": 0, "ke": 0, "et": [] });
-        assert!(score_telemetry(&t, 31_000));
-        assert!(score_telemetry(&t, 301_000));
-        // A normal-duration solve with no interaction is fine (users may not
-        // touch the page while it auto-solves).
+        // The widget auto-solves and listens only on the widget: no
+        // interaction is the ordinary case, not a bot signal.
+        assert!(!score_telemetry(&t, 31_000));
+        assert!(!score_telemetry(&t, 299_000));
         assert!(!score_telemetry(&t, 4000));
+        // The absolute solve bound still rejects.
+        assert!(score_telemetry(&t, 301_000));
     }
 
     #[test]
@@ -6151,34 +6142,40 @@ mod tests {
     }
 
     #[test]
-    fn signed_argon2_record_at_max_parallelism_verifies() {
-        // Ceiling outcome for p: the parallelism ceiling is 4, so a
-        // properly signed record with p=4 (and m_kib >= 8*p, t >= 3) must
-        // verify.
+    fn signed_argon2_record_at_the_pinned_parallelism_verifies() {
+        // The parallelism space is pinned to p == 1 (the libsodium-backed
+        // PHP verifier has no p parameter and refuses anything else), so
+        // the floor/ceiling pair is 1/1 and the shipped profile verifies.
         let mut record = make_argon2_record(4, 64);
-        record.p = 4;
-        record.m_kib = 64; // >= 8 * 4
+        record.p = 1;
+        record.m_kib = 64;
         resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
-        assert!(record.p <= crate::challenge::MAX_PARALLELISM);
-        let counter = solve_for_test(&record).expect("p=4 argon solve finds a counter");
+        assert_eq!(crate::challenge::MIN_PARALLELISM, 1);
+        assert_eq!(crate::challenge::MAX_PARALLELISM, 1);
+        let counter = solve_for_test(&record).expect("argon solve finds a counter");
         assert!(
             matches!(
                 verify(&mut record, counter, 5000),
                 VerifyOutcome::Valid { .. }
             ),
-            "p=4 (at the parallelism ceiling) must verify"
+            "the pinned p=1 profile must verify"
         );
     }
 
     #[test]
-    fn signed_argon2_record_above_max_parallelism_is_rejected() {
-        let mut record = make_argon2_record(4, 128);
-        record.p = 5; // above the parallelism ceiling
-        resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
-        assert_eq!(
-            verify(&mut record, 0, 5000),
-            VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params)
-        );
+    fn signed_argon2_record_above_the_pinned_parallelism_is_rejected() {
+        // A signed p >= 2 record is authentic but unsupported: Rust and
+        // PHP must agree that it is never derivable.
+        for p in [2u32, 4, 5] {
+            let mut record = make_argon2_record(4, 128);
+            record.p = p;
+            resign_v2(&mut record, "test-key-32-bytes-0123456789abcd");
+            assert_eq!(
+                verify(&mut record, 0, 5000),
+                VerifyOutcome::Invalid(VerifyError::UnsupportedArgon2Params),
+                "p={p} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -6207,8 +6204,8 @@ mod tests {
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
-    const FIXTURE_CHALLENGE_V2: &str = "djJ8UVVKRFJFVkdSMGhKU2t0TVRVNVBVRkZTVTFSVlZsZFlXVnBoWW1Oa1pXWT18bG9naW58NWIxMDU0MjRmZTNhNWNmYTNhZmRjY2RhOTVmNzM0YzllNjZlZTcwM2U4YjhkNDI2YTA3Y2ZlMWNiOWM4OTU0ZnwxNzAwMDAwMDAwfDE3MDAwMDAxMjB8c2hhMjU2fDB8MXwxfDh8TVRJek5EVTJOemc1TUdGaVkyUmxaZz09fDB8fDF8fHwx.145669d338579ed579537accc7be3f9b4004e01af9bc5a5ede4e5761df9bde88";
+    const FIXTURE_CANONICAL_V2: &str = "v3|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
+    const FIXTURE_CHALLENGE_V2: &str = "djN8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDE=.ad26185231b547fe467ef8de28029e0fbaff955bc5f31350d0421fd89f3e525e";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";

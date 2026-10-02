@@ -1307,9 +1307,17 @@ final class ChallengeController
 
                 $this->releaseChain($chainId, $chainOwner);
 
+                // The just-minted risk session must ride the 429 too:
+                // the sourceRateLimitHit evidence above was recorded
+                // against it, and a client that never receives the
+                // cookie mints a fresh session on every retry, losing
+                // the session reputation that partly drives the limit.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
         }
@@ -1928,7 +1936,7 @@ final class ChallengeController
         $stage2IssuedCommitted = false;
         try {
             if ($chainId !== null) {
-                $chainResponse = $this->markStage2Issued($challenge, $chainId, $chainOwner, $clientIp, $outstandingAdmissionHeld);
+                $chainResponse = $this->markStage2Issued($challenge, $chainId, $chainOwner, $clientIp, $outstandingAdmissionHeld, $request, $riskSession, $mintedCookie);
                 if ($chainResponse !== null) {
                     return $chainResponse;
                 }
@@ -1943,8 +1951,25 @@ final class ChallengeController
             // risk.nonce_to_decision_ttl_secs).
             $this->issuanceCounter?->record();
             if ($this->risk !== null && $riskAssessed && $decision !== null) {
-                $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
-                $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
+                // Issue-debt feedback and the nonce->decision pairing are
+                // evidence on top of an already-minted, already-admitted
+                // challenge: a risk-Redis blip must never discard the
+                // challenge (rollback) or escape as a raw 500. The
+                // pairing is best-effort too; losing it degrades only
+                // later confirmation attribution.
+                try {
+                    $this->risk->challengeIssued($scope, $clientIp, $riskSession, $decision->decisionId);
+                } catch (\Throwable $riskFailure) {
+                    $this->logGate('kiwicaptcha: challengeIssued feedback failed for nonce_id={nonce_id}: {message}', [
+                        'nonce_id' => substr(hash('sha256', $challenge->nonce), 0, 16),
+                        'message' => $riskFailure->getMessage(),
+                    ]);
+                }
+                try {
+                    $this->risk->attachDecisionForNonce($challenge->nonce, $decision->decisionId);
+                } catch (\Throwable) {
+                    // Evidence only.
+                }
             }
         } catch (\Throwable $e) {
             if ($stage2IssuedCommitted) {
@@ -1969,10 +1994,23 @@ final class ChallengeController
             // not handed out, so the whole uncommitted issuance attempt is
             // rolled back (the minted record discarded, the admitted
             // outstanding slot returned, the chain reservation released);
-            // then the failure propagates (the caller maps it to the
-            // closed response).
+            // then the private structured 503 answers — never a raw 500.
+            // The bundle has no kernel.exception listener, so a propagated
+            // exception would reach the client as an unhandled error
+            // instead of the documented retryable envelope.
             $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
-            throw $e;
+            $this->logGate('kiwicaptcha: pre-commit issuance failed for nonce_id={nonce_id}: {message}', [
+                'nonce_id' => substr(hash('sha256', $challenge->nonce), 0, 16),
+                'message' => $e->getMessage(),
+            ]);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
         }
 
         // The handoff body is serialized from the stored record through
@@ -2023,7 +2061,10 @@ final class ChallengeController
                     $mintedCookie,
                 );
             }
-            $challengeData = $this->issuanceResponseFromRecord($storedRecord);
+            $challengeData = $this->issuanceResponseOrUnavailable($storedRecord, $request, $riskSession, $mintedCookie);
+            if ($challengeData instanceof JsonResponse) {
+                return $challengeData;
+            }
         }
 
         // Handoff: the challenge is durably issued and stored, the metadata
@@ -2309,9 +2350,17 @@ final class ChallengeController
                     ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
                     : 'Too many cancellation requests from this address. Try again later.';
 
+                // The just-minted risk session must ride the 429 too:
+                // the sourceRateLimitHit evidence above was recorded
+                // against it, and a client that never receives the
+                // cookie mints a fresh session on every retry, losing
+                // the session reputation that partly drives the limit.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
         } elseif ($this->cancellationLimiter !== null) {
@@ -2339,9 +2388,17 @@ final class ChallengeController
                     ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
                     : 'Too many cancellation requests from this address. Try again later.';
 
+                // The just-minted risk session must ride the 429 too:
+                // the sourceRateLimitHit evidence above was recorded
+                // against it, and a client that never receives the
+                // cookie mints a fresh session on every retry, losing
+                // the session reputation that partly drives the limit.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
         }
@@ -2857,9 +2914,26 @@ final class ChallengeController
                     // Pending and still valid: recover the exact issuance
                     // response (no re-mint, no re-admission). Exactly one
                     // fence per store before the hand-out.
-                    $this->confirmRecoveryBarriers();
+                    try {
+                        $this->confirmRecoveryBarriers();
+                    } catch (\Throwable $fenceFailure) {
+                        $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-                    return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                        return $this->privateJson(
+                            ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                            Response::HTTP_SERVICE_UNAVAILABLE,
+                            $request,
+                            $riskSession,
+                            $mintedCookie,
+                        );
+                    }
+
+                    $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+                    if ($builtResponse instanceof JsonResponse) {
+                        return $builtResponse;
+                    }
+
+                    return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
                 // margin): the prior nonce must become provably
@@ -2963,9 +3037,26 @@ final class ChallengeController
             // Pending: the issued challenge is still live, so recover the
             // exact issuance response (no re-mint, no re-admission). One
             // fence before the hand-out.
-            $this->confirmRecoveryBarriers();
+            try {
+                $this->confirmRecoveryBarriers();
+            } catch (\Throwable $fenceFailure) {
+                $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-            return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+
+            $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+            if ($builtResponse instanceof JsonResponse) {
+                return $builtResponse;
+            }
+
+            return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
@@ -3044,9 +3135,26 @@ final class ChallengeController
             return null;
         }
 
-        $this->confirmRecoveryBarriers();
+        try {
+            $this->confirmRecoveryBarriers();
+        } catch (\Throwable $fenceFailure) {
+            $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-        return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
+
+        $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+        if ($builtResponse instanceof JsonResponse) {
+            return $builtResponse;
+        }
+
+        return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
@@ -3069,7 +3177,7 @@ final class ChallengeController
      *    this nonce: the minted record is discarded, the slot returned,
      *    the reservation released (503).
      */
-    private function markStage2Issued(\KiwiCaptcha\Challenge $challenge, string $chainId, string $chainOwner, string $clientIp, bool $outstandingAdmissionHeld): ?JsonResponse
+    private function markStage2Issued(\KiwiCaptcha\Challenge $challenge, string $chainId, string $chainOwner, string $clientIp, bool $outstandingAdmissionHeld, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
         // The issuance-time requirement check: a concurrent stage-1 solve
         // for the same transaction may have raised the chain's requirement
@@ -3097,6 +3205,9 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                 Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
             );
         }
         try {
@@ -3118,6 +3229,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
             if (($current->state === 'issued' || $current->state === 'verified') && $current->stage2Nonce === $challenge->nonce) {
@@ -3139,6 +3253,9 @@ final class ChallengeController
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
 
@@ -3155,6 +3272,9 @@ final class ChallengeController
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
             } else {
@@ -3166,6 +3286,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
             }
         }
@@ -3191,6 +3314,9 @@ final class ChallengeController
                     return $this->privateJson(
                         ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                         Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
                     );
                 }
 
@@ -3211,6 +3337,9 @@ final class ChallengeController
                 return $this->privateJson(
                     ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
                     Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
                 );
         }
     }
@@ -3354,9 +3483,26 @@ final class ChallengeController
                     );
                 }
 
-                $this->confirmRecoveryBarriers();
+                try {
+                    $this->confirmRecoveryBarriers();
+                } catch (\Throwable $fenceFailure) {
+                    $this->logGate('kiwicaptcha: recovery fence failed before the hand-out: {message}', ['message' => $fenceFailure->getMessage()]);
 
-                return $this->privateJson($this->issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                    return $this->privateJson(
+                        ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                        Response::HTTP_SERVICE_UNAVAILABLE,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
+
+                $builtResponse = $this->issuanceResponseOrUnavailable($record, $request, $riskSession, $mintedCookie);
+                if ($builtResponse instanceof JsonResponse) {
+                    return $builtResponse;
+                }
+
+                return $this->privateJson($builtResponse, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
             case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
                 // The final disposition is StepUp: transition to the
                 // terminal step_up_required (the obligation mapping is
@@ -3485,6 +3631,32 @@ final class ChallengeController
      * stored-record handoff, the issued-stage-2 recovery or the
      * lost-response reconstruction.
      */
+    /**
+     * Serialize a stored record or answer the private structured 503.
+     * issuanceResponseFromRecord() throws when the record cannot be
+     * rebuilt from storage. This bundle has no kernel.exception
+     * listener, so an uncaught throw would reach the client as a raw 500
+     * on a recovery path instead of the retryable envelope.
+     *
+     * @return array<string,mixed>|JsonResponse
+     */
+    private function issuanceResponseOrUnavailable(\KiwiCaptcha\ChallengeRecord $record, Request $request, ?string $riskSession, bool $mintedCookie): array|JsonResponse
+    {
+        try {
+            return $this->issuanceResponseFromRecord($record);
+        } catch (\RuntimeException $e) {
+            $this->logGate('kiwicaptcha: stored challenge record could not be serialized: {message}', ['message' => $e->getMessage()]);
+
+            return $this->privateJson(
+                ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
+    }
+
     private function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
     {
         $challenge = $this->issuer?->responseFromRecord($record);
@@ -3794,14 +3966,17 @@ final class ChallengeController
      * so the allowlist is exactly the framing contract of the challenge
      * endpoint (an empty allowlist emits no CSP header). The bundle emits
      * no CORS headers: CORS is not authorization; the origin checks are,
-     * and they run on every response regardless. When a new risk
-     * continuity session was minted for this request, the cookie is
-     * attached here, on every response path, so the session the
-     * assessment keyed on is what the client carries.
+     * and they run on every response regardless. When the request
+     * carries or mints a risk continuity session, the cookie is attached
+     * here on every response path, so the session the assessment keyed
+     * on is what the client carries. A successful response with a
+     * carried session does not re-set it; a newly minted session and
+     * every error path do, so a 429/503 can never drop a session the
+     * assessment already recorded evidence against.
      *
      * @param array<string, mixed> $data
      */
-    private function privateJson(array $data, int $status = Response::HTTP_OK, ?Request $request = null, ?string $riskSession = null, bool $mintedCookie = false): JsonResponse
+    private function privateJson(array $data, int $status = Response::HTTP_OK, ?Request $request = null, ?string $riskSession = null, ?bool $mintedCookie = null): JsonResponse
     {
         $response = new JsonResponse($data, $status);
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
@@ -3813,7 +3988,16 @@ final class ChallengeController
             $response->headers->set('Content-Security-Policy', 'frame-ancestors '.implode(' ', $this->challengeOriginAllowlist));
         }
 
-        if ($mintedCookie && $request !== null && $riskSession !== null && $this->continuityCookie !== null) {
+        // The continuity session rides every response path that has a
+        // session, not only the minting one. A carried session belongs to
+        // the client (idempotent re-set, same value), and a rate-limited
+        // or failed response that records evidence against the session
+        // must not drop it, or every retry looks like a fresh client and
+        // the session reputation dimension never engages. The
+        // $mintedCookie argument stays for existing call sites; the
+        // emission condition is the session's presence.
+        $carriesSession = $request !== null && $riskSession !== null && $this->continuityCookie !== null;
+        if ($carriesSession && ($mintedCookie === true || $status >= 400)) {
             $response->headers->setCookie($this->continuityCookie->cookie($request, $riskSession));
         }
 

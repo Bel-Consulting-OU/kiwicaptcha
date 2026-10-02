@@ -111,12 +111,15 @@ final class IssuerBindingTest extends TestCase
 
     public function testIssuerIsThePenultimateFieldOfTheSignedCanonicalPayload(): void
     {
-        // Canonical v2 payload: `...|min_duration_ms|region|policy_version|
-        // request_binding|issuer|kid`; kid (default 1) is the final
-        // segment, appended after the issuer.
+        // Revision-3 canonical payload:
+        // `v3|protocol_version|...|min_duration_ms|region|policy_version|
+        // request_binding|issuer|kid`; kid (default 1) is the final base
+        // segment, appended after the issuer, and protocol_version sits
+        // second.
         [, $record] = $this->issue('staging');
 
         $canonical = Issuer::canonicalPayload(
+            2,
             $record->nonce,
             $record->scope,
             $record->bindingTag,
@@ -136,8 +139,8 @@ final class IssuerBindingTest extends TestCase
             $record->kid ?? 1,
         );
         self::assertStringEndsWith('|staging|1', $canonical, 'the canonical must end with the issuer segment then the kid');
-        self::assertSame('staging', explode('|', $canonical)[16], 'issuer is the 17th canonical field');
-        self::assertSame('1', explode('|', $canonical)[17], 'kid is the 18th (final) canonical field');
+        self::assertSame('staging', explode('|', $canonical)[17], 'issuer is the 18th canonical field');
+        self::assertSame('1', explode('|', $canonical)[18], 'kid is the 19th (final base) canonical field');
 
         $signature = substr($record->challenge, strrpos($record->challenge, '.') + 1);
         self::assertSame(

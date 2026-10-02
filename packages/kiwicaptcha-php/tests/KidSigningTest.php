@@ -110,7 +110,7 @@ final class KidSigningTest extends TestCase
 
         $canonical = base64_decode(explode('.', $record->challenge)[0], true);
         self::assertStringEndsWith('|2', (string) $canonical, 'the canonical must end with the kid segment');
-        self::assertSame('2', explode('|', (string) $canonical)[17], 'kid is the 18th (final) canonical field, after issuer');
+        self::assertSame('2', explode('|', (string) $canonical)[18], 'kid is the 19th (final base) canonical field, after issuer');
     }
 
     public function testLegacySingleSecretPathIgnoresKid(): void

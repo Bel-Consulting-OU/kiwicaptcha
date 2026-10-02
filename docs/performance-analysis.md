@@ -237,21 +237,21 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-102,404 bytes raw, 30,240 bytes gzip and 25,524 bytes brotli, against
+102,356 bytes raw, 30,218 bytes gzip and 25,583 bytes brotli, against
 caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
 module) is 42,369 bytes raw, 12,339 bytes gzip and 10,592 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
-widget-telemetry.js copy is 2,922 bytes raw, 1,229 bytes gzip and 992
+widget-telemetry.js copy is 3,037 bytes raw, 1,287 bytes gzip and 1,043
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
-widget-locales.js copy (the lazy non-default locale packs) is 12,737
-bytes raw, 4,387 bytes gzip and 3,860 bytes brotli against caps of
+widget-locales.js copy (the lazy non-default locale packs) is 12,754
+bytes raw, 4,403 bytes gzip and 3,882 bytes brotli against caps of
 16,384 / 6,000 / 5,000 (the packs are stored columnar — one value row
 per language in a fixed key order, rebuilt into the same registered
 object shape at module scope — which removed the repeated key names
 and restored translation headroom without a cap raise); every
-widget-compat.js copy is 31,586 bytes raw, 9,304 bytes gzip and 8,095
+widget-compat.js copy is 32,094 bytes raw, 9,389 bytes gzip and 8,175
 bytes brotli against caps of 32,768 / 12,000 / 10,000; every
 execution-interpreter copy (execution-interpreter.js, the lazy
 ExecutionChallengeV1 asset) is 33,039 bytes raw, 9,998 bytes gzip and
@@ -327,8 +327,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 102,404 bytes
-raw, 30,240 gzip and 25,524 brotli (the record's
+any memory-hard challenge — is the eager core alone: 102,356 bytes
+raw, 30,218 gzip and 25,583 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits at 98.4% of its 30,720-byte cap after the timeout-ordering
 and correlation-hardening wave added core code; the cap is unchanged
@@ -345,7 +345,7 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (102,404 raw / 30,240 gzip / 25,524 brotli);
+  lazy-module loader (102,356 raw / 30,218 gzip / 25,583 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned
@@ -359,13 +359,13 @@ record's budget rows, equality-gated):
   the fallback, and loads the module exactly when a widget's resolved
   language is non-default, so a default-language page pays zero bytes
   for translations; a load failure degrades to English with a console
-  warning, never a broken widget (12,737 raw / 4,387 gzip / 3,860
+  warning, never a broken widget (12,754 raw / 4,403 gzip / 3,882
   brotli);
 - `widget-telemetry.js`, the lazy telemetry session, loaded only when
   a widget enables one (2,922 raw / 1,229 gzip / 992 brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (31,586 raw / 9,304 gzip / 8,095 brotli).
+  (32,094 raw / 9,389 gzip / 8,175 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:

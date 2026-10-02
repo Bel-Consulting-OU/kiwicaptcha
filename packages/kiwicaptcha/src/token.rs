@@ -98,18 +98,6 @@ pub struct IssuedChallenge {
 /// The telemetry segment may itself contain dots; the optional suffix
 /// segments (execution evidence, then the rsw final value) are peeled
 /// right-to-left, so an armed rsw challenge carries both independently.
-/// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
-pub const MAX_DURATION_MS: u64 = 3_600_000;
-
-/// Hard ceiling on the RAW token length (bytes) accepted by
-/// [`SolutionToken::decode`]. The canonical wire form of a
-/// legitimate token is a few hundred bytes (32-byte nonce + counter +
-/// duration + a small telemetry object); 32 KiB is far beyond any of them.
-/// The bound is enforced before the base64 decode, so an oversized token is
-/// rejected with [`DecodeError::TooLarge`] without spending any work on —
-/// or allocating for — a decode of attacker-supplied bytes.
-pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionToken {
     /// The nonce from the original challenge (base64, 32 bytes).
@@ -142,6 +130,18 @@ pub struct SolutionToken {
     /// constant-time against the trapdoor expectation.
     pub rsw_proof: Option<String>,
 }
+
+/// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
+pub const MAX_DURATION_MS: u64 = 3_600_000;
+
+/// Hard ceiling on the RAW token length (bytes) accepted by
+/// [`SolutionToken::decode`]. The canonical wire form of a
+/// legitimate token is a few hundred bytes (32-byte nonce + counter +
+/// duration + a small telemetry object); 32 KiB is far beyond any of them.
+/// The bound is enforced before the base64 decode, so an oversized token is
+/// rejected with [`DecodeError::TooLarge`] without spending any work on —
+/// or allocating for — a decode of attacker-supplied bytes.
+pub const MAX_TOKEN_RAW_BYTES: usize = 32_768;
 
 impl SolutionToken {
     /// Encode the token into the compact wire format stored in `kiwi__token`.
@@ -472,7 +472,8 @@ mod tests {
 
     #[test]
     fn telemetry_with_embedded_dots_is_preserved() {
-        // A JSON string value containing dots must not break the splitn(4).
+        // A JSON string value containing dots must not break decoding: the
+        // decoder splits on every dot and re-joins the telemetry tail.
         let token = SolutionToken {
             nonce: VALID_NONCE.to_string(),
             counter: 1,

@@ -529,16 +529,16 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
     public function testDoctorPassesTheExecutionVersioningCheckWhenTheDimensionIsInert(): void
     {
-        // The gate on without an execution_key never arms: the check
-        // reports the inert state and passes, exactly like issuance.
+        // The gate on without an execution_key never arms: the doctor
+        // flags the inert state as a warning, exactly like issuance.
         $container = $this->containerFor(new DoctorHighAbuseV3WriterKernel('test', true));
         $this->seedProtocolFloor($container, 4);
         $tester = $this->doctor($container);
         $tester->execute([]);
 
         $display = $tester->getDisplay();
-        self::assertStringContainsString('[PASS] Execution versioning', $display);
-        self::assertStringContainsString('no execution_key is configured: the armed dimension is inert', $display);
+        self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('no execution_key is configured: the armed dimension is INERT', $display);
         self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
     }

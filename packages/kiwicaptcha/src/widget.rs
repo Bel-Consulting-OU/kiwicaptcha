@@ -32,7 +32,8 @@ const KIWI_RISK_JS: &str = include_str!("../resources/widget-risk.js");
 /// inline when a non-default `lang` is requested, so the widget does not
 /// fall back to English on pages that pass no asset attributes.
 const KIWI_LOCALES_JS: &str = include_str!("../resources/widget-locales.js");
-/// The telemetry module: inlined when a telemetry mode is requested and no
+/// The telemetry module: inlined on the emit_assets (first-widget) tier
+/// whenever no
 /// external asset pair is given, so the token actually carries a session
 /// (the driver awaits the module before sending).
 const KIWI_TELEMETRY_JS: &str = include_str!("../resources/widget-telemetry.js");
@@ -167,12 +168,14 @@ pub fn kiwi_widget_html_with(options: &KiwiWidgetOptions) -> String {
         && options.locales
         && !lang_is_default
         && options.locales_external.is_none();
-    let inline_telemetry = options.emit_assets
-        && options
-            .telemetry
-            .filter(|m| !m.is_empty() && *m != "off")
-            .is_some()
-        && options.telemetry_external.is_none();
+    // The telemetry module is embedded unconditionally on the inline
+    // tier (when no external asset is configured): the first widget's
+    // emit_assets block is the only place shared assets can land, and a
+    // later widget may enable telemetry after the first one did not.
+    // Gating the embed on the first widget's mode would leave that later
+    // widget without the module; the module itself is inert until a
+    // widget with a telemetry mode creates a session.
+    let inline_telemetry = options.emit_assets && options.telemetry_external.is_none();
     let mut shared_assets = String::new();
     if options.emit_assets {
         shared_assets.push_str(&format!(
@@ -287,7 +290,9 @@ mod tests {
         // driver and the inline risk module).
         assert!(html.contains("<style nonce=\"abc123XYZ\">"));
         assert!(html.contains("<script nonce=\"abc123XYZ\">"));
-        assert_eq!(html.matches("<script nonce=\"abc123XYZ\">").count(), 3);
+        // style + wasm + driver + the unconditional inline telemetry
+        // module (a later widget may enable telemetry after the first).
+        assert_eq!(html.matches("<script nonce=\"abc123XYZ\">").count(), 4);
         // No nonce-less style/script remains.
         assert!(!html.contains("<style>\n"));
         assert!(!html.contains("<script>\n"));

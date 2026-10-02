@@ -313,7 +313,16 @@ final class SiteVerifyController
         $binary = @inet_pton($trimmed);
         $canonical = null;
         if ($binary !== false) {
-            if (\strlen($binary) === 16 && str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
+            if (\strlen($binary) === 16
+                && (str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")
+                    || (str_starts_with($binary, str_repeat("\x00", 12))
+                        && substr($binary, 12) !== "\x00\x00\x00\x00"
+                        && substr($binary, 12) !== "\x00\x00\x00\x01"))) {
+                // Both IPv4-mapped (::ffff:a.b.c.d) and the deprecated
+                // IPv4-compatible (::a.b.c.d, excluding :: and ::1)
+                // spellings fold to the 4-byte IPv4 form, exactly like
+                // Issuer::canonicalIpFamily() and the Rust core: one
+                // address must produce one idempotency pseudonym.
                 $binary = substr($binary, 12);
             }
             $canonical = (string) inet_ntop($binary);
@@ -524,7 +533,11 @@ final class SiteVerifyController
         // the idempotency namespace instead of returning the historical
         // answer, exactly as the native hard-security verdicts dominate
         // even a same-operation retry.
-        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch.'|'.$this->securityContextDigest);
+        // The backend namespace id is keyed (HMAC), never a raw hash of
+        // secret-prefixed data: the secret is the HMAC key, so the
+        // digest carries no length-extension structure and cannot be
+        // recomputed by anyone who learns the namespace inputs alone.
+        $backendId = hash_hmac('sha256', $expectedScope.'|'.$effectiveEpoch.'|'.$this->securityContextDigest, $secret);
 
         // The authoritative transaction binding, resolved before any
         // claim or verification: when a request-binding authority is
@@ -1045,8 +1058,16 @@ final class SiteVerifyController
         // SolveSuccess repays the issuance debt only, and the failure
         // classes enrich the model. The measured solve duration rides
         // along (null-safe through the core's additive solve-duration
-        // surface, see RiskGateway::solveDurationMsOf()).
-        $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error, null, \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway::solveDurationMsOf($outcome));
+        // surface, see RiskGateway::solveDurationMsOf()). Evidence only:
+        // the token is already consumed at this point, so a risk-Redis
+        // outage must never turn a valid proof into the retryable
+        // provider error (an idempotency-less caller would retry a
+        // consumed token and get timeout-or-duplicate).
+        try {
+            $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error, null, \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway::solveDurationMsOf($outcome));
+        } catch (\Throwable) {
+            // Evidence only.
+        }
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An

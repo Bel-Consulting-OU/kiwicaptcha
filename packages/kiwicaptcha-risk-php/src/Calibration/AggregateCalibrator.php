@@ -261,6 +261,27 @@ final class AggregateCalibrator implements CalibrationStore
         ]);
     }
 
+    /**
+     * The cross-language decimal spelling of a weight: shortest
+     * round-trip form, integral values without a trailing ".0" (Rust's
+     * f64::to_string). Weights are bounded scoring multipliers, so the
+     * exponent forms json_encode can emit never occur in practice; if
+     * one ever did it would be a configuration error surfaced by the
+     * script's numeric validation.
+     */
+    public static function weightText(float $weight): string
+    {
+        $text = json_encode($weight);
+        if (!\is_string($text)) {
+            throw new \InvalidArgumentException('weight must be a finite number');
+        }
+        if (str_ends_with($text, '.0')) {
+            $text = substr($text, 0, -2);
+        }
+
+        return $text;
+    }
+
     public function namespace(): string
     {
         return $this->namespace;
@@ -369,7 +390,14 @@ final class AggregateCalibrator implements CalibrationStore
                 (string) $scope,
                 (string) $decisionHour,
                 (string) $score,
-                (string) $weight,
+                // The weight is serialized with the shortest round-trip
+                // form (json_encode under serialize_precision=-1), then
+                // integer-valued weights drop the trailing ".0" — the
+                // exact text Rust's f64::to_string emits. A raw
+                // (string) cast uses precision=14, so a weight like
+                // 1/0.3 would write a different `HINCRBYFLOAT` amount
+                // (and a different ledger.w) than the Rust core.
+                self::weightText($weight),
             ],
         );
         return ((int) $result) === 1;

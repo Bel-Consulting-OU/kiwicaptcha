@@ -192,6 +192,17 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SERIALIZE_REAL = 32;
     public const OP_DOM_OBSERVE = 33;
     public const OP_DOM_SIBLING_INDEX = 34;
+
+    /**
+     * The number of elements the srcdoc body holds before the
+     * program's own nodes. The harness template always carries exactly
+     * one `<script>` element, the interpreter bootstrap, so a
+     * program-built node's browser sibling index is its append rank
+     * plus this constant. Mirrors the Rust
+     * `SRCDOC_PREEXISTING_BODY_ELEMENTS` so the cores agree on the
+     * template shape.
+     */
+    public const SRCDOC_PREEXISTING_BODY_ELEMENTS = 1;
     public const OP_DOM_CHILD = 35;
     public const OP_DOM_DEPTH = 36;
     /** Version-5 ops: moves the current node (with its subtree) into a detached fragment slot; terminal only. */
@@ -206,6 +217,16 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_EVENT_PHASE = 41;
     /** Version-5 ops: canonicalizes and hashes the sandboxed document URL (the one browser-observed entry). */
     public const OP_DOM_URL_CANON = 42;
+
+    /**
+     * The SHA-256 hex of the canonical sandboxed document URL the
+     * widget execution sandbox always has: `about:srcdoc`. The
+     * version-5 URL-canon probe reports this value, and the trace walker
+     * pins it by exact equality. Environment evidence is a constant, so
+     * any other digest is fabricated. Mirrors the Rust
+     * `SRCDOC_URL_DIGEST` byte for byte.
+     */
+    public const SRCDOC_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
     /** Version-5 ops: sets the current node's textContent to the value operand. */
     public const OP_DOM_TEXT_MUTATE = 43;
     /** Version-5 ops: descends by the three child-index bytes; the entry is the number of descents completed. */
@@ -763,7 +784,7 @@ final class ExecutionChallengeGenerator
                 // one (deterministic across engines).
                 if ($expectedRank === null
                     || preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1
-                    || (int) $m[1] !== $expectedRank + 1) {
+                    || (int) $m[1] !== $expectedRank + self::SRCDOC_PREEXISTING_BODY_ELEMENTS) {
                     return null;
                 }
                 $pos += \strlen($m[0]);
@@ -803,16 +824,16 @@ final class ExecutionChallengeGenerator
                 $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_URL_CANON) {
                 // The URL-canon entry is the one browser-observed value
-                // of the version-5 rung: the canonical sim emits the
-                // placeholder and the walker validates the shape (64
-                // lowercase hex, the SHA-256 digest of the canonicalized
-                // sandboxed document URL) and replays the reported
-                // value as the entry. The op draws no cell byte, so no
-                // u8 write follows the obs replay rule.
-                if (preg_match('/\G([0-9a-f]{64})\)/', $trace, $m, 0, $pos) !== 1) {
+                // of the version-5 rung: it is pinned to the SHA-256 of
+                // the canonical sandboxed document URL
+                // (self::SRCDOC_URL_DIGEST, the constant `about:srcdoc`),
+                // so any other digest is fabricated. The op draws no
+                // cell byte, so no u8 write follows the obs replay rule.
+                if (substr($trace, $pos, 64) !== self::SRCDOC_URL_DIGEST
+                    || substr($trace, $pos + 64, 1) !== ')') {
                     return null;
                 }
-                $pos += \strlen($m[0]);
+                $pos += 65;
             } else {
                 $simEntry = $sim.')';
                 if (substr($trace, $pos, \strlen($simEntry)) !== $simEntry) {

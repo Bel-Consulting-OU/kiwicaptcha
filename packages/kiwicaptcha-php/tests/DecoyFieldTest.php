@@ -53,7 +53,7 @@ final class DecoyFieldTest extends TestCase
     use VerifyFixtureTrait;
 
     /** The pre-extension canonical vector, pinned (ProtocolV2Test pins the same bytes). */
-    private const LEGACY_CANONICAL = 'v2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1';
+    private const BASE_CANONICAL = 'v3|2|nonce123|login|tag456|111|222|sha256|0|1|1|8|c2FsdA==|5||1|||1';
 
     private function shaConfig(): Config
     {
@@ -119,14 +119,15 @@ final class DecoyFieldTest extends TestCase
         self::assertSame($decoy, $record->decoyField);
         self::assertSame(3, $record->protocolVersion, 'an armed issuance writes protocol v3 (the decoy-capable canonical)');
 
-        // The canonical signing input: 18 base fields + the decoy segment,
-        // decoy last (after the kid), matching the Rust mirror.
+        // The canonical signing input: the 19-field revision-3 base +
+        // the tagged decoy segment, decoy last (after the kid), matching
+        // the Rust mirror.
         $canonical = $this->decodedCanonical($challenge);
         $segments = explode('|', $canonical);
-        self::assertCount(19, $segments, 'the v3 canonical input: 18 base fields + the decoy segment');
-        self::assertSame($decoy, $segments[18], 'the decoy name must be the FINAL canonical segment');
-        self::assertSame((string) ($record->kid ?? 1), $segments[17], 'the kid stays immediately before the decoy');
-        self::assertStringEndsWith('|'.$decoy, $canonical);
+        self::assertCount(20, $segments, 'revision-3 v3 canonical: 19 base fields + the tagged decoy segment');
+        self::assertSame('d='.$decoy, $segments[19], 'the decoy name must be the final canonical segment, tagged d=');
+        self::assertSame((string) ($record->kid ?? 1), $segments[18], 'the kid stays immediately before the decoy segment');
+        self::assertStringEndsWith('|d='.$decoy, $canonical);
 
         // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
@@ -139,12 +140,14 @@ final class DecoyFieldTest extends TestCase
         self::assertGreaterThanOrEqual(2, \count($seen), 'per-issuance decoy picks must vary across challenges');
     }
 
-    // ── (b) unarmed: byte-identical to the pre-change canonical ─────
+    // ── (b) unarmed: the revision-3 base canonical ─────
 
-    public function testUnarmedCanonicalIsByteIdenticalToThePreExtensionVector(): void
+    public function testUnarmedCanonicalIsTheRevision3BaseVector(): void
     {
-        // The pinned pre-extension canonical (18 fields, kid last).
-        self::assertSame(self::LEGACY_CANONICAL, Issuer::canonicalPayload(
+        // The pinned revision-3 base canonical (19 fields, kid last,
+        // protocol_version signed as the second segment).
+        self::assertSame(self::BASE_CANONICAL, Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -161,7 +164,8 @@ final class DecoyFieldTest extends TestCase
 
         // An explicit null decoy renders nothing extra — byte-identical
         // to the legacy call without the argument.
-        self::assertSame(self::LEGACY_CANONICAL, Issuer::canonicalPayload(
+        self::assertSame(self::BASE_CANONICAL, Issuer::canonicalPayload(
+            2,
             'nonce123',
             'login',
             'tag456',
@@ -184,8 +188,9 @@ final class DecoyFieldTest extends TestCase
 
         // An armed decoy appends exactly ONE segment after the kid.
         self::assertSame(
-            self::LEGACY_CANONICAL.'|company_website',
+            self::BASE_CANONICAL.'|d=company_website',
             Issuer::canonicalPayload(
+                2,
                 'nonce123',
                 'login',
                 'tag456',
@@ -210,10 +215,10 @@ final class DecoyFieldTest extends TestCase
 
     public function testUnarmedIssuanceKeepsTheLegacyCanonicalShape(): void
     {
-        // The plain path (and the explicit false arm) issues NO decoy: the
-        // canonical string keeps the exact pre-extension shape (18 fields,
-        // kid last), the record stays protocol v2, and neither JSON
-        // surface carries the key.
+        // The plain path (and the explicit false arm) issues NO decoy:
+        // the canonical keeps the revision-3 base shape (19 fields, kid
+        // last, protocol_version signed), the record stays protocol v2,
+        // and neither JSON surface carries the key.
         $storage = new ArrayStorage();
         $issuer = $this->issuer($storage);
 
@@ -226,12 +231,14 @@ final class DecoyFieldTest extends TestCase
             $record = $storage->find($challenge->nonce);
             self::assertNotNull($record);
             self::assertNull($record->decoyField, "{$label}: no decoy on the stored record");
-            self::assertSame(2, $record->protocolVersion, "{$label}: unarmed issuance stays protocol v2, byte-identical to the pre-decoy format");
+            self::assertSame(2, $record->protocolVersion, "{$label}: unarmed issuance stays protocol v2");
 
             $canonical = $this->decodedCanonical($challenge);
             $segments = explode('|', $canonical);
-            self::assertCount(18, $segments, "{$label}: the base v2 canonical input stays 18 fields (no decoy segment)");
-            self::assertSame((string) ($record->kid ?? 1), $segments[17], "{$label}: kid stays the final field when no decoy is armed");
+            self::assertCount(19, $segments, "{$label}: the revision-3 base canonical input has 19 fields (no extension)");
+            self::assertSame('v3', $segments[0], "{$label}: the canonical revision tag leads the input");
+            self::assertSame('2', $segments[1], "{$label}: the signed protocol_version is the second field");
+            self::assertSame((string) ($record->kid ?? 1), $segments[18], "{$label}: kid stays the final base field when no decoy is armed");
 
             self::assertArrayNotHasKey('decoy_field', $challenge->toArray(), "{$label}: the challenge key is absent when no decoy is armed");
             self::assertArrayNotHasKey('decoy_field', $record->toArray(), "{$label}: the record key is absent when no decoy is armed");
@@ -1022,7 +1029,7 @@ final class DecoyFieldTest extends TestCase
         $record = $storage->find($challenge->nonce);
         self::assertNotNull($record);
         self::assertSame($pinned, $record->decoyField, 'the pinned name is signed into the record like any other armed name');
-        self::assertStringEndsWith('|'.$pinned, $this->decodedCanonical($challenge));
+        self::assertStringEndsWith('|d='.$pinned, $this->decodedCanonical($challenge));
 
         foreach (['', str_repeat('x', 65), 'company|website', 'company.website'] as $bad) {
             try {

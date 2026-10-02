@@ -2775,6 +2775,7 @@ final class Verifier
                 $record->issuedAt,
             ), $secretKey)
             : Issuer::signPayloadV2(Issuer::canonicalPayload(
+                $record->protocolVersion,
                 $record->nonce,
                 $record->scope,
                 $record->bindingTag,

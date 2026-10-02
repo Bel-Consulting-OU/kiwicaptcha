@@ -64,7 +64,7 @@ final class SiteVerifyStoreParityTraceTest extends TestCase
      */
     private function runTrace(SiteVerifyIdempotencyStore $store, callable $advanceLease, callable $expireKey): array
     {
-        $backendId = hash('sha256', 'parity-trace|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'parity-trace');
         $uuid = 'c4f5a6b7-1111-4000-8000-00000000f001';
         $hash = hash('sha256', 'parity-response');
         $fingerprint = hash('sha256', 'parity-ip');
@@ -106,7 +106,7 @@ final class SiteVerifyStoreParityTraceTest extends TestCase
         if ($probe === null) {
             return;
         }
-        $backendId = hash('sha256', 'parity-trace|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'parity-trace');
         $uuid = 'c4f5a6b7-1111-4000-8000-00000000f001';
         $key = '{kiwi:'.self::NAMESPACE.'}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$key]);

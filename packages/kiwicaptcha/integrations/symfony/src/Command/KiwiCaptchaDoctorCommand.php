@@ -491,7 +491,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $mode = $this->config['risk']['client_ip_mode'];
         $proxies = $this->config['risk']['trusted_proxies'];
         if ($mode === 'direct') {
-            return ['PASS', 'direct mode: the socket peer is authoritative'];
+            return ['PASS', 'direct mode: the socket peer is authoritative. Caveat: an empty REMOTE_ADDR (for example a Unix-socket upstream) collapses every client into the shared unknown per-client rate-limit bucket; serve over TCP (FastCGI/HTTP) in that topology or configure a trusted-proxy mode'];
         }
         if ($mode === 'symfony_trusted_proxies' && $proxies === []) {
             return ['WARN', 'no trusted proxy is configured: forwarding headers are ignored, so behind a reverse proxy every client shares the proxy IP (per-source limits and risk attribution collapse)'];
@@ -728,7 +728,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'risk.execution_challenge is off: the execution dimension is disabled, so execution_required_version has no effect'];
         }
         if (!\is_string($this->config['execution_key'] ?? null)) {
-            return ['PASS', 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is inert, so execution_required_version has no effect'];
+            return ['WARN', 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is INERT (no execution program is ever issued and execution_required_version has no effect). Configure kiwi_captcha.execution_key to actually arm the execution dimension, or set risk.execution_challenge off to state the intent'];
         }
         $cap = (int) ($this->config['execution_version'] ?? 1);
         $required = (int) ($this->config['execution_required_version'] ?? 1);

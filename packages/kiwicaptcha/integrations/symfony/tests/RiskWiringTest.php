@@ -278,7 +278,9 @@ final class RiskWiringTest extends TestCase
         // RedisStorage definition. Opting out (defaults) must leave the
         // definition untouched (older cores stay compatible).
         $container = $this->load($this->riskDefaults(), ['storage' => 'my.redis.storage'], $registerRedisStorage);
-        self::assertArrayNotHasKey('$waitReplicas', $container->getDefinition('my.redis.storage')->getArguments(), 'default wait_replicas=0/ttl_margin_secs=0: the storage definition must not be touched');
+        $defaultArgs = $container->getDefinition('my.redis.storage')->getArguments();
+        self::assertSame(0, $defaultArgs['$waitReplicas'], 'default wait_replicas=0 is passed explicitly alongside the hardened ttl margin');
+        self::assertSame(60, $defaultArgs['$ttlMarginSecs'], 'the hardened ttl_margin_secs default (60) reaches the storage definition');
 
         $risk = $this->riskDefaults();
         $risk['redis'] = ['wait_replicas' => 2, 'wait_timeout_ms' => 500, 'ttl_margin_secs' => 30];

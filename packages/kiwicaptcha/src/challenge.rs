@@ -637,10 +637,15 @@ impl ChallengeConfig {
         if !self.auto_tune {
             return self.target_bits.min(SOLVER_MAX_TARGET_BITS);
         }
-        // Both bounds are clamped to the solver ceiling; the upper bound is
-        // re-raised to at least the lower bound so the interpolation range
-        // never inverts under misconfiguration.
-        let min_bits = self.auto_tune_min_bits.min(SOLVER_MAX_TARGET_BITS);
+        // Both bounds are clamped to the solver ceiling; the lower bound
+        // is also raised to at least 1: auto_tune_min_bits = 0 would
+        // issue a zero-bit target (an already-solved challenge) under
+        // zero load, and the PHP core's issuance validation rejects a
+        // 0-bit target outright, so the two cores must not disagree at
+        // the edge (the upper bound is re-raised to at least the lower
+        // bound so the interpolation range never inverts under
+        // misconfiguration).
+        let min_bits = self.auto_tune_min_bits.clamp(1, SOLVER_MAX_TARGET_BITS);
         let max_bits = self
             .auto_tune_max_bits
             .min(SOLVER_MAX_TARGET_BITS)
@@ -679,19 +684,26 @@ impl ChallengeConfig {
     /// solution can occur at counter 0) and a fast bot can wait before
     /// submitting, so the floor only rejects solves that arrive faster than
     /// the theoretical minimum, as measured by the server clock:
-    /// - SHA-256: assumes up to 5e9 hashes/sec (beyond any browser; catches
-    ///   hardware-accelerated/precomputed solves) with an absolute 5 ms floor.
-    /// - Argon2id: assumes up to 5e5 hashes/sec (memory-hard; the wasm solver
-    ///   manages ~1e3-1e4/s), floor 50 ms.
+    /// - SHA-256: the assumed upper-bound hash rate is 5e9/sec (far beyond
+    ///   any browser solver; the bound exists to catch
+    ///   hardware-accelerated/precomputed solves). At every issuable target
+    ///   (at most 20 bits, about 1.05M expected hashes) the derived bound is
+    ///   sub-millisecond, so the effective SHA floor is the absolute 5 ms
+    ///   minimum.
+    /// - Argon2id: the assumed upper-bound rate is 5e5/sec (memory-hard; the
+    ///   wasm solver manages ~1e3-1e4/s), with an absolute 50 ms floor that
+    ///   likewise dominates at the issuable targets.
     pub fn min_duration_ms_for(&self, target_bits: u32) -> u64 {
         let expected_hashes = 1u64 << target_bits.min(32);
         match self.algorithm {
             PoWAlgorithm::Sha256 => {
-                let ms = (expected_hashes as f64 / 5e9 * 1000.0).ceil() as u64;
+                let ms =
+                    (expected_hashes as f64 / SHA256_SOLVER_HASHES_PER_SEC * 1000.0).ceil() as u64;
                 ms.max(5)
             }
             PoWAlgorithm::Argon2id => {
-                let ms = (expected_hashes as f64 / 5e5 * 1000.0).ceil() as u64;
+                let ms =
+                    (expected_hashes as f64 / ARGON2_SOLVER_HASHES_PER_SEC * 1000.0).ceil() as u64;
                 ms.max(50)
             }
             PoWAlgorithm::Rsw => self.rsw_min_duration_ms(),
@@ -848,12 +860,29 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2/v3/v4 canonical input: the full parameter
-/// set so no issuance parameter can be tampered with without breaking the
-/// signature:
-/// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
-/// `region`, `request_binding` and `issuer` render as the empty segment when
-/// unset; `kid` is the final field, appended after the issuer.
+/// Protocol v2..v5 canonical input (canonical revision 3), the full
+/// parameter set plus the protocol version and every armed extension, so
+/// no issuance parameter, version flip or extension swap can be made
+/// without breaking the signature:
+/// `v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
+/// `region`, `request_binding` and `issuer` render as the empty segment
+/// when unset; `kid` is the final base field.
+///
+/// # Why revision 3 (injectivity)
+///
+/// Revision 2 signed `v2|...` for every protocol version and appended
+/// the decoy, execution pair and rsw identity as bare untagged
+/// positional segments. That was not injective: a v5 rsw record with
+/// identity `H` and no decoy signed the exact bytes of a v3 rsw record
+/// with decoy `H`, and a v4 execution pair `(V, C)` signed the bytes of
+/// a v5 record with decoy `V` and identity `C`. An attacker who can
+/// write challenge storage could therefore reshape a record (for
+/// example downgrade v5 to v3, stripping the rsw modulus-identity
+/// pinning) while keeping a valid signature. Revision 3 signs the
+/// protocol version as a segment and tags every extension (`d=` decoy,
+/// `e=` execution pair, `r=` rsw identity), so distinct capability
+/// shapes can never collide; [`protocol_extension_grammar_ok`]
+/// independently enforces which shape each version allows.
 ///
 /// # The decoy-field extension (protocol v3)
 ///
@@ -862,9 +891,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// final segment after the `kid`:
 ///
 /// ```text
-/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-///   issuer|kid|decoy_field
+///   issuer|kid|d=decoy_field
 /// ```
 ///
 /// - `decoy_field` is the literal armed decoy name (e.g.
@@ -874,13 +903,13 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   [`DECOY_GRAMMAR_SLOT3_FORM`]) plus the 16-hex `CSPRNG` suffix, so it
 ///   can never contain the `|` separator (the alphabet is `[a-z_0-9]`;
 ///   validation accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-/// - The segment is appended only when a decoy is armed, and an armed
-///   record is issued as `protocol_version == 3` (or 4 when the execution
-///   dimension is armed too). `None` renders
-///   nothing extra — the canonical string is byte-identical to the
-///   pre-extension format and the record stays `protocol_version == 2`,
-///   so unarmed records and cross-language records keep verifying
-///   unchanged across the upgrade.
+/// - The `d=` segment is appended only when a decoy is armed, and an
+///   armed record is issued as `protocol_version == 3` (or 4 when the
+///   execution dimension is armed too). `None` renders nothing extra and
+///   the record stays `protocol_version == 2`. Revision 3 deliberately
+///   changed the signed bytes of every record, so a challenge issued by
+///   a pre-revision-3 node does not verify after a rolling deploy; the
+///   migration is a hard cutover, which is the point of the repair.
 /// - The grammar is total: v2 => no decoy segment, v3 => decoy segment
 ///   present. Validation enforces both directions, so the protocol
 ///   capability is fully inferable from the authenticated canonical
@@ -906,9 +935,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// decoy segment (or after the `kid` when no decoy is armed):
 ///
 /// ```text
-/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
-///   issuer|kid[|decoy_field]|execution_version|execution_commitment
+///   issuer|kid[|d=decoy_field]|e=execution_version,execution_commitment
 /// ```
 ///
 /// - `execution_version` is the canonical numeric byte carrying the
@@ -917,18 +946,21 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never
 ///   `|`-capable.
-/// - The segments are appended only when the record carries an execution
-///   program, and the protocol-vs-execution grammar is total: v2/v3 =>
-///   no execution, v4 => execution present. The signed commitment is
+/// - The `e=` segment is appended only when the record carries an
+///   execution program, and the protocol-vs-execution grammar is total:
+///   v2/v3 => no execution, v4 => execution present. The tag is what
+///   keeps an execution pair from ever colliding with a decoy+identity
+///   pair (a revision-2 collision). The signed commitment is
 ///   therefore the exact mirror of the stored program: a
 ///   stored/tampered record cannot strip, substitute or inject a program
 ///   without breaking the signature (the equivalence is additionally
 ///   enforced by the verifier's SHA256(stored program) == commitment
 ///   check).
-/// - Wire compatibility: unarmed and decoy-only records are byte-identical
-///   in both directions; execution-armed records are protocol v4 and
-///   require a v4-capable verifier (an old verifier rejects version 4 as
-///   unknown).
+/// - Execution-armed records are protocol v4 and require a v4-capable
+///   verifier. The rsw modulus identity is signed as `r=<sha256>` when
+///   present (protocol v5), so stripping, swapping or replaying it
+///   breaks the signature and it can never be mistaken for a decoy name
+///   (`d=`) or an execution pair (`e=`).
 ///
 /// The canonical signing input of a record — public so cross-language
 /// tests and integrations can pin the byte-exact reconstruction against
@@ -985,8 +1017,9 @@ pub fn protocol_extension_grammar_ok(
 }
 
 pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
-    let base = format!(
-        "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+    let mut canonical = format!(
+        "v3|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        record.protocol_version,
         record.nonce,
         record.scope,
         record.binding_tag,
@@ -1005,28 +1038,22 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.issuer.as_deref().unwrap_or(""),
         record.kid
     );
-    let mut canonical = match record.decoy_field.as_deref() {
-        Some(decoy) => format!("{base}|{decoy}"),
-        None => base,
-    };
-    // The execution commitment segments are appended only when the
-    // record carries an execution program — and only as the exact pair.
-    // The issuer always sets both; the verifier's structural gate
-    // rejects a record carrying exactly one, so the canonical
-    // reconstruction is byte-exact in both languages.
+    // Every extension is tagged and ordered by capability: d= decoy,
+    // e= execution (version,commitment), r= rsw modulus identity. The
+    // tags make the encoding injective across capability shapes; the
+    // signed protocol_version makes a stored version flip fail.
+    if let Some(decoy) = record.decoy_field.as_deref() {
+        canonical.push_str("|d=");
+        canonical.push_str(decoy);
+    }
     if let Some(version) = record.execution_version {
-        canonical.push('|');
+        canonical.push_str("|e=");
         canonical.push_str(&version.to_string());
-        canonical.push('|');
+        canonical.push(',');
         canonical.push_str(record.execution_commitment.as_deref().unwrap_or(""));
     }
-    // The rsw trapdoor identity is appended only when the record carries
-    // it: a legacy rsw record (bound before the identity existed) signs
-    // the canonical it always signed, and a post-binding record
-    // authenticates its modulus. Byte-exact with the PHP
-    // Issuer::canonicalPayload().
     if let Some(identity) = record.rsw_modulus_sha256.as_deref() {
-        canonical.push('|');
+        canonical.push_str("|r=");
         canonical.push_str(identity);
     }
     canonical
@@ -1447,8 +1474,13 @@ pub const MAX_ARGON_TIME: u32 = 16;
 /// record.
 pub const MIN_PARALLELISM: u32 = 1;
 /// Hard ceiling on the Argon2id parallelism the verifier accepts in a signed
-/// record.
-pub const MAX_PARALLELISM: u32 = 4;
+/// record. The ceiling is pinned to 1 (the floor): the PHP core derives
+/// Argon2id through libsodium, which has no parallelism parameter and
+/// refuses any p != 1 as authentic-but-unsupported, so a signed p >= 2
+/// record must never verify in Rust either — the two "byte-identical"
+/// verifiers must accept exactly the same parameter space. Neither
+/// shipped issuer emits p != 1.
+pub const MAX_PARALLELISM: u32 = 1;
 
 /// The floor for the rsw sequential-squaring cost T. Below it the
 /// challenge would finish too fast to carry meaningful sequential cost,
@@ -1481,8 +1513,12 @@ pub const RSW_TARGET_BITS_PIN: u32 = 1;
 /// implementation stays far below the assumed rate.
 pub const RSW_SOLVER_SQUARINGS_PER_SEC: f64 = 5e6;
 
-/// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
-/// Used to derive the per-challenge minimum solve duration.
+/// The SHA-256 timing floor's assumed upper-bound hash rate
+/// (hashes/sec). NOT an expected browser rate: it is deliberately far
+/// above any real solver so the derived minimum solve duration only
+/// rejects solves that arrive faster than hardware could possibly go.
+/// At every issuable target the derived bound is sub-millisecond, so
+/// the effective floor is the absolute 5 ms minimum.
 pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 
 /// The combinatorial decoy-name grammar, the server-side naming space for
@@ -1750,6 +1786,9 @@ fn pick_decoy_slot_index(vocab_len: usize) -> Result<usize, SignError> {
 
 /// Expected hashes per second for the Argon2id wasm solver at moderate memory
 /// (8-64 MiB). Used to derive the per-challenge minimum solve duration.
+/// The Argon2id timing floor's assumed upper-bound rate (hashes/sec),
+/// not an expected browser rate (the wasm solver manages ~1e3-1e4/s);
+/// the 50 ms absolute floor dominates at every issuable target.
 pub const ARGON2_SOLVER_HASHES_PER_SEC: f64 = 5e5;
 
 impl ChallengeCache {
@@ -3109,6 +3148,23 @@ mod tests {
     }
 
     #[test]
+    fn auto_tune_with_a_zero_floor_never_issues_a_zero_bit_target() {
+        let mut config = profile_base_config();
+        config.auto_tune = true;
+        config.auto_tune_min_bits = 0;
+        config.auto_tune_max_bits = 24;
+        // The floor is clamped to 1: a zero-bit target is an
+        // already-solved challenge, and the PHP core's issuance
+        // validation rejects one outright, so the cores must agree.
+        assert_eq!(config.tuned_target_bits(0), 1);
+        assert_eq!(
+            config.tuned_target_bits(50),
+            crate::challenge::SOLVER_MAX_TARGET_BITS,
+            "the ceiling still clamps the interpolated value"
+        );
+    }
+
+    #[test]
     fn auto_tune_disabled_ignores_tuning_bounds() {
         // With auto_tune off, the tuning bounds must have NO effect: only the
         // solver ceiling caps target_bits. A target_bits below the tuning min
@@ -3783,8 +3839,8 @@ mod tests {
         // the armed name (a grammar prefix plus the 16-hex suffix, at
         // most 47 bytes), the record is issued as protocol v3 (the
         // decoy-capable canonical), the canonical input ends with the
-        // `|<name>` segment, and the signature verifies over that exact
-        // extended input.
+        // tagged `|d=<name>` segment, and the signature verifies over
+        // that exact extended input.
         let issued = issue_challenge_with_decoy(
             &profile_base_config(),
             "login",
@@ -3819,13 +3875,13 @@ mod tests {
 
         let canonical = canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with(&format!("|{decoy}")),
-            "the decoy name must be the FINAL canonical segment: {canonical}"
+            canonical.ends_with(&format!("|d={decoy}")),
+            "the decoy name must be the FINAL canonical segment, tagged d=: {canonical}"
         );
         assert_eq!(
             canonical.split('|').count(),
-            19,
-            "v3 canonical input: the 18-field v2 base + the decoy segment"
+            20,
+            "revision-3 v3 canonical: the 19-field base + the tagged decoy segment"
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
@@ -3840,7 +3896,7 @@ mod tests {
             .rsplit_once('.')
             .expect("challenge is base64.signature");
         let decoded = B64.decode(payload).expect("challenge payload decodes");
-        assert!(String::from_utf8_lossy(&decoded).ends_with(&decoy));
+        assert!(String::from_utf8_lossy(&decoded).ends_with(&format!("|d={decoy}")));
 
         // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
@@ -3866,6 +3922,97 @@ mod tests {
         assert!(
             seen.len() >= 2,
             "per-issuance decoy picks must vary across challenges"
+        );
+    }
+
+    #[test]
+    fn canonical_revision3_is_injective_across_capability_shapes() {
+        // The revision-2 encoding signed `v2|...` for every
+        // protocol version and appended the decoy, execution pair and
+        // rsw identity as bare positional segments, so a v5 rsw record
+        // with identity H and no decoy signed the same bytes as a v3
+        // record with decoy H, and a v4 execution pair (V, C) signed the
+        // bytes of a v5 record with decoy V and identity C. Revision 3
+        // signs protocol_version and tags every extension; this test
+        // pins the attack shapes apart.
+        let plain = issue_challenge(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap()
+        .record;
+        let decoy_name = "billing_address_line_a3f9c21d8e5b7401";
+
+        // Attack 1: v3 decoy H vs v5 rsw identity H.
+        let mut v3_decoy = plain.clone();
+        v3_decoy.protocol_version = 3;
+        v3_decoy.decoy_field = Some(decoy_name.to_string());
+        let mut v5_identity = plain.clone();
+        v5_identity.protocol_version = 5;
+        v5_identity.rsw_modulus_sha256 = Some(decoy_name.to_string());
+        assert_ne!(
+            canonical_signing_input_v2(&v3_decoy),
+            canonical_signing_input_v2(&v5_identity),
+            "a decoy name must never collide with an rsw identity"
+        );
+
+        // Attack 2: v4 execution pair (V, C) vs v5 decoy V + identity C.
+        let mut v4_execution = plain.clone();
+        v4_execution.protocol_version = 4;
+        v4_execution.execution_version = Some(1);
+        v4_execution.execution_commitment = Some("a".repeat(64));
+        let mut v5_decoy_identity = plain.clone();
+        v5_decoy_identity.protocol_version = 5;
+        v5_decoy_identity.decoy_field = Some("1".to_string());
+        v5_decoy_identity.rsw_modulus_sha256 = Some("a".repeat(64));
+        assert_ne!(
+            canonical_signing_input_v2(&v4_execution),
+            canonical_signing_input_v2(&v5_decoy_identity),
+            "an execution pair must never collide with decoy+identity"
+        );
+
+        // Attack 3: a stored protocol-version flip changes the signed
+        // bytes, so a legitimate v5 signature cannot be replayed as v3.
+        let mut flipped = v5_identity.clone();
+        flipped.protocol_version = 3;
+        flipped.rsw_modulus_sha256 = None;
+        flipped.decoy_field = Some(decoy_name.to_string());
+        assert_ne!(
+            canonical_signing_input_v2(&v5_identity),
+            canonical_signing_input_v2(&flipped),
+            "a version flip must change the signed canonical"
+        );
+
+        // And the signature gate refuses the flipped record outright.
+        let issued = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_001,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let signature = crate::verify::signature_from_challenge(&issued.record);
+        assert!(verify_signature_v2(
+            &issued.record,
+            signature,
+            "test-key-32-bytes-0123456789abcd"
+        )
+        .unwrap());
+        let mut tampered = issued.record.clone();
+        tampered.protocol_version = 2;
+        tampered.decoy_field = None;
+        assert!(
+            !verify_signature_v2(&tampered, signature, "test-key-32-bytes-0123456789abcd").unwrap(),
+            "dropping the decoy and flipping the version must invalidate the signature"
         );
     }
 
@@ -4101,11 +4248,11 @@ mod tests {
     }
 
     #[test]
-    fn decoy_field_disabled_keeps_the_old_wire_and_canonical_format() {
+    fn decoy_field_disabled_keeps_the_plain_canonical_shape() {
         // The plain path (and the explicit false arm) issues NO decoy and
-        // stays protocol v2: the canonical string keeps the exact
-        // pre-extension shape (18 fields, kid last — byte-identical), and
-        // neither JSON surface carries the key.
+        // stays protocol v2: the canonical keeps the revision-3 base
+        // shape (19 fields, kid last, protocol_version signed as the
+        // second segment) and neither JSON surface carries the key.
         for issued in [
             issue_challenge(
                 &profile_base_config(),
@@ -4138,8 +4285,12 @@ mod tests {
             let canonical = canonical_signing_input_v2(&issued.record);
             assert_eq!(
                 canonical.split('|').count(),
-                18,
-                "the base v2 canonical input stays 18 fields (no decoy segment)"
+                19,
+                "the revision-3 base canonical has 19 fields (canonical tag + protocol_version + 17 record fields; no extension)"
+            );
+            assert!(
+                canonical.starts_with("v3|2|"),
+                "the canonical revision and the signed protocol version lead the base"
             );
             assert!(
                 canonical.ends_with(&issued.record.kid.to_string()),

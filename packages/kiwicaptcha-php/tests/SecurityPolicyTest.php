@@ -121,6 +121,7 @@ final class SecurityPolicyTest extends TestCase
         [$storage, $record, $token] = $this->issue(policyVersion: 2, requestBinding: 'txn-abc');
 
         $canonical = Issuer::canonicalPayload(
+            2,
             $record->nonce,
             $record->scope,
             $record->bindingTag,

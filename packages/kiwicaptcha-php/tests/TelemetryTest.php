@@ -29,9 +29,12 @@ final class TelemetryTest extends TestCase
         self::assertTrue(Telemetry::score(['wd' => false, 'me' => 20, 'ke' => 0], 301_000));
     }
 
-    public function testZeroInteractionLongSolveRejected(): void
+    public function testZeroInteractionLongSolveIsNotRejected(): void
     {
-        self::assertTrue(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 31_000));
+        // The widget auto-solves with widget-local listeners: a slow
+        // device or an Argon2id profile legitimately produces no events.
+        self::assertFalse(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 31_000));
+        self::assertFalse(Telemetry::score(['wd' => false, 'me' => 0, 'ke' => 0], 299_000));
     }
 
     public function testZeroInteractionShortSolvePasses(): void
@@ -94,7 +97,7 @@ final class TelemetryTest extends TestCase
     public function testMissingFieldsDefaultToZero(): void
     {
         // Rust: as_u64() on a missing key yields 0.
-        self::assertTrue(Telemetry::score([], 31_000), 'missing me/ke must default to 0');
+        self::assertFalse(Telemetry::score([], 31_000), 'a zero-interaction long solve must not be rejected');
         self::assertFalse(Telemetry::score([], 5_000));
     }
 

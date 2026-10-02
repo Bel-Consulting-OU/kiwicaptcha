@@ -591,3 +591,61 @@ test.describe('Lazy locale packs under real CSP headers (files tier)', () => {
     expect(result.body.ok, `the French retry solve must verify (got ${result.body.code})`).toBe(true);
   });
 });
+
+test.describe('Locale registry coherence and regional resolution', () => {
+  test('every shipped locale row has an eager placeholder in the driver table', () => {
+    const locales = fs.readFileSync(localeAssetPath(), 'utf8');
+    const driverPath = path.resolve(specDir, '../../../packages/kiwicaptcha-wasm/assets/widget-driver.js');
+    const driver = fs.readFileSync(driverPath, 'utf8');
+    const langs = [...locales.matchAll(/^    "([a-z-]+)": \[/gm)].map((m) => m[1]);
+    expect(langs.length, 'the locales asset must ship at least one pack').toBeGreaterThan(0);
+    const start = driver.indexOf('de: null');
+    expect(start, 'the placeholder table must exist in the driver').toBeGreaterThan(-1);
+    const table = driver.slice(start, driver.indexOf('};', start));
+    for (const lang of langs) {
+      const covered = table.includes(`"${lang}": null`) || table.includes(`${lang}: null`);
+      expect(covered, `the eager placeholder table must carry ${lang} so resolution cannot downgrade before the module lands`).toBe(true);
+    }
+  });
+
+  test('pt-br resolves regionally and paints the Brazilian forms after the module lands', async ({ page }) => {
+    const held = [];
+    await page.route('**/assets/locales*.js', (route) => {
+      held.push(route);
+    });
+    await page.goto('/?assets=files&lang=pt-br&bits=4', { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => held.length, 'the pt-br module load must start').toBe(1);
+    const widget = page.locator('[data-kiwi-widget]');
+    // While the pack is pending the subtree mirrors the English fallback
+    // that is actually on screen; the resolved language, however, must be
+    // pt-br, not the base language pt (the placeholder table must carry
+    // "pt-br"), or the late pack would paint European Portuguese.
+    await expect(widget).toHaveAttribute('lang', 'en');
+    await held.shift().continue().catch(() => {});
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await expect(widget).toHaveAttribute('lang', 'pt-br');
+    await expect(page.locator('[data-kiwi-label]')).toHaveText('Verificação de segurança');
+    await expect(page.locator('[data-kiwi-badge]')).toHaveText('Concluído');
+
+    // A widget created after the module registered must resolve the same
+    // language: the old table returned "pt" before the module landed, so
+    // two widgets on one page could disagree. The second widget proves
+    // both generations agree on pt-br and its Brazilian text.
+    await page.evaluate(() => {
+      const origin = document.querySelector('.kiwi-container');
+      const clone = origin.cloneNode(true);
+      clone.id = 'kiwicaptcha-ptbr-second';
+      clone.querySelectorAll('[data-kiwi-instance]').forEach((el) => el.removeAttribute('data-kiwi-instance'));
+      const w = clone.querySelector('[data-kiwi-widget]');
+      w.removeAttribute('data-kiwi-started');
+      w.removeAttribute('data-state');
+      for (const input of clone.querySelectorAll('[data-kiwi-token]')) input.value = '';
+      document.body.appendChild(clone);
+      window.__kiwiCaptchaCore.core.scan(document);
+    });
+    const second = page.locator('#kiwicaptcha-ptbr-second [data-kiwi-widget]');
+    await expect(second).toHaveAttribute('lang', 'pt-br');
+    await expect(second).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    await expect(page.locator('#kiwicaptcha-ptbr-second [data-kiwi-label]')).toHaveText('Verificação de segurança');
+  });
+});

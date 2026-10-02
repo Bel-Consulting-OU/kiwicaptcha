@@ -1926,7 +1926,7 @@ if ($path === '/' || $path === '/index.html') {
         $riskAsset = $assetLink('risk', 'js');
         $telemetryAsset = $assetLink('telemetry', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
-            .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
+            .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'" defer></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
         $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
         $moduleAttrs = ' data-kiwi-risk-src="'.$riskAsset['url'].'" data-kiwi-risk-integrity="'.$riskAsset['sri'].'"'

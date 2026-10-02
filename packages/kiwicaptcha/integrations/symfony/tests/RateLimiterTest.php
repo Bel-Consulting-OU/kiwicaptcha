@@ -166,6 +166,38 @@ final class RateLimiterTest extends TestCase
         self::assertSame($mapped, array_keys($pool->getValues()), 'IPv4-mapped IPv6 must equal the plain IPv4 pseudonym');
     }
 
+    public function testIpv6PerClientBudgetIsKeyedByThe64Prefix(): void
+    {
+        // A host controls at least a /64, so a /128-keyed budget is free
+        // to rotate through. Two addresses in one /64 share one budget;
+        // different /64s do not.
+        $pool = new ArrayAdapter();
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, null, 'pepper');
+
+        self::assertSame(1, $limiter->check('2001:db8:1:2::1'), 'the first address in the /64 is inside budget');
+        self::assertSame(0, $limiter->check('2001:db8:1:2::2'), 'a sibling address in the same /64 shares the exhausted budget');
+
+        $pool->clear();
+        self::assertSame(1, $limiter->check('2001:db8:1:3::1'));
+        self::assertSame(1, $limiter->check('2001:db8:1:4::1'), 'different /64s are different clients');
+    }
+
+    public function testDisabledGlobalCapWritesNoGlobalMembers(): void
+    {
+        // globalMax = 0 disables the deployment-wide window: the Lua
+        // script must not `ZADD` a global member, or the "cardinality is
+        // bounded by the global cap" contract fails and the set grows
+        // with deployment traffic per window.
+        $client = new FakePredisClient();
+        $limiter = new IssuanceRateLimiter(5, 60, redis: $client, globalMax: 0, namespace: 'no-global', pepper: 'p');
+        self::assertSame(1, $limiter->check('203.0.113.9'));
+
+        self::assertNotSame([], $client->zsets, 'the per-client window is still written');
+        foreach (array_keys($client->zsets) as $key) {
+            self::assertStringNotContainsString(':global', (string) $key, 'a disabled global cap must not grow the global ZSET');
+        }
+    }
+
     public function testGlobalOnlyModeCreatesNoClientKeys(): void
     {
         // maxChallenges = 0 disables the per-client control: with Redis, only

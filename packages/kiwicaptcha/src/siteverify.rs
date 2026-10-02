@@ -2,7 +2,8 @@
 //!
 //! Incumbent captcha backends call a provider "siteverify" endpoint with
 //! `response` + `secret` (+ optional `remoteip`) and expect provider-shaped
-//! JSON: `success`, `challenge_ts`, `hostname`, `error-codes`. This module
+//! JSON: `success`, `challenge_ts`, `hostname`, `action`, `cdata`,
+//! `error-codes`. This module
 //! provides the response DTO and the mapping from the core verify outcome —
 //! the same atomic verifier the native path uses; there is no second
 //! verification implementation, and the deterministic consumed-result
@@ -26,6 +27,17 @@ pub struct SiteverifyResponse {
     pub success: bool,
     pub challenge_ts: Option<String>,
     pub hostname: Option<String>,
+    /// The action bound to the challenge at issuance (reCAPTCHA v3
+    /// vocabulary), echoed from server-side metadata, never from the
+    /// verification request. Absent when no metadata store recorded one
+    /// — the PHP provider response carries the same information as an
+    /// explicit null on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// The cdata bound to the challenge at issuance, echoed from
+    /// server-side metadata, never from the verification request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cdata: Option<String>,
     #[serde(rename = "error-codes")]
     pub error_codes: Vec<String>,
 }
@@ -39,17 +51,35 @@ pub fn siteverify_response(
     outcome: &VerifyOutcome,
     record: Option<&ChallengeRecord>,
 ) -> SiteverifyResponse {
+    siteverify_response_with_metadata(outcome, record, None, None)
+}
+
+/// Build the provider-shaped response with the server-side metadata the
+/// caller resolved (the PHP SiteVerifyController's metadata store
+/// mirror): `action` and `cdata` are issued with the challenge, never
+/// echoed from the verification request, and appear on the success
+/// response when known.
+pub fn siteverify_response_with_metadata(
+    outcome: &VerifyOutcome,
+    record: Option<&ChallengeRecord>,
+    action: Option<&str>,
+    cdata: Option<&str>,
+) -> SiteverifyResponse {
     match outcome {
         VerifyOutcome::Valid { .. } => SiteverifyResponse {
             success: true,
             challenge_ts: record.map(|r| format_unix_ts(r.issued_at)),
             hostname: record.and_then(|r| r.hostname.clone()),
+            action: action.map(str::to_string),
+            cdata: cdata.map(str::to_string),
             error_codes: Vec::new(),
         },
         VerifyOutcome::Invalid(reason) => SiteverifyResponse {
             success: false,
             challenge_ts: None,
             hostname: None,
+            action: None,
+            cdata: None,
             error_codes: vec![map_error(reason)],
         },
     }
@@ -141,6 +171,65 @@ fn civil_from_days(z: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
     use crate::verify::VerifyOutcome;
+
+    #[test]
+    fn success_response_echoes_the_issued_action_and_cdata_metadata() {
+        // action/cdata are bound at issuance and echoed from the
+        // server-side metadata, never from the verification request; the
+        // PHP provider response carries the same fields.
+        let outcome = VerifyOutcome::Invalid(crate::verify::VerifyError::BadSignature);
+        let without = siteverify_response(&outcome, None);
+        assert_eq!(without.action, None);
+        assert_eq!(without.cdata, None);
+
+        let record = crate::challenge::ChallengeRecord {
+            nonce: "n".into(),
+            scope: "login".into(),
+            binding_tag: "b".into(),
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_000_120,
+            algorithm: crate::challenge::PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            salt: "c2FsdA==".into(),
+            prefix: String::new(),
+            challenge: String::new(),
+            min_duration_ms: 0,
+            issued_at_ns: 0,
+            attempts_used: 0,
+            protocol_version: 2,
+            region: None,
+            policy_version: 1,
+            request_binding: None,
+            issuer: None,
+            kid: 1,
+            execution_program: None,
+            execution_version: None,
+            execution_commitment: None,
+            hostname: None,
+            decoy_field: None,
+            rsw_modulus_sha256: None,
+        };
+        let outcome = VerifyOutcome::Valid {
+            nonce: "n".into(),
+            request_binding: None,
+            from_stored_result: false,
+            solve_duration_ms: Some(10),
+        };
+        let with = siteverify_response_with_metadata(
+            &outcome,
+            Some(&record),
+            Some("login"),
+            Some("cdata-1"),
+        );
+        assert_eq!(with.action.as_deref(), Some("login"));
+        assert_eq!(with.cdata.as_deref(), Some("cdata-1"));
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["action"], "login");
+        assert_eq!(json["cdata"], "cdata-1");
+    }
 
     #[test]
     fn formats_unix_ts_as_rfc3339() {

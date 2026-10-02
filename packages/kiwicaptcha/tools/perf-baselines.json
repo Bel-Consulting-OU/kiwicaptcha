@@ -9,31 +9,31 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 102404,
-      "brotli_bytes": 25524,
+      "raw_bytes": 102356,
+      "brotli_bytes": 25583,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 30240,
-      "gzip_bytes_zlib13": 30240,
+      "gzip_bytes_zlib12": 30218,
+      "gzip_bytes_zlib13": 30218,
       "headroom_review": {
         "gzip": "reviewed 2026-10-01: 30240/30720 bytes (98.4%). The eager driver core carries the always-loaded bootstrap (solvers, lifecycle, a11y, provider surface); the remaining gzip margin is real but thin. A hard 95% failure without this note would reject the asset today, so the note documents the reviewed follow-up: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Any further growth must either recover bytes or re-review this note."
       }
     },
     "widget_worker": {
-      "raw_bytes": 145507,
+      "raw_bytes": 146984,
       "copies_identical": true,
       "note": "The worker asset (kiwi-worker.js), three byte-identical copies; since the r8 glue-embedding change the asset is assembled by tools/embed-worker as the `var window = self;` prelude plus the full wasm glue (kiwicaptcha-wasm.js) plus the worker solver source, so a files-mode worker boots with wasm in scope (SHA solves in the worker use solve_sha256_chunk; the rsw sequential time-lock solver stays pure JS BigInt, exactly the Argon worker's loading and message pattern). The lazy runtime fetch of the driver stays for the compat tier. The row carries no cap fields by design, like the widget_runtime and widget_css rows: the asset is lazy in the files tier (a SHA-only page never fetches it) and perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_runtime": {
-      "raw_bytes": 116196,
+      "raw_bytes": 116940,
       "copies_identical": true,
       "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from the worker solver source (the tail of assets/kiwi-worker.js) by the embed-worker tool, so the rsw solver rides the glue copy too; the release worker asset embeds this same glue text, so the files-mode worker needs no runtime fetch to solve. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_css": {
-      "raw_bytes": 13014,
+      "raw_bytes": 12891,
       "copies_identical": true,
       "note": "The widget stylesheet (widget.css), three byte-identical copies; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The narrow-container wrapping fix (status text wraps instead of ellipsizing) intentionally grew the sheet; the row carries no cap by design."
     },
@@ -81,40 +81,40 @@
       "gzip_bytes_zlib13": 12340
     },
     "widget_telemetry": {
-      "raw_bytes": 2922,
-      "brotli_bytes": 992,
+      "raw_bytes": 3037,
+      "brotli_bytes": 1043,
       "raw_cap_bytes": 8192,
       "gzip_cap_bytes": 2500,
       "brotli_cap_bytes": 2000,
       "copies_identical": true,
       "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 1229,
-      "gzip_bytes_zlib13": 1229
+      "gzip_bytes_zlib12": 1287,
+      "gzip_bytes_zlib13": 1287
     },
     "widget_compat": {
-      "raw_bytes": 31586,
-      "brotli_bytes": 8095,
+      "raw_bytes": 32094,
+      "brotli_bytes": 8175,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,
       "brotli_cap_bytes": 10000,
       "copies_identical": true,
       "note": "The compatibility-loader module (widget-compat.js), three byte-identical copies. Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 9304,
-      "gzip_bytes_zlib13": 9304,
+      "gzip_bytes_zlib12": 9389,
+      "gzip_bytes_zlib13": 9389,
       "headroom_review": {
         "raw": "reviewed 2026-10-01: 31586/32768 bytes (96.4%). The compat loader is already lazy (only the /api.js route pays for it) and its code is dense with no non-bootstrap block left to extract; the reviewed follow-up is a source-level compaction pass of the loader parser and descriptor table before the next compat behavior wave."
       }
     },
     "widget_locales": {
-      "raw_bytes": 12737,
-      "brotli_bytes": 3860,
+      "raw_bytes": 12754,
+      "brotli_bytes": 3882,
       "raw_cap_bytes": 16384,
       "gzip_cap_bytes": 6000,
       "brotli_cap_bytes": 5000,
       "copies_identical": true,
       "note": "The lazy non-default locale packs (widget-locales.js), three byte-identical copies. Loaded by the eager core only when kiwiResolveLang() resolves a non-default language; a default-language page pays zero bytes. Never embedded inline (the compat loader carries its descriptor; the Symfony theme and the fixture issue data-kiwi-locales-src/-integrity in both asset tiers). Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 4387,
-      "gzip_bytes_zlib13": 4387
+      "gzip_bytes_zlib12": 4403,
+      "gzip_bytes_zlib13": 4403
     }
   },
   "bench": {

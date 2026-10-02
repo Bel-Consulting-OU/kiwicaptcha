@@ -1187,16 +1187,26 @@ final class FakePredisClient extends \Predis\Client
                     return 0;
                 }
             }
-            if ($this->zcard((string) $keys[$keyCount - 1]) >= $globalMax) {
-                return -1;
+            // globalMax = 0 disables the global window entirely: the
+            // real script neither counts nor writes the global ZSET.
+            $globalEnabled = $keyCount === 1 ? $globalMax > 0 : $globalMax > 0;
+            if ($keyCount === 1 || $globalEnabled) {
+                if ($this->zcard((string) $keys[$keyCount - 1]) >= $globalMax) {
+                    return -1;
+                }
             }
             if ($keyCount === 1) {
                 $this->fakeZadd([(string) $keys[0], (string) $now, (string) $rest[2]]);
             } else {
                 $this->fakeZadd([(string) $keys[$keyCount === 2 ? 0 : 1], (string) $now, (string) $rest[3]]);
-                $this->fakeZadd([(string) $keys[$keyCount - 1], (string) $now, (string) $rest[4]]);
+                if ($globalEnabled) {
+                    $this->fakeZadd([(string) $keys[$keyCount - 1], (string) $now, (string) $rest[4]]);
+                }
             }
             foreach ($keys as $k) {
+                if (!$globalEnabled && $keyCount !== 1 && (string) $k === (string) $keys[$keyCount - 1]) {
+                    continue;
+                }
                 $this->fakePexpire([$k, (string) ($windowMs + 1000)]);
             }
 

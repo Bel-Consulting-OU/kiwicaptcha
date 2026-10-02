@@ -319,6 +319,7 @@ final class RswModulusIdentityTest extends TestCase
         $wire['protocol_version'] = $protocolVersion;
         $wire['rsw_modulus_sha256'] = $identity;
         $payload = Issuer::canonicalPayload(
+            $protocolVersion,
             $wire['nonce'],
             $wire['scope'],
             $wire['binding_tag'],

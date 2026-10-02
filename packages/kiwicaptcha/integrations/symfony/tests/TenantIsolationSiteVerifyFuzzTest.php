@@ -154,7 +154,7 @@ final class TenantIsolationSiteVerifyFuzzTest extends TestCase
 
     private function backendId(string $secret, string $scope, int $epoch, ?string $digest): string
     {
-        return hash('sha256', $secret.'|'.$scope.'|'.$epoch.'|'.($digest ?? ''));
+        return hash_hmac('sha256', $scope.'|'.$epoch.'|'.($digest ?? ''), $secret);
     }
 
     private function idempotencyKeys(string $idempotencyKey): array

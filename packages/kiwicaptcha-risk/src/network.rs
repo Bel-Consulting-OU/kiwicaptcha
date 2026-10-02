@@ -78,6 +78,14 @@ impl CidrEntry {
         let prefix: u8 = prefix_raw
             .parse()
             .map_err(|_| NetworkError::Parse(format!("invalid CIDR prefix: {prefix_raw}")))?;
+        // Canonical spelling only: u8::parse accepts "+24" and "024",
+        // while the PHP classifier's integer validation rejects them, so
+        // the same config file would load differently in the two cores.
+        if prefix_raw != prefix.to_string() {
+            return Err(NetworkError::Parse(format!(
+                "invalid CIDR prefix: {prefix_raw}"
+            )));
+        }
         let max_bits = match network {
             IpAddr::V4(_) => 32u8,
             IpAddr::V6(_) => 128u8,

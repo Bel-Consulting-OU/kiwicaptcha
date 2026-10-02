@@ -93,7 +93,7 @@ final class RealRedisSiteVerifyPersistenceGuardTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, $nonce] = $this->issueSha($storage);
         $uuid = '7f1e6d20-1111-4000-8000-000000000001';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha');
@@ -145,7 +145,7 @@ final class RealRedisSiteVerifyPersistenceGuardTest extends TestCase
             return;
         }
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha-persist-guard');
-        $backendId = hash('sha256', 'persist-guard|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', 'persist-guard');
         $uuid = '7f1e6d20-2222-4000-8000-000000000002';
         $key = '{kiwi:kiwicaptcha-persist-guard}:siteverify-idem:'.$backendId.':'.$uuid;
         $hash = hash('sha256', 'canonical-response');
@@ -214,7 +214,7 @@ final class RealRedisSiteVerifyPersistenceGuardTest extends TestCase
         $storage = new RedisStorage($probe);
         [$token, $nonce] = $this->issueSha($storage);
         $uuid = '7f1e6d20-3333-4000-8000-000000000003';
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         $idemKey = '{kiwi:kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha');

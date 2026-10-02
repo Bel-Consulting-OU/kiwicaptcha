@@ -94,10 +94,7 @@
     position: relative;
     overflow: hidden;
     cursor: default;
-    user-select: none;
-    transition: border-color 0.2s ease;
   }
-  .kiwi-widget:hover { border-color: var(--kiwi-primary); }
   /* The widget is never focusable (status, not control); the Retry button
      carries the only visible focus ring (2px, >=3:1). */
   .kiwi-retry:focus-visible {

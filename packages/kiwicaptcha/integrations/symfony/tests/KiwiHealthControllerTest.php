@@ -167,7 +167,7 @@ final class KiwiHealthControllerTest extends TestCase
 
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 6 exceeds this binary\'s max (5) — it must leave the pool (mixed-version rolling deployment)');
-        self::assertStringContainsString('min_protocol_version', (string) $response->getContent());
+        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent());
     }
 
     public function testNotReadyWhenCentralPolicyDemandsANewerEpoch(): void
@@ -178,7 +178,7 @@ final class KiwiHealthControllerTest extends TestCase
 
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'min_policy_epoch 2 > the configured risk.policy_version 1 — the policy was revoked while this binary still issues under it');
-        self::assertStringContainsString('min_policy_epoch', (string) $response->getContent());
+        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent());
     }
 
     public function testReadyOkWithTheExecutionFloorAtTheBinaryMax(): void
@@ -208,7 +208,7 @@ final class KiwiHealthControllerTest extends TestCase
 
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version above the binary max must leave the pool (mixed-version rolling deployment)');
-        self::assertSame('security_policy_incompatible:min_execution_version_'.(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION + 1), json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
+        self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
     }
 
     public function testNotReadyWhenCentralPolicyCarriesACorruptExecutionFloor(): void
@@ -224,7 +224,7 @@ final class KiwiHealthControllerTest extends TestCase
 
             $response = $controller->ready();
             self::assertSame(503, $response->getStatusCode(), 'a corrupt min_execution_version ('.$raw.') must fail readiness');
-            self::assertSame('security_policy_state_corrupt:min_execution_version', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the corrupt execution field');
+            self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the corrupt execution field');
         }
     }
 
@@ -259,10 +259,10 @@ final class KiwiHealthControllerTest extends TestCase
         // and the generator max, and a required tier above it refuses
         // readiness. Rows: gate, cap, floor, required, expected code.
         $rows = [
-            [true, 2, null, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
-            [true, 2, 1, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
+            [true, 2, null, 2, 503, 'security_policy_incompatible'],
+            [true, 2, 1, 2, 503, 'security_policy_incompatible'],
             [true, 2, 2, 2, 200, null],
-            [true, 3, 2, 3, 503, 'security_policy_incompatible:execution_required_3_effective_2'],
+            [true, 3, 2, 3, 503, 'security_policy_incompatible'],
             [true, 3, 3, 3, 200, null],
             [false, 3, 1, 3, 200, null],
             // The current generator maximum: cap 5 with floor 5
@@ -271,7 +271,7 @@ final class KiwiHealthControllerTest extends TestCase
             // still satisfies a required tier at the cap, because the
             // effective fleet tier is the minimum of all three.
             [true, 5, 5, 5, 200, null],
-            [true, 5, 4, 5, 503, 'security_policy_incompatible:execution_required_5_effective_4'],
+            [true, 5, 4, 5, 503, 'security_policy_incompatible'],
             [true, 4, 5, 4, 200, null],
         ];
         foreach ($rows as [$gate, $cap, $floor, $required, $expectedCode, $expectedReason]) {
@@ -315,7 +315,7 @@ final class KiwiHealthControllerTest extends TestCase
         // required tier 1 stays ready.
         $requiredTwo = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 2);
         self::assertSame(503, $requiredTwo->ready()->getStatusCode());
-        self::assertSame('security_policy_incompatible:execution_required_2_effective_1', json_decode((string) $requiredTwo->ready()->getContent(), true)['reason']);
+        self::assertSame('security_policy_incompatible', json_decode((string) $requiredTwo->ready()->getContent(), true)['reason']);
 
         $requiredOne = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 1);
         self::assertSame(200, $requiredOne->ready()->getStatusCode());
@@ -337,7 +337,7 @@ final class KiwiHealthControllerTest extends TestCase
         $unsatisfiable = $this->controller($unfloored, executionGate: true, executionVersionCap: 4, executionRequiredVersion: 4);
         $response = $unsatisfiable->ready();
         self::assertSame(503, $response->getStatusCode(), 'cap 4 required 4 with no confirmed floor is not ready');
-        self::assertSame('security_policy_incompatible:execution_required_4_effective_1', json_decode((string) $response->getContent(), true)['reason']);
+        self::assertSame('security_policy_incompatible', json_decode((string) $response->getContent(), true)['reason']);
     }
 
     public function testNotReadyWhenSecurityRedisIsUnreachable(): void
@@ -500,8 +500,8 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a pod whose authority pin is uninitialized must not be ready');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_uninitialized', $body['reason'], 'the machine-readable reason names the uninitialized authority');
-        self::assertSame('storage', $body['authority'], 'the failing authority label is reported');
+        self::assertSame('authority_not_eligible', $body['reason'], 'the failing authority leg reports only the generic reason');
+        self::assertArrayNotHasKey('authority', $body, 'the failing authority label is logged, never exposed on the unauthenticated route');
     }
 
     public function testReadyPassesAnInitializedPinnedAuthority(): void
@@ -531,8 +531,8 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'a changed authority must fail readiness immediately');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_changed', $body['reason'], 'the machine-readable reason names the changed authority');
-        self::assertSame('storage', $body['authority']);
+        self::assertSame('authority_not_eligible', $body['reason']);
+        self::assertArrayNotHasKey('authority', $body);
     }
 
     public function testReadyRecoversAfterAnAuthorizedReinitialize(): void
@@ -587,7 +587,7 @@ final class KiwiHealthControllerTest extends TestCase
         $controller = $this->controller($client);
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'the other legs still decide');
-        self::assertStringContainsString('min_protocol_version', (string) $response->getContent(), 'the failing leg is the central policy, not the authority leg');
+        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent(), 'the failing leg is the central policy, not the authority leg');
     }
 
     public function testReadyRefusesAnUnreachablePinnedAuthority(): void
@@ -603,6 +603,6 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'an unverifiable pinned authority must not be ready');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertSame('ha_authority_unreachable', $body['reason']);
+        self::assertSame('authority_not_eligible', $body['reason']);
     }
 }

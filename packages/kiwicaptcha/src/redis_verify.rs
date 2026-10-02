@@ -704,6 +704,26 @@ impl StoreScripts {
     }
 }
 
+/// The default resume-claim TTL in seconds: the initial value of
+/// [`RedisChallengeStore::resume_claim_ttl_secs`]. A crashed recovery
+/// leaves only this short lease before a later retry may claim again —
+/// a long poison marker would block resultless recovery for its full
+/// TTL even when nothing is running. The configured lease must cover
+/// the maximum supported derivation and request duration: fencing
+/// stays correct on expiry (a stale owner can never commit), so the
+/// lower bound is the longest single resume, and the lease only
+/// protects the single-derivation efficiency property, never
+/// correctness.
+///
+/// Contract: the core minimum is 1 second — the storage boundary
+/// (`validate_claim_ttl`) rejects a lower TTL, and a sub-second
+/// lease would expire before the claim is even usable (the lease
+/// would be non-functional). The bundle production policy is at
+/// least 60 seconds (the Symfony `resume_claim_ttl_secs` lower
+/// bound): the claim TTL is an efficiency bound, fencing stays
+/// correct on expiry, and a stale owner can never commit.
+const CLAIM_TTL_SECS: u64 = 60;
+
 /// One Lua script for the consumed-state transition: atomically
 /// marks a pending record consumed (keeping it — the storage-level `state`
 /// field is added), or observes the already-consumed record.
@@ -731,25 +751,6 @@ impl StoreScripts {
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
-/// The default resume-claim TTL in seconds: the initial value of
-/// [`RedisChallengeStore::resume_claim_ttl_secs`]. A crashed recovery
-/// leaves only this short lease before a later retry may claim again —
-/// a long poison marker would block resultless recovery for its full
-/// TTL even when nothing is running. The configured lease must cover
-/// the maximum supported derivation and request duration: fencing
-/// stays correct on expiry (a stale owner can never commit), so the
-/// lower bound is the longest single resume, and the lease only
-/// protects the single-derivation efficiency property, never
-/// correctness.
-///
-/// Contract: the core minimum is 1 second — the storage boundary
-/// (`validate_claim_ttl`) rejects a lower TTL, and a sub-second
-/// lease would expire before the claim is even usable (the lease
-/// would be non-functional). The bundle production policy is at
-/// least 60 seconds (the Symfony `resume_claim_ttl_secs` lower
-/// bound): the claim TTL is an efficiency bound, fencing stays
-/// correct on expiry, and a stale owner can never commit.
-const CLAIM_TTL_SECS: u64 = 60;
 
 const CONSUME_TRANSITION_LUA: &str = r#"
 -- kiwicaptcha consume transition
@@ -807,10 +808,20 @@ local updated = kiwiReplaceTopLevel(v, 'state', '"consumed"')
 if updated == nil then
     return false
 end
+-- The operation-identity splice is part of the caller's contract when
+-- ARGV[1] is non-empty: a pending envelope that carries no
+-- operation_identity marker (only store() writes the null marker, so a
+-- hand-written or foreign envelope may lack it) cannot receive the
+-- identity. The flip still completes durably, but the fifth reply
+-- element reports whether the splice landed so the caller fails closed
+-- instead of proceeding on a silently identity-less consumed record.
+-- Mirrors the PHP consume script byte for byte.
+local identitySpliced = 0
 if ARGV[1] ~= '' then
     local withIdentity = kiwiReplaceTopLevel(updated, 'operation_identity', ARGV[1])
     if withIdentity ~= nil then
         updated = withIdentity
+        identitySpliced = 1
     end
 end
 -- The re-SET preserves the key's exact remaining TTL in milliseconds: a
@@ -824,7 +835,7 @@ if pttl < 0 then
 end
 if pttl < 1000 then pttl = 1000 end
 redis.call('SET', KEYS[1], updated, 'PX', pttl)
-return {updated, 1}
+return {updated, 1, identitySpliced}
 "#;
 
 /// One atomic delete-if-pending cleanup: GET decides — a missing record
@@ -1801,26 +1812,37 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
 /// `first` flag. The stored outcome is taken from the returned JSON itself,
 /// so `first == false` carries the winner's committed result when one
 /// exists.
-fn parse_consume(value: redis::Value) -> Option<ConsumeResult> {
-    let (raw, first) = match value {
+fn parse_consume(value: redis::Value) -> Option<(ConsumeResult, bool)> {
+    let (raw, first, identity_spliced) = match value {
         redis::Value::Nil => return None,
-        redis::Value::Array(items) if items.len() == 2 => {
+        redis::Value::Array(items) if items.len() == 2 || items.len() == 3 => {
             let raw = match &items[0] {
                 redis::Value::BulkString(bytes) => String::from_utf8_lossy(bytes).into_owned(),
                 _ => return None,
             };
             let first = matches!(&items[1], redis::Value::Int(1));
-            (raw, first)
+            // The third reply element is the identity-splice flag; an
+            // older two-element reply (a stale loaded script) reports
+            // false so the caller still fails closed when an identity
+            // was requested.
+            let spliced = items
+                .get(2)
+                .map(|v| matches!(v, redis::Value::Int(1)))
+                .unwrap_or(false);
+            (raw, first, spliced)
         }
         _ => return None,
     };
     let stored = decode_stored(&raw)?;
-    Some(ConsumeResult {
-        record: stored.record,
-        first,
-        stored_result: if first { None } else { stored.consumed_result },
-        operation_identity: stored.operation_identity,
-    })
+    Some((
+        ConsumeResult {
+            record: stored.record,
+            first,
+            stored_result: if first { None } else { stored.consumed_result },
+            operation_identity: stored.operation_identity,
+        },
+        identity_spliced,
+    ))
 }
 
 /// Parse the Lua cancel-transition reply into a [`CancelResult`]: `nil`
@@ -2349,6 +2371,8 @@ impl RedisChallengeStore {
         };
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
+        let identity_requested = operation_identity.is_some();
+        let mut identity_spliced = true;
         Self::run_command(conn, |c| {
             let v = Self::invoke_script::<redis::Value>(
                 c,
@@ -2356,7 +2380,12 @@ impl RedisChallengeStore {
                 &key,
                 &[&identity_arg],
             )?;
-            let parsed = parse_consume(v);
+            let (parsed, spliced) = match parse_consume(v) {
+                Some((result, spliced)) => (Some(result), spliced),
+                None => (None, true),
+            };
+            identity_spliced = spliced;
+            let parsed = parsed;
             // Durability barrier: only the fresh pending → consumed
             // transition mutated the store, so only it waits. The wait
             // proves that at least N replicas acknowledged the write; it
@@ -2371,6 +2400,22 @@ impl RedisChallengeStore {
             // cannot turn an idempotent retry into a failure.
             if matches!(parsed, Some(ref result) if result.first) && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
+            }
+            // The identity-splice contract (mirrors the PHP
+            // doConsume): a fresh flip with a requested identity that
+            // could not land is a storage-write failure, not a silent
+            // success. The flip itself stays durable, so a same-identity
+            // retry recovers the consumed record instead of redeeming
+            // it twice.
+            if identity_requested
+                && !identity_spliced
+                && matches!(parsed, Some(ref result) if result.first)
+            {
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::ResponseError,
+                    "consume identity splice refused",
+                    "the consume transition could not record the operation identity: the stored envelope carries no operation_identity marker".to_string(),
+                )));
             }
             Ok(parsed)
         })

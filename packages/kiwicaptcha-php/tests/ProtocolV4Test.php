@@ -100,12 +100,13 @@ final class ProtocolV4Test extends TestCase
         $canonical = base64_decode(substr($record->challenge, 0, strpos($record->challenge, '.')), true);
         self::assertNotFalse($canonical);
         self::assertStringEndsWith(
-            '|'.$record->executionVersion.'|'.$record->executionCommitment,
+            '|e='.$record->executionVersion.','.$record->executionCommitment,
             $canonical,
-            'the signed canonical carries the execution_version|execution_commitment segments',
+            'the signed canonical carries the tagged e=version,commitment segment',
         );
         // And the verifier's byte-exact reconstruction equals it.
         self::assertSame($canonical, Issuer::canonicalPayload(
+            $record->protocolVersion,
             $record->nonce,
             $record->scope,
             $record->bindingTag,
@@ -152,9 +153,9 @@ final class ProtocolV4Test extends TestCase
         self::assertNotNull($bothRecord->decoyField);
         $bothCanonical = base64_decode(substr($bothRecord->challenge, 0, strpos($bothRecord->challenge, '.')), true);
         self::assertStringEndsWith(
-            '|'.$bothRecord->decoyField.'|1|'.$bothRecord->executionCommitment,
+            '|d='.$bothRecord->decoyField.'|e=1,'.$bothRecord->executionCommitment,
             $bothCanonical,
-            'v4 with a decoy: |decoy|execution_version|execution_commitment',
+            'v4 with a decoy: |d=decoy|e=execution_version,execution_commitment',
         );
 
         // Decoy only: protocol v3, no execution segments.
@@ -163,7 +164,8 @@ final class ProtocolV4Test extends TestCase
         self::assertSame(3, $decoyRecord->protocolVersion);
         self::assertNull($decoyRecord->executionProgram);
         $decoyCanonical = base64_decode(substr($decoyRecord->challenge, 0, strpos($decoyRecord->challenge, '.')), true);
-        self::assertStringEndsWith('|'.$decoyRecord->decoyField, $decoyCanonical, 'a decoy-only record stays protocol v3');
+        self::assertStringEndsWith(
+            '|d='.$decoyRecord->decoyField, $decoyCanonical, 'a decoy-only record stays protocol v3');
     }
 
     public function testArmedChallengeVerifiesEndToEnd(): void

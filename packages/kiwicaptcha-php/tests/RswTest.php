@@ -509,12 +509,12 @@ final class RswTest extends TestCase
         // The canonical payload really says rsw: the signed string is
         // the v2 grammar with the algorithm segment.
         $payload = base64_decode(explode('.', $challenge->challenge)[0], true);
-        self::assertStringStartsWith('v2|', $payload);
+        self::assertStringStartsWith('v3|5|', $payload);
         self::assertStringContainsString('|rsw|0|30000|1|1|', $payload);
         self::assertStringEndsWith(
-            '|'.RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
+            '|r='.RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
             $payload,
-            'the authenticated rsw trapdoor identity is the final canonical segment',
+            'the authenticated rsw trapdoor identity is the final tagged canonical segment',
         );
         self::assertSame(
             RswModulusIdentity::fingerprint(RswFixture::MODULUS_N_B64),
@@ -854,6 +854,7 @@ final class RswTest extends TestCase
         $salt = base64_encode(random_bytes(16));
         $bindingTag = Issuer::bindingTag($nonce, '198.51.100.7', Vectors::SECRET);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             'login',
             $bindingTag,

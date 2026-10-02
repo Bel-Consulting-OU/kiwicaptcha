@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
+use BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestCacheWarmer;
+use BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestIndex;
 use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
@@ -1828,8 +1830,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // execution dimension when a risk trigger passes AND the
             // SecurityEpochMonitor confirms the central
             // min_protocol_version floor >= 4 (the protocol-v4 rollout
-            // gate). The gate on without execution_key was refused at
-            // compile time above.
+            // gate). The gate on without execution_key is deliberately
+            // inert (no execution program is ever issued); the
+            // kiwicaptcha:doctor command flags that misconfiguration as
+            // a warning, and the execution generator's key validation is
+            // the runtime backstop.
             ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
             // The node's execution-program version cap
             // (kiwi_captcha.execution_version, default 1): the effective
@@ -1942,8 +1947,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // GET {prefix}/api.js[?compat=...] serves the canonical glue and
         // driver as one same-origin external script.
         $assetsDir = \dirname(__DIR__, 2).'/Resources/public';
+        $container->setDefinition(AssetDigestIndex::class, new Definition(AssetDigestIndex::class, [
+            $assetsDir,
+        ]));
+        $container->setDefinition(AssetDigestCacheWarmer::class, (new Definition(AssetDigestCacheWarmer::class, [
+            new Reference(AssetDigestIndex::class),
+        ]))->addTag('kernel.cache_warmer'));
         $container->setDefinition(ApiJsController::class, (new Definition(ApiJsController::class, [
             $assetsDir,
+            new Reference(AssetDigestIndex::class),
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // Versioned immutable widget assets (asset_mode "files"):
@@ -1953,6 +1965,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // content-hash ETag.
         $container->setDefinition(AssetController::class, (new Definition(AssetController::class, [
             $assetsDir,
+            // Rolling-deploy fallbacks: previous-release asset dirs.
+            $config['asset_fallback_dirs'],
+            new Reference(AssetDigestIndex::class),
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // Health endpoints: /health/live is always 200 while the process
@@ -2016,6 +2031,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
             ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
             ->setArgument('$readLegacyFallback', $readLegacyFallback)
+            // The actionable failure detail is logged here, never exposed
+            // on the unauthenticated readiness route.
+            ->setArgument('$logger', new Reference('logger', \Symfony\Component\DependencyInjection\ContainerInterface::NULL_ON_INVALID_REFERENCE))
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Form type (renders the widget through the form theme). The
@@ -2173,6 +2191,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // tag clears the request-scoped emission registry between
             // requests in long-lived runtimes.
             $config['asset_mode'],
+            new Reference(AssetDigestIndex::class),
         ]))
             ->addTag('twig.runtime')
             ->addTag('kernel.reset', ['method' => 'reset']));

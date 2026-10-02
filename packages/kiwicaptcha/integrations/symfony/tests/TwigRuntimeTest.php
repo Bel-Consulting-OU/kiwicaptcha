@@ -125,8 +125,11 @@ final class TwigRuntimeTest extends TestCase
         self::assertSame('/kiwi-captcha/assets/widget.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css')).'.css', $cssMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css'), true)), $cssMatches[2][0]);
 
-        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{64}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)"></script>~', $html, $driverMatches);
-        self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once');
+        // The files-mode driver is deferred: ~100 KB must never block
+        // parsing mid-form, and the driver's readyState handling covers
+        // the deferred timing.
+        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{64}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)" defer></script>~', $html, $driverMatches);
+        self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once, deferred');
         self::assertSame('/kiwi-captcha/assets/driver.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js')).'.js', $driverMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js'), true)), $driverMatches[2][0]);
 
@@ -234,6 +237,21 @@ final class TwigRuntimeTest extends TestCase
         [$env, $runtime] = $this->runtimeWithTelemetry('minimal');
         $html = $runtime->renderWidget($env, []);
         self::assertStringContainsString('data-kiwi-telemetry="minimal"', $html, 'the configured telemetry mode must be the render default');
+
+        // Inline telemetry is embedded even when this (first) widget has
+        // telemetry off: a later widget on the page may enable it, and
+        // the first widget's emit_assets block is the only place the
+        // shared inline module can land.
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, []);
+        self::assertStringContainsString('kiwiBridge.register("telemetry"', $html, 'the inline telemetry module must be embedded for later widgets');
+    }
+
+    public function testLangRendersDataKiwiLangLikeTheRustRenderer(): void
+    {
+        [$env, $runtime] = $this->runtime();
+        $html = $runtime->renderWidget($env, ['lang' => 'pt-BR']);
+        self::assertStringContainsString('data-kiwi-lang="pt-BR"', $html);
     }
 
     private function runtimeWithTelemetry(string $telemetry): array

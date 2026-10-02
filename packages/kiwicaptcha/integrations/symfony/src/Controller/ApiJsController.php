@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Asset\AssetDigestIndex;
+use BelConsulting\KiwiCaptchaBundle\Asset\EtagMatcher;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
@@ -99,19 +101,34 @@ final class ApiJsController
     /** @var string|null in-process cache of the concatenated loader */
     private static ?string $cachedBody = null;
 
+    /**
+     * Per-request-path ETag cache of the loader body. The body is the
+     * static chunks plus a small path-dependent marker, so the 575 KB
+     * sha256 is computed once per distinct request path per process
+     * instead of on every no-cache revalidation.
+     *
+     * @var array<string, string>
+     */
+    private static array $etagCache = [];
+
     public function __construct(
         private readonly string $assetsDir,
+        private readonly ?AssetDigestIndex $digestIndex = null,
     ) {
     }
 
     public function apiJs(Request $request): Response
     {
+        $assetBase = $this->assetBase($request);
         $body = str_replace(
             self::ASSET_MARKER,
-            $this->compatMarker($this->assetBase($request)),
+            $this->compatMarker($assetBase),
             $this->cachedBody(),
         );
-        $etag = '"'.hash('sha256', $body).'"';
+        // The full-body hash is the expensive part of a revalidation;
+        // cache it per request-path spelling (bounded by the route
+        // spellings the loader is served under).
+        $etag = self::$etagCache[$assetBase] ??= '"'.hash('sha256', $body).'"';
 
         // The stable {prefix}/api.js URL is mutable (it changes on every
         // upgrade), so year-long immutable caching is wrong: a browser or
@@ -119,7 +136,7 @@ final class ApiJsController
         // was upgraded. The stable migration URL uses revalidation instead:
         // ETag + public no-cache (304 on match); versioned or
         // content-addressed URLs are reserved for truly immutable assets.
-        if ((string) $request->headers->get('If-None-Match') === $etag) {
+        if (EtagMatcher::matches($request->headers->get('If-None-Match'), $etag)) {
             return new Response('', Response::HTTP_NOT_MODIFIED, [
                 'ETag' => $etag,
                 'Cache-Control' => 'public, no-cache',
@@ -136,14 +153,23 @@ final class ApiJsController
 
     public function widgetCss(Request $request): Response
     {
-        $body = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget.css');
-        $etag = '"'.hash('sha256', $body).'"';
-        if ((string) $request->headers->get('If-None-Match') === $etag) {
+        // The digest index answers the ETag without reading or hashing
+        // the stylesheet; a 304 never touches the bytes at all.
+        $digest = $this->digestIndex?->digest('widget.css');
+        $body = null;
+        if ($digest === null) {
+            $body = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget.css');
+            $digest = hash('sha256', $body);
+        }
+        $etag = '"'.$digest.'"';
+        if (EtagMatcher::matches($request->headers->get('If-None-Match'), $etag)) {
             return new Response('', Response::HTTP_NOT_MODIFIED, [
                 'ETag' => $etag,
                 'Cache-Control' => 'public, no-cache',
             ]);
         }
+
+        $body ??= (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget.css');
 
         return new Response($body, Response::HTTP_OK, [
             'Content-Type' => 'text/css; charset=UTF-8',
@@ -207,17 +233,24 @@ final class ApiJsController
         }
         $descriptors = [];
         foreach (self::COMPAT_ASSETS as $kind => $spec) {
-            $path = rtrim($this->assetsDir, '/').'/'.$spec['file'];
-            $body = @file_get_contents($path);
-            if ($body === false) {
-                throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
+            $digest = $this->digestIndex?->digest($spec['file']);
+            if ($digest === null) {
+                $path = rtrim($this->assetsDir, '/').'/'.$spec['file'];
+                $body = @file_get_contents($path);
+                if ($body === false) {
+                    throw new \RuntimeException(sprintf('KiwiCaptcha asset not found: %s (run bin/sync-assets.sh)', $path));
+                }
+                $hash = hash('sha256', $body);
+                $sri = 'sha256-'.base64_encode(hash('sha256', $body, true));
+            } else {
+                $hash = $digest;
+                $sri = 'sha256-'.base64_encode((string) hex2bin($digest));
             }
-            $hash = hash('sha256', $body);
             $descriptors[$kind] = [
                 'file' => $spec['file'],
                 'ext' => $spec['ext'],
                 'hash' => $hash,
-                'sri' => 'sha256-'.base64_encode(hash('sha256', $body, true)),
+                'sri' => $sri,
                 'path' => 'assets/'.$kind.'.'.$hash.'.'.$spec['ext'],
             ];
         }

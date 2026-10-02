@@ -213,7 +213,7 @@ if mapped then
           rec['state'] = 'step_up_required'
           rec['owner'] = cjson.null
           rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+          rec['reservedRequirementGeneration'] = cjson.null
         end
         redis.call('SET', KEYS[3], cjson.encode(rec), 'KEEPTTL')
         return {ARGV[11], 1, ''}
@@ -413,7 +413,6 @@ if rec['state'] == 'reserved' then
   rec['stage2Nonce'] = ARGV[2]
   rec['owner'] = cjson.null
   rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
   rec['reservedRequirementGeneration'] = cjson.null
   redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
   return 'issued_new'

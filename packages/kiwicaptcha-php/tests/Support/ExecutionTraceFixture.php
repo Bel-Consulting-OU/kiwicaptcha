@@ -77,7 +77,7 @@ final class ExecutionTraceFixture
      * uses this fixed hex reference value exactly like the fixed
      * observed height above, a fabricated reference value.
      */
-    private const FABRICATED_URL_DIGEST = 'e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7';
+    private const FABRICATED_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
 
     private function __construct()
     {

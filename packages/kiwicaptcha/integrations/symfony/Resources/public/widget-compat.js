@@ -47,21 +47,17 @@
     compatOnloadName = compatLoader.onloadName;
   } catch (e) {}
   if (!compat || !compatScriptUrl) return;
-  // Route and asset bases derive from the loader's OWN script URL, so a
-  // deployment served under /security/captcha/api.js posts to
-  // /security/captcha/challenge and loads /security/captcha/assets/... .
+  // Route/asset bases derive from the loader's own script URL.
   var compatAssetBase = compatScriptUrl.split("?")[0].replace(/[^/]*$/, "");
   var compatRouteBase = "/";
   try { compatRouteBase = new URL(compatScriptUrl, document.baseURI).pathname.replace(/[^/]*$/, ""); } catch (e) {}
   var compatEndpointDefault = compatRouteBase + "challenge";
-  // Google's API defaults reset()/getResponse() and invisible execute()
-  // to the FIRST CREATED widget when the id is omitted. Track the first
-  // successful compat render.
+  // The incumbent defaults an omitted id to the first created widget.
   var kiwiCompatFirstId = null;
-  // The worker cannot read an inline glue script, so the module rebuilds
-  // the worker prelude from the glue's executed constants (K.compatGlue).
-  // The b64 constant carries its assembly-stamped digest; a mismatch
-  // drops the glue (fail closed).
+  // Numeric Google ids (grecaptcha.reset(0)) map to creation order.
+  var kiwiCompatOrderedIds = [];
+  // Rebuild the worker prelude from the glue's executed constants
+  // (K.compatGlue); the b64 constant's assembly digest fails closed.
   var kiwiCompatGlue = null;
   var kiwiCompatGlueReady = null;
   kiwiCompatGlueReady = Promise.resolve().then(function () {
@@ -150,8 +146,7 @@
       if (typeof v !== "string" || !v) return null;
       if (COMPAT_FORBIDDEN_CALLBACKS[v]) return null;
       if (!Object.prototype.hasOwnProperty.call(window, v)) return null;
-      // A page-defined accessor may throw when read: that must never
-      // abort the implicit-render loop and strand the other widgets.
+      // A page accessor may throw; never strand the implicit loop.
       try {
         return typeof window[v] === "function" ? window[v] : null;
       } catch (e) {
@@ -188,9 +183,7 @@
     if (!entry || entry.id !== id || entry.activationHandler) return;
     entry.activationHandler = function (ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
-      // The click path is fire-and-forget: a rejecting challenge must
-      // surface only through the controlled error lifecycle, never as
-      // an unhandled rejection.
+      // Fire-and-forget: failures surface via the error lifecycle only.
       Promise.resolve(core.execute(entry.id)).catch(function () {});
     };
     el.addEventListener("click", entry.activationHandler);
@@ -260,18 +253,29 @@
     if (typeof responseFieldName === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(responseFieldName)) {
       try {
         var tokenHost = (renderTarget.querySelector("[data-kiwi-token]") || {}).parentNode;
-        var aliasExists = false;
-        var hostInputs = tokenHost ? tokenHost.querySelectorAll("input") : [];
-        for (var hi = 0; hi < hostInputs.length; hi++) {
-          if (hostInputs[hi].name === responseFieldName) { aliasExists = true; break; }
+        // The field carries the incumbent's ID as well as the name, so
+        // getElementById / $("#g-recaptcha-response") finds it; the
+        // element stays Kiwi's hidden input (the documented compat
+        // shape). hCaptcha also fills the reCAPTCHA field for drop-in
+        // compatibility.
+        var fieldNames = [responseFieldName];
+        if (compat === "hcaptcha" && responseFieldName !== "g-recaptcha-response") {
+          fieldNames.push("g-recaptcha-response");
         }
-        if (tokenHost && !aliasExists) {
-          var aliasInput = document.createElement("input");
-          aliasInput.type = "hidden";
-          aliasInput.name = responseFieldName;
-          // A fresh input already reads as the empty string (no value
-          // write, which would invoke a page-installed setter).
-          tokenHost.appendChild(aliasInput);
+        for (var rf = 0; rf < fieldNames.length && tokenHost; rf++) {
+          var fieldName = fieldNames[rf];
+          var hostFields = tokenHost.querySelectorAll("input,textarea");
+          var aliasExists = false;
+          for (var hi = 0; hi < hostFields.length; hi++) {
+            if (hostFields[hi].name === fieldName) { aliasExists = true; break; }
+          }
+          if (aliasExists) continue;
+          var aliasField = document.createElement("input");
+          aliasField.type = "hidden";
+          aliasField.id = fieldName;
+          aliasField.name = fieldName;
+          aliasField.setAttribute("data-kiwi-response-alias", "");
+          tokenHost.appendChild(aliasField);
         }
       } catch (e) {}
     }
@@ -322,6 +326,7 @@
         compatBindActivation(el, id);
       }
       if (!kiwiCompatFirstId) kiwiCompatFirstId = id;
+      if (kiwiCompatOrderedIds.indexOf(id) === -1) kiwiCompatOrderedIds.push(id);
     } else if (isControl) {
         if (holder && holder.parentNode) holder.parentNode.removeChild(holder);
       compatForgetControl(compatControlByElement.get(el));
@@ -340,12 +345,9 @@
     return "internal-error";
   }
   function compatExecute(arg, opts) {
-    // Registration readiness first: implicit compat renders complete
-    // asynchronously (the loader-glue bootstrap), so execute() awaits
-    // kiwiCompatReady before resolving its target — an immediate
-    // execute must observe the rendered widget, not a widget-less
-    // page.
-    return (kiwiCompatReady || Promise.resolve()).then(function () {
+    // Implicit renders complete asynchronously (the glue bootstrap), so
+    // execute() awaits kiwiCompatReady before resolving its target.
+    var kiwiExecuteChain = (kiwiCompatReady || Promise.resolve()).then(function () {
     // hCaptcha async mode is decided before argument resolution: it
     // normalizes resolution failures to the incumbent error-code STRING.
     var hcaptchaAsync = compat === "hcaptcha" && opts && opts.async === true;
@@ -429,11 +431,23 @@
       throw err;
     });
     });
+    // The v2 contract is callback-style: pages ignore execute()'s return
+    // value. Observe the rejection of the promise actually returned to
+    // the page so such pages can never produce an unhandled rejection
+    // (awaiting callers still receive the rejected promise; a tamed
+    // promise merely has a handler attached).
+    if (compat === "recaptcha") kiwiExecuteChain.catch(function () {});
+    return kiwiExecuteChain;
   }
   function compatResolveId(idOrEl) {
-    // An omitted id targets the first created widget; an element
-    // resolves through the owned table, then its instance marker.
+    // Omitted id -> first render; number -> creation-order index; element
+    // -> owned record then instance marker. A container without a live
+    // widget resolves null (""/null/false), never throwing.
     if (idOrEl === undefined || idOrEl === null) return kiwiCompatFirstId;
+    if (typeof idOrEl === "number" && Number.isInteger(idOrEl)) {
+      var byIndex = kiwiCompatOrderedIds[idOrEl];
+      return byIndex && core.record(byIndex) ? byIndex : null;
+    }
     if (typeof idOrEl === "string" && core.record(idOrEl)) return idOrEl;
     if (idOrEl && idOrEl.nodeType === 1) {
       var entry = compatControlByElement.get(idOrEl);
@@ -441,8 +455,9 @@
       if (idOrEl.dataset && idOrEl.dataset.kiwiInstance && core.record(idOrEl.dataset.kiwiInstance)) {
         return idOrEl.dataset.kiwiInstance;
       }
-      if (idOrEl.querySelector) {
-        return (idOrEl.querySelector("[data-kiwi-widget]") || {}).dataset.kiwiInstance || null;
+      var inner = idOrEl.querySelector ? idOrEl.querySelector("[data-kiwi-widget]") : null;
+      if (inner && inner.dataset && inner.dataset.kiwiInstance && core.record(inner.dataset.kiwiInstance)) {
+        return inner.dataset.kiwiInstance;
       }
     }
     return null;
@@ -482,11 +497,9 @@
       return id ? core.isExpired(id) : false;
     }
   };
-  // Merge into an existing provider global instead of skipping it: a
-  // pre-seeded object keeps its own properties and gains the Kiwi API.
-  // Ready callbacks queued before the loader (own array properties, or
-  // the conventional ___grecaptcha_cfg pre-loader queues) drain once,
-  // in order, after the glue is ready.
+  // Merge into a pre-seeded provider global (its own properties stay);
+  // ready callbacks queued before the loader drain once, in order, after
+  // the glue is ready.
   var COMPAT_QUEUE_KEYS = ["_", "q", "queue", "_q", "_ready", "readyQueue"];
   function compatDrainQueue(q, queued) {
     if (Object.prototype.toString.call(q) !== "[object Array]") return;
@@ -495,12 +508,9 @@
     }
     try { q.length = 0; } catch (e) {}
   }
-  // The conventional reCAPTCHA pre-loader contract: ready callbacks are
-  // parked as arrays on the global configuration object before the real
-  // grecaptcha exists. Only the queue arrays are drained; the config
-  // object and its unknown fields stay untouched. The documented shape
-  // is an array of callbacks under ___grecaptcha_cfg (cfg.ready); the
-  // loader's fns/onload arrays and clients.af.ready are recognized too.
+  // Conventional reCAPTCHA pre-loader queues: callbacks parked as arrays
+  // on ___grecaptcha_cfg (cfg.ready), the loader's fns/onload arrays and
+  // clients.af.ready drain once; the config object stays untouched.
   function compatCollectPreloader(queued) {
     var cfg = window.___grecaptcha_cfg;
     if (!cfg || (typeof cfg !== "object" && typeof cfg !== "function")) return;

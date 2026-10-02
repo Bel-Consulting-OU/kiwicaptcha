@@ -31,7 +31,11 @@ final class RedisAdmissionSemaphoreTest extends TestCase
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
     /** Lease lifetime in ms — must mirror the semaphore's own constant. */
-    private const LEASE_MS = 45_000;
+    /**
+     * Tracks RedisAdmissionSemaphore's default lease (90 s), which must
+     * exceed the documented 60 s verification window.
+     */
+    private const LEASE_MS = 90_000;
 
     private function leases(FakePredisClient $client, string $namespace = 'default'): int
     {

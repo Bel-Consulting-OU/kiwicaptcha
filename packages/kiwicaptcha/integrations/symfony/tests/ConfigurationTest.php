@@ -766,7 +766,7 @@ final class ConfigurationTest extends TestCase
 
         self::assertSame(0, $redis['wait_replicas'], 'wait_replicas defaults to 0 (WAIT disabled)');
         self::assertSame(100, $redis['wait_timeout_ms'], 'wait_timeout_ms defaults to 100');
-        self::assertSame(0, $redis['ttl_margin_secs'], 'ttl_margin_secs defaults to 0 (no extra retention)');
+        self::assertSame(60, $redis['ttl_margin_secs'], 'ttl_margin_secs defaults to 60, above ordinary clock skew and failover margins');
 
         $redis = $this->process(['risk' => ['redis' => [
             'wait_replicas' => 2,
@@ -1102,8 +1102,9 @@ final class ConfigurationTest extends TestCase
     public function testArgon2MaxVerificationRuntimeMsDefaultsAndBounds(): void
     {
         // The deployment bound on a single verification derivation: below
-        // the default lease (45000) by the 5000 ms safety margin, so the
-        // default combination compiles (45000 > 30000 + 5000 = 35000).
+        // the default lease by the 5000 ms safety margin, so the default
+        // combination compiles (the configured default lease exceeds
+        // 30000 + 5000 = 35000).
         self::assertSame(30000, $this->process()['argon2_max_verification_runtime_ms'], 'argon2_max_verification_runtime_ms defaults to 30000 (below the default argon2_lease_ms 45000 by the 5000 ms safety margin)');
         self::assertSame(120000, $this->process(['argon2_max_verification_runtime_ms' => 120000])['argon2_max_verification_runtime_ms']);
     }

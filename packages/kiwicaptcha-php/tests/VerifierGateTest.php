@@ -90,6 +90,7 @@ final class VerifierGateTest extends TestCase
         $targetBits = (int) ($overrides['targetBits'] ?? 8);
         $minDurationMs = (int) ($overrides['minDurationMs'] ?? 0);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             $scope,
             $bindingTag,
@@ -141,6 +142,7 @@ final class VerifierGateTest extends TestCase
         $targetBits = (int) ($overrides['targetBits'] ?? 4);
         $t = (int) ($overrides['t'] ?? 3);
         $canonical = Issuer::canonicalPayload(
+            2,
             $nonce,
             $scope,
             $bindingTag,
@@ -1082,13 +1084,16 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Canonical v2 layout: the field order with
+        // Revision-3 canonical layout: the canonical tag, the signed
+        // protocol version 2, then the field order with
         // region/request_binding/issuer as empty segments, policy_version
-        // 1, and the final kid segment 1.
-        $canonicalV2 = 'v2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
+        // 1, and the final kid segment 1. This is byte-identical to the
+        // Rust shared fixture vector.
+        $canonicalV2 = 'v3|2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
         self::assertSame(
             $canonicalV2,
             Issuer::canonicalPayload(
+                2,
                 $nonce,
                 $scope,
                 $bindingTag,

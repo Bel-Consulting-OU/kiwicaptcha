@@ -1035,15 +1035,22 @@ LUA;
      *                            validity: TTL = expires_at - now + margin.
      *                            Must exceed max clock skew + failover
      *                            margin so a replayed token can never land
-     *                            on an already-expired state.
+     *                            on an already-expired state. Defaults to
+     *                            60 seconds, which exceeds ordinary clock
+     *                            skew and failover margins; a zero or tiny
+     *                            value is a deliberate, documented choice
+     *                            for single-clock test deployments only.
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
         private readonly string $prefix = 'kiwicaptcha:',
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
-        private readonly int $ttlMarginSecs = 0,
+        private readonly int $ttlMarginSecs = 60,
     ) {
+        if ($this->ttlMarginSecs < 0) {
+            throw new \InvalidArgumentException('ttlMarginSecs must be >= 0');
+        }
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
     }
 

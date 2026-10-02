@@ -11,6 +11,7 @@ use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -1003,6 +1004,77 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('RISK_DENIED', json_decode((string) $response->getContent(), true)['error']['code']);
         self::assertSame([], $client->calls, 'the process-local cap must refuse BEFORE any Redis round trip (the rate limiter never ran)');
+    }
+
+    public function testASourceRateLimited429ReEmitsTheCarriedSessionCookie(): void
+    {
+        // The rate-limited client already holds a continuity session; the
+        // 429 records the sourceRateLimitHit evidence against that
+        // session, so it must also re-emit it. Dropping the cookie makes
+        // every retry mint a fresh session and loses the session
+        // reputation that partly drives the limit.
+        $cookie = new ContinuityCookie();
+        $session = $cookie->mint();
+        self::assertNotNull($session);
+        $limiter = new IssuanceRateLimiter(1, 60, null, null, 'pepper', $this->requirePredis(), 500, 'cookie-429-ns');
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $controller = new ChallengeController($issuer, $limiter, false, null, $cookie);
+
+        $makeRequest = static function () use ($cookie, $session): \Symfony\Component\HttpFoundation\Request {
+            $request = JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+            $request->cookies->set($cookie->cookie(Request::create('/'), $session)->getName(), $session);
+
+            return $request;
+        };
+
+        $first = $controller->challenge($makeRequest());
+        self::assertSame(200, $first->getStatusCode(), 'the first request is inside the per-source budget');
+        $second = $controller->challenge($makeRequest());
+        self::assertSame(429, $second->getStatusCode(), 'the second request exhausts the per-source budget');
+
+        $emitted = null;
+        foreach ($second->headers->getCookies() as $emittedCookie) {
+            if ($emittedCookie->getValue() === $session) {
+                $emitted = $emittedCookie;
+                break;
+            }
+        }
+        self::assertNotNull($emitted, 'the rate-limited response must re-emit the carried session cookie');
+        self::assertSame($cookie->cookie(Request::create('/'), $session)->getName(), $emitted->getName());
+    }
+
+    public function testAChallengeIssuedFeedbackOutageStillHandsOutTheChallenge(): void
+    {
+        // The challenge is minted and admitted; the challengeIssued
+        // issue-debt feedback then hits a risk-store outage. That
+        // feedback is evidence only — the challenge must still be handed
+        // out (200), never discarded by the pre-commit rollback and never
+        // surfaced as a raw 500.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow']],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8), new ArrayStorage());
+        $limiter = new IssuanceRateLimiter(100, 60, null, null, 'pepper', new FakePredisClient(), 500, 'test-ns');
+        $controller = new ChallengeController($issuer, $limiter, false, $gateway);
+
+        // The pre-issue assessment observes once; the request's second
+        // observation is the challengeIssued feedback and its outage must
+        // be swallowed.
+        $store->throwAtObservation = 2;
+        $response = $controller->challenge(JsonRequest::create('/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'a challengeIssued feedback outage must not discard a minted challenge');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame('', (string) ($body['nonce'] ?? ''), 'the hand-out still carries a real challenge');
+        self::assertCount(1, $store->observations, 'only the pre-issue assessment landed; the feedback outage was swallowed');
     }
 
     public function testRedisRateLimiterRunsWhenTheProcessCapHasBudget(): void

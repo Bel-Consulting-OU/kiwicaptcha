@@ -50,6 +50,8 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use num_bigint::BigUint;
+use num_integer::Integer as _;
+use rand::Rng as _;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
@@ -232,7 +234,28 @@ impl RswTrapdoor {
     pub fn expected_proof_hex(&self, prefix: &str, nonce: &str, t: u64) -> String {
         let base = derive_base(prefix, nonce, &self.n);
         let exponent = BigUint::from(2u8).modpow(&BigUint::from(t), &self.lambda);
-        proof_hex(&base.modpow(&exponent, &self.n))
+        proof_hex(&base.modpow(&self.blind_exponent(&base, exponent), &self.n))
+    }
+
+    /// Exponent blinding for the trapdoor exponentiation.
+    ///
+    /// `num-bigint`'s `modpow` is not constant-time, and the true
+    /// exponent is the deployment-stable secret `2^T mod lambda`: a
+    /// timing attacker who recovers lambda defeats RSW entirely. Adding
+    /// a random multiple of lambda leaves the result unchanged for every
+    /// base coprime to n (Euler's theorem), and it randomizes the
+    /// exponent's bit pattern across verifications, so an attacker's
+    /// measurements average over independent exponents instead of
+    /// extracting the secret one. The negligible `gcd(base, n) != 1`
+    /// case (base is a 256-bit residue of a 2048-bit modulus; a shared
+    /// factor means factoring n) falls back to the unblinded exponent so
+    /// the result stays exact for every base.
+    fn blind_exponent(&self, base: &BigUint, exponent: BigUint) -> BigUint {
+        if base.gcd(&self.n) != BigUint::from(1u8) {
+            return exponent;
+        }
+        let blind: u128 = rand::rngs::OsRng.gen();
+        exponent + BigUint::from(blind) * &self.lambda
     }
 }
 

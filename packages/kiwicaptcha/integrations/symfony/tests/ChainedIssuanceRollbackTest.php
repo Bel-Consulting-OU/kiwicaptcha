@@ -255,7 +255,9 @@ final class ChainedIssuanceRollbackTest extends TestCase
         // Once markStage2Issued() confirms issued(N), NO later failure
         // (here the risk feedback) may roll back the challenge record, the
         // outstanding memberships or the chain — a rolled-back membership
-        // would resurrect a valid-but-unaccounted challenge.
+        // would resurrect a valid-but-unaccounted challenge. Post-commit
+        // feedback is evidence only, so the hand-out still succeeds (200)
+        // even though the feedback write throws.
         $storage = new ArrayStorage();
         $client = new RollbackFakeRedis();
         $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
@@ -284,8 +286,9 @@ final class ChainedIssuanceRollbackTest extends TestCase
         $controller = $this->chainController($storage, $chainService, $risk, outstanding: $outstanding);
 
         $response = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
-        self::assertSame(503, $response->getStatusCode(), 'the post-commit feedback failure answers the private structured 503');
-        self::assertSame('SERVICE_UNAVAILABLE', json_decode((string) $response->getContent(), true)['error']['code']);
+        self::assertSame(200, $response->getStatusCode(), 'the post-commit feedback failure is best-effort: the issued challenge is still handed out');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame('', (string) ($body['challenge'] ?? ''), 'the hand-out carries the minted challenge');
 
         // Nothing was rolled back: the chain stays issued(N), the record
         // exists, the outstanding memberships still hold N.

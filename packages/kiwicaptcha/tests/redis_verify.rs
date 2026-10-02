@@ -790,6 +790,69 @@ fn cancelled_argon_record_never_acquires_an_admission_slot() {
 }
 
 #[test]
+fn consume_identity_without_a_marker_fails_closed_after_the_durable_flip() {
+    // A pending envelope hand-written without the operation_identity
+    // marker that only store writes: the splice cannot
+    // land, the durable flip still happens, and the caller MUST learn
+    // the identity was not recorded instead of proceeding on a silently
+    // identity-less consumed record (the PHP doConsume contract; the
+    // revision-2 Rust Lua skipped the splice and reported success).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("identity-splice");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let mut envelope = serde_json::to_value(&issued.record).unwrap();
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .insert("state".to_string(), serde_json::json!("pending"));
+    envelope
+        .as_object_mut()
+        .unwrap()
+        .insert("consumed_result".to_string(), serde_json::Value::Null);
+    let raw = serde_json::to_string(&envelope).unwrap();
+    assert!(
+        !raw.contains("operation_identity"),
+        "precondition: no marker"
+    );
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(&raw)
+        .arg("EX")
+        .arg(300)
+        .query(&mut conn)
+        .unwrap();
+
+    let store = store_for(&url, &prefix);
+    let failure = store.consume_with_operation_identity(&issued.record.nonce, Some("op-uncorded"));
+    assert!(
+        failure.is_err(),
+        "a requested identity that cannot be spliced must fail closed"
+    );
+
+    // The flip itself is durable: the record is consumed without the
+    // identity, so a same-identity retry recovers instead of redeeming
+    // twice.
+    let after: Option<String> = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let after = after.expect("the consumed record survives");
+    assert!(after.contains("\"state\":\"consumed\""));
+    assert!(!after.contains("op-uncorded"));
+}
+
+#[test]
 fn consumed_argon_record_with_matching_identity_replays_without_admission() {
     // An already-consumed Argon record resolves through
     // the identity gate from the runtime-state read, before the
@@ -4087,7 +4150,7 @@ fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
 
     // The wrong secret for the same kid → BadSignature.
     let wrong =
-        verifier_for(&url, &prefix).with_secrets_by_kid([(2, "WRONG-KEY-16-bytes!".into())]);
+        verifier_for(&url, &prefix).with_secrets_by_kid([(2, "WRONG-KEY-32-bytes-0123456789abc".into())]);
     wrong.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(&wrong, &token, issued_at_ns),

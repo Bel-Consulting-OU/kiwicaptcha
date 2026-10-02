@@ -237,7 +237,8 @@ final class IssuanceRateLimiter
      *              cap: at most globalMax members ever coexist, whatever
      *              the window length or request volume).
      *   ARGV[1]  = per-client max.
-     *   ARGV[2]  = global max.
+     *   ARGV[2]  = global max; 0 disables the global window entirely
+     *              (no global member is written).
      *   ARGV[3]  = window in ms.
      *   ARGV[4]  = unique request id, the per-client member.
      *   ARGV[5]  = unique request id, the global member (the same
@@ -262,14 +263,21 @@ final class IssuanceRateLimiter
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+-- ARGV[2] = 0 disables the global window entirely: the global ZSET is
+-- neither pruned, counted nor written, so a disabled cap can never grow
+-- an unbounded deployment-wide set (the cardinality doc bounds it only
+-- when the cap is live).
+local globalEnabled = tonumber(ARGV[2]) > 0
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+if globalEnabled then redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff) end
 if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
+if globalEnabled and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[1], now, ARGV[4])
-redis.call('ZADD', KEYS[2], now, ARGV[5])
+if globalEnabled then
+    redis.call('ZADD', KEYS[2], now, ARGV[5])
+    redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
+end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
-redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
@@ -294,16 +302,21 @@ LUA;
 local time = redis.call('TIME')
 local now = tonumber(time[1])*1000 + math.floor(tonumber(time[2])/1000)
 local cutoff = now - tonumber(ARGV[3])
+-- ARGV[2] = 0 disables the global window entirely (no global member is
+-- written; see LIMIT_SCRIPT).
+local globalEnabled = tonumber(ARGV[2]) > 0
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', cutoff)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff)
+if globalEnabled then redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', cutoff) end
 if redis.call('ZCARD', KEYS[1]) + redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[1]) then return 0 end
-if redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
+if globalEnabled and redis.call('ZCARD', KEYS[3]) >= tonumber(ARGV[2]) then return -1 end
 redis.call('ZADD', KEYS[2], now, ARGV[4])
-redis.call('ZADD', KEYS[3], now, ARGV[5])
+if globalEnabled then
+    redis.call('ZADD', KEYS[3], now, ARGV[5])
+    redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
+end
 redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 1000)
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[3]) + 1000)
-redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
@@ -410,22 +423,7 @@ LUA;
             // deployment — see the class docblock).
             return $this->checkLocalGlobalOnly();
         }
-        // An unknown client IP must never bypass the limit: bucket it with
-        // the other unidentifiable clients instead (conservative, shared
-        // budget). The IP itself is never used as a key — only the HMAC.
-        // The identity is derived from canonical IP bytes (inet_pton with
-        // IPv4-mapped-IPv6 normalization), so two textual spellings of the
-        // same address (e.g. "2001:db8::1" vs "2001:0db8:0:0:0:0:0:1")
-        // produce the same pseudonym — matching the challenge binding tag.
-        if ($clientIp === '') {
-            $identity = 'unknown';
-        } else {
-            try {
-                $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($clientIp);
-            } catch (\InvalidArgumentException) {
-                $identity = 'unknown';
-            }
-        }
+        $identity = $this->perClientIdentity($clientIp);
 
         if ($this->rateLimitRotationSecs > 0) {
             // Epoch-rotated pseudonym: HMAC(pepper, "kiwi-rate-v2|epoch|
@@ -489,6 +487,42 @@ LUA;
         return hash_hmac('sha256', 'kiwi-rate-v2|'.$epoch.'|'.$identity, $this->pepper);
     }
 
+    /**
+     * The per-client limiter identity of one reported address.
+     *
+     * An unknown or unparseable address must never bypass the limit: it
+     * is bucketed with the other unidentifiable clients ('unknown',
+     * conservative shared budget). The IP itself is never a key — only
+     * its HMAC under the configured pepper.
+     *
+     * IPv4 is keyed by the full address; IPv6 is keyed by the /64
+     * prefix. A host controls at least a /64, so a /128-keyed budget
+     * lets it rotate source addresses and take a fresh per-request
+     * budget on every request (only the deployment-wide cap would
+     * remain). The /64 bucket restores a meaningful per-client limit
+     * while the canonical-bytes derivation still folds equivalent
+     * spellings and IPv4-mapped forms exactly like the challenge
+     * binding tag. The binding tag itself keeps the full /128.
+     */
+    private function perClientIdentity(string $clientIp): string
+    {
+        if ($clientIp === '') {
+            return 'unknown';
+        }
+        try {
+            $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($clientIp);
+        } catch (\InvalidArgumentException) {
+            return 'unknown';
+        }
+        // The canonical family byte is 0x06 for IPv6; the address bytes
+        // follow. Truncate IPv6 to the first 8 bytes (a /64).
+        if (\strlen($identity) === 17 && $identity[0] === "\x06") {
+            return "\x06".substr($identity, 1, 8);
+        }
+
+        return $identity;
+    }
+
     private function checkRedisRotated(string $identityPrev, string $identityCur): int
     {
         // Only the client keys are epoch-rotated. The global key contains
@@ -502,7 +536,7 @@ LUA;
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
 
         $result = $this->eval(self::LIMIT_SCRIPT_ROTATED, [$clientPrev, $clientCur, $global], [
             (string) $clientMax,
@@ -543,7 +577,7 @@ LUA;
     {
         $globalKey = '{kiwi:rl:'.$this->rlTag().'}:global';
         $windowMs = $this->windowSecs * 1000;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
         $requestId = bin2hex(random_bytes(16));
 
         $result = $this->eval(self::LIMIT_SCRIPT_GLOBAL_ONLY, [$globalKey], [
@@ -769,7 +803,7 @@ LUA;
         $windowMs = $this->windowSecs * 1000;
         $requestId = bin2hex(random_bytes(16));
         $clientMax = $this->maxChallenges > 0 ? $this->maxChallenges : \PHP_INT_MAX;
-        $globalMax = $this->globalMax > 0 ? $this->globalMax : \PHP_INT_MAX;
+        $globalMax = $this->globalMax > 0 ? $this->globalMax : 0;
 
         $result = $this->eval(self::LIMIT_SCRIPT, [$clientKey, $globalKey], [
             (string) $clientMax,

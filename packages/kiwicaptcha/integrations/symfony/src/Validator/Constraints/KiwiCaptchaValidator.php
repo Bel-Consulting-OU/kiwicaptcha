@@ -39,6 +39,7 @@ use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
 use Symfony\Component\Validator\ConstraintValidator;
 use Symfony\Component\Validator\Exception\UnexpectedTypeException;
+use Symfony\Contracts\Service\ResetInterface;
 
 /**
  * The Symfony validator: verifies a KiwiCaptcha solution token through the
@@ -47,7 +48,7 @@ use Symfony\Component\Validator\Exception\UnexpectedTypeException;
  * reproduces the same application-level outcome. The verification pipeline
  * and its invariants are documented in docs/security-hardening.md.
  */
-final class KiwiCaptchaValidator extends ConstraintValidator
+final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInterface
 {
     /**
      * Request attribute holding the canonical jti of the last
@@ -267,9 +268,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * The canonical JSON payload of the last verified challenge's Ed25519
-     * receipt, the full replay-critical set signed from the consumed
-     * record: {jti, tenant, action, request_binding, issued_at,
-     * expires_at, issuer}. Null when no verification succeeded yet or no
+     * receipt, the full replay-critical and work-profile set signed
+     * from the consumed record: {v, jti, tenant, request_binding,
+     * issued_at, expires_at, issuer, region, policy_version, algorithm,
+     * target_bits, m_kib, t, p}. The payload tenant is the signed
+     * scope, not a multi-tenant separation id: use a distinct signing
+     * key per tenant when tenants share a deployment. Null when no
+     * verification succeeded yet or no
      * signing key is configured (risk.result_receipt_signing_key). The
      * payload is public by construction (no secret material); pair it
      * with {@see verifiedReceiptSignature()} and verify against the
@@ -303,8 +308,29 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         return $this->lastReceiptSignature;
     }
 
+    /**
+     * Clear every per-verification accessor: the jti, the transaction
+     * binding and the signed receipt. Called at the start of every
+     * validate() and by the container between worker requests
+     * (ResetInterface), so a failed verification can never surface an
+     * earlier user's result.
+     */
+    public function reset(): void
+    {
+        $this->lastVerifiedJti = null;
+        $this->lastVerifiedRequestBinding = null;
+        $this->lastReceiptPayload = null;
+        $this->lastReceiptSignature = null;
+    }
+
     public function validate(mixed $value, Constraint $constraint): void
     {
+        // Per-call state reset first: the accessors must never expose a
+        // previous verification's jti/binding/receipt after a later
+        // failed call, and in long-lived workers the same instance
+        // serves many requests. reset() is the ResetInterface hook the
+        // container invokes between worker requests; it is idempotent.
+        $this->reset();
         if (!$constraint instanceof KiwiCaptcha) {
             throw new UnexpectedTypeException($constraint, KiwiCaptcha::class);
         }
@@ -383,7 +409,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // no-client-IP path, never an empty-string pseudonym).
                 $peer = (string) $request->server->get('REMOTE_ADDR', '');
                 if ($peer !== '') {
-                    $this->risk?->solveOutcome($constraint->scope, $peer, null, VerifyError::MalformedToken);
+                    $this->recordSolveOutcome($constraint->scope, $peer, VerifyError::MalformedToken);
                 }
                 $this->logger?->info('KiwiCaptcha: verification refused — ambiguous forwarding headers', [
                     'scope' => $constraint->scope,
@@ -553,10 +579,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // only when a client IP resolves, and before the violation is
             // built so the evidence always precedes the refusal.
             if ($clientIp !== null) {
-                $this->risk?->solveOutcome(
+                $this->recordSolveOutcome(
                     $constraint->scope,
                     $clientIp,
-                    null,
                     VerifyError::AlreadyConsumed,
                     null,
                     RiskGateway::solveDurationMsOf($outcome),
@@ -610,10 +635,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             //     client IP is exactly what could not be resolved, and a
             //     header-derived guess is never used as the identity.
             if ($clientIp !== null) {
-                $this->risk?->solveOutcome(
+                $this->recordSolveOutcome(
                     $constraint->scope,
                     $clientIp,
-                    null,
                     $outcome->error,
                     null,
                     RiskGateway::solveDurationMsOf($outcome),
@@ -838,6 +862,27 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      * StorageUnavailable, never to invalid_or_expired: the client must
      * not be told its token is burned when it may still redeem.
      */
+    /**
+     * Best-effort risk feedback: a risk-Redis outage must never change a
+     * verification verdict or turn a consumed valid proof into an
+     * error. Evidence only, exactly like the honeypot call; the caller
+     * keeps its own non-null IP guard, so an empty-string pseudonym is
+     * never invented.
+     */
+    private function recordSolveOutcome(
+        ?string $scope,
+        string $ip,
+        ?VerifyError $error,
+        ?string $decisionId = null,
+        ?int $solveDurationMs = null,
+    ): void {
+        try {
+            $this->risk?->solveOutcome($scope, $ip, null, $error, $decisionId, $solveDurationMs);
+        } catch (\Throwable) {
+            // Evidence only.
+        }
+    }
+
     private function publicCode(?VerifyError $error): string
     {
         return match ($error) {
@@ -1401,11 +1446,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // rides along (null-safe through the core's additive
             // solve-duration surface, see
             // RiskGateway::solveDurationMsOf()).
-            if ($this->risk !== null && $clientIp !== null) {
-                $this->risk->solveOutcome(
+            if ($clientIp !== null) {
+                $this->recordSolveOutcome(
                     $constraint->scope,
                     $clientIp,
-                    null,
                     $outcome->error,
                     null,
                     RiskGateway::solveDurationMsOf($outcome),
@@ -2066,12 +2110,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     }
 
     /**
-     * Sign the Ed25519 result receipt from a consumed record: the
-     * payload is built from the record's own fields, jti, tenant,
-     * action, request_binding, issued_at, expires_at, issuer, never
-     * from per-request state, so a stored-result retry re-signs the
-     * same payload. No-op when signing is disabled or the record is
-     * unavailable.
+     * Sign the Ed25519 result receipt from a consumed record. The
+     * payload is built from the record fields: v, jti, tenant (scope),
+     * request_binding, issued_at, expires_at, issuer, region,
+     * policy_version and the work profile (algorithm, target_bits,
+     * m_kib, t, p). It never uses per-request state, so a stored-result
+     * retry re-signs the same payload. No-op when signing is disabled
+     * or the record is unavailable.
      */
     private function signReceipt(?ChallengeRecord $record): void
     {

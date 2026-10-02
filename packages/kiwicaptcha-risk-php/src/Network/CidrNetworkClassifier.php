@@ -144,10 +144,14 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
         }
         $addr = substr($cidr, 0, $slash);
         $prefixRaw = substr($cidr, $slash + 1);
-        $prefix = filter_var($prefixRaw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 0]]);
-        if ($prefix === false) {
+        // Canonical spelling only: `FILTER_VALIDATE_INT` trims surrounding
+        // whitespace and rejects leading zeros, while Rust's u8::parse
+        // trims nothing but accepts "+24"/"024"; the explicit canonical
+        // grammar makes both cores load the same operator config.
+        if (preg_match('/^(0|[1-9][0-9]*)$/D', $prefixRaw) !== 1) {
             throw new \InvalidArgumentException(sprintf('Invalid CIDR prefix: %s', $cidr));
         }
+        $prefix = (int) $prefixRaw;
         $bytes = self::normalizeFamilyBytes(self::packIp($addr, sprintf('Invalid CIDR network address: %s', $cidr)));
         $maxBits = strlen($bytes) * 8;
         if ($prefix > $maxBits) {

@@ -243,7 +243,7 @@ final class RealRedisSiteVerifyIdempotencyScaleTest extends TestCase
         $check = new \Predis\Client(self::redisUrl(), ['timeout' => 15.0, 'read_write_timeout' => 15.0]);
         $checkStorage = new RedisStorage($check);
         $store = new RedisSiteVerifyIdempotencyStore($check);
-        $backendId = hash('sha256', self::SITEVERIFY_SECRET.'|login|0|');
+        $backendId = hash_hmac('sha256', 'login|0|', self::SITEVERIFY_SECRET);
         try {
             $keys = $check->keys('{kiwi:kiwicaptcha}:*');
             self::assertCount(self::CHALLENGES, $keys, 'the store must hold exactly the raced population');
