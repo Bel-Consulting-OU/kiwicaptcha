@@ -628,7 +628,7 @@ test.describe('Locale registry coherence and regional resolution', () => {
     await expect(page.locator('[data-kiwi-badge]')).toHaveText('Concluído');
 
     // A widget created after the module registered must resolve the same
-    // language: the old table returned "pt" before the module landed, so
+    // language: the earlier table returned "pt" before the module landed, so
     // two widgets on one page could disagree. The second widget proves
     // both generations agree on pt-br and its Brazilian text.
     await page.evaluate(() => {

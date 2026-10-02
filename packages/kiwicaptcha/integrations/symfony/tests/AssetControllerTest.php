@@ -121,7 +121,7 @@ final class AssetControllerTest extends TestCase
     public function testRollingDeployFallbackDirectoryServesPreviousReleaseBytes(): void
     {
         // The active node has new bytes; a page from the previous release
-        // still asks for the old content hash. The fallback directory
+        // still asks for the earlier content hash. The fallback directory
         // (the previous release's Resources/public) answers instead of a
         // 404, so lazy modules keep loading during the rollout.
         $fallback = sys_get_temp_dir().'/kiwi-asset-fallback-'.getmypid();
