@@ -4149,8 +4149,8 @@ fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
     );
 
     // The wrong secret for the same kid → BadSignature.
-    let wrong =
-        verifier_for(&url, &prefix).with_secrets_by_kid([(2, "WRONG-KEY-32-bytes-0123456789abc".into())]);
+    let wrong = verifier_for(&url, &prefix)
+        .with_secrets_by_kid([(2, "WRONG-KEY-32-bytes-0123456789abc".into())]);
     wrong.store().store(&issued.record).unwrap();
     assert_eq!(
         verify_at(&wrong, &token, issued_at_ns),
