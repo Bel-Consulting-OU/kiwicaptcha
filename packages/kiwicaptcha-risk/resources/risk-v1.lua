@@ -315,6 +315,19 @@ if ttl_out_of_bounds(principal_ttl) then
     return redis.error_reply('risk-v1: principal_ttl_s must be a positive integer no greater than 2147483647 (a persistent principal risk hash is not admissible)')
 end
 
+-- ── Numeric argument validation BEFORE any write. ──
+-- Redis does not roll back: the historical order wrote the dedupe marker
+-- first and parsed the numeric arguments afterwards, so a missing or
+-- non-numeric saturation ARGV errored (nil comparison) AFTER the event
+-- was marked seen. The event was silently lost and an identical retry
+-- was refused as a duplicate. Every numeric argument is validated here,
+-- before the first write.
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
+    if tonumber(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be numeric')
+    end
+end
+
 -- ── Dedupe: identical event_id must not double-increment state. On a
 -- duplicate, SKIP the event application but still decay/read/return the
 -- current signals (shared risk-v1 semantics across Rust and PHP).
@@ -384,7 +397,11 @@ end
 -- inside the non-duplicate branch here would be a strict subset of it:
 -- the same fields one HSET earlier, doubled for no effect).
 local g = read_state(KEYS[9], now)
-local prev_level = g.scope
+-- Corrupt or tampered stored levels above the hysteresis table are
+-- clamped into range (the Rust core applies the same .min(4)); a nil
+-- exit entry would otherwise error mid-transition after the dedupe
+-- marker was written.
+local prev_level = math.min(4, math.max(1, tonumber(g.scope) or 1))
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then
