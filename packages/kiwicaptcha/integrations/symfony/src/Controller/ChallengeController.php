@@ -2350,17 +2350,11 @@ final class ChallengeController
                     ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
                     : 'Too many cancellation requests from this address. Try again later.';
 
-                // The just-minted risk session must ride the 429 too:
-                // the sourceRateLimitHit evidence above was recorded
-                // against it, and a client that never receives the
-                // cookie mints a fresh session on every retry, losing
-                // the session reputation that partly drives the limit.
+                // The cancellation endpoint never mints or re-sets the
+                // continuity cookie: the 429 carries no session.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
-                    $request,
-                    $riskSession,
-                    $mintedCookie,
                 );
             }
         } elseif ($this->cancellationLimiter !== null) {
@@ -2388,17 +2382,11 @@ final class ChallengeController
                     ? 'Cancellation is temporarily unavailable for this deployment. Try again later.'
                     : 'Too many cancellation requests from this address. Try again later.';
 
-                // The just-minted risk session must ride the 429 too:
-                // the sourceRateLimitHit evidence above was recorded
-                // against it, and a client that never receives the
-                // cookie mints a fresh session on every retry, losing
-                // the session reputation that partly drives the limit.
+                // The cancellation endpoint never mints or re-sets the
+                // continuity cookie: the 429 carries no session.
                 return $this->privateJson(
                     ['error' => ['code' => $code, 'message' => $message]],
                     Response::HTTP_TOO_MANY_REQUESTS,
-                    $request,
-                    $riskSession,
-                    $mintedCookie,
                 );
             }
         }

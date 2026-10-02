@@ -147,7 +147,9 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             self::markTestSkipped('Redis unreachable: '.$e->getMessage());
         }
         $this->client->flushdb();
-        $this->storage = new RedisStorage($this->client, self::PREFIX);
+        // Single-clock walk: no retention margin, so the real Redis TTL
+        // equals the record TTL and the 1 s expiry probe below is exact.
+        $this->storage = new RedisStorage($this->client, self::PREFIX, ttlMarginSecs: 0);
         $this->verifier = new Verifier($this->storage);
         $this->simulator = new ProtocolV2OnlyVerifier($this->verifier, $this->storage);
         $this->ledger = [];

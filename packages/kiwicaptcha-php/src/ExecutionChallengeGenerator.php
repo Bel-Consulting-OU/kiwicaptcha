@@ -1591,7 +1591,7 @@ final class ExecutionChallengeGenerator
             // walker validates the hex shape (see verifyExecutedTrace).
             self::OP_DOM_FRAGMENT_APPEND => self::opFragAppend($operands, $u8, $cur, $docIds, $ctx),
             self::OP_DOM_CLONE => self::opDomClone($operands, $u8, $cur, $docIds, $ctx),
-            self::OP_DOM_REPARENT => self::opDomReparent($operands, $u8, $cur, $ctx),
+            self::OP_DOM_REPARENT => self::opDomReparent($operands, $u8, $cur, $docIds, $ctx),
             self::OP_DOM_ATTR_REFLECT => self::opAttrReflect($operands, $cur),
             self::OP_DOM_EVENT_PHASE => self::opEventPhase($operands, $u8, $cur, $ctx),
             self::OP_DOM_URL_CANON => 'durlc',
@@ -2083,9 +2083,10 @@ final class ExecutionChallengeGenerator
      * @param array<string, mixed> $operands
      * @param list<int>            $u8
      * @param array|null           $cur
+     * @param array<string, true>  $docIds
      * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
      */
-    private static function opDomReparent(array $operands, array &$u8, ?array &$cur, array &$ctx): string
+    private static function opDomReparent(array $operands, array &$u8, ?array &$cur, array &$docIds, array &$ctx): string
     {
         $entry = 0;
         $targetId = $operands['id'];

@@ -89,7 +89,15 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
             '2001:0db8:0:0:0:0:0:1',
             '2400:cb00::1',
             '2400:cb00::2',
+            '2001:db8:1::1',
+            '2001:db8:2::1',
         ];
+    }
+
+    /** The limiter's bucket of a canonical identity: IPv6 truncates to the /64. */
+    private static function bucketOf(string $canonical): string
+    {
+        return \strlen($canonical) === 17 && $canonical[0] === "\x06" ? substr($canonical, 0, 9) : $canonical;
     }
 
     private function limiter(string $namespace, string $pepper, int $maxPerClient = 1, int $globalMax = 0): IssuanceRateLimiter
@@ -126,6 +134,16 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
                     continue;
                 }
                 if ($canonicalA === $canonicalB) {
+                    continue;
+                }
+                // IPv6 clients are bucketed by /64 (a host controls at
+                // least a /64, so per-/128 budgets would be rotatable).
+                // Distinct addresses inside one /64 must SHARE a window.
+                if (self::bucketOf($canonicalA) === self::bucketOf($canonicalB)) {
+                    $namespace = 'iso-rl-same64-'.$i.'-'.$j;
+                    $limiter = $this->limiter($namespace, 'pepper');
+                    self::assertTrue($limiter->allow($ipA), 'the first /64 address must be admitted');
+                    self::assertFalse($limiter->allow($ipB), sprintf('%s must not get a fresh budget beside %s inside one /64', $ipB, $ipA));
                     continue;
                 }
                 $pairs++;

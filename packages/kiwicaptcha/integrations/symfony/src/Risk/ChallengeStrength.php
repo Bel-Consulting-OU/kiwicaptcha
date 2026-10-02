@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 use KiwiCaptcha\Challenge;
+use KiwiCaptcha\ChallengeProfile;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\PoWAlgorithm;
 

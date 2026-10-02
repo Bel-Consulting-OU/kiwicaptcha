@@ -18,15 +18,6 @@ namespace KiwiCaptcha;
  * Parameter sets outside the profile are rejected at construction;
  * issuing them would produce challenges that can never verify in PHP.
  */
-enum BindingMode: string
-{
-    /** Bind challenges to a nonce-bound HMAC tag of the client IP. */
-    case Bound = 'bound';
-
-    /** No client binding at all (maximum privacy; relay protection off). */
-    case None = 'none';
-}
-
 final class Config
 {
     /**
