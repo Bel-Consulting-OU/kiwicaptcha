@@ -91,10 +91,12 @@ steps:
       - *php_core_suite
 
   # Non-gating parity with the GitHub php-nightly lane (continue-on-error):
-  # the 8.6 nightly image exercises the next PHP release while a nightly
-  # regression never blocks the pipeline.
+  # the rolling 8.6 pre-release image exercises the next PHP line while a
+  # pre-release regression never blocks the pipeline. The Docker Hub
+  # library publishes the pre-release as 8.6-rc-cli until the first
+  # stable 8.6 tag lands (mirrors the setup-php nightly pin).
   - name: php-nightly-8.6
-    image: php:8.6-cli
+    image: php:8.6-rc-cli
     failure: ignore
     commands:
       - *php_extensions

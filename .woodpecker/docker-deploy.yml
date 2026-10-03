@@ -11,7 +11,7 @@
 # pipeline.
 labels:
   capability: docker
-environment:
+variables:
   COMPOSE_FILE: deploy/docker-compose.yml
   COMPOSE_ENV_FILES: deploy/.env
 when:
@@ -101,7 +101,7 @@ steps:
 
     docker compose cp $$CI_WORKSPACE/.ci-run-tmp/challenge.json captcha:/tmp/challenge.json
 
-    docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge.json > /tmp/token.txt
+    docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge.json > $$CI_WORKSPACE/.ci-run-tmp/token.txt
 
     test -s $$CI_WORKSPACE/.ci-run-tmp/token.txt
 
@@ -211,9 +211,9 @@ steps:
       docker compose cp packages/kiwicaptcha-php/tests/Support/RswFixture.php \
         captcha:/tmp/RswFixture.php
       MODULUS_N="$$(docker compose exec -T captcha php -r \
-        'require "$$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
+        'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
       LAMBDA="$$(docker compose exec -T captcha php -r \
-        'require "$$CI_WORKSPACE/.ci-run-tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
+        'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
       test -n "$$MODULUS_N"
       test -n "$$LAMBDA"
       VALKEY_PASSWORD="$$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)"
@@ -284,9 +284,9 @@ steps:
         fi
         curl -fsS -X POST -H 'Content-Type: application/json' -d "$$body" \
           http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json
-        docker compose cp $$CI_WORKSPACE/.ci-run-tmp/$$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
+        docker compose cp $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
         docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \
-          $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json > $$CI_WORKSPACE/.ci-run-tmp/f2-token.txt
+          /tmp/f2-challenge.json > $$CI_WORKSPACE/.ci-run-tmp/f2-token.txt
         test -s $$CI_WORKSPACE/.ci-run-tmp/f2-token.txt
         tr -d '\r\n' < $$CI_WORKSPACE/.ci-run-tmp/f2-token.txt > $$CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt
         sleep 0.15
@@ -390,8 +390,8 @@ steps:
       set -eu
       curl -fsS -o $$CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
         -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
-      docker compose cp $$CI_WORKSPACE/.ci-run-tmp/$$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json
-      docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > /tmp/token2.txt
+      docker compose cp $$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json
+      docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > $$CI_WORKSPACE/.ci-run-tmp/token2.txt
       TOKEN2="$$(tr -d '\r\n' < $$CI_WORKSPACE/.ci-run-tmp/token2.txt)"
       test -n "$$TOKEN2"
       curl -fsS -X POST -H 'Content-Type: application/json' \
