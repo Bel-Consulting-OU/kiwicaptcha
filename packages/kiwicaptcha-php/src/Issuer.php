@@ -770,6 +770,20 @@ final class Issuer
 
         $challenge = base64_encode($payload).'.'.$signature;
         $prefix = $challenge.'|'.$salt.'|';
+        // issuedAtNs = epoch microseconds since Unix epoch (wall clock;
+        // hrtime(true) is monotonic and per-host, so it must never be
+        // persisted to shared storage). The name/JSON key stay
+        // issuedAtNs for ChallengeRecord serialization stability. The
+        // value and the hostname are not part of the signed canonical,
+        // so they are authenticated by the record-metadata MAC under
+        // the server-state purpose key.
+        $issuedAtNs = (int) (microtime(true) * 1_000_000);
+        $serverMac = ServerStateMac::recordMeta(
+            ServerStateMac::key($this->config->secretKey, $this->config->tenantId),
+            $challenge,
+            $issuedAtNs,
+            $hostname,
+        );
 
         $record = new ChallengeRecord(
             nonce: $nonce,
@@ -786,11 +800,7 @@ final class Issuer
             prefix: $prefix,
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            // issuedAtNs = epoch microseconds since Unix epoch (wall clock;
-            // hrtime(true) is monotonic and per-host, so it must never be
-            // persisted to shared storage). The name/JSON key stay
-            // issuedAtNs for ChallengeRecord serialization stability.
-            issuedAtNs: (int) (microtime(true) * 1_000_000),
+            issuedAtNs: $issuedAtNs,
             // Protocol version by arm: an identity-armed rsw record
             // carries the identity-capable v5 canonical (the final
             // `|rsw_modulus_sha256` segment), so it is protocol v5 — a
@@ -820,6 +830,7 @@ final class Issuer
             executionVersion: $executionProgram !== null ? $executionVersion : null,
             executionCommitment: $executionCommitment,
             rswModulusSha256: $rswIdentity,
+            serverMac: $serverMac,
         );
         $this->storage->store($record);
 
@@ -1095,6 +1106,45 @@ final class Issuer
     }
 
     /**
+     * The source identity shared by every abuse-tracking layer (the
+     * issuance/cancellation limiter budget, OutstandingChallenges, the
+     * risk source pseudonym, the siteverify idempotency source and the
+     * client-IP budget): the canonical family bytes with IPv6 masked to
+     * its /64. A host controls at least a /64, so a /128-keyed source
+     * lets it rotate addresses and take a fresh identity on every
+     * request. The /64 bucket matches the Rust risk core, where
+     * `source_id_for_epoch` masks with `masked_network(ip, 32, 64)`:
+     * full IPv4, /64 IPv6. The challenge binding tag keeps the full
+     * /128 via
+     * {@see self::canonicalIpFamily()}.
+     *
+     * @throws \InvalidArgumentException when the IP is not a valid IPv4 or
+     *                                   IPv6 address
+     */
+    public static function canonicalSourceFamily(string $ip): string
+    {
+        $identity = self::canonicalIpFamily($ip);
+        $family = $identity[0];
+        $bytes = substr($identity, 1);
+        $prefix = $family === "\x04" ? 32 : 64;
+        $masked = '';
+        $remaining = $prefix;
+        foreach (str_split($bytes) as $byte) {
+            if ($remaining >= 8) {
+                $masked .= $byte;
+                $remaining -= 8;
+            } elseif ($remaining > 0) {
+                $masked .= chr(ord($byte) & (0xFF << (8 - $remaining) & 0xFF));
+                $remaining = 0;
+            } else {
+                $masked .= "\x00";
+            }
+        }
+
+        return $family.$masked;
+    }
+
+    /**
      * Canonical payload (revision 3): the exact byte string that is
      * signed and base64-encoded into the challenge. Shared with the
      * verifier so issuance and verification can never drift apart.
@@ -1120,7 +1170,7 @@ final class Issuer
      *   {@see self::issueWithDecoyField()}. `null` renders no segment.
      * - `e=` (protocol v4): the ExecutionChallengeV1 version and the hex
      *   SHA-256 of the program's base64 wire string, see
-     *   {@see self::issueWithExecutionField()}. Both are always present
+     *   {@see self::issueWithExecutionField()}. They are always present
      *   together; the signed commitment is the exact mirror of the stored
      *   program, and the verifier additionally checks
      *   SHA256(stored program) == commitment.

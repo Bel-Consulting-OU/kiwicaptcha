@@ -79,7 +79,7 @@ final class MalformedClientIpTest extends TestCase
         [$storage, $token] = $this->issueAndSolve();
         $nonce = SolutionToken::decode($token)->nonce;
         $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
-        $storage->commitResult($nonce, true, null);
+        \KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $nonce, true, null);
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
 
         $outcome = $verifier->verify($token, Vectors::SECRET, 'login', $badIp, nowNs: 1_800_000_000_000_000, operationIdentity: self::IDENTITY);

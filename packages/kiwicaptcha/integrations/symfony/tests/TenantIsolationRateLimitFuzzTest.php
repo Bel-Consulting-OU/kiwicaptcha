@@ -138,7 +138,7 @@ final class TenantIsolationRateLimitFuzzTest extends TestCase
                 }
                 // IPv6 clients are bucketed by /64 (a host controls at
                 // least a /64, so per-/128 budgets would be rotatable).
-                // Distinct addresses inside one /64 must SHARE a window.
+                // Distinct addresses inside one /64 must share a window.
                 if (self::bucketOf($canonicalA) === self::bucketOf($canonicalB)) {
                     $namespace = 'iso-rl-same64-'.$i.'-'.$j;
                     $limiter = $this->limiter($namespace, 'pepper');

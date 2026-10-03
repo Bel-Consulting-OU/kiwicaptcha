@@ -1006,6 +1006,11 @@ if ARGV[2] ~= '' then
 else
     result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
+if ARGV[3] ~= '' then
+    local parsed = cjson.decode(result)
+    parsed['mac'] = ARGV[3]
+    result = cjson.encode(parsed)
+end
 local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
 if updated == nil then return 0 end
 -- The re-SET preserves the key's exact remaining TTL in milliseconds; a
@@ -1237,6 +1242,11 @@ if ARGV[2] ~= '' then
 else
     result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
 end
+if ARGV[4] ~= '' then
+    local parsed = cjson.decode(result)
+    parsed['mac'] = ARGV[4]
+    result = cjson.encode(parsed)
+end
 local updated = kiwiReplaceTopLevel(v, 'consumed_result', result)
 if updated == nil then return 0 end
 local cleared = kiwiRemoveTopLevel(updated, 'resume_until')
@@ -1377,6 +1387,10 @@ pub struct StoredConsumedResult {
     pub valid: bool,
     /// The record's application-supplied transaction binding at commit time.
     pub binding: Option<String>,
+    /// The optional server-state MAC over the challenge, verdict,
+    /// binding and recorded operation identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 /// The storage boundary for a committed result: exactly the object form,
@@ -1395,14 +1409,26 @@ impl<'de> serde::Deserialize<'de> for StoredConsumedResult {
             #[serde(deserialize_with = "deserialize_consumed_valid")]
             valid: bool,
             binding: Option<String>,
+            #[serde(default)]
+            mac: Option<String>,
         }
         let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let wire: Wire = serde_json::from_value(serde_json::Value::Object(object))
             .map_err(serde::de::Error::custom)?;
 
+        if wire
+            .mac
+            .as_deref()
+            .is_some_and(|mac| !crate::challenge::is_server_state_mac_shape(mac))
+        {
+            return Err(serde::de::Error::custom(
+                "consumed_result.mac must be 64 lowercase hex",
+            ));
+        }
         Ok(StoredConsumedResult {
             valid: wire.valid,
             binding: wire.binding,
+            mac: wire.mac,
         })
     }
 }
@@ -1509,6 +1535,8 @@ struct StoredEnvelope {
     rsw_modulus_sha256: Option<String>,
     #[serde(default = "crate::challenge::default_kid")]
     kid: u32,
+    #[serde(default)]
+    server_mac: Option<String>,
     #[serde(default)]
     state: Option<serde_json::Value>,
     #[serde(default)]
@@ -1764,6 +1792,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
             execution_commitment: envelope.execution_commitment.clone(),
             kid: envelope.kid,
             rsw_modulus_sha256: envelope.rsw_modulus_sha256.clone(),
+            server_mac: envelope.server_mac.clone(),
         };
         if !crate::challenge::record_is_structurally_valid(&probe) {
             return None;
@@ -1798,6 +1827,7 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
         execution_commitment: envelope.execution_commitment,
         kid: envelope.kid,
         rsw_modulus_sha256: envelope.rsw_modulus_sha256,
+        server_mac: envelope.server_mac,
     };
     Some(StoredChallenge {
         record,
@@ -2741,7 +2771,7 @@ impl RedisChallengeStore {
         binding: Option<&str>,
     ) -> redis::RedisResult<bool> {
         let mut conn = self.checkout()?;
-        self.commit_result_with_conn(&mut conn, nonce, valid, binding)
+        self.commit_result_with_conn(&mut conn, nonce, valid, binding, None)
     }
 
     /// The outcome commit on an already checked-out connection — the
@@ -2755,12 +2785,17 @@ impl RedisChallengeStore {
         nonce: &str,
         valid: bool,
         binding: Option<&str>,
+        mac: Option<&str>,
     ) -> redis::RedisResult<bool> {
         let key = format!("{}{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let stored = Self::run_command(conn, |c| {
-            let args = [if valid { "1" } else { "0" }, binding.unwrap_or("")];
+            let args = [
+                if valid { "1" } else { "0" },
+                binding.unwrap_or(""),
+                mac.unwrap_or(""),
+            ];
             let r = Self::invoke_script::<i64>(c, &self.scripts.commit_result, &key, &args)?;
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
@@ -2794,6 +2829,17 @@ impl RedisChallengeStore {
         binding: Option<&str>,
         claim_owner: &str,
     ) -> redis::RedisResult<bool> {
+        self.commit_result_clearing_claim_with_mac(nonce, valid, binding, claim_owner, None)
+    }
+
+    fn commit_result_clearing_claim_with_mac(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+        claim_owner: &str,
+        mac: Option<&str>,
+    ) -> redis::RedisResult<bool> {
         validate_resume_owner(claim_owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
@@ -2804,6 +2850,7 @@ impl RedisChallengeStore {
                 if valid { "1" } else { "0" },
                 binding.unwrap_or(""),
                 claim_owner,
+                mac.unwrap_or(""),
             ];
             let r: i64 =
                 Self::invoke_script(c, &self.scripts.commit_clearing_claim, &record_key, &args)?;
@@ -3848,6 +3895,16 @@ impl ProductionVerifier {
         //    the connection is released as soon as the commit returns; a
         //    checkout failure is treated exactly like a commit failure
         //    (best-effort, the outcome stands).
+        let result_mac = match self.resolve_derived_keys(&record) {
+            Ok(keys) => crate::challenge::consumed_result_mac(
+                &keys,
+                &record.challenge,
+                valid,
+                record.request_binding.as_deref(),
+                operation_identity,
+            ),
+            Err(e) => return VerifyOutcome::Invalid(e),
+        };
         if valid {
             let outcome = VerifyOutcome::Valid {
                 nonce: record.nonce.clone(),
@@ -3865,6 +3922,7 @@ impl ProductionVerifier {
                     &token.nonce,
                     true,
                     record.request_binding.as_deref(),
+                    Some(&result_mac),
                 );
             }
             outcome
@@ -3875,6 +3933,7 @@ impl ProductionVerifier {
                     &token.nonce,
                     false,
                     record.request_binding.as_deref(),
+                    Some(&result_mac),
                 );
             }
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -4124,11 +4183,22 @@ impl ProductionVerifier {
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         };
         let valid = matches!(outcome, VerifyOutcome::Valid { .. });
-        let commit = self.store.commit_result_clearing_claim(
+        let result_mac = match self.resolve_derived_keys(&state.record) {
+            Ok(keys) => crate::challenge::consumed_result_mac(
+                &keys,
+                &state.record.challenge,
+                valid,
+                state.record.request_binding.as_deref(),
+                state.operation_identity.as_deref(),
+            ),
+            Err(e) => return VerifyOutcome::Invalid(e),
+        };
+        let commit = self.store.commit_result_clearing_claim_with_mac(
             &token.nonce,
             valid,
             state.record.request_binding.as_deref(),
             &claim_guard.owner,
+            Some(&result_mac),
         );
         match commit {
             Ok(true) => {
@@ -4235,6 +4305,25 @@ impl ProductionVerifier {
                     _ => false,
                 };
                 if identity_ok {
+                    // Every retained success on the shipped Redis backend
+                    // must carry a MAC for this record and the identity
+                    // written by the consume transition. A MAC-less or
+                    // transplanted success is malformed, never a grant.
+                    let authentic = self.resolve_derived_keys(&state.record).is_ok_and(|keys| {
+                        result.mac.as_deref().is_some_and(|tag| {
+                            crate::challenge::verify_consumed_result_mac(
+                                &keys,
+                                &state.record.challenge,
+                                result.valid,
+                                result.binding.as_deref(),
+                                state.operation_identity.as_deref(),
+                                tag,
+                            )
+                        })
+                    });
+                    if !authentic {
+                        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+                    }
                     // Failed-barrier replay guard (the PHP mirror): the
                     // consume and commit mutations that produced this
                     // stored success may have landed on the primary with
@@ -4431,6 +4520,11 @@ impl ProductionVerifier {
             Ok(true) => {}
             _ => return Err(VerifyError::BadSignature),
         }
+        if record.server_mac.is_some()
+            && !crate::challenge::verify_record_meta(&self.resolve_derived_keys(record)?, record)
+        {
+            return Err(VerifyError::BadSignature);
+        }
 
         // 3c2. Hard Argon2id parameter ceilings — after the
         //      signature is authenticated, before any Params::new/allocation.
@@ -4612,6 +4706,9 @@ impl ProductionVerifier {
     /// `issued_at_ns` is malformed (no legacy fallback).
     fn check_min_duration(&self, record: &ChallengeRecord, now_ns: u64) -> Result<(), VerifyError> {
         if record.issued_at_ns == 0 {
+            return Err(VerifyError::MalformedRecord);
+        }
+        if record.min_duration_ms > 0 && record.server_mac.is_none() {
             return Err(VerifyError::MalformedRecord);
         }
         if record.min_duration_ms > 0 {

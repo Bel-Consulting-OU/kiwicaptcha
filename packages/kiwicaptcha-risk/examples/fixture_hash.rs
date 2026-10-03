@@ -84,7 +84,11 @@ fn main() {
     let cookie = identity["session"]["cookie_hex"]
         .as_str()
         .expect("cookie_hex");
-    blob.extend_from_slice(&factory.session_id(&hex::decode(cookie).expect("cookie hex")));
+    let cookie_raw: [u8; 16] = hex::decode(cookie)
+        .expect("cookie hex")
+        .try_into()
+        .expect("16 bytes");
+    blob.extend_from_slice(&factory.session_id(&cookie_raw));
     let principal = identity["principal"]["material_utf8"]
         .as_str()
         .expect("material_utf8");
@@ -103,6 +107,19 @@ fn main() {
             .unwrap()
             .as_slice(),
     );
+    // The IPv6 source /64 vectors: expected, same-/64 sibling and a
+    // different /64. Hashing all three pins the masking rule (not only
+    // one derived value) across the two implementations.
+    let v6 = &identity["source_ipv6"];
+    let v6_epoch = v6["epoch"].as_i64().unwrap() * 900;
+    for key in ["ip", "sibling_ip", "other_ip"] {
+        let ip: IpAddr = v6[key].as_str().unwrap().parse().unwrap();
+        blob.extend_from_slice(
+            hex::decode(factory.source_id(ip, v6_epoch))
+                .unwrap()
+                .as_slice(),
+        );
+    }
 
     // 5. Deployment namespace derivations from the shared vectors.
     for vector in fixtures["namespace_vectors"]

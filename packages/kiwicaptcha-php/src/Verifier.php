@@ -916,7 +916,7 @@ final class Verifier
                 // that produced the peek: resolve it directly, never a
                 // second read.
                 if ($runtime->consumed !== null) {
-                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs);
+                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
@@ -930,7 +930,7 @@ final class Verifier
                         return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                     }
                     if ($retained !== null) {
-                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs);
+                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
                     }
                 }
             }
@@ -997,7 +997,7 @@ final class Verifier
                 // {@see self::resolveConsumedRecord()}, used by both this
                 // consume path and the pre-admission terminal-state
                 // check, so the two can never diverge.
-                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs);
+                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs, $secretKey);
             }
             $record = $consumed->record;
 
@@ -1097,7 +1097,7 @@ final class Verifier
             if (!$valid) {
                 // Commit the deterministic invalid outcome (best-effort) so
                 // a retry sees the same InsufficientWork without re-deriving.
-                $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
+                $this->bestEffortCommit($record, false, $consumed->operationIdentity, $consumedSecret);
 
                 return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
@@ -1105,7 +1105,7 @@ final class Verifier
             // Commit the deterministic valid outcome (best-effort: a
             // storage failure must not change the outcome) so a retry
             // replays it without re-deriving.
-            $this->bestEffortCommit($record->nonce, true, $record->requestBinding);
+            $this->bestEffortCommit($record, true, $consumed->operationIdentity, $consumedSecret);
 
             return VerifyOutcome::valid(
                 $record->nonce,
@@ -1230,7 +1230,7 @@ final class Verifier
      * StorageUnavailable, never a generic exception escaping the
      * verifier.
      */
-    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
+    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs, string $secretKey): VerifyOutcome
     {
         if ($consumed->record->nonce !== $tokenNonce) {
             // The consumed envelope was loaded by the token's nonce (the
@@ -1251,6 +1251,14 @@ final class Verifier
             && $consumed->operationIdentity !== null
             && hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
+            // The stored success must carry an authentic server-state
+            // MAC from storedSuccessAuthentic(): a storage writer who
+            // forged valid=true under the recorded identity never gets
+            // a grant. Forged or corrupt persisted state, the evidence
+            // preserved.
+            if (!$this->storedSuccessAuthentic($consumed, $secretKey)) {
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
             // Failed-barrier replay guard: the consume/commit mutations
             // that produced this stored success may have landed on the
             // primary with their WAIT failing. Accepting the stored
@@ -1490,6 +1498,12 @@ final class Verifier
             if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation, $evidence, $receiptNs)) !== null) {
                 return VerifyOutcome::invalid($failure);
             }
+            if ($consumed->consumedResult->valid && !$this->storedSuccessAuthentic($consumed, $secretKey)) {
+                // A stored success without an authentic server-state
+                // MAC is forged or corrupt persisted state: never a
+                // grant, the retained envelope preserved.
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
             // Failed-barrier replay guard: the committed result's writes
             // may have landed with their WAIT failing; accepting the
             // stored success read-only would return a success a promotion
@@ -1605,7 +1619,7 @@ final class Verifier
                     return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
                 if ($loserState?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs, $secretKey);
                 }
 
                 return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
@@ -1696,9 +1710,7 @@ final class Verifier
             // same outcome either way).
             $binding = $record->requestBinding;
             try {
-                $committed = $claimOwner !== null
-                    ? $this->storage->commitResultResume($record->nonce, $valid, $binding, $claimOwner)
-                    : $this->storage->commitResult($record->nonce, $valid, $binding);
+                $committed = $this->commitConsumedResult($record, $valid, $consumed->operationIdentity, $this->secretForKey($record, $secretKey) ?? $secretKey, $claimOwner);
             } catch (\Throwable) {
                 $committed = false;
             }
@@ -1709,7 +1721,7 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs, $secretKey);
                 }
 
                 // A genuinely missing result. With a held claim the
@@ -1777,8 +1789,13 @@ final class Verifier
      * the shared PHP/Rust spec) and the authenticated decoy name from
      * the replayed record.
      */
-    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
+    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs, string $secretKey): VerifyOutcome
     {
+        if ($after->consumedResult->valid && !$this->storedSuccessAuthentic($after, $secretKey)) {
+            // A stored success without an authentic server-state MAC is
+            // forged or corrupt persisted state: never a grant.
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         try {
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
                 $this->storage->establishReplicationFence($fenceReason);
@@ -2500,6 +2517,13 @@ final class Verifier
             return VerifyError::MalformedRecord;
         }
         $floor = max(0, $record->minDurationMs);
+        if ($floor > 0 && $record->serverMac === null) {
+            // The issuance clock is unauthenticated (no record-metadata
+            // MAC): a storage writer could have backdated it, so the
+            // floor cannot be evaluated and fails closed. The MAC itself
+            // was verified with the signature before this check.
+            return VerifyError::MalformedRecord;
+        }
         if ($floor > 0) {
             $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
             if ($receiptNs >= $record->issuedAtNs) {
@@ -2538,12 +2562,15 @@ final class Verifier
      * elapsed time cannot be measured reliably, null; beyond the
      * tolerance the record is rejected as TooFast and never reaches a
      * valid outcome. A record whose issuance clock is unknown,
-     * `issued_at_ns <= 0`, is equally unmeasurable. Sub-millisecond
+     * `issued_at_ns <= 0`, or unauthenticated (no `server_mac`, see
+     * {@see ServerStateMac}) is equally unmeasurable. Sub-millisecond
      * spans floor toward zero.
      */
     private function measurableSolveDurationMs(ChallengeRecord $record, ?int $receiptNs): ?int
     {
-        if ($record->issuedAtNs <= 0 || $receiptNs === null || $receiptNs < $record->issuedAtNs) {
+        if ($record->serverMac === null || $record->issuedAtNs <= 0 || $receiptNs === null || $receiptNs < $record->issuedAtNs) {
+            // No record-metadata MAC: the issuance clock is untrusted,
+            // so no measured duration is reported.
             return null;
         }
 
@@ -2645,12 +2672,104 @@ final class Verifier
      * consumed record degrades to ConsumeIndeterminate, which is strictly
      * safer than re-deriving a wrong outcome.
      */
-    private function bestEffortCommit(string $nonce, bool $valid, ?string $binding): void
+    private function bestEffortCommit(ChallengeRecord $record, bool $valid, ?string $operationIdentity, string $secret): void
     {
         try {
-            $this->storage->commitResult($nonce, $valid, $binding);
+            $this->commitConsumedResult($record, $valid, $operationIdentity, $secret, null);
         } catch (\Throwable) {
         }
+    }
+
+    /**
+     * Commit a consumed result. On a storage with the
+     * {@see AuthenticatedResultCommitInterface} capability the result
+     * carries the server-state MAC over the record's challenge, the
+     * verdict, the binding and the operation identity the consume
+     * transition recorded, see {@see ServerStateMac::consumedResult()}.
+     * A held resume claim selects the claim-fenced variant.
+     */
+    private function commitConsumedResult(ChallengeRecord $record, bool $valid, ?string $operationIdentity, string $secret, ?string $claimOwner): bool
+    {
+        $binding = $record->requestBinding;
+        if ($this->storage instanceof AuthenticatedResultCommitInterface) {
+            $result = new ConsumedResult(
+                $valid,
+                $binding,
+                ServerStateMac::consumedResult(ServerStateMac::key($secret, $this->tenantId), $record->challenge, $valid, $binding, $operationIdentity),
+            );
+
+            return $claimOwner !== null
+                ? $this->storage->commitAuthenticatedResultResume($record->nonce, $result, $claimOwner)
+                : $this->storage->commitAuthenticatedResult($record->nonce, $result);
+        }
+
+        return $claimOwner !== null
+            ? $this->storage->commitResultResume($record->nonce, $valid, $binding, $claimOwner)
+            : $this->storage->commitResult($record->nonce, $valid, $binding);
+    }
+
+    /**
+     * Whether a consumed record's committed success is authentic enough
+     * to replay. The stored result must be `valid=true` and carry a
+     * server-state MAC that verifies under the record's kid secret and
+     * the deployment tenant for exactly this record, binding and
+     * recorded operation identity, see
+     * {@see ServerStateMac::verifyConsumedResult()}. A storage writer
+     * without the master secret cannot produce one, so a forged stored
+     * success is refused.
+     *
+     * A result without a MAC is accepted only on a storage that cannot
+     * carry one (no {@see AuthenticatedResultCommitInterface}
+     * capability): the legacy unauthenticated residual of third-party
+     * backends. Every shipped backend has the capability.
+     *
+     * Every stored-success grant consults this gate: the verify and
+     * resume paths here, {@see ConsumedOutcomeRecovery} and the Symfony
+     * validator's ambiguous-outcome normalization.
+     *
+     * @param string                $secretKey the legacy single secret (the
+     *                                         kid set, when configured, wins)
+     * @param StorageInterface|null $storage   the storage the record was read
+     *                                         from (default: the verifier's)
+     */
+    public function storedSuccessAuthentic(ConsumedRecord $consumed, string $secretKey, ?StorageInterface $storage = null): bool
+    {
+        $result = $consumed->consumedResult;
+        if ($result === null || !$result->valid) {
+            return false;
+        }
+        if ($result->mac === null) {
+            return !(($storage ?? $this->storage) instanceof AuthenticatedResultCommitInterface);
+        }
+        $secret = $this->secretForKey($consumed->record, $secretKey);
+        if ($secret === null) {
+            return false;
+        }
+
+        return ServerStateMac::verifyConsumedResult(ServerStateMac::key($secret, $this->tenantId), $consumed);
+    }
+
+    /**
+     * The record's hostname, only when its record-metadata MAC verifies
+     * under the record's kid secret and the deployment tenant (see
+     * {@see ServerStateMac::verifyRecordMeta()}); null otherwise. The
+     * hostname is not part of the signed canonical, so an echo of it
+     * (the siteverify response) must not trust an unauthenticated read.
+     *
+     * @param string $secretKey the legacy single secret (the kid set,
+     *                          when configured, wins)
+     */
+    public function authenticatedHostname(ChallengeRecord $record, string $secretKey): ?string
+    {
+        if ($record->serverMac === null) {
+            return null;
+        }
+        $secret = $this->secretForKey($record, $secretKey);
+        if ($secret === null || !ServerStateMac::verifyRecordMeta(ServerStateMac::key($secret, $this->tenantId), $record)) {
+            return null;
+        }
+
+        return $record->hostname;
     }
 
     /**
@@ -2799,7 +2918,19 @@ final class Verifier
                 $record->rswModulusSha256,
             ), $secretKey, $this->tenantId);
 
-        return hash_equals($expected, self::signatureFromChallenge($record->challenge));
+        if (!hash_equals($expected, self::signatureFromChallenge($record->challenge))) {
+            return false;
+        }
+
+        // The record-metadata MAC (issued_at_ns + hostname, not part of
+        // the signed canonical): a present MAC must verify under the
+        // same kid secret and tenant, so a storage writer cannot
+        // backdate the issuance clock or rewrite the hostname of an
+        // issuer-written record. An absent MAC is judged where the
+        // metadata is consumed (the duration floor fails closed, the
+        // measured duration and the hostname are withheld).
+        return $record->serverMac === null
+            || ServerStateMac::verifyRecordMeta(ServerStateMac::key($secretKey, $this->tenantId), $record);
     }
 
     /**

@@ -78,12 +78,12 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(28, \count(ChallengeRecord::WIRE_KEYS));
-        // An unarmed record omits the optional decoy_field and
-        // execution keys entirely (the skip_serializing_if mirror), so
-        // toArray() emits exactly the 23 always-present keys.
+        self::assertSame(29, \count(ChallengeRecord::WIRE_KEYS));
+        // An unarmed record omits the optional decoy_field, execution
+        // and server_mac keys entirely (the skip_serializing_if mirror),
+        // so toArray() emits exactly the 23 always-present keys.
         self::assertSame(
-            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment', 'rsw_modulus_sha256'])),
+            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment', 'rsw_modulus_sha256', 'server_mac'])),
             \array_keys($record->toArray()),
         );
         self::assertNull($record->decoyField);
@@ -614,11 +614,11 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo28(): void
+    public function testWireKeySetIsPinnedTo29(): void
     {
         // decoy_field, execution_program, execution_version,
-        // execution_commitment and rsw_modulus_sha256 are the Option keys
-        // omitted from toArray() when null (the Rust
+        // execution_commitment, rsw_modulus_sha256 and server_mac are the
+        // Option keys omitted from toArray() when null (the Rust
         // skip_serializing_if mirror); every other key is always
         // present. The three execution keys are present together or all
         // absent, and the rsw identity rides only an rsw record.
@@ -629,7 +629,30 @@ final class StrictParserTest extends TestCase
             'attempts_used', 'region', 'policy_version', 'request_binding',
             'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
             'execution_version', 'execution_commitment', 'rsw_modulus_sha256',
+            'server_mac',
         ], ChallengeRecord::WIRE_KEYS);
+    }
+
+    public function testServerMacMustBeSixtyFourLowercaseHex(): void
+    {
+        $ok = self::base();
+        $ok['server_mac'] = str_repeat('0a', 32);
+        self::assertSame(str_repeat('0a', 32), ChallengeRecord::fromArray($ok)->serverMac);
+        self::assertSame(str_repeat('0a', 32), ChallengeRecord::fromArray($ok)->toArray()['server_mac']);
+        $absent = self::base();
+        unset($absent['server_mac']);
+        self::assertNull(ChallengeRecord::fromArray($absent)->serverMac);
+
+        foreach ([str_repeat('0A', 32), str_repeat('0a', 31), str_repeat('0a', 32)."\n", 'zz'.str_repeat('0a', 31), 7, true, []] as $bad) {
+            $data = self::base();
+            $data['server_mac'] = $bad;
+            try {
+                ChallengeRecord::fromArray($data);
+                self::fail('a malformed server_mac must fail decode: '.var_export($bad, true));
+            } catch (MalformedRecordException) {
+                self::addToAssertionCount(1);
+            }
+        }
     }
 
     public function testRuntimeStorageFieldsAreNotWireKeys(): void

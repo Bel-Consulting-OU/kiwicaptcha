@@ -70,12 +70,40 @@ final class ConsumedOutcomeRecoveryTest extends TestCase
     public function testMatchingIdentityRecoversTheStoredOutcome(): void
     {
         [$storage, $token] = $this->consumedWithStoredValid(self::IDENTITY_A);
-        $recovery = new ConsumedOutcomeRecovery($storage);
+        $recovery = new ConsumedOutcomeRecovery($storage, new Verifier($storage), Vectors::SECRET);
 
         $outcome = $recovery->recover($token, self::IDENTITY_A);
         self::assertNotNull($outcome);
         self::assertTrue($outcome->isOk(), 'the proven identity recovers the stored success');
         self::assertTrue($outcome->fromStoredResult, 'the recovery is the stored committed result, never a fresh derivation');
+    }
+
+    public function testRecoveryWithoutTheVerifierFailsTheStoredSuccessClosed(): void
+    {
+        // The stored success carries a server-state MAC; a recovery
+        // that cannot check it (no verifier/secret) on a storage that
+        // carries authenticated results never releases the grant.
+        [$storage, $token] = $this->consumedWithStoredValid(self::IDENTITY_A);
+        $outcome = (new ConsumedOutcomeRecovery($storage))->recover($token, self::IDENTITY_A);
+        self::assertNotNull($outcome);
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error);
+    }
+
+    public function testAForgedStoredSuccessIsNeverRecovered(): void
+    {
+        // A storage writer consumes a pending record under its own
+        // identity and commits valid=true without a MAC (it holds no
+        // master secret), or with a wrong-key MAC: both are refused.
+        foreach ([null, str_repeat('ab', 32)] as $mac) {
+            [$storage, $token] = $this->issuedAndSolved();
+            $nonce = SolutionToken::decode($token)->nonce;
+            self::assertNotNull($storage->consumeWithOperationIdentity($nonce, self::IDENTITY_A));
+            self::assertTrue($storage->commitAuthenticatedResult($nonce, new \KiwiCaptcha\ConsumedResult(true, null, $mac)));
+
+            $outcome = (new ConsumedOutcomeRecovery($storage, new Verifier($storage), Vectors::SECRET))->recover($token, self::IDENTITY_A);
+            self::assertNotNull($outcome);
+            self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a forged stored success is never a grant');
+        }
     }
 
     public function testMismatchedIdentityNeverRecoversTheStoredSuccess(): void

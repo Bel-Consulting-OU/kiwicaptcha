@@ -400,8 +400,10 @@ local g = read_state(KEYS[9], now)
 -- Corrupt or tampered stored levels above the hysteresis table are
 -- clamped into range (the Rust core applies the same .min(4)); a nil
 -- exit entry would otherwise error mid-transition after the dedupe
--- marker was written.
-local prev_level = math.min(4, math.max(1, tonumber(g.scope) or 1))
+-- marker was written. The floor stays 0: a fresh state legitimately
+-- starts at level 0, and forcing a minimum of 1 here would raise every
+-- namespace's baseline pressure.
+local prev_level = math.min(4, tonumber(g.scope) or 0)
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then

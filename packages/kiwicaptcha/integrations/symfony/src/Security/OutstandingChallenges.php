@@ -426,7 +426,11 @@ LUA;
     public function sourceKey(string $clientIp): string
     {
         try {
-            $identity = Issuer::canonicalIpFamily($clientIp);
+            // The shared source identity: full IPv4, /64 IPv6, matching
+            // the issuance/cancellation limiter and the risk source
+            // pseudonym. A /128 key would let an IPv6 host rotate
+            // addresses around the anti-stockpiling window.
+            $identity = Issuer::canonicalSourceFamily($clientIp);
         } catch (\InvalidArgumentException) {
             $identity = 'unknown';
         }

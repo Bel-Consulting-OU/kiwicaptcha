@@ -100,7 +100,7 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
      * Every envelope reader strips them with the other runtime fields
      * before the strict record parse.
  */
-final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface, ResumeDerivationClaimInterface
+final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface, ResumeDerivationClaimInterface, \KiwiCaptcha\AuthenticatedResultCommitInterface
 {
     /**
      * Shared envelope inspection for the runtime transition scripts.
@@ -901,7 +901,8 @@ LUA;
 --
 -- The resume-path claim is an optional fencing precondition carried in
 -- ARGV[4]: when non-empty, the envelope must hold a LIVE claim owned by
--- exactly this token before the protected mutation is written.
+-- exactly this token before the protected mutation is written. ARGV[5],
+-- when non-empty, is the server-state MAC stored inside the result.
 -- Ownership lost (missing, expired, or owned by a different token)
 -- returns 2 with no write, so a stale owner whose claim expired
 -- mid-derivation can never commit, and the successful write clears the
@@ -953,10 +954,21 @@ if pttl < 0 then
   return 0
 end
 if pttl < 1000 then pttl = 1000 end
-local encoded = cjson.encode({
-  valid = (ARGV[1] == '1'),
-  binding = (ARGV[3] == "0") and cjson.null or ARGV[2]
-})
+local encoded
+if ARGV[5] ~= nil and ARGV[5] ~= '' then
+  -- The server-state MAC (64 lowercase hex, validated by the caller)
+  -- rides inside the result object verbatim.
+  encoded = cjson.encode({
+    valid = (ARGV[1] == '1'),
+    binding = (ARGV[3] == "0") and cjson.null or ARGV[2],
+    mac = ARGV[5]
+  })
+else
+  encoded = cjson.encode({
+    valid = (ARGV[1] == '1'),
+    binding = (ARGV[3] == "0") and cjson.null or ARGV[2]
+  })
+end
 local updated = kiwiReplaceTopLevel(v, 'consumed_result', encoded)
 if updated == nil then
   return 0
@@ -1465,8 +1477,19 @@ LUA;
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
+        return $this->commitAuthenticatedResult($nonce, new ConsumedResult($valid, $binding));
+    }
+
+    /**
+     * The result commit carrying the server-state MAC (see
+     * {@see \KiwiCaptcha\AuthenticatedResultCommitInterface}): the same
+     * commit_SCRIPT, with the MAC (validated by ConsumedResult) stored
+     * verbatim inside `consumed_result`.
+     */
+    public function commitAuthenticatedResult(string $nonce, ConsumedResult $result): bool
+    {
         $key = $this->prefix.$nonce;
-        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$key, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1'], 1);
+        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$key, $result->valid ? '1' : '0', $result->binding ?? '', $result->binding === null ? '0' : '1', '', $result->mac ?? ''], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
 
         // Durability barrier: a committed deterministic result that only
@@ -1565,7 +1588,7 @@ LUA;
 
     /**
      * The resume-path commit clears the re-derivation claim atomically
-     * with the result write. The same `COMMIT_SCRIPT` takes the owner
+     * with the result write. The same `commit_SCRIPT` takes the owner
      * token as a fencing precondition: ownership lost, whether missing,
      * expired, or owned by a different token, is refused before any
      * write. The script clears the embedded claim fields in the same
@@ -1588,9 +1611,15 @@ LUA;
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
+        return $this->commitAuthenticatedResultResume($nonce, new ConsumedResult($valid, $binding), $owner);
+    }
+
+    /** The MAC-carrying resume commit, see {@see self::commitResultResume()}. */
+    public function commitAuthenticatedResultResume(string $nonce, ConsumedResult $result, string $owner): bool
+    {
         $this->assertValidResumeOwner($owner);
         $recordKey = $this->prefix.$nonce;
-        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$recordKey, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1', $owner], 1);
+        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$recordKey, $result->valid ? '1' : '0', $result->binding ?? '', $result->binding === null ? '0' : '1', $owner, $result->mac ?? ''], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
 
         if ($committed && $this->waitReplicas > 0) {

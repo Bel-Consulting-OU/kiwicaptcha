@@ -2909,6 +2909,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      *  - global_floors is an array of five entries with index 0 = Allow
      *    (level 0 is the idle level). When global_pressure.enabled is
      *    false every floor is Allow, since the global controller is off.
+     *  - default_scope is always the conservative row (base_risk 100,
+     *    minimum/degraded sha20): an id the table does not list can never
+     *    degrade to Allow.
      *  - unknown_scope.mode "minimum" adds a synthetic scope entry
      *    (base_risk 100, minimum/degraded sha20) under a reserved id,
      *    walking down from 1..u32::MAX until it collides with no
@@ -2935,6 +2938,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             'global_floors' => $riskConfig['global_pressure']['enabled']
                 ? [0 => RiskAction::Allow->value] + $riskConfig['global_floors']
                 : array_fill(0, 5, RiskAction::Allow->value),
+            // Any scope id the table above does not list (for example a
+            // stored scope from a previous configuration) uses this
+            // conservative row instead of the risk package's Allow
+            // default; the bundle pins it explicitly so the policy handed
+            // to the engine carries the intent.
+            'default_scope' => [
+                'base_risk' => 100,
+                'minimum' => RiskAction::Sha20->value,
+                'post_solve_check' => false,
+                'degraded' => RiskAction::Sha20->value,
+            ],
         ];
         $scopeIds = [];
         $postSolveScopes = [];

@@ -44,11 +44,22 @@ namespace KiwiCaptcha;
  * The retained evidence is readable even after the signed challenge has
  * expired (the storage's retention horizon covers the recovery window),
  * so a late-lifetime crash can still reproduce the original outcome.
+ *
+ * A stored success is released only when its server-state MAC verifies
+ * see {@see Verifier::storedSuccessAuthentic()}. A storage writer who
+ * forges `valid=true` under the recorded identity gets MalformedRecord,
+ * never a grant. Checking the MAC needs the verifier and the secret: on
+ * a storage that carries authenticated results
+ * see {@see AuthenticatedResultCommitInterface}, a recovery constructed
+ * without them fails every stored success closed.
  */
 final class ConsumedOutcomeRecovery
 {
     public function __construct(
         private readonly StorageInterface $storage,
+        private readonly ?Verifier $verifier = null,
+        #[\SensitiveParameter]
+        private readonly ?string $secretKey = null,
     ) {
     }
 
@@ -112,6 +123,16 @@ final class ConsumedOutcomeRecovery
             || !hash_equals($consumed->operationIdentity, $operationIdentity)
         ) {
             return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
+        }
+
+        // The authenticity gate: a stored success must carry a
+        // server-state MAC that verifies for this record, binding and
+        // recorded identity. Forged or corrupt persisted state otherwise.
+        $authentic = $this->verifier !== null && $this->secretKey !== null
+            ? $this->verifier->storedSuccessAuthentic($consumed, $this->secretKey, $this->storage)
+            : !$this->storage instanceof AuthenticatedResultCommitInterface;
+        if (!$authentic) {
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
         }
 
         // Failed-barrier replay guard, the same fence the verify and

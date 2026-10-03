@@ -109,6 +109,23 @@ final class TelemetryTest extends TestCase
         self::assertFalse(Telemetry::score(['et' => $mixed], 5_000));
     }
 
+    public function testNegativeTimestampsAreSkippedExactlyLikeRustsUnsignedParse(): void
+    {
+        // Rust reads each timestamp with as_u64(): a negative value is
+        // not a u64, so the pair contributes no diff. An all-negative
+        // strictly increasing series therefore has NO diffs and must not
+        // reject; PHP mirrored the permissive behaviour before.
+        $events = [];
+        for ($i = 0; $i < 30; $i++) {
+            $events[] = -300 + $i * 8;
+        }
+        self::assertFalse(Telemetry::score(['et' => $events, 'wd' => false], 5000));
+
+        // A direct negative duration is clamped to 0 like an unsigned u64
+        // input, never treated as a >300 s solve.
+        self::assertFalse(Telemetry::score(['wd' => false], -1));
+    }
+
     public function testDecreasingTimestampsAreSkipped(): void
     {
         // t1 >= t0 is required; decreasing pairs are dropped (Rust skips them).

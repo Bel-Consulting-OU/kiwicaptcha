@@ -330,7 +330,7 @@ bootstrap — the bytes a plain SHA-256 English page downloads before
 any memory-hard challenge — is the eager core alone: 102,356 bytes
 raw, 30,218 gzip and 25,583 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
-figure sits at 98.4% of its 30,720-byte cap after the timeout-ordering
+figure sits at 98.8% of its 30,720-byte cap after the timeout-ordering
 and correlation-hardening wave added core code; the cap is unchanged
 and still enforced, the asset carries a recorded `headroom_review`
 exemption under the 95% near-cap gate, and the raw 160,000 cap keeps
@@ -345,7 +345,7 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (102,356 raw / 30,218 gzip / 25,583 brotli);
+  lazy-module loader (102,601 raw / 30,346 gzip / 25,646 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned

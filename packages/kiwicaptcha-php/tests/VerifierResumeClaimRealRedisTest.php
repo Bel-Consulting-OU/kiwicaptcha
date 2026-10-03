@@ -281,7 +281,7 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
 
         $winner = $storage->claimResumeDerivation($record->nonce);
         self::assertIsString($winner);
-        self::assertTrue($storage->commitResultResume($record->nonce, true, $record->requestBinding, $winner), 'the winner commits while holding the claim');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, $record->requestBinding, $winner, self::SECRET), 'the winner commits while holding the claim');
 
         $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('the loser must resolve the winner\'s committed outcome, got %s', $outcome->code()));

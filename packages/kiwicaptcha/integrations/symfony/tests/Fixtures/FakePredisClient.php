@@ -782,6 +782,10 @@ final class FakePredisClient extends \Predis\Client
                 'valid' => ($rest[0] ?? '0') === '1',
                 'binding' => ($rest[2] ?? '0') === '1' ? (string) ($rest[1] ?? '') : null,
             ];
+            // ARGV[5]: the server-state MAC, stored when non-empty.
+            if (($rest[4] ?? '') !== '') {
+                $obj['consumed_result']['mac'] = (string) $rest[4];
+            }
             $this->strings[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             return 1;
@@ -902,10 +906,28 @@ final class FakePredisClient extends \Predis\Client
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
             $ledgerKey = (string) $keys[2];
+            $sampled = (string) $rest[2];
+            if ($sampled !== '0' && $sampled !== '1') {
+                throw new \Predis\Response\ServerException('register_decision: sampled must be 0 or 1');
+            }
+            foreach ([[1, 'receipt_ttl_s'], [3, 'bucket_ttl_s'], [4, 'outcome_ttl_s']] as [$ttlIndex, $ttlLabel]) {
+                $ttl = (float) $rest[$ttlIndex];
+                if ($ttl < 1 || $ttl > 2147483647 || $ttl !== floor($ttl)) {
+                    throw new \Predis\Response\ServerException('register_decision: '.$ttlLabel.' must be a positive integer no greater than 2147483647');
+                }
+            }
             if (isset($this->strings[$receiptKey])) {
                 return 0;
             }
             $this->strings[$receiptKey] = (string) $rest[0];
+            if (isset($this->strings[$ledgerKey])) {
+                // Late re-registration: never reset an authoritative
+                // ledger to pending; remove the receipt just created and
+                // book no second denominator.
+                unset($this->strings[$receiptKey]);
+
+                return 0;
+            }
             $this->strings[$ledgerKey] = (string) json_encode([
                 'o' => 'P',
                 'scope' => (int) $rest[5],
@@ -915,7 +937,7 @@ final class FakePredisClient extends \Predis\Client
             ]);
             $this->fakePexpire([$receiptKey, (int) $rest[1] * 1000]);
             $this->fakePexpire([$ledgerKey, (int) $rest[4] * 1000]);
-            if ((int) $rest[2] === 1) {
+            if ($sampled === '1') {
                 $this->fakeHincrbyfloat([$bucketKey, 'sample_total', 1.0]);
                 $this->fakePexpire([$bucketKey, (int) $rest[3] * 1000]);
             }
@@ -934,11 +956,28 @@ final class FakePredisClient extends \Predis\Client
             $ledgerKey = (string) $keys[2];
             $mode = (int) $rest[0];
             $weight = (float) $rest[1];
-            $legitimate = (int) $rest[2] === 1;
+            $legitimateRaw = (string) $rest[2];
             $bucketTtlSecs = (int) $rest[3];
             $outcomeTtlSecs = (int) $rest[4];
             $expectedScope = (int) $rest[5];
             $expectedHour = (int) $rest[6];
+
+            if ($mode !== 0 && $mode !== 1 && $mode !== 2) {
+                throw new \Predis\Response\ServerException('invalid calibration mode');
+            }
+            if ($mode === 2 && ($weight <= 0 || !\is_finite($weight))) {
+                throw new \Predis\Response\ServerException('invalid calibration weight');
+            }
+            if ($legitimateRaw !== '0' && $legitimateRaw !== '1') {
+                throw new \Predis\Response\ServerException('invalid legitimate flag');
+            }
+            if ($bucketTtlSecs < 1 || $bucketTtlSecs > 2147483647) {
+                throw new \Predis\Response\ServerException('confirm: bucket_ttl_s must be a positive integer no greater than 2147483647');
+            }
+            if ($outcomeTtlSecs < 1 || $outcomeTtlSecs > 2147483647) {
+                throw new \Predis\Response\ServerException('confirm: outcome_ttl_s must be a positive integer no greater than 2147483647');
+            }
+            $legitimate = $legitimateRaw === '1';
 
             $raw = $this->strings[$receiptKey] ?? null;
             if ($raw === null) {
@@ -955,13 +994,6 @@ final class FakePredisClient extends \Predis\Client
             ) {
                 return 0;
             }
-            if ($mode !== 0 && $mode !== 1 && $mode !== 2) {
-                throw new \Predis\Response\ServerException('invalid calibration mode');
-            }
-            if ($mode === 2 && ($weight <= 0 || !\is_finite($weight))) {
-                throw new \Predis\Response\ServerException('invalid calibration weight');
-            }
-
             $ledgerRaw = $this->strings[$ledgerKey] ?? null;
             if ($ledgerRaw === null) {
                 return 0;
@@ -986,17 +1018,21 @@ final class FakePredisClient extends \Predis\Client
 
             $ledger['o'] = $legitimate ? 'L' : 'A';
             $ledger['w'] = $weight;
+            $ledger['c'] = $status === 1 ? 1 : 0;
             $this->strings[$ledgerKey] = (string) json_encode($ledger);
             $this->fakePexpire([$ledgerKey, $outcomeTtlSecs * 1000]);
             unset($this->strings[$receiptKey]);
 
+            $boundary = 600;
             if ($status === 1) {
                 if ($legitimate) {
                     $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
                     $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', max(0.0, $score - $boundary) * $weight]);
                 } else {
                     $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
                     $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', max(0.0, $boundary - $score) * $weight]);
                 }
                 $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
                 if ($mode === 1) {
@@ -1021,6 +1057,19 @@ final class FakePredisClient extends \Predis\Client
             $expectedScope = (int) $rest[4];
             $expectedHour = (int) $rest[5];
 
+            if ($newOutcome !== 'L' && $newOutcome !== 'A') {
+                throw new \Predis\Response\ServerException('invalid correction outcome');
+            }
+            if ($weight <= 0 || !\is_finite($weight)) {
+                throw new \Predis\Response\ServerException('invalid correction weight');
+            }
+            if ($bucketTtlSecs < 1 || $bucketTtlSecs > 2147483647) {
+                throw new \Predis\Response\ServerException('correction: bucket_ttl_s must be a positive integer no greater than 2147483647');
+            }
+            if ($outcomeTtlSecs < 1 || $outcomeTtlSecs > 2147483647) {
+                throw new \Predis\Response\ServerException('correction: outcome_ttl_s must be a positive integer no greater than 2147483647');
+            }
+
             $ledgerRaw = $this->strings[$ledgerKey] ?? null;
             if ($ledgerRaw === null) {
                 return 0;
@@ -1029,19 +1078,17 @@ final class FakePredisClient extends \Predis\Client
             if (!\is_array($ledger) || !isset($ledger['o'])) {
                 return 0;
             }
+            if (($ledger['o'] ?? null) !== 'L' && ($ledger['o'] ?? null) !== 'A') {
+                // pending is never corrected directly.
+                return 0;
+            }
             if ((int) ($ledger['scope'] ?? 0) !== $expectedScope
                 || (int) ($ledger['hour'] ?? 0) !== $expectedHour
             ) {
                 return 0;
             }
-            if ($newOutcome !== 'L' && $newOutcome !== 'A') {
-                throw new \Predis\Response\ServerException('invalid correction outcome');
-            }
             if (($ledger['o'] ?? null) === $newOutcome) {
                 return 0;
-            }
-            if ($weight <= 0 || !\is_finite($weight)) {
-                throw new \Predis\Response\ServerException('invalid correction weight');
             }
             $score = (float) ($ledger['score'] ?? 0);
             if ($score < 0) {
@@ -1051,28 +1098,36 @@ final class FakePredisClient extends \Predis\Client
                 $score = 1000;
             }
             $oldW = (float) ($ledger['w'] ?? 1);
+            $counted = (int) ($ledger['c'] ?? 0) === 1;
+            $boundary = 600;
 
-            if (($ledger['o'] ?? null) === 'L') {
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', -$oldW]);
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', -($score * $oldW)]);
-            } else {
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', -$oldW]);
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', -($score * $oldW)]);
-            }
-            foreach (['legit_count', 'legit_score_sum', 'abuse_count', 'abuse_score_sum'] as $field) {
-                if (($this->hashes[$bucketKey][$field] ?? 0) < 0) {
-                    $this->hashes[$bucketKey][$field] = 0;
+            if ($counted) {
+                if (($ledger['o'] ?? null) === 'L') {
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', -$oldW]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', -($score * $oldW)]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', -(max(0.0, $score - $boundary) * $oldW)]);
+                } else {
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', -$oldW]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', -($score * $oldW)]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', -(max(0.0, $boundary - $score) * $oldW)]);
                 }
-            }
+                foreach (['legit_count', 'legit_score_sum', 'legit_above_sum', 'abuse_count', 'abuse_score_sum', 'abuse_below_sum'] as $field) {
+                    if (($this->hashes[$bucketKey][$field] ?? 0) < 0) {
+                        $this->hashes[$bucketKey][$field] = 0;
+                    }
+                }
 
-            if ($newOutcome === 'L') {
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
-                $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
-            } else {
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
-                $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+                if ($newOutcome === 'L') {
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', max(0.0, $score - $boundary) * $weight]);
+                } else {
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
+                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', max(0.0, $boundary - $score) * $weight]);
+                }
+                $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
             }
-            $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
 
             $ledger['o'] = $newOutcome;
             $ledger['w'] = $weight;
@@ -1124,17 +1179,31 @@ final class FakePredisClient extends \Predis\Client
             // Canonical outcome_correct.lua: keys[1] ledger;
             // argv[1] new outcome, argv[2] TTL.
             $ledgerKey = (string) $keys[0];
+            $newOutcome = (string) $rest[0];
+            if ($newOutcome !== 'L' && $newOutcome !== 'A') {
+                throw new \Predis\Response\ServerException('outcome_correct: new outcome must be L or A');
+            }
+            $ttl = (float) $rest[1];
+            if ($ttl < 1 || $ttl > 2147483647 || $ttl !== floor($ttl)) {
+                throw new \Predis\Response\ServerException('outcome_correct: outcome_ttl_s must be a positive integer no greater than 2147483647');
+            }
             $ledgerRaw = $this->strings[$ledgerKey] ?? null;
             if ($ledgerRaw === null) {
                 return 0;
             }
             $ledger = json_decode($ledgerRaw, true);
-            if (!\is_array($ledger) || ($ledger['o'] ?? null) === (string) $rest[0]) {
+            if (!\is_array($ledger)) {
                 return 0;
             }
-            $ledger['o'] = (string) $rest[0];
+            if (($ledger['o'] ?? null) !== 'L' && ($ledger['o'] ?? null) !== 'A') {
+                return 0;
+            }
+            if (($ledger['o'] ?? null) === $newOutcome) {
+                return 0;
+            }
+            $ledger['o'] = $newOutcome;
+            // SET ... KEEPTTL: the original ledger TTL is preserved.
             $this->strings[$ledgerKey] = (string) json_encode($ledger);
-            $this->fakePexpire([$ledgerKey, (int) $rest[1] * 1000]);
 
             return 1;
         }

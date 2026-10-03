@@ -65,7 +65,7 @@ use Psr\Cache\CacheItemPoolInterface;
  * `commitResult()` keeps its boolean contract and simply returns the
  * `save()` result, as before.
  */
-final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
+final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface, \KiwiCaptcha\AuthenticatedResultCommitInterface
 {
     /**
      * PSR-6 reserves the characters `{}()/\@:` in cache keys, so the
@@ -220,6 +220,11 @@ final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
+        return $this->commitAuthenticatedResult($nonce, new ConsumedResult($valid, $binding));
+    }
+
+    public function commitAuthenticatedResult(string $nonce, ConsumedResult $result): bool
+    {
         $item = $this->pool->getItem(self::key($nonce));
         if (!$item->isHit()) {
             return false;
@@ -234,10 +239,19 @@ final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
         if (isset($data['consumed_result']) && $data['consumed_result'] !== null) {
             return false;
         }
-        $data['consumed_result'] = ['valid' => $valid, 'binding' => $binding];
+        $data['consumed_result'] = $result->toArray();
         $item->set($data);
 
         return $this->pool->save($item);
+    }
+
+    /**
+     * This backend offers no resume-derivation claim, so the verifier
+     * never reaches the claim-fenced commit on it.
+     */
+    public function commitAuthenticatedResultResume(string $nonce, ConsumedResult $result, string $owner): bool
+    {
+        throw new \LogicException('Psr6Storage does not support the resume-derivation claim');
     }
 
     public function delete(string $nonce): void

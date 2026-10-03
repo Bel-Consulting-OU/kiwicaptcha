@@ -1458,7 +1458,10 @@ final class SiteVerifyController
                 $record = $this->storage->find($outcome->nonce());
                 if ($record !== null) {
                     $issuedAt = $record->issuedAt;
-                    $hostname = $record->hostname;
+                    // The hostname is record metadata outside the signed
+                    // canonical: echoed only when its server-state MAC
+                    // verifies, never a storage writer's rewrite.
+                    $hostname = $this->verifier->authenticatedHostname($record, $this->secretKey);
                 }
             }
             $action = null;

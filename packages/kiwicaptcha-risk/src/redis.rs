@@ -1913,12 +1913,35 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
         assert_eq!(value["o"], "L");
 
-        // A pending entry can be corrected too (never confirmed yet).
+        // A pending entry is never corrected directly: confirmation is
+        // the only transition out of pending (a direct P flip would skip
+        // the confirmation and its reputation event). The refusal must
+        // leave the ledger untouched.
         assert!(store.register_outcome("led-2", 7, hour, 100).unwrap());
+        assert!(!store.correct_outcome("led-2", false).unwrap());
+        let raw: String = conn.get(store.outcome_ledger_key("led-2")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "P");
+
+        // After a real confirmation the correction applies, and the
+        // original TTL is preserved (SET ... KEEPTTL, never re-extended).
+        assert_eq!(store.confirm_outcome("led-2", true).unwrap(), 1);
+        let ttl_before: i64 = redis::cmd("TTL")
+            .arg(store.outcome_ledger_key("led-2"))
+            .query(&mut conn)
+            .expect("ttl");
         assert!(store.correct_outcome("led-2", false).unwrap());
+        let ttl_after: i64 = redis::cmd("TTL")
+            .arg(store.outcome_ledger_key("led-2"))
+            .query(&mut conn)
+            .expect("ttl");
         let raw: String = conn.get(store.outcome_ledger_key("led-2")).expect("get");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
         assert_eq!(value["o"], "A");
+        assert!(
+            ttl_after <= ttl_before && ttl_before - ttl_after <= 2,
+            "KEEPTTL must preserve the ledger TTL (before {ttl_before}, after {ttl_after})"
+        );
     }
 
     #[test]

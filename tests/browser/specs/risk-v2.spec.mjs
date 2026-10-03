@@ -55,9 +55,9 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(typeof body.client_context).toBe('string');
     // The server's accepted bounded pattern.
     expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
-    // The coarse capabilities: viewport class, touch class, language
-    // family and timezone class.
-    expect(body.client_context).toMatch(/v[123]/);
+    // The coarse capabilities: touch class, language family and
+    // timezone class. The viewport is deliberately excluded from the
+    // consistency tag (rotation/resize would flag legitimate users).
     expect(body.client_context).toMatch(/t[01]/);
     expect(body.client_context).toMatch(/l[a-z]{2,3}/);
     expect(body.client_context).toMatch(/z[0-4]/);
@@ -112,7 +112,6 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     expect(body, 'the challenge request must be captured').toBeTruthy();
     expect(typeof body.client_context).toBe('string');
     expect(body.client_context).toMatch(/^[a-z0-9+_,=:-]{1,64}$/);
-    expect(body.client_context).toMatch(/v[123]/);
     expect(body.client_context).toMatch(/t[01]/);
     expect(body.client_context).toMatch(/l[a-z]{2,3}/);
     expect(body.client_context).toMatch(/z[0-4]/);

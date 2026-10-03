@@ -347,6 +347,7 @@ final class RswModulusIdentityTest extends TestCase
         $wire['challenge'] = $challenge;
         $wire['prefix'] = $challenge.'|'.$wire['salt'].'|';
 
-        return ChallengeRecord::fromArray($wire);
+        // The rewritten challenge needs a fresh record-metadata MAC.
+        return \KiwiCaptcha\Tests\Fixtures\ServerState::seal(ChallengeRecord::fromArray($wire));
     }
 }

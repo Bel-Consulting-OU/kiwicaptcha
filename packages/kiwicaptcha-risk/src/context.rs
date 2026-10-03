@@ -12,8 +12,9 @@ pub struct RiskContext<'a> {
     pub source_ip: IpAddr,
     /// The decoded 16-byte session cookie value (pseudonymized before
     /// storage): the browser carries the cookie as 32 lowercase hex chars,
-    /// the caller decodes them.
-    pub session_id: Option<&'a [u8]>,
+    /// the caller decodes them. The typed array makes a wrong-length
+    /// cookie a compile-time error instead of a runtime panic.
+    pub session_id: Option<&'a [u8; 16]>,
     /// Application principal id bytes (pseudonymized before storage).
     pub principal_id: Option<&'a [u8]>,
     pub event: RiskEventKind,
@@ -26,7 +27,7 @@ impl<'a> RiskContext<'a> {
     pub fn new(
         scope: u32,
         source_ip: IpAddr,
-        session_id: Option<&'a [u8]>,
+        session_id: Option<&'a [u8; 16]>,
         principal_id: Option<&'a [u8]>,
         event: RiskEventKind,
         network_flags: NetworkFlags,

@@ -342,8 +342,11 @@ pub enum VerifyOutcome {
         /// distinguish a new proof from a retained-state replay.
         from_stored_result: bool,
         /// The server-measured solve duration in milliseconds: the span
-        /// between the record's signed issuance clock (`issued_at_ns`,
-        /// epoch microseconds) and this verification's receipt instant —
+        /// between the record's server-written issuance clock
+        /// (`issued_at_ns`, epoch microseconds; server-side metadata
+        /// outside the challenge HMAC, authenticated by the record's
+        /// `server_mac`) and this verification's
+        /// receipt instant —
         /// unforgeable behavioral evidence the risk layer can consume as a
         /// graded signal. The client-reported token `duration_ms` is
         /// forgeable and is never consulted; only server-written
@@ -669,6 +672,13 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // requires the execution triplet.
     if !(1..=crate::challenge::MAX_PROTOCOL_VERSION).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
+    }
+    // The record-metadata MAC, when present, has the exact wire shape
+    // (64 lowercase hex) — the PHP ChallengeRecord boundary twin.
+    if let Some(tag) = record.server_mac.as_deref() {
+        if !crate::challenge::is_server_state_mac_shape(tag) {
+            return Err(VerifyError::MalformedRecord);
+        }
     }
     // The protocol-vs-extension grammar is the one shared table (the
     // stored-record decoder applies the same matrix at its boundary),
@@ -1010,13 +1020,14 @@ pub(crate) fn real_now_unix() -> u64 {
 /// time cannot be measured reliably — `None`; beyond the tolerance
 /// the record is rejected as `TooFast` and never reaches a valid
 /// outcome). A record whose issuance clock is unknown
-/// (`issued_at_ns == 0`) is equally unmeasurable. Sub-millisecond
-/// spans floor toward zero.
+/// (`issued_at_ns == 0`) or unauthenticated (no `server_mac`; the MAC
+/// itself is verified with the signature) is equally unmeasurable.
+/// Sub-millisecond spans floor toward zero.
 pub(crate) fn measurable_solve_duration_ms(
     record: &ChallengeRecord,
     receipt_ns: u64,
 ) -> Option<u64> {
-    if record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
+    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
         return None;
     }
     Some((receipt_ns - record.issued_at_ns) / 1_000)
@@ -1246,8 +1257,20 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Ok(false) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
+    // 1b'. The record-metadata MAC: a present `server_mac` must verify
+    //      under the record's kid secret and the tenant — a rewritten
+    //      issuance clock or hostname is a forged record
+    //      (BadSignature), exactly like the PHP verifier.
+    if ctx.record.server_mac.is_some()
+        && !crate::challenge::verify_record_meta(
+            &crate::keys::DerivedKeys::from_master(secret, ctx.tenant),
+            ctx.record,
+        )
+    {
+        return VerifyOutcome::Invalid(VerifyError::BadSignature);
+    }
 
-    // 1c. Hard Argon2id parameter ceilings — validated after the
+    // 1b''. Hard Argon2id parameter ceilings — validated after the
     //     signature has been authenticated and before any Params::new or
     //     memory allocation: even a properly signed record must never drive
     //     an out-of-bounds memory-hard computation.
@@ -1385,6 +1408,12 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
     let floor = ctx.min_duration_ms.max(ctx.record.min_duration_ms);
+    if floor > 0 && ctx.record.server_mac.is_none() {
+        // The issuance clock is unauthenticated (no record-metadata
+        // MAC): a storage writer could have backdated it, so the floor
+        // cannot be evaluated and fails closed.
+        return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
+    }
     if floor > 0 {
         if ctx.now_ns >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
@@ -1890,11 +1919,26 @@ mod tests {
     /// valid v2 signature — the ceiling checks must fire on
     /// properly signed records, not on signature failures.
     fn resign_v2(record: &mut ChallengeRecord, secret: &str) {
+        resign_v2_tenant(record, secret, None);
+    }
+
+    fn resign_v2_tenant(record: &mut ChallengeRecord, secret: &str, tenant: Option<&str>) {
         let canonical = super::super::challenge::canonical_signing_input_v2(record);
-        let sig = super::super::challenge::sign_canonical_v2(&canonical, secret, None).unwrap();
+        let sig = super::super::challenge::sign_canonical_v2(&canonical, secret, tenant).unwrap();
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
+        // The server-state MAC authenticates the unsigned server-side
+        // fields (issued_at_ns, hostname) against the exact challenge
+        // string: a re-sign changes the challenge, so the MAC must be
+        // re-sealed exactly as the production issuer seals it after
+        // signing.
+        record.server_mac = Some(super::super::challenge::record_meta_mac(
+            &super::super::keys::DerivedKeys::from_master(secret, tenant),
+            &record.challenge,
+            record.issued_at_ns,
+            record.hostname.as_deref(),
+        ));
     }
 
     // ── tenant-scoped verification ─────────────────────────────────────
@@ -3580,9 +3624,10 @@ mod tests {
         // Records without a high-resolution issuance timestamp (issued_at_ns
         // == 0) are rejected as MalformedRecord — there is no client-duration
         // fallback: the floor can only be enforced with a
-        // server-measured elapsed time.
-        let mut record = make_record(8);
-        record.issued_at_ns = 0;
+        // server-measured elapsed time. The record is issued with ns=0 so
+        // its server-state MAC is valid: the malformed gate is what
+        // refuses it, not the MAC.
+        let mut record = make_record_at(8, NOW_UNIX, 0);
         let counter = solve_for_test(&record).unwrap();
         let mut ctx = VerifyContext {
             record: &mut record,
@@ -3615,6 +3660,47 @@ mod tests {
         assert_eq!(
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+
+        // Rewriting the issuance clock of a properly issued record
+        // without re-sealing the server-state MAC is the fraud the MAC
+        // exists to catch: it fails closed as a signature error, never as
+        // a merely malformed record.
+        let mut rewritten = make_record(8);
+        rewritten.issued_at_ns = 0;
+        let counter = solve_for_test(&rewritten).unwrap();
+        let mut rewritten_ctx = VerifyContext {
+            record: &mut rewritten,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 60_000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 10_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert_eq!(
+            verify_solution(&mut rewritten_ctx),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "a rewritten issuance clock must fail the server-state MAC"
         );
     }
 
@@ -6254,6 +6340,7 @@ mod tests {
             hostname: None,
             decoy_field: None,
             rsw_modulus_sha256: None,
+            server_mac: None,
         }
     }
 

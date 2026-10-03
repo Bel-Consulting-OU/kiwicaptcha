@@ -209,6 +209,7 @@ final class ParityTest extends TestCase
             minDurationMs: 100,
             issuedAtNs: $issuedAtNs,
             protocolVersion: 1,
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $record->challenge, $issuedAtNs, null),
         );
         $storage = new ArrayStorage();
         $storage->store($recordWithFloor);

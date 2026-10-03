@@ -337,6 +337,15 @@ pub struct ChallengeRecord {
     /// keep verifying unchanged. Shared with the PHP core.
     #[serde(default = "default_kid")]
     pub kid: u32,
+    /// The record-metadata MAC (64 lowercase hex) authenticating the
+    /// server-side fields the challenge signature does not cover
+    /// (`issued_at_ns`, `hostname`), keyed with the server-state purpose
+    /// key (see [`record_meta_mac`]). `None` on records issued before the
+    /// MAC existed: such a record verifies only floorless, without a
+    /// server-measured duration and without a hostname. The JSON key is
+    /// absent when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_mac: Option<String>,
 }
 
 /// The wire mirror of [`ChallengeRecord`]: exactly the serde attributes
@@ -390,6 +399,8 @@ struct RawChallengeRecord {
     rsw_modulus_sha256: Option<String>,
     #[serde(default = "default_kid")]
     kid: u32,
+    #[serde(default)]
+    server_mac: Option<String>,
 }
 
 impl From<RawChallengeRecord> for ChallengeRecord {
@@ -423,6 +434,7 @@ impl From<RawChallengeRecord> for ChallengeRecord {
             execution_commitment: raw.execution_commitment,
             rsw_modulus_sha256: raw.rsw_modulus_sha256,
             kid: raw.kid,
+            server_mac: raw.server_mac,
         }
     }
 }
@@ -1104,6 +1116,157 @@ pub(crate) fn sign_canonical_v2(
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Domain tag of the record-metadata MAC input.
+pub const RECORD_META_MAC_DOMAIN: &str = "kiwi/record-meta/v1";
+
+/// Domain tag of the consumed-result MAC input.
+pub const CONSUMED_RESULT_MAC_DOMAIN: &str = "kiwi/consumed-result/v1";
+
+fn mac_lp(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(value.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn mac_opt(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        None => out.push(b'0'),
+        Some(v) => {
+            out.extend_from_slice(b"1:");
+            mac_lp(out, v);
+        }
+    }
+}
+
+/// The exact record-metadata MAC input bytes, shared verbatim with PHP
+/// `ServerStateMac::recordMetaInput()`:
+/// `domain \n lp(challenge) \n issued_at_ns \n opt(hostname)` where
+/// `lp(s) = len(s) ":" s`, `opt(None) = "0"`, `opt(s) = "1:" lp(s)`.
+pub fn record_meta_mac_input(
+    challenge: &str,
+    issued_at_ns: u64,
+    hostname: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + challenge.len());
+    out.extend_from_slice(RECORD_META_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    out.extend_from_slice(issued_at_ns.to_string().as_bytes());
+    out.push(b'\n');
+    mac_opt(&mut out, hostname);
+    out
+}
+
+/// The exact consumed-result MAC input bytes, shared verbatim with PHP
+/// `ServerStateMac::consumedResultInput()`:
+/// `domain \n lp(challenge) \n (1|0) \n opt(binding) \n opt(operation_identity)`.
+pub fn consumed_result_mac_input(
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96 + challenge.len());
+    out.extend_from_slice(CONSUMED_RESULT_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    out.push(if valid { b'1' } else { b'0' });
+    out.push(b'\n');
+    mac_opt(&mut out, binding);
+    out.push(b'\n');
+    mac_opt(&mut out, operation_identity);
+    out
+}
+
+fn server_state_hmac(key: &[u8; 32], input: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn server_state_hmac_matches(key: &[u8; 32], input: &[u8], tag: &str) -> bool {
+    if tag.len() != 64 {
+        return false;
+    }
+    let Some(bytes) = hex_decode_strict(tag) else {
+        return false;
+    };
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(input);
+    mac.verify_slice(&bytes).is_ok()
+}
+
+/// True when `tag` has the server-state MAC wire shape (64 lowercase hex).
+pub fn is_server_state_mac_shape(tag: &str) -> bool {
+    tag.len() == 64 && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The record-metadata MAC (`server_mac`) under the server-state purpose
+/// key (`K_server_state`, see [`crate::keys::DerivedKeys`]).
+pub fn record_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    issued_at_ns: u64,
+    hostname: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &record_meta_mac_input(challenge, issued_at_ns, hostname),
+    )
+}
+
+/// The consumed-result MAC (`consumed_result.mac`) under the server-state
+/// purpose key.
+pub fn consumed_result_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &consumed_result_mac_input(challenge, valid, binding, operation_identity),
+    )
+}
+
+/// True when the record carries a well-formed `server_mac` matching its
+/// own challenge string, issuance clock and hostname (constant time).
+pub fn verify_record_meta(derived: &DerivedKeys, record: &ChallengeRecord) -> bool {
+    match record.server_mac.as_deref() {
+        Some(tag) => server_state_hmac_matches(
+            derived.server_state_key(),
+            &record_meta_mac_input(
+                &record.challenge,
+                record.issued_at_ns,
+                record.hostname.as_deref(),
+            ),
+            tag,
+        ),
+        None => false,
+    }
+}
+
+/// True when `tag` is a well-formed consumed-result MAC matching the given
+/// record challenge, verdict, binding and operation identity (constant
+/// time).
+pub fn verify_consumed_result_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+    tag: &str,
+) -> bool {
+    server_state_hmac_matches(
+        derived.server_state_key(),
+        &consumed_result_mac_input(challenge, valid, binding, operation_identity),
+        tag,
+    )
 }
 
 /// Sign the payload with the secret key, returning a hex HMAC tag
@@ -2479,11 +2642,20 @@ fn issue_challenge_inner(
         // fingerprint, set before canonical_signing_input_v2()/signing
         // so the identity segment is covered by the signature.
         rsw_modulus_sha256: rsw_identity.clone(),
+        server_mac: None, // sealed below once the challenge is signed
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
     let challenge = format!("{}.{}", B64.encode(&canonical), signature);
     record.challenge = challenge.clone();
+    // The record-metadata MAC authenticates the unsigned server-side
+    // fields (issued_at_ns, hostname) bound to this exact challenge.
+    record.server_mac = Some(record_meta_mac(
+        &DerivedKeys::from_master(&config.secret_key, tenant),
+        &record.challenge,
+        record.issued_at_ns,
+        record.hostname.as_deref(),
+    ));
     // The prefix binds the client's counter input to this exact challenge.
     record.prefix = format!("{challenge}|{salt}|");
 

@@ -115,7 +115,7 @@ fn random_session(state: &mut u64) -> Option<[u8; 16]> {
 fn context<'a>(
     scope: u32,
     ip: IpAddr,
-    session: Option<&'a [u8]>,
+    session: Option<&'a [u8; 16]>,
     principal: Option<&'a [u8]>,
 ) -> RiskContext<'a> {
     RiskContext::new(
@@ -188,12 +188,7 @@ fn client_supplied_identity_fields_never_lower_the_score() {
             .expect("baseline assessment");
         let varied = varied_engine
             .assess_pre_issue(
-                context(
-                    scope,
-                    ip,
-                    session.as_ref().map(|s| s.as_slice()),
-                    principal.as_deref(),
-                ),
+                context(scope, ip, session.as_ref(), principal.as_deref()),
                 idem.as_ref()
                     .map(|v| String::from_utf8(v.clone()).expect("utf8")),
             )

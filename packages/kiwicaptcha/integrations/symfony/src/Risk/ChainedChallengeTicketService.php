@@ -22,8 +22,6 @@ final class ChainedChallengeTicketService
     /** The ticket format version this service issues and accepts. */
     private const TICKET_VERSION = 1;
 
-    /** The chain id alphabet (base64url of 16 random bytes). */
-
     /** The wire bound shared with the controller's accepted pattern. */
     private const MAX_TICKET_BYTES = 256;
 
@@ -199,7 +197,7 @@ final class ChainedChallengeTicketService
     {
         $body = self::encode([self::TICKET_VERSION, $chainId, $expiresAt]);
 
-        return $body.'.'.self::sign($body);
+        return $body.'.'.$this->sign($body);
     }
 
     /**
@@ -266,12 +264,8 @@ final class ChainedChallengeTicketService
     }
 
     /**
-     * Verify a ticket's signature + expiry and return its signed payload,
-     * or null when the ticket is malformed, forged, expired or carries a
-     * structurally invalid payload. The signature comparison is
-     * constant-time (hash_equals over the raw-digest base64url encoding).
-     *
-     * @return array{version: int, chainId: string, expiresAt: int}|null
+     * Ask the store to confirm the replication barrier (a no-op when the
+     * store does not implement the barrier interface).
      */
     public function establishReplicationFence(string $what): void
     {
@@ -280,13 +274,21 @@ final class ChainedChallengeTicketService
         }
     }
 
+    /**
+     * Verify a ticket's signature + expiry and return its signed payload,
+     * or null when the ticket is malformed, forged, expired or carries a
+     * structurally invalid payload. The signature comparison is
+     * constant-time (hash_equals over the raw-digest base64url encoding).
+     *
+     * @return array{version: int, chainId: string, expiresAt: int}|null
+     */
     public function verify(string $ticket): ?array
     {
         $parts = explode('.', $ticket, 2);
         if (\count($parts) !== 2 || $parts[0] === '' || $parts[1] === '') {
             return null;
         }
-        if (!hash_equals(self::sign($parts[0]), $parts[1])) {
+        if (!hash_equals($this->sign($parts[0]), $parts[1])) {
             return null;
         }
         $payload = self::decode($parts[0]);

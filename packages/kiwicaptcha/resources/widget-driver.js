@@ -1912,10 +1912,13 @@
   var kiwiClientContext = null;
   function kiwiBuildClientContext() {
     if (kiwiClientContext !== null) return kiwiClientContext;
+    // Stable components ONLY: pointer type, language family and timezone
+    // class. The viewport is deliberately excluded — a phone rotation, a
+    // window resize or a split-screen layout would otherwise flip the
+    // consistency tag and add the session-inconsistency weight to a
+    // legitimate user. The viewport remains available separately to the
+    // rest of the page context, but it is never part of this tag.
     var parts = [];
-    var viewport = 0;
-    if (typeof window !== "undefined" && window.innerWidth) viewport = window.innerWidth;
-    parts.push(viewport < 600 ? "v1" : (viewport < 1200 ? "v2" : "v3"));
     var coarsePointer = false;
     try {
       var pm = window.matchMedia ? window.matchMedia("(pointer: coarse)") : null;

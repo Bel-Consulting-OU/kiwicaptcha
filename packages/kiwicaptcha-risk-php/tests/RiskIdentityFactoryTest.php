@@ -148,6 +148,22 @@ final class RiskIdentityFactoryTest extends TestCase
             $vectors['subnet']['expected_id'],
             $f->subnetId($vectors['subnet']['ip'], (int) $vectors['subnet']['epoch'] * 900)
         );
+
+        // The IPv6 source is masked to its /64: two hosts in one /64
+        // share the source pseudonym, a different /64 does not.
+        $v6 = $vectors['source_ipv6'];
+        $v6Epoch = (int) $v6['epoch'] * 900;
+        self::assertSame($v6['expected_id'], $f->sourceId($v6['ip'], $v6Epoch));
+        self::assertSame(
+            $f->sourceId($v6['ip'], $v6Epoch),
+            $f->sourceId($v6['sibling_ip'], $v6Epoch),
+            'a /64 sibling must share the source pseudonym'
+        );
+        self::assertSame(
+            $v6['expected_other_id'],
+            $f->sourceId($v6['other_ip'], $v6Epoch),
+            'a different /64 must derive a different source pseudonym'
+        );
     }
 
     public function testPseudonymsAre16BytesHex(): void

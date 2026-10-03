@@ -15,6 +15,7 @@ namespace KiwiCaptcha;
  *     K_challenge = `HKDF`-Expand(PRK, "kiwi/v2/challenge-sign", 32).
  *     K_ip_bind   = `HKDF`-Expand(PRK, "kiwi/v2/ip-bind", 32).
  *     K_result    = `HKDF`-Expand(PRK, "kiwi/v2/result-token", 32).
+ *     K_server_state = `HKDF`-Expand(PRK, "kiwi/v2/server-state", 32).
  *
  * Tenant-scoped deployments additionally derive a per-tenant root and
  * the three purpose keys under it:
@@ -99,6 +100,14 @@ final class DerivedKeys
     /** Info label for the result/solution-token purpose key. */
     public const INFO_RESULT_TOKEN = 'kiwi/v2/result-token';
 
+    /**
+     * Info label for the server-state purpose key: the HMAC over the
+     * server-written record metadata (`server_mac`: issued_at_ns and
+     * hostname) and over the committed consumed result (`mac`), so a
+     * storage writer without the master secret cannot forge either.
+     */
+    public const INFO_SERVER_STATE = 'kiwi/v2/server-state';
+
     /** Prefix of the tenant-root info label: "kiwi/v2/tenant/" + tenant id. */
     public const INFO_TENANT_ROOT_PREFIX = 'kiwi/v2/tenant/';
 
@@ -106,6 +115,7 @@ final class DerivedKeys
         private readonly string $challengeKey,
         private readonly string $ipBindKey,
         private readonly string $resultKey,
+        private readonly string $serverStateKey,
     ) {
     }
 
@@ -123,6 +133,7 @@ final class DerivedKeys
             'challengeKey' => '<redacted>',
             'ipBindKey' => '<redacted>',
             'resultKey' => '<redacted>',
+            'serverStateKey' => '<redacted>',
         ];
     }
 
@@ -190,6 +201,7 @@ final class DerivedKeys
             self::hkdf($master, self::INFO_CHALLENGE_SIGN, $salt),
             self::hkdf($master, self::INFO_IP_BIND, $salt),
             self::hkdf($master, self::INFO_RESULT_TOKEN, $salt),
+            self::hkdf($master, self::INFO_SERVER_STATE, $salt),
         );
     }
 
@@ -211,6 +223,16 @@ final class DerivedKeys
     public function resultKey(): string
     {
         return $this->resultKey;
+    }
+
+    /**
+     * The server-state key (K_server_state): HMAC over the server-written
+     * record metadata and the committed consumed result, see
+     * {@see ServerStateMac}.
+     */
+    public function serverStateKey(): string
+    {
+        return $this->serverStateKey;
     }
 
     /**

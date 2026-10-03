@@ -105,6 +105,7 @@ final class VerifierGateTest extends TestCase
             $minDurationMs,
         );
         $challenge = base64_encode($canonical).'.'.Issuer::signPayloadV2($canonical, Vectors::SECRET);
+        $issuedAtNs = (int) ($overrides['issuedAtNs'] ?? $issuedAt * 1_000_000);
 
         return new ChallengeRecord(
             nonce: $nonce,
@@ -121,8 +122,9 @@ final class VerifierGateTest extends TestCase
             prefix: $challenge.'|'.$salt.'|',
             challenge: $challenge,
             minDurationMs: $minDurationMs,
-            issuedAtNs: (int) ($overrides['issuedAtNs'] ?? $issuedAt * 1_000_000),
+            issuedAtNs: $issuedAtNs,
             protocolVersion: (int) ($overrides['protocolVersion'] ?? 2),
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $challenge, $issuedAtNs, null),
         );
     }
 
@@ -416,7 +418,7 @@ final class VerifierGateTest extends TestCase
         $token = $this->tokenFor($record->nonce, $counter);
         $identity = 'op-'.hash('sha256', 'terminal-replay');
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
-        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+        self::assertTrue(\KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $record->nonce, true, null), 'the committed stored success lands');
 
         $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
         $gate = $this->countingGate(1, $counters);

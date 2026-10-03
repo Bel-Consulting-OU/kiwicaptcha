@@ -81,6 +81,13 @@ $blob .= (string) hex2bin($factory->sessionId($identity['session']['cookie_hex']
 $blob .= (string) hex2bin($factory->principalId($identity['principal']['material_utf8']));
 $blob .= (string) hex2bin($factory->sourceId($identity['source']['ip'], (int) $identity['source']['epoch'] * 900));
 $blob .= (string) hex2bin($factory->subnetId($identity['subnet']['ip'], (int) $identity['subnet']['epoch'] * 900));
+// The IPv6 source /64 vectors: expected, same-/64 sibling and a
+// different /64. Hashing all three pins the masking rule (not only one
+// derived value) across the two implementations.
+$v6Epoch = (int) $identity['source_ipv6']['epoch'] * 900;
+foreach (['ip', 'sibling_ip', 'other_ip'] as $v6Key) {
+    $blob .= (string) hex2bin($factory->sourceId($identity['source_ipv6'][$v6Key], $v6Epoch));
+}
 
 // 5. Deployment namespace derivations from the shared vectors.
 foreach ($fixtures['namespace_vectors'] as $vector) {

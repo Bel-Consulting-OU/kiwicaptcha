@@ -6,10 +6,14 @@
 //!
 //! - Hourly aggregate buckets `{kiwi:<ns>}:cal:<scope>:<hour>` (hour =
 //!   `now_ms / 3600000`, integer) — a hash of flat fields
-//!   `legit_count` / `legit_score_sum` / `abuse_count` / `abuse_score_sum`
-//!   (exact scores, not band-quantized) plus the sample counters
+//!   `legit_count` / `legit_score_sum` / `legit_above_sum` /
+//!   `abuse_count` / `abuse_score_sum` / `abuse_below_sum` (exact scores,
+//!   not band-quantized) plus the sample counters
 //!   `sample_total` / `sample_resolved` — written by
-//!   hincrbyfloat + expire 48h. At most 24 keys per scope are ever read.
+//!   hincrbyfloat + expire 48h. The clipped sums accumulate each sample's
+//!   weight-scaled distance on the wrong side of the decision boundary
+//!   `T = 600` (the sha20→argon16 edge in `action.rs`); a legacy bucket
+//!   without them contributes 0. At most 24 keys per scope are ever read.
 //!   The sample counters live in the same scope/hour buckets as the
 //!   observations, so scope, window, label population and resolution
 //!   population are exactly one cohort (no namespace-wide
@@ -19,7 +23,9 @@
 //!   "sampled":0|1}`, expire `receipt_ttl_secs`, consumed once by the atomic
 //!   confirm script.
 //! - Outcome-ledger entries `{kiwi:<ns>}:outcome:<decision_id>` — a
-//!   string JSON `{"o":"P|L|A","scope","hour","score","w"}` with expire
+//!   string JSON `{"o":"P|L|A","scope","hour","score","w","c"}` (`c`
+//!   records whether the first confirmation contributed a calibration
+//!   sample; absent on legacy ledgers and read as 0) with expire
 //!   `outcome_ttl_secs` (default 86400 s). The outcome ledger is always on
 //!   and independent of calibration: with calibration enabled it is created
 //!   atomically by `register_decision.lua` at decision time; with
@@ -31,19 +37,33 @@
 //! executed inside one canonical Lua invocation — the script at
 //! `resources/calibration.lua`, shared verbatim with PHP):
 //!
-//! Class-normalized exact score calibration (volume-independent): each
-//! confirmed observation carries its original risk score (0..1000):
+//! Boundary-relative class-normalized exact score calibration
+//! (volume-independent): each confirmed observation carries its original
+//! risk score (0..1000), and the error measures its distance on the
+//! wrong side of the decision boundary `T = 600` (the sha20→argon16 edge
+//! in `action.rs`), the score where the policy actually switches action
+//! bands:
 //!
 //! ```text
-//! fp_mean = Σ legit_scores / legit_count      (0 when no legit samples)
-//! fn_mean = (abuse_count × 1000 − Σ abuse_scores) / abuse_count
-//!                                             (0 when no abuse samples)
+//! fp_mean = Σ max(0, legit_score − T) / legit_count  (0 when no legit)
+//! fn_mean = Σ max(0, T − abuse_score) / abuse_count  (0 when no abuse)
 //! error   = fn_mean × fn_cost − fp_mean × fp_cost
 //! raw     = clamp(error × 2 / 10, −max_adjustment, +max_adjustment)
 //!                                                  (default ±150)
 //! ```
 //!
-//! Class normalization removes label-volume dominance; the
+//! The clipped sums are accumulated per sample at confirmation (and
+//! reversed/redone by correction), so the means are per-sample boundary
+//! distances, not aggregates of the full score sums. A healthy
+//! classifier (legit around 150, abuse around 600) lands on the correct
+//! side and contributes zero pressure; only misclassified samples move
+//! the bias.
+//!
+//! Label sources: only human- or support-verified outcomes should feed
+//! `confirm_outcome`, never an automatic success signal such as any
+//! successful login. A credentialed attacker can otherwise manufacture
+//! "legitimate" labels and pull the bias down. Class normalization
+//! removes label-volume dominance; the
 //! `false_positive_cost` / `false_negative_cost` knobs price false
 //! positives against false negatives explicitly (defaults 1.0 / 2.0). A
 //! perfectly separating classifier contributes ~zero pressure when the
@@ -85,8 +105,10 @@
 //! ledger CAS pending->L/A → hincrbyfloat into the decision-time bucket →
 //! expire): there is no crash window between consuming the receipt and
 //! recording the outcome, and all arguments are validated before the
-//! receipt is deleted (an invalid mode/weight is an error reply that
-//! leaves the receipt untouched). Confirmed outcomes are bucketed by when
+//! receipt is deleted or any key is touched (an invalid mode, weight,
+//! legitimate flag — exactly the canonical 0/1 strings — or TTL is an
+//! error reply that leaves the receipt, ledger and bucket untouched).
+//! Confirmed outcomes are bucketed by when
 //! the decision was made (`receipt.decision_hour`), never by confirmation
 //! time. The script returns a shared status: 0 = missing / already
 //! confirmed / corrupt receipt; 1 = first confirmation and calibration
@@ -679,11 +701,13 @@ impl RedisCalibrationStore {
     }
 
     /// Seeds an explicit hourly bucket with one exact-score observation
-    /// (flat fields `legit_count` / `legit_score_sum` /
-    /// `abuse_count` / `abuse_score_sum`, hincrbyfloat + expire 48h —
-    /// the exact wire shape `resources/confirm.lua` produces; `now_ms`
-    /// injected so tests can pin the hour). Ops/tests seeding: the
-    /// production confirm path is [`CalibrationStore::confirm_outcome`].
+    /// (flat fields `legit_count` / `legit_score_sum` / `legit_above_sum`
+    /// / `abuse_count` / `abuse_score_sum` / `abuse_below_sum`,
+    /// hincrbyfloat + expire 48h — the exact wire shape
+    /// `resources/confirm.lua` produces, including the per-sample
+    /// boundary distance; `now_ms` injected so tests can pin the hour).
+    /// Ops/tests seeding: the production confirm path is
+    /// [`CalibrationStore::confirm_outcome`].
     pub fn record_at(
         &self,
         scope: u32,
@@ -693,10 +717,16 @@ impl RedisCalibrationStore {
     ) -> Result<(), CalibrationError> {
         let hour = now_ms / 3_600_000;
         let key = self.bucket_key(scope, hour);
-        let (count_field, sum_field) = if legitimate {
-            ("legit_count", "legit_score_sum")
+        let (count_field, sum_field, clipped_field) = if legitimate {
+            ("legit_count", "legit_score_sum", "legit_above_sum")
         } else {
-            ("abuse_count", "abuse_score_sum")
+            ("abuse_count", "abuse_score_sum", "abuse_below_sum")
+        };
+        let boundary = u32::from(crate::action::RiskAction::DECISION_BOUNDARY_SCORE);
+        let clipped = if legitimate {
+            score.saturating_sub(boundary)
+        } else {
+            boundary.saturating_sub(score)
         };
         self.with_connection(|conn| {
             redis::cmd("HINCRBYFLOAT")
@@ -709,6 +739,12 @@ impl RedisCalibrationStore {
                 .arg(&key)
                 .arg(sum_field)
                 .arg(score as f64)
+                .query::<()>(conn)
+                .map_err(backend)?;
+            redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(clipped_field)
+                .arg(clipped as f64)
                 .query::<()>(conn)
                 .map_err(backend)?;
             conn.expire::<_, ()>(&key, Self::BUCKET_EXPIRE_S as i64)
@@ -1418,59 +1454,58 @@ mod tests {
         // in full.
         let s = store_limits("bias", 1, 150, 100_000);
 
-        // Perfect separator (legit@100, abuse@900): with the default costs
-        // (fn 2x fp) a balanced classifier nets error = 100*2 - 100*1 = 100
-        // -> raw 20 (the cost-knob test shows 1/1 costs zero it out).
+        // Perfect separator (legit@100, abuse@900): both classes land on
+        // the correct side of T=600, so both clipped means are 0 and the
+        // error is exactly zero regardless of the cost knobs.
         fill(&s, 1, 100, 10, 0, now());
         fill(&s, 1, 900, 0, 10, now());
-        // Abuse predicted at low score (100): under-predicted threat ->
-        // fn_mean = 900 -> error 1800 -> raw 360 -> clamped 150.
+        // Abuse predicted at low score (100): 500 below T -> fn_mean 500
+        // -> error 1000 -> raw 200 -> clamped 150.
         fill(&s, 2, 100, 0, 10, now());
-        // Legit traffic predicted at high score (900): over-predicted ->
-        // fp_mean = 900 -> error -900 -> raw -180 -> clamped -150.
+        // Legit traffic predicted at high score (900): 300 above T ->
+        // fp_mean 300 -> error -300 -> raw -60.
         fill(&s, 3, 900, 10, 0, now());
         // Class normalization kills label-volume dominance: 60 legit@900
-        // + 40 abuse@100 has fp_mean = fn_mean = 900 -> error 900 -> 150
-        // (the volume-based formula would have read -36 here).
+        // + 40 abuse@100 has fp_mean 300 and fn_mean 500 -> error
+        // 1000 - 300 = 700 -> raw 140.
         fill(&s, 4, 900, 60, 0, now());
         fill(&s, 4, 100, 0, 40, now());
-        // 1 legit@100 + 2 abuse@100: fp 100, fn 900 -> error 1700 -> 150.
+        // 1 legit@100 + 2 abuse@100: fp 0, fn 500 -> error 1000 -> 150.
         fill(&s, 5, 100, 1, 2, now());
         // Positive truncation toward zero, byte-identical with PHP
-        // trunc_div: 1 legit@100 + 2 abuse@600/601 -> fn 399.5 -> error
-        // 699 -> raw 139.8 -> 139.
+        // trunc_div: 1 legit@100 (fp 0) + 2 abuse@300/301 -> fn
+        // (300+299)/2 = 299.5 -> error 599 -> raw 119.8 -> 119.
         fill(&s, 6, 100, 1, 0, now());
-        fill(&s, 6, 600, 0, 1, now());
-        fill(&s, 6, 601, 0, 1, now());
-        // Negative truncation: 1 legit@402 + 2 abuse@850/851 -> fn 149.5,
-        // error -103 -> raw -20.6 -> -20 (trunc toward zero).
-        fill(&s, 7, 402, 1, 0, now());
-        fill(&s, 7, 850, 0, 1, now());
-        fill(&s, 7, 851, 0, 1, now());
+        fill(&s, 6, 300, 0, 1, now());
+        fill(&s, 6, 301, 0, 1, now());
+        // Negative truncation: 2 legit@750/751 -> fp (150+151)/2 = 150.5,
+        // fn 0 -> error -150.5 -> raw -30.1 -> -30 (trunc toward zero).
+        fill(&s, 7, 750, 1, 0, now());
+        fill(&s, 7, 751, 1, 0, now());
         // No samples -> 0.
         seed_all(&s, &[1, 2, 3, 4, 5, 6, 7, 99]);
         std::thread::sleep(Duration::from_millis(700));
         assert_eq!(
             query_raw(s.namespace(), 1),
-            20,
-            "balanced separator with default costs"
+            0,
+            "both classes on the correct side of T contribute zero"
         );
         assert_eq!(query_raw(s.namespace(), 2), 150);
-        assert_eq!(query_raw(s.namespace(), 3), -150);
+        assert_eq!(query_raw(s.namespace(), 3), -60);
         assert_eq!(
             query_raw(s.namespace(), 4),
-            150,
+            140,
             "class normalization is volume-independent"
         );
         assert_eq!(query_raw(s.namespace(), 5), 150);
         assert_eq!(
             query_raw(s.namespace(), 6),
-            139,
+            119,
             "positive truncation toward zero"
         );
         assert_eq!(
             query_raw(s.namespace(), 7),
-            -20,
+            -30,
             "negative truncation toward zero"
         );
         assert_eq!(query_raw(s.namespace(), 99), 0);
@@ -2349,8 +2384,11 @@ mod tests {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
         };
-        // Default costs (fp 1.0, fn 2.0): 10 legit@250 + 10 abuse@900 ->
-        // error = 100*2 - 250*1 = -50 -> raw -10.
+        // Inputs deliberately straddle the boundary on the wrong side:
+        // 10 legit@700 (100 above T) + 10 abuse@400 (200 below T) ->
+        // fp_mean 100, fn_mean 200.
+        // Default costs (fp 1.0, fn 2.0): error = 200*2 - 100*1 = 300
+        // -> raw 60.
         let d = store_full(
             "costd",
             1,
@@ -2363,10 +2401,10 @@ mod tests {
             1.0,
             2.0,
         );
-        fill(&d, 1, 250, 10, 0, now());
-        fill(&d, 1, 900, 0, 10, now());
-        // fn-heavy pricing (fp 3.0, fn 1.0): the same data -> error =
-        // 100*1 - 250*3 = -650 -> raw -130 (false positives cost 3x).
+        fill(&d, 1, 700, 10, 0, now());
+        fill(&d, 1, 400, 0, 10, now());
+        // fp-heavy pricing (fp 3.0, fn 1.0): the same data -> error =
+        // 200*1 - 100*3 = -100 -> raw -20 (false positives cost 3x).
         let c = store_full(
             "costc",
             1,
@@ -2379,10 +2417,10 @@ mod tests {
             3.0,
             1.0,
         );
-        fill(&c, 2, 250, 10, 0, now());
-        fill(&c, 2, 900, 0, 10, now());
-        // Equal costs (1.0/1.0): a perfectly separating classifier
-        // (legit@100 + abuse@900) contributes exactly zero pressure.
+        fill(&c, 2, 700, 10, 0, now());
+        fill(&c, 2, 400, 0, 10, now());
+        // Equal costs (1.0/1.0): the same straddling data -> error =
+        // 200 - 100 = 100 -> raw 20.
         let e = store_full(
             "coste",
             1,
@@ -2395,8 +2433,8 @@ mod tests {
             1.0,
             1.0,
         );
-        fill(&e, 3, 100, 10, 0, now());
-        fill(&e, 3, 900, 0, 10, now());
+        fill(&e, 3, 700, 10, 0, now());
+        fill(&e, 3, 400, 0, 10, now());
 
         assert_eq!(d.bias_for_scope(1, now()), 0, "seeds");
         assert_eq!(c.bias_for_scope(2, now()), 0, "seeds");
@@ -2416,7 +2454,7 @@ mod tests {
                 2.0
             )
             .bias_for_scope(1, now()),
-            -10,
+            60,
             "default costs"
         );
         assert_eq!(
@@ -2433,7 +2471,7 @@ mod tests {
                 1.0
             )
             .bias_for_scope(2, now()),
-            -130,
+            -20,
             "fp 3x / fn 1x"
         );
         assert_eq!(
@@ -2450,8 +2488,8 @@ mod tests {
                 1.0
             )
             .bias_for_scope(3, now()),
-            0,
-            "equal costs zero a balanced separator"
+            20,
+            "equal costs"
         );
     }
 
@@ -2757,7 +2795,7 @@ mod tests {
         let mut conn = client().get_connection().expect("connection");
         let key = s.bucket_key(1, now() / 3_600_000);
         hset_corrupt(&mut conn, &key, "legit_count", "1e999");
-        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+        hset_corrupt(&mut conn, &key, "legit_above_sum", "1e999");
 
         assert_eq!(
             s.bias_for_scope(1, now()),
@@ -2786,7 +2824,7 @@ mod tests {
         let mut conn = client().get_connection().expect("connection");
         let key = s.bucket_key(2, now() / 3_600_000);
         hset_corrupt(&mut conn, &key, "legit_count", "100");
-        hset_corrupt(&mut conn, &key, "legit_score_sum", "1e999");
+        hset_corrupt(&mut conn, &key, "legit_above_sum", "1e999");
         // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
         // 100_000 * 1000 * 60000 / 60000 = 1e8 milli-points >> 150 points.
         redis::cmd("HSET")

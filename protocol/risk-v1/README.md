@@ -102,17 +102,27 @@ identical in:
                epoch.to_be_bytes() || material)
    ```
 
-   - source material: canonical IP bytes (family byte 0x04/0x06 + packed
-     bytes; IPv4-mapped IPv6 and the deprecated IPv4-compatible `0::/96`
-     form `::a.b.c.d` — excluding the unspecified `::` and the loopback
-     `::1` — normalized to the 4-byte IPv4 family). The context is
-     `b"src"`; the epoch is floor(now / 900).
+   - source material: canonical IP bytes with IPv6 masked to its /64
+     (family byte 0x04 or 0x06 + packed bytes, the bytes after the
+     prefix zeroed; IPv4 keeps the full address). A host controls at
+     least a /64, so a /128-keyed source would let it rotate addresses
+     for a fresh pseudonym on every request. IPv4-mapped IPv6 and the
+     deprecated IPv4-compatible `0::/96` form `::a.b.c.d` — excluding
+     the unspecified `::` and the loopback `::1` — normalize to the
+     4-byte IPv4 family first. The context is `b"src"`; the epoch is
+     floor(now / 900).
    - subnet material: masked canonical network (IPv4 /24, IPv6 /56) in the
      same family+bytes form; context `b"net"`; epoch = floor(now / 900).
    - session: HMAC over the raw 16-byte session cookie value; context
      `b"sess"`; no epoch.
    - principal: HMAC over the application principal ID bytes; context
      `b"prin"`; no epoch.
+
+    Rotation: only the source and subnet pseudonyms rotate with their
+    epochs. Session pseudonyms are stable for the lifetime of the session
+    cookie or its record TTL, and principal pseudonyms for the principal
+    TTL (`principal_ttl_s`, default 24 h). There is no per-request
+    rotation for either stable identity.
 
 9) State: leaky fixed-point counters (1000 = one unit) with the canonical
    Lua in `risk-v1.lua` (embedded verbatim by both implementations, loaded via
@@ -180,15 +190,24 @@ Files:
     Confirmation is atomic via the canonical `confirm.lua` (GET receipt →
     validate → DEL receipt → `HINCRBYFLOAT` bucket → `EXPIRE` → return
     scope); a confirmed outcome is either fully recorded or not consumed.
-    Bias is exact score calibration on class-normalized means. fp_mean =
-    legit_score_sum/legit_count, fn_mean = (abuse_count*1000 −
-    abuse_score_sum)/abuse_count, and error = fn_mean·fn_cost −
-    fp_mean·fp_cost. raw = (error*2)/10, clamped to ±max_adjustment, and
-    moved toward the
-    target through the proportional per-minute rate limiter (milli-points,
-    max change per minute). Below min_samples the target is 0 but the path
-    is still rate-limited. Applied to the score before band mapping in both
-    languages.
+    Bias is boundary-relative exact score calibration on class-normalized
+    means. T = 600 is the decision boundary where the default ladder
+    leaves the sha20 band and enters the first Argon band
+    (`action.rs`/`score.rs`). fp_mean = Σ max(0, legit_score − T) /
+    legit_count and fn_mean = Σ max(0, T − abuse_score) / abuse_count,
+    then error = fn_mean·fn_cost − fp_mean·fp_cost. The clipped sums
+    (`legit_above_sum`, `abuse_below_sum`) are accumulated per sample at
+    confirmation and reversed/redone by correction; a legacy bucket
+    without them contributes 0. raw = (error*2)/10, clamped to
+    ±max_adjustment, and moved toward the target through the proportional
+    per-minute rate limiter (milli-points, max change per minute). Below
+    min_samples the target is 0 but the path is still rate-limited.
+    Applied to the score before band mapping in both languages.
+
+    Label sources: only human- or support-verified outcomes may feed
+    `confirmOutcome`, never an automatic success signal such as any
+    successful login. A credentialed attacker can otherwise manufacture
+    "legitimate" labels and pull the calibration bias down.
     Sampling contract: at assessment time the engine marks each receipt
     `sampled` (mode complete → always; random_sample →
     random < sampling_probability_ppm; weighted → always, the application
@@ -199,20 +218,29 @@ Files:
 
 17. Outcome ledger (always on, independent of calibration):
     `{kiwi:<ns>}:outcome:<decision_id>` holds the decision's outcome state
-    as JSON `{"o":"P|L|A","scope","hour","score","w"}` (pending /
-    legitimate / abuse, exact decision score, recorded weight), EX =
-    outcome receipt TTL. Registration is atomic with the calibration
-    receipt + sample denominator (register_decision.lua: SET receipt NX
-    EX + pending ledger + sample_total `INCR` in the decision-hour
-    bucket); when calibration is disabled the store still registers the
-    ledger (outcome_register.lua). Confirmation performs a pending -> L/A
+    as JSON `{"o":"P|L|A","scope","hour","score","w","c"}` (pending /
+    legitimate / abuse, exact decision score, recorded weight, sample
+    marker), EX = outcome receipt TTL. Registration is atomic with the
+    calibration receipt + sample denominator (register_decision.lua:
+    validate → SET receipt NX EX → pending ledger `SET NX EX` → gated
+    sample_total `INCR`). The ledger NX means a late re-registration can
+    never reset an authoritative L/A ledger to pending. When the ledger
+    already exists, the just-created receipt is removed and no second
+    denominator is booked. When calibration is disabled the store still
+    registers the ledger (outcome_register.lua). Confirmation performs a pending -> L/A
     CAS exactly once (confirm.lua / outcome_confirm.lua) and returns the
     shared status 0/1/2. Reputation mutation is gated on 1|2, so
     ConfirmedLegitimate/ConfirmedAbuse work identically with or without
     calibration, and webhook retries can never amplify reputation.
-    Corrections flip the ledger (correction.lua / outcome_correct.lua):
-    the original bucket contribution is reversed using the recorded
-    weight and the corrected contribution added (clamped at zero). The
+    Corrections flip the ledger (correction.lua / outcome_correct.lua).
+    Arguments are validated first, and a pending ledger is refused: the
+    confirmation is the only transition out of pending. Only a counted
+    sample (`c == 1`; a missing marker reads as 0) reverses the original
+    bucket contribution, using the recorded weight, and adds the
+    corrected one (clamped at zero), so an unsampled decision never
+    deletes another decision's sample. `outcome_correct.lua` preserves
+    the stored TTL (`SET ... KEEPTTL`) instead of extending it on every
+    correction. The
     corrected outcome is authoritative for future events while the prior
     ephemeral reputation pressure decays naturally, so no synthetic
     identities are created. `record_feedback` rejects confirmation events
@@ -238,3 +266,15 @@ Files:
     StepUp. Floors can never reintroduce Argon.
 
 20. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.
+
+21. Policy table: the score bands are configurable, and the shared
+    `global_floors` plus per-scope `minimum`/`degraded` rows clamp the
+    result. A scope id the table does not list uses the `default_scope`
+    row (base risk 100, minimum/degraded sha20 unless the operator
+    overrides it) — never Allow. Velocity (`source_fast >= 950`)
+    records the HardRateLimit reason. It floors the action at Argon32.
+    A hard deny needs corroboration from another hard signal:
+    `bad_proof`, `malformed` or `replay >= 300`. A shared IPv4 address
+    (carrier NAT, office, campus) therefore cannot be denied on volume
+    alone, and a saturated argon backend re-escalates the floor to
+    StepUp.

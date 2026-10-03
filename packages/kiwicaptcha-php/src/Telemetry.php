@@ -46,6 +46,13 @@ final class Telemetry
         //    widget auto-solves and its listeners sit only on the widget,
         //    so a real user on a slow device (or an Argon2id profile)
         //    has no reason to interact and would be misclassified.
+        // A negative duration cannot arrive over the wire (the token
+        // decoder only accepts canonical digit strings), but a direct
+        // caller could pass one; Rust's u64 cannot be negative, so clamp
+        // to 0 for exact parity.
+        if ($durationMs < 0) {
+            $durationMs = 0;
+        }
         if ($durationMs > 300_000) {
             return true;
         }
@@ -60,9 +67,12 @@ final class Telemetry
             for ($i = 1; $i < $count; $i++) {
                 $t1 = $events[$i];
                 $t0 = $events[$i - 1];
-                // Rust's as_u64(): only integers count; floats/strings are
-                // skipped exactly as serde_json's u64 coercion would fail.
-                if (\is_int($t1) && \is_int($t0) && $t1 >= $t0) {
+                // Rust's as_u64(): only non-negative integers count;
+                // floats, strings and negatives are skipped exactly as
+                // serde_json's u64 coercion would fail (a negative
+                // timestamp breaks the pair chain instead of forming a
+                // diff, which the earlier permissive check allowed).
+                if (\is_int($t1) && \is_int($t0) && $t1 >= 0 && $t0 >= 0 && $t1 >= $t0) {
                     $diffs[] = $t1 - $t0;
                 }
             }

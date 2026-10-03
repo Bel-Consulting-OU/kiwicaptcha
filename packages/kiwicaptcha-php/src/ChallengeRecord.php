@@ -85,7 +85,9 @@ namespace KiwiCaptcha;
  * serialization stability; 0 marks an unknown issuance time. It is never
  * signed into the challenge payload and never sent to the client; the
  * verifier uses it to measure elapsed solve time on the server instead
- * of trusting the client-reported duration.
+ * of trusting the client-reported duration. It is authenticated by
+ * `serverMac` (see below): a storage writer without the master secret
+ * cannot backdate it.
  *
  * `region` is server-side deployment metadata included in the v2
  * canonical payload, therefore authenticated by the challenge HMAC, see
@@ -129,7 +131,16 @@ namespace KiwiCaptcha;
  * `hostname` is server-side issuance metadata (the Siteverify host the
  * challenge was issued for), always present in `toArray()` (null when
  * unset); it is never signed into the challenge and never sent to the
- * client.
+ * client. It is authenticated by `serverMac`.
+ *
+ * `serverMac` is the record-metadata MAC: 64 lowercase hex HMAC-SHA256
+ * under the server-state purpose key over the challenge string,
+ * `issuedAtNs` and `hostname`, see {@see ServerStateMac::recordMeta()}.
+ * The issuer always writes it. The verifier rejects a mismatching MAC
+ * as a malformed record; a record without one carries untrusted
+ * metadata, so it fails closed under a minimum-duration floor, reports
+ * no measured solve duration, and exposes no hostname. The JSON key is
+ * absent when null (`skip_serializing_if`).
  *
  * `decoyField` is the server-issued decoy (honeypot) form-field name
  * armed for this challenge, drawn from the combinatorial grammar (see
@@ -204,6 +215,7 @@ final class ChallengeRecord
         'attempts_used', 'region', 'policy_version', 'request_binding',
         'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
         'execution_version', 'execution_commitment', 'rsw_modulus_sha256',
+        'server_mac',
     ];
 
     /**
@@ -325,6 +337,10 @@ final class ChallengeRecord
         // legacy rsw record carries none and resolves through the active
         // pair. The JSON key is omitted when null.
         public readonly ?string $rswModulusSha256 = null,
+        // The record-metadata MAC over the challenge string, issuedAtNs
+        // and hostname (64 lowercase hex), see ServerStateMac. The JSON
+        // key is omitted when null.
+        public readonly ?string $serverMac = null,
     ) {
     }
 
@@ -449,6 +465,9 @@ final class ChallengeRecord
         }
         if ($this->rswModulusSha256 !== null) {
             $data['rsw_modulus_sha256'] = $this->rswModulusSha256;
+        }
+        if ($this->serverMac !== null) {
+            $data['server_mac'] = $this->serverMac;
         }
 
         return $data;
@@ -749,6 +768,18 @@ final class ChallengeRecord
             throw MalformedRecordException::invalidProtocolFieldCombination($protocolVersion);
         }
 
+        // Option field: the record-metadata MAC. Absent and JSON null
+        // both decode to null (untrusted metadata, judged by the
+        // verifier); a present value must be exactly 64 lowercase hex.
+        $serverMac = null;
+        if (isset($data['server_mac'])) {
+            self::requireString($data['server_mac'], 'server_mac');
+            if (preg_match(ServerStateMac::PATTERN, $data['server_mac']) !== 1) {
+                throw MalformedRecordException::wrongType('server_mac', '64 lowercase hex characters', $data['server_mac']);
+            }
+            $serverMac = $data['server_mac'];
+        }
+
         return new self(
             nonce: $data['nonce'],
             scope: $data['scope'],
@@ -790,6 +821,7 @@ final class ChallengeRecord
             // The authenticated rsw trapdoor identity (absent on legacy
             // rsw records and on every non-rsw record).
             rswModulusSha256: $rswModulusSha256,
+            serverMac: $serverMac,
         );
     }
 

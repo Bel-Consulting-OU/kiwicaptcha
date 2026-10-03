@@ -501,7 +501,7 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Commit result: only on a consumed record without a
-        // result yet. ARGV = [valid, binding, has_binding, claim_owner].
+        // result yet. ARGV = [valid, binding, has_binding, claim_owner, mac].
         // With a non-empty ARGV[4] (the resume claim owner), the claim
         // is a fencing precondition: the envelope must carry a live
         // claim owned by exactly that token (ownership lost returns 2,
@@ -540,6 +540,11 @@ final class FakePredisClient extends \Predis\Client
                 'valid' => ($args[0] ?? '0') === '1',
                 'binding' => ($args[2] ?? '0') === '1' ? (string) ($args[1] ?? '') : null,
             ];
+            // ARGV[5]: the server-state MAC over the result, stored when
+            // non-empty (the authenticated commit).
+            if (($args[4] ?? '') !== '') {
+                $obj['consumed_result']['mac'] = (string) $args[4];
+            }
             if ($owner !== '') {
                 unset($obj['resume_owner'], $obj['resume_until']);
             }

@@ -118,6 +118,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Client-IP policy' => $this->checkClientIpPolicy(),
             'Continuity cookie' => $this->checkContinuityCookie(),
             'Risk Redis' => $this->checkRiskRedis(),
+            'Risk scope policy' => $this->checkScopePolicy(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Execution versioning' => $this->checkExecutionVersioning(),
@@ -579,6 +580,39 @@ final class KiwiCaptchaDoctorCommand extends Command
     /**
      * @return array{0: string, 1: string} [status, detail]
      */
+    /**
+     * Scopes in use that risk.scopes does not list use the conservative
+     * built-in default row (base_risk 100, minimum/degraded sha20)
+     * instead of Allow. The sources are risk.allowed_scopes and every
+     * risk.sitekeys target. The operator should still name them
+     * explicitly so the policy intent is reviewable.
+     */
+    private function checkScopePolicy(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk disabled: the scope policy is inactive'];
+        }
+        $configured = array_map('strval', array_keys($risk['scopes'] ?? []));
+        $inUse = [];
+        foreach (($risk['allowed_scopes'] ?? []) as $name) {
+            $inUse[] = (string) $name;
+        }
+        foreach (($risk['sitekeys'] ?? []) as $name) {
+            $inUse[] = (string) $name;
+        }
+        $inUse = array_values(array_unique(array_filter($inUse, static fn (string $name): bool => $name !== '')));
+        $missing = array_values(array_diff($inUse, $configured));
+        if ($missing !== []) {
+            return ['WARN', sprintf(
+                'scopes in use but not listed in risk.scopes (they use the conservative default row: base_risk 100, minimum/degraded sha20): %s',
+                implode(', ', $missing),
+            )];
+        }
+
+        return ['PASS', sprintf('all %d scope(s) in use are explicitly configured', count($inUse))];
+    }
+
     private function checkProtocolFloor(): array
     {
         $this->epochMonitor->refresh();

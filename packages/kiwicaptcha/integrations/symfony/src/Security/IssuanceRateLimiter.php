@@ -510,17 +510,14 @@ LUA;
             return 'unknown';
         }
         try {
-            $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($clientIp);
+            // The shared source identity: full IPv4, /64 IPv6 (the same
+            // derivation OutstandingChallenges and the risk source
+            // pseudonym use, so every layer keys one address the same
+            // way).
+            return \KiwiCaptcha\Issuer::canonicalSourceFamily($clientIp);
         } catch (\InvalidArgumentException) {
             return 'unknown';
         }
-        // The canonical family byte is 0x06 for IPv6; the address bytes
-        // follow. Truncate IPv6 to the first 8 bytes (a /64).
-        if (\strlen($identity) === 17 && $identity[0] === "\x06") {
-            return "\x06".substr($identity, 1, 8);
-        }
-
-        return $identity;
     }
 
     private function checkRedisRotated(string $identityPrev, string $identityCur): int

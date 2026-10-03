@@ -55,6 +55,7 @@ final class RiskPolicy
         public readonly string $hash,
         public readonly RiskWeights $weights,
         public readonly array $scopes,
+        public readonly array $defaultScope,
         public readonly array $globalFloors,
     ) {
     }
@@ -68,6 +69,37 @@ final class RiskPolicy
      * fail-closed, identical to the Rust parser). Enforced in the
      * parser itself, not only in the Symfony config layer.
      */
+    /**
+     * The unconfigured-scope row (`default_scope`): shaped exactly like a
+     * scope row and validated the same way. The built-in default is
+     * deliberately NOT Allow on any axis (100 / sha20 / false / sha20):
+     * a scope the operator forgot to list must not be the weakest hole in
+     * the policy.
+     *
+     * @return array{base_risk:int, minimum:RiskAction, post_solve_check:bool, degraded:RiskAction}
+     */
+    private static function parseDefaultScope(mixed $spec): array
+    {
+        if (!\is_array($spec)
+            || !isset($spec['base_risk'], $spec['minimum'], $spec['degraded'])
+            || !array_key_exists('post_solve_check', $spec)) {
+            throw new \InvalidArgumentException('default_scope requires base_risk, minimum, post_solve_check and degraded');
+        }
+        if (!\is_int($spec['base_risk']) || $spec['base_risk'] < 0 || $spec['base_risk'] > 1000) {
+            throw new \InvalidArgumentException('default_scope base_risk must be an int within 0..1000');
+        }
+        if (!\is_bool($spec['post_solve_check'])) {
+            throw new \InvalidArgumentException('default_scope post_solve_check must be a bool');
+        }
+
+        return [
+            'base_risk' => $spec['base_risk'],
+            'minimum' => RiskAction::from((string) $spec['minimum']),
+            'post_solve_check' => $spec['post_solve_check'],
+            'degraded' => RiskAction::from((string) $spec['degraded']),
+        ];
+    }
+
     public static function fromConfig(array $config, int $version = self::CONTRACT_VERSION): self
     {
         if (!isset($config['version']) || !is_int($config['version'])) {
@@ -171,18 +203,21 @@ final class RiskPolicy
             hash: hash('sha256', self::canonicalJson($config)),
             weights: RiskWeights::fromArray($config['weights']),
             scopes: $scopes,
+            defaultScope: isset($config['default_scope'])
+                ? self::parseDefaultScope($config['default_scope'])
+                : ['base_risk' => 100, 'minimum' => RiskAction::Sha20, 'post_solve_check' => false, 'degraded' => RiskAction::Sha20],
             globalFloors: $floors,
         );
     }
 
     public function baseRisk(int $scope): int
     {
-        return $this->scopes[$scope]['base_risk'] ?? 100;
+        return $this->scopes[$scope]['base_risk'] ?? $this->defaultScope['base_risk'];
     }
 
     public function minimum(int $scope): RiskAction
     {
-        return $this->scopes[$scope]['minimum'] ?? RiskAction::Allow;
+        return $this->scopes[$scope]['minimum'] ?? $this->defaultScope['minimum'];
     }
 
     /**
@@ -237,6 +272,7 @@ final class RiskPolicy
 
         $reasons = [];
         $deny = false;
+        $velocityFloor = null;
 
         if ($s->replay >= 700) {
             $reasons[] = RiskReason::ReplayTraffic;
@@ -248,7 +284,20 @@ final class RiskPolicy
         }
         if ($s->sourceFast >= 950) {
             $reasons[] = RiskReason::HardRateLimit;
-            $deny = true;
+            // Velocity alone must not hard-deny: a shared IPv4 address
+            // (cgnat, an office, a campus) can exceed the saturation from
+            // legitimate volume, and the history is shed with the /64
+            // source identity so a single abusive host cannot speak for
+            // the aggregate. Deny only when another hard signal
+            // corroborates the source; otherwise floor the action at
+            // Argon32 (the strongest non-interactive band) and let the
+            // score/capacity logic decide — the argon-capacity check
+            // below still re-escalates a saturated backend to StepUp.
+            if ($s->badProof >= 300 || $s->malformed >= 300 || $s->replay >= 300) {
+                $deny = true;
+            } else {
+                $velocityFloor = RiskAction::Argon32;
+            }
         }
         if ($r->issuanceCapacity < 100) {
             $reasons[] = RiskReason::CapacityPressure;
@@ -278,6 +327,9 @@ final class RiskPolicy
         if ($deny) {
             $action = RiskAction::Deny;
         } else {
+            if ($velocityFloor !== null) {
+                $action = $this->strongest($action, $velocityFloor);
+            }
             $action = $this->strongest($action, $minimum, $floor);
         }
 
@@ -315,7 +367,7 @@ final class RiskPolicy
     public function degradedDecision(int $scope, int $globalLevel = 0): RiskDecision
     {
         $spec = $this->scopes[$scope] ?? null;
-        $degraded = $spec['degraded'] ?? RiskAction::Allow;
+        $degraded = $spec['degraded'] ?? $this->defaultScope['degraded'];
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($degraded, $this->minimum($scope), $floor);
 

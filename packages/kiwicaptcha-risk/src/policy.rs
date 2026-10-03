@@ -129,6 +129,13 @@ pub struct RiskPolicy {
     pub hash: [u8; 32],
     pub weights: RiskWeights,
     pub scopes: HashMap<u32, ScopePolicy>,
+    /// The row applied to every scope the config does not list: a
+    /// conservative default (base risk 100, minimum sha20, degraded
+    /// sha20) unless the config overrides it with a `default_scope`
+    /// object shaped exactly like a scope row. Unconfigured scopes must
+    /// never degrade to Allow: a scope the operator forgot to list would
+    /// otherwise be the weakest hole in the policy.
+    pub default_scope: ScopePolicy,
     /// Global pressure level 0..4 -> minimum action floor. Level 0 has no
     /// floor (Allow).
     pub global_floors: [RiskAction; 5],
@@ -212,37 +219,21 @@ impl RiskPolicy {
             if scope == 0 {
                 return Err(PolicyError::InvalidScopeId(key.clone()));
             }
-            let spec_obj = spec
-                .as_object()
-                .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?;
-            let required = ["base_risk", "minimum", "post_solve_check", "degraded"];
-            for field in required {
-                if !spec_obj.contains_key(field) {
-                    return Err(PolicyError::InvalidScope(key.clone()));
-                }
-            }
-            let base_risk_value = spec["base_risk"]
-                .as_u64()
-                .ok_or_else(|| PolicyError::InvalidBaseRisk(key.clone()))?;
-            if base_risk_value > 1000 {
-                return Err(PolicyError::InvalidBaseRisk(key.clone()));
-            }
-            let base_risk = base_risk_value as u16;
-            let minimum = parse_action(&spec["minimum"])?;
-            let post_solve_check = spec["post_solve_check"]
-                .as_bool()
-                .ok_or_else(|| PolicyError::InvalidScope(key.clone()))?;
-            let degraded = parse_action(&spec["degraded"])?;
-            scopes.insert(
-                scope,
-                ScopePolicy {
-                    base_risk,
-                    minimum,
-                    post_solve_check,
-                    degraded,
-                },
-            );
+            let parsed = parse_scope_row(spec, key)?;
+            scopes.insert(scope, parsed);
         }
+
+        // The unconfigured-scope row: optional, but shaped exactly like a
+        // scope row. The default is deliberately NOT Allow on any axis.
+        let default_scope = match config.get("default_scope") {
+            Some(value) => parse_scope_row(value, "default_scope")?,
+            None => ScopePolicy {
+                base_risk: 100,
+                minimum: RiskAction::Sha20,
+                post_solve_check: false,
+                degraded: RiskAction::Sha20,
+            },
+        };
 
         let mut floors = Self::DEFAULT_GLOBAL_FLOORS;
         match config.get("global_floors") {
@@ -312,20 +303,24 @@ impl RiskPolicy {
             hash,
             weights,
             scopes,
+            default_scope,
             global_floors: floors,
         })
     }
 
-    /// Base risk for a scope (default 100).
+    /// Base risk for a scope: the scope row, else the conservative
+    /// `default_scope` row.
     pub fn base_risk(&self, scope: u32) -> u16 {
-        self.scopes.get(&scope).map_or(100, |s| s.base_risk)
+        self.scopes
+            .get(&scope)
+            .map_or(self.default_scope.base_risk, |s| s.base_risk)
     }
 
-    /// Minimum action for a scope (default Allow).
+    /// Minimum action for a scope: the scope row, else `default_scope`.
     pub fn minimum(&self, scope: u32) -> RiskAction {
         self.scopes
             .get(&scope)
-            .map_or(RiskAction::Allow, |s| s.minimum)
+            .map_or(self.default_scope.minimum, |s| s.minimum)
     }
 
     /// Full decision: band action, clamped to the scope minimum and the
@@ -395,6 +390,7 @@ impl RiskPolicy {
         let mut reasons: Vec<RiskReason> = Vec::new();
         let mut deny = false;
         let mut retry_after_ms = None;
+        let mut velocity_floor: Option<RiskAction> = None;
 
         if s.replay >= 700 {
             reasons.push(RiskReason::ReplayTraffic);
@@ -406,7 +402,20 @@ impl RiskPolicy {
         }
         if s.source_fast >= 950 {
             reasons.push(RiskReason::HardRateLimit);
-            deny = true;
+            // Velocity alone must not hard-deny: a shared IPv4 address
+            // (cgnat, an office, a campus) can exceed the saturation from
+            // legitimate volume, and the history is shed with the /64
+            // source identity so a single abusive host cannot speak for
+            // the aggregate. Deny only when another hard signal
+            // corroborates the source; otherwise floor the action at
+            // Argon32 (the strongest non-interactive band) and let the
+            // score/capacity logic decide — the argon-capacity check
+            // below still re-escalates a saturated backend to StepUp.
+            if s.bad_proof >= 300 || s.malformed >= 300 || s.replay >= 300 {
+                deny = true;
+            } else {
+                velocity_floor = Some(RiskAction::Argon32);
+            }
         }
         if r.issuance_capacity < 100 {
             reasons.push(RiskReason::CapacityPressure);
@@ -433,6 +442,12 @@ impl RiskPolicy {
 
         if deny {
             action = RiskAction::Deny;
+        } else if let Some(floor_action) = velocity_floor {
+            action = strongest(action, floor_action, action);
+            if action.is_argon() && r.argon_capacity < 300 {
+                action = RiskAction::StepUp;
+                reasons.push(RiskReason::CapacityPressure);
+            }
         } else if action.is_argon() && r.argon_capacity < 300 {
             // Capacity check last: the final action is Argon and the
             // backend cannot serve memory-hard work — re-escalate to the
@@ -478,7 +493,7 @@ impl RiskPolicy {
         let degraded = self
             .scopes
             .get(&scope)
-            .map_or(RiskAction::Allow, |s| s.degraded);
+            .map_or(self.default_scope.degraded, |s| s.degraded);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let action = strongest(degraded, self.minimum(scope), floor);
 
@@ -549,6 +564,36 @@ fn strongest(a: RiskAction, b: RiskAction, c: RiskAction) -> RiskAction {
         best = c;
     }
     best
+}
+
+/// Parses one scope row (a configured scope or `default_scope`): every
+/// field is required, `base_risk` must be an integer within 0..=1000 (a
+/// float or string is a configuration error, never a silent cast) and the
+/// actions are the exact literal strings.
+fn parse_scope_row(spec: &Value, label: &str) -> Result<ScopePolicy, PolicyError> {
+    let spec_obj = spec
+        .as_object()
+        .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?;
+    let required = ["base_risk", "minimum", "post_solve_check", "degraded"];
+    for field in required {
+        if !spec_obj.contains_key(field) {
+            return Err(PolicyError::InvalidScope(label.to_string()));
+        }
+    }
+    let base_risk_value = spec["base_risk"]
+        .as_u64()
+        .ok_or_else(|| PolicyError::InvalidBaseRisk(label.to_string()))?;
+    if base_risk_value > 1000 {
+        return Err(PolicyError::InvalidBaseRisk(label.to_string()));
+    }
+    Ok(ScopePolicy {
+        base_risk: base_risk_value as u16,
+        minimum: parse_action(&spec["minimum"])?,
+        post_solve_check: spec["post_solve_check"]
+            .as_bool()
+            .ok_or_else(|| PolicyError::InvalidScope(label.to_string()))?,
+        degraded: parse_action(&spec["degraded"])?,
+    })
 }
 
 fn parse_action(value: &Value) -> Result<RiskAction, PolicyError> {
@@ -746,6 +791,14 @@ mod malformed_vectors {
                 "reason vector mismatch: {}",
                 vector["why"].as_str().unwrap_or("")
             );
+            if let Some(expected_action) = vector.get("expected_action").and_then(|v| v.as_str()) {
+                assert_eq!(
+                    expected_action,
+                    decision.action.as_str(),
+                    "action vector mismatch: {}",
+                    vector["why"].as_str().unwrap_or("")
+                );
+            }
         }
 
         // The shared malformed global-floor values: an integer,
@@ -869,7 +922,9 @@ mod tests {
         assert_eq!(p.base_risk(999), 100);
         assert_eq!(p.minimum(1), RiskAction::Allow);
         assert_eq!(p.minimum(2), RiskAction::Sha16);
-        assert_eq!(p.minimum(999), RiskAction::Allow);
+        // Unconfigured scopes use the conservative default_scope row
+        // (sha20 minimum / sha20 degraded), never Allow.
+        assert_eq!(p.minimum(999), RiskAction::Sha20);
         assert_eq!(p.global_floors, RiskPolicy::DEFAULT_GLOBAL_FLOORS);
     }
 
@@ -1005,6 +1060,9 @@ mod tests {
     #[test]
     fn source_fast_hard_override() {
         let p = policy();
+        // Velocity alone must not hard-deny a shared address: the reason
+        // is recorded and the action is floored at the strongest
+        // non-interactive band.
         let d = p.decide(
             1,
             0,
@@ -1017,7 +1075,45 @@ mod tests {
             1_700_000_000_000,
             0,
         );
+        assert_eq!(d.action, RiskAction::Argon32);
+        assert!(d.has_reason(RiskReason::HardRateLimit));
+
+        // Corroboration (another hard signal at its floor) restores the
+        // hard deny.
+        let d = p.decide(
+            1,
+            0,
+            &SignalVector {
+                source_fast: 950,
+                bad_proof: 300,
+                ..Default::default()
+            },
+            &healthy(),
+            0,
+            1_700_000_000_000,
+            0,
+        );
         assert_eq!(d.action, RiskAction::Deny);
+        assert!(d.has_reason(RiskReason::HardRateLimit));
+
+        // A saturated backend re-escalates the velocity floor to the
+        // interactive step-up flow instead of weakening it.
+        let d = p.decide(
+            1,
+            0,
+            &SignalVector {
+                source_fast: 950,
+                ..Default::default()
+            },
+            &ResourcePressure {
+                issuance_capacity: 1000,
+                argon_capacity: 0,
+            },
+            0,
+            1_700_000_000_000,
+            0,
+        );
+        assert_eq!(d.action, RiskAction::StepUp);
         assert!(d.has_reason(RiskReason::HardRateLimit));
 
         let d = p.decide(
@@ -1244,9 +1340,9 @@ mod tests {
         let d = p.degraded_decision(2, 0);
         assert_eq!(d.action, RiskAction::Sha20);
 
-        // unknown scope degrades to allow
+        // unknown scope degrades to the conservative default_scope row
         let d = p.degraded_decision(999, 0);
-        assert_eq!(d.action, RiskAction::Allow);
+        assert_eq!(d.action, RiskAction::Sha20);
     }
 
     #[test]

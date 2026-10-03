@@ -156,7 +156,7 @@ final class RiskIdentityFactory
 
     /**
      * Source pseudonym: context "src", epoch = floor(now / sourceEpochSecs),
-     * material = canonical IP bytes.
+     * material = canonical source bytes (full IPv4, IPv6 /64).
      */
     public function sourceId(string $ip, int $nowSecs): string
     {
@@ -212,7 +212,18 @@ final class RiskIdentityFactory
     /** @internal string-IP variant shared by the epoch-parameterized derivations */
     private function sourceIdForEpochIp(string $ip, int $epoch): string
     {
-        return $this->pseudonym($this->keys->source, 'src', $epoch, $this->canonicalIp($ip));
+        // Source material = the shared source identity: full IPv4, /64
+        // IPv6 (a host controls at least a /64, so a /128-keyed source
+        // lets it rotate addresses for a fresh pseudonym on every
+        // request). Mirrors Rust identity.rs
+        // `masked_network(ip, 32, 64)`; the subnet derivation below keeps
+        // the configurable /24 // /56 window.
+        return $this->pseudonym(
+            $this->keys->source,
+            'src',
+            $epoch,
+            \KiwiCaptcha\Issuer::canonicalSourceFamily($ip),
+        );
     }
 
     /** @internal string-IP variant shared by the epoch-parameterized derivations */

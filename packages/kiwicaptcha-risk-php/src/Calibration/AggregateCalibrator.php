@@ -21,14 +21,25 @@ use Predis\Response\ServerException;
  * pruning loops.
  *
  * Bias is derived from the last 24 hourly buckets (calibration.lua,
- * class-normalized exact-score semantics). Below minSamples the target
- * is 0.
- *   fp_mean = legit_score_sum / legit_count        (0 when none).
- *   fn_mean = (abuse_count*1000 - abuse_score_sum) / abuse_count.
+ * boundary-relative class-normalized exact-score semantics). Below
+ * minSamples the target is 0.
+ *   fp_mean = Σ max(0, legit_score - T) / legit_count   (0 when none).
+ *   fn_mean = Σ max(0, T - abuse_score) / abuse_count   (0 when none).
  *   error   = fn_mean * falseNegativeCost - fp_mean * falsePositiveCost.
- *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment. Class normalization removes
- * label-volume dominance; the fp/fn cost knobs price false positives
- * against false negatives explicitly. The whole read (24 hgetall calls)
+ *   raw     = trunc(error * 2 / 10), clamped ±maxAdjustment.
+ * T = 600 is the decision boundary: the score where the default ladder
+ * leaves sha20 and enters the first Argon band (action.rs/score.rs).
+ * only samples that landed on the wrong side of the boundary the policy
+ * switches on move the bias. The clipped distances are accumulated per
+ * sample at confirmation and reversed/redone by correction
+ * (legit_above_sum / abuse_below_sum; legacy buckets without them
+ * contribute 0). Only human- or support-verified outcomes should feed confirmOutcome,
+ * never an automatic success signal such as any successful login: a
+ * credentialed attacker can otherwise manufacture "legitimate" labels
+ * and pull the bias down. Class normalization removes label-volume
+ * dominance; the
+ * fp/fn cost knobs price false positives against false negatives
+ * explicitly. The whole read (24 hgetall calls)
  * plus the rate-of-change clamp plus the state write runs in one Lua
  * script (single round trip); the clamp is atomic (read prev -> clamp ->
  * write) so concurrent processes never race.
@@ -48,12 +59,15 @@ use Predis\Response\ServerException;
  *
  * The outcome ledger is always on and independent of calibration.
  * register_decision.lua creates the pending ledger entry
- * ({kiwi:<ns>}:cal:ledger:<decision_id>, JSON {"o":"P","scope","hour","score","w"})
- * atomically with the receipt and denominator. confirm.lua performs the
- * ledger CAS pending -> legitimate/abuse exactly once and, as the
- * downstream observer, records the calibration bucket contribution.
- * correction.lua flips the ledger L <-> A and reverses/redoes the bucket
- * contribution. Confirmed outcomes work identically with or without
+ * ({kiwi:<ns>}:outcome:<decision_id>, JSON
+ * {"o":"P","scope","hour","score","w"}) atomically with the receipt and
+ * denominator. confirm.lua performs the ledger CAS pending ->
+ * legitimate/abuse exactly once, records whether the confirmation
+ * contributed a calibration sample (`c`), and, as the downstream
+ * observer, records the calibration bucket contribution. correction.lua
+ * validates its arguments first, refuses a pending ledger (confirmation
+ * is the only transition out of pending) and flips the ledger L <-> A,
+ * reversing/redoing the bucket contribution only when `c == 1`. Confirmed outcomes work identically with or without
  * calibration; with calibration disabled the store writes the same ledger
  * (outcome_register/outcome_confirm/outcome_correct.lua) under the same
  * key.
@@ -301,7 +315,7 @@ final class AggregateCalibrator implements CalibrationStore
 
     /**
      * The always-on outcome ledger key shared with the store:
-     * RedisRiskStateStore::ledgerKey() is {kiwi:<ns>}:cal:ledger:<decisionId>.
+     * RedisRiskStateStore::ledgerKey() is {kiwi:<ns>}:outcome:<decisionId>.
      * With calibration enabled register_decision.lua / confirm.lua /
      * correction.lua own it; with calibration disabled the store's
      * outcome_*.lua scripts write the same key.

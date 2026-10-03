@@ -463,9 +463,10 @@ mod tests {
 
     /// Asymmetric trust: the exact-IP (source) signals must
     /// outweigh the subnet (network) signals in the scorer weights, so one
-    /// attacker IP is always punished harder than the /64 aggregate it
-    /// shares. Pinned on the contract defaults; a future symmetric-weight
-    /// regression fails here.
+    /// attacker IP is always punished harder than the masked-subnet
+    /// aggregate it shares (default /24 IPv4, /56 IPv6 — NOT /64). Pinned
+    /// on the contract defaults; a future symmetric-weight regression
+    /// fails here.
     #[test]
     fn source_weights_outweigh_subnet_weights() {
         let w = RiskWeights::default();

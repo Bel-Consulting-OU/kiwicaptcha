@@ -3750,12 +3750,22 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // throws, so the request answers the retryable 503 even though the
         // transition + deterministic commit landed. Everything else
         // delegates.
-        $lostAfterTransition = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface {
-            public function __construct(private readonly \KiwiCaptcha\AtomicStorageInterface $inner)
+        $lostAfterTransition = new class($storage) implements \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageInterface, \KiwiCaptcha\AuthenticatedResultCommitInterface {
+            public function __construct(private readonly ArrayStorage $inner)
             {
             }
 
             private bool $responseLost = false;
+
+            public function commitAuthenticatedResult(string $nonce, \KiwiCaptcha\ConsumedResult $result): bool
+            {
+                return $this->inner->commitAuthenticatedResult($nonce, $result);
+            }
+
+            public function commitAuthenticatedResultResume(string $nonce, \KiwiCaptcha\ConsumedResult $result, string $owner): bool
+            {
+                return $this->inner->commitAuthenticatedResultResume($nonce, $result, $owner);
+            }
 
             public function store(\KiwiCaptcha\ChallengeRecord $record): void
             {

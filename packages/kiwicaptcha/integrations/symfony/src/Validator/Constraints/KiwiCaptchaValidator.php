@@ -956,6 +956,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
         }
 
+        // The authenticity gate, shared with every core stored-success
+        // grant: the stored success must carry a server-state MAC that
+        // verifies for this record, binding and recorded identity. A
+        // storage writer who forged valid=true is refused as forged or
+        // corrupt persisted state, never a synthesized Valid.
+        if (!$this->verifier->storedSuccessAuthentic($consumed, $this->secretKey, $this->storage)) {
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
         // The pipeline's binding check enforces the stored-result
         // contract: the normalized outcome carries the stored consumed
         // binding, so the request binding must equal it — a challenge

@@ -2062,7 +2062,7 @@ mod tests {
     fn v2_session_client_context_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
         // A 16-byte session material: the decoded-cookie contract length.
-        let session: &[u8] = &[0x31u8; 16];
+        let session: &[u8; 16] = &[0x31u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -2136,7 +2136,7 @@ mod tests {
     #[test]
     fn v2_tls_consistency() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = &[0x32u8; 16];
+        let session: &[u8; 16] = &[0x32u8; 16];
         let with_session = |_tag: &str| RiskContext {
             session_id: Some(session),
             ..context()
@@ -2186,7 +2186,7 @@ mod tests {
     #[test]
     fn v2_absent_or_overbound_tls_tag_is_neutral() {
         let engine = RiskEngine::new(V2FirstTagStore::default(), classifier(), policy(), keys());
-        let session: &[u8] = &[0x33u8; 16];
+        let session: &[u8; 16] = &[0x33u8; 16];
 
         let first = engine
             .assess_pre_issue_v2(

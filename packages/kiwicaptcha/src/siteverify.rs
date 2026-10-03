@@ -211,6 +211,7 @@ mod tests {
             hostname: None,
             decoy_field: None,
             rsw_modulus_sha256: None,
+            server_mac: None,
         };
         let outcome = VerifyOutcome::Valid {
             nonce: "n".into(),
@@ -329,6 +330,7 @@ mod tests {
             execution_version: None,
             execution_commitment: None,
             rsw_modulus_sha256: None,
+            server_mac: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(

@@ -301,7 +301,7 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
         $saltBytes = base64_decode($record->salt, true);
         $hash = hash('sha256', $record->prefix.$token->counter.$saltBytes, true);
         $valid = Verifier::leadingZeroBits($hash) >= $record->targetBits;
-        $committed = $storage->commitResult($nonce, $valid, $record->requestBinding);
+        $committed = \KiwiCaptcha\Tests\Fixtures\ServerState::commit($storage, $nonce, $valid, $record->requestBinding, null, self::SECRET);
 
         return ['committed' => $committed, 'valid' => $valid];
     }
@@ -393,7 +393,7 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
         $label = 'death before the consume at the '.$boundary.' boundary';
         $storage = new RedisStorage($client, $prefix);
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT, resumeClaimTtlSecs: self::CLAIM_TTL_SECS);
-        $recovery = new ConsumedOutcomeRecovery($storage);
+        $recovery = new ConsumedOutcomeRecovery($storage, $verifier, self::SECRET);
         $identity = $this->identity('death-a');
 
         $data = $this->envelope($client, $prefix, $nonce);
@@ -445,7 +445,7 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
 
         $storage = new RedisStorage($client, $prefix);
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT, resumeClaimTtlSecs: self::CLAIM_TTL_SECS);
-        $recovery = new ConsumedOutcomeRecovery($storage);
+        $recovery = new ConsumedOutcomeRecovery($storage, $verifier, self::SECRET);
 
         $data = $this->envelope($client, $prefix, $nonce);
         self::assertSame('consumed', $data['state'] ?? null, 'the record is consumed when the worker dies');
@@ -511,7 +511,7 @@ final class WorkerDeathMatrixRealRedisTest extends TestCase
 
         $storage = new RedisStorage($client, $prefix);
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT, resumeClaimTtlSecs: self::CLAIM_TTL_SECS);
-        $recovery = new ConsumedOutcomeRecovery($storage);
+        $recovery = new ConsumedOutcomeRecovery($storage, $verifier, self::SECRET);
 
         $data = $this->envelope($client, $prefix, $nonce);
         self::assertSame('consumed', $data['state'] ?? null, 'the record is consumed when the worker dies');

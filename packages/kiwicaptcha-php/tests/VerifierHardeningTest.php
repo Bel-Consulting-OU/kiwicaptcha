@@ -80,6 +80,9 @@ final class VerifierHardeningTest extends TestCase
             minDurationMs: $record->minDurationMs,
             issuedAtNs: $record->issuedAtNs,
             protocolVersion: 1,
+            // The rebuilt challenge needs a fresh record-metadata MAC
+            // (it covers the challenge), exactly as the issuer writes it.
+            serverMac: \KiwiCaptcha\ServerStateMac::recordMeta(\KiwiCaptcha\ServerStateMac::key(Vectors::SECRET, null), $challenge, $record->issuedAtNs, null),
         );
     }
 

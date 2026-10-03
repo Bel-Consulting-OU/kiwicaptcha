@@ -196,9 +196,20 @@ end
 -- to error mid-transition AFTER the dedupe marker was written, losing
 -- the event and refusing an identical retry as a duplicate. Validate
 -- every numeric slot up front, before the first write.
-for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}) do
+-- Required numeric slots: a missing value would reach a nil comparison
+-- mid-transition, so it is refused here.
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
     if tonumber(ARGV[i]) == nil then
         return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric')
+    end
+end
+-- Optional numeric slots (registration/outcome fields): callers that do
+-- not request the feature legitimately omit trailing arguments, so a
+-- missing slot is left to the feature-specific checks below; any slot
+-- that IS present must be numeric, or it would error after a write.
+for _, i in ipairs({26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}) do
+    if ARGV[i] ~= nil and ARGV[i] ~= '' and tonumber(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric when present')
     end
 end
 if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
@@ -448,8 +459,10 @@ local g = read_state(KEYS[9], now)
 -- Corrupt or tampered stored levels above the hysteresis table are
 -- clamped into range (the Rust core applies the same .min(4)); a nil
 -- exit entry would otherwise error mid-transition after the dedupe
--- marker was written.
-local prev_level = math.min(4, math.max(1, tonumber(g.scope) or 1))
+-- marker was written. The floor stays 0: a fresh state legitimately
+-- starts at level 0, and forcing a minimum of 1 here would raise every
+-- namespace's baseline pressure.
+local prev_level = math.min(4, tonumber(g.scope) or 0)
 if not is_duplicate then
     apply_event(g, event, scope)
     if event == 16 then

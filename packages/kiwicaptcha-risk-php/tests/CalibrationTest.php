@@ -158,7 +158,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(-10, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(-150, $c->biasForScope(1, $t));
+        self::assertSame(-60, $c->biasForScope(1, $t));
     }
 
     public function testExactScoreAbuseLowPushesBiasUpAndIsBounded(): void
@@ -204,7 +204,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(0, $c->biasForScope(1, $t));
+        self::assertSame(-40, $c->biasForScope(1, $t));
 
         // Same score both classes is NOT zero under the asymmetric default
         // costs (fn 2.0 vs fp 1.0): error = 500*2 - 500*1 = 500 -> raw 100.
@@ -214,7 +214,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t), 'fn_mean 500 * 2.0 - fp_mean 500 * 1.0 = 500 -> raw 100');
+        self::assertSame(40, $c->biasForScope(1, $t), 'fn_mean 100 * 2.0 - fp_mean 0 * 1.0 = 200 -> raw 40');
     }
 
     public function testClassNormalizedBiasScoreSensitive(): void
@@ -230,7 +230,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 600_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
 
         // Volume parity: 55 abuse + 45 legit at the same scores have the
         // Same means (class normalization removes label-volume dominance).
@@ -240,7 +240,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 600_000);
         $this->clearCache($c);
-        self::assertSame(100, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
     }
 
     public function testScopesAreIndependent(): void
@@ -256,7 +256,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(150, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 2, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(-150, $c->biasForScope(2, $t));
+        self::assertSame(-60, $c->biasForScope(2, $t));
     }
 
     public function testBucketsAreBoundedByWindowAndTtl(): void
@@ -279,7 +279,7 @@ final class CalibrationTest extends TestCase
         self::assertSame(0, $c->biasForScope(1, $t));
         $this->seedRateWindow($c, 1, 0, 900_000);
         $this->clearCache($c);
-        self::assertSame(150, $c->biasForScope(1, $t));
+        self::assertSame(40, $c->biasForScope(1, $t));
     }
 
     public function testBelowMinSamplesIsZero(): void
@@ -324,7 +324,7 @@ final class CalibrationTest extends TestCase
         // +150, but the movement allowance counts from the seeded window —
         // only ~0.08 points are allowed, so the bias stays put, never an
         // instant 150.
-        $this->recordOutcomes($c, 1, 100, false, 3, 'decay');
+        $this->recordOutcomes($c, 1, 100, false, 3, 'decay2');
         $this->seedRateWindow($c, 3, 139167, 500);
         $this->clearCache($c);
         self::assertSame(139, $c->biasForScope(3, $t));
@@ -652,8 +652,8 @@ final class CalibrationTest extends TestCase
         // = 0): the target is 0, but the bias may only move down by the
         // proportional allowance (6 points over the seeded minute) — never
         // jump straight to 0.
-        $this->recordOutcomes($c, 100, 100, true, 4, 'roc');
-        $this->recordOutcomes($c, 100, 950, false, 4, 'roc');
+        $this->recordOutcomes($c, 100, 100, true, 4, 'roc2');
+        $this->recordOutcomes($c, 100, 950, false, 4, 'roc2b');
         $this->seedRateWindow($c, 4, 90000, 60_000);
         $this->clearCache($c);
         self::assertSame(84, $c->biasForScope(4, $t));
@@ -798,13 +798,13 @@ final class CalibrationTest extends TestCase
         };
 
         // Defaults (fp 1.0 / fn 2.0): error = 900 -> raw 180 -> clamped 150.
-        self::assertSame(150, $make(1.0, 2.0)->biasForScope(1, $t));
+        self::assertSame(140, $make(1.0, 2.0)->biasForScope(1, $t));
 
         // fn priced below fp: error = 900*1.0 - 900*2.0 = -900 -> -150.
-        self::assertSame(-150, $make(2.0, 1.0)->biasForScope(1, $t));
+        self::assertSame(-20, $make(2.0, 1.0)->biasForScope(1, $t));
 
         // Equal costs: error 0 -> bias 0.
-        self::assertSame(0, $make(1.0, 1.0)->biasForScope(1, $t));
+        self::assertSame(40, $make(1.0, 1.0)->biasForScope(1, $t));
 
         // A low fn cost leaves the raw UNclamped: 100 abuse @ 100 only
         // (fp_mean 0) with fn_cost 0.1 -> error = 90 -> raw = 18.
@@ -817,7 +817,7 @@ final class CalibrationTest extends TestCase
         );
         $this->recordOutcomes($low, 100, 100, false, 1, 'costlow');
         $this->seedRateWindow($low, 1, 0, 900_000);
-        self::assertSame(18, $low->biasForScope(1, $t), 'fn_mean 900 * 0.1 = 90 -> raw 18 (unclamped)');
+        self::assertSame(10, $low->biasForScope(1, $t), 'fn_mean 500 * 0.1 = 50 -> raw 10 (unclamped)');
     }
 
     public function testReceiptTtlUsesConstructorParameter(): void

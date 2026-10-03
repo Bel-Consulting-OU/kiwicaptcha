@@ -152,7 +152,22 @@ final class CidrNetworkClassifier implements NetworkClassifierInterface
             throw new \InvalidArgumentException(sprintf('Invalid CIDR prefix: %s', $cidr));
         }
         $prefix = (int) $prefixRaw;
-        $bytes = self::normalizeFamilyBytes(self::packIp($addr, sprintf('Invalid CIDR network address: %s', $cidr)));
+        $rawBytes = self::packIp($addr, sprintf('Invalid CIDR network address: %s', $cidr));
+        $bytes = self::normalizeFamilyBytes($rawBytes);
+        // A v6 spelling that canonicalizes to IPv4 (the mapped
+        // ::ffff:a.b.c.d form or the deprecated compatible ::a.b.c.d
+        // form, exactly the fold the walk applies) is stored as a v4
+        // entry with the prefix shifted by 96. Without this, an entry
+        // like ::ffff:192.0.2.0/120 was inserted into the v6 trie and
+        // could never match 192.0.2.x while a genuine v6 address under
+        // the same /32 was flagged; a prefix below /96 cannot address a
+        // v4 network and is refused.
+        if (\strlen($rawBytes) === 16 && \strlen($bytes) === 4) {
+            if ($prefix < 96) {
+                throw new \InvalidArgumentException(sprintf('Mapped IPv4 CIDR prefix %d is below /96: %s', $prefix, $cidr));
+            }
+            $prefix -= 96;
+        }
         $maxBits = strlen($bytes) * 8;
         if ($prefix > $maxBits) {
             throw new \InvalidArgumentException(sprintf('CIDR prefix %d exceeds %d bits for %s', $prefix, $maxBits, $cidr));

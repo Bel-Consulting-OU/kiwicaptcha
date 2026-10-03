@@ -54,7 +54,9 @@ final class RiskPolicyTest extends TestCase
         self::assertSame(100, $policy->baseRisk(999));
         self::assertSame(RiskAction::Allow, $policy->minimum(1));
         self::assertSame(RiskAction::Sha16, $policy->minimum(2));
-        self::assertSame(RiskAction::Allow, $policy->minimum(999));
+        // Unconfigured scopes use the conservative default_scope row
+        // (sha20 minimum / sha20 degraded), never Allow.
+        self::assertSame(RiskAction::Sha20, $policy->minimum(999));
     }
 
     private function sortRecursive(array &$value): void
@@ -132,8 +134,37 @@ final class RiskPolicyTest extends TestCase
     public function testSourceFastHardOverride(): void
     {
         $policy = RiskPolicy::fromConfig($this->config());
+        // Velocity alone must not hard-deny a shared address: the reason
+        // is recorded and the action is floored at the strongest
+        // non-interactive band.
         $d = $policy->decide(1, 0, SignalVector::fromArray(['source_fast' => 950]), $this->healthy(), 0, 1_700_000_000_000);
+        self::assertSame(RiskAction::Argon32, $d->action);
+        self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
+
+        // Corroboration (another hard signal at its floor) restores the
+        // hard deny.
+        $d = $policy->decide(
+            1,
+            0,
+            SignalVector::fromArray(['source_fast' => 950, 'bad_proof' => 300]),
+            $this->healthy(),
+            0,
+            1_700_000_000_000
+        );
         self::assertSame(RiskAction::Deny, $d->action);
+        self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
+
+        // A saturated backend re-escalates the velocity floor to the
+        // interactive step-up flow instead of weakening it.
+        $d = $policy->decide(
+            1,
+            0,
+            SignalVector::fromArray(['source_fast' => 950]),
+            new ResourcePressure(0, 1000),
+            0,
+            1_700_000_000_000
+        );
+        self::assertSame(RiskAction::StepUp, $d->action);
         self::assertTrue($d->hasReason(RiskReason::HardRateLimit));
 
         $d = $policy->decide(1, 0, SignalVector::fromArray(['source_fast' => 949]), $this->healthy(), 0, 1_700_000_000_000);
@@ -294,6 +325,9 @@ final class RiskPolicyTest extends TestCase
                 array_map(static fn (RiskReason $reason): string => $reason->value, $decision->reasons),
                 $vector['why'],
             );
+            if (isset($vector['expected_action'])) {
+                self::assertSame($vector['expected_action'], $decision->action->value, $vector['why']);
+            }
         }
     }
 
@@ -439,9 +473,9 @@ final class RiskPolicyTest extends TestCase
         $d = $policy->degradedDecision(2);
         self::assertSame(RiskAction::Sha20, $d->action);
 
-        // unknown scope degrades to allow
+        // unknown scope degrades to the conservative default_scope row
         $d = $policy->degradedDecision(999);
-        self::assertSame(RiskAction::Allow, $d->action);
+        self::assertSame(RiskAction::Sha20, $d->action);
     }
 
     public function testDegradedGlobalLevelPassthrough(): void

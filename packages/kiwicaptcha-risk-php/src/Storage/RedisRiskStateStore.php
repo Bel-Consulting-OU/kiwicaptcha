@@ -258,7 +258,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * The outcome ledger key shared with the calibrator's register_decision /
-     * confirm / correction scripts: {kiwi:<ns>}:cal:ledger:<decisionId>.
+     * confirm / correction scripts: {kiwi:<ns>}:outcome:<decisionId>.
      * The ledger is always on (calibration-independent): with calibration
      * enabled the calibrator writes it inside register_decision.lua; with
      * calibration disabled the store writes it here. One key, one
