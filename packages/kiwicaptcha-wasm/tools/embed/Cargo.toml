@@ -6,4 +6,4 @@ description = "Embeds the kiwicaptcha WASM + wasm-bindgen glue as a single self-
 license = "MIT"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
