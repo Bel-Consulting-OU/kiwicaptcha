@@ -41,6 +41,7 @@ steps:
         rm -f /tmp/composer-setup.php
       - &composer_audit |
         set -eu
+        cd packages/kiwicaptcha/integrations/symfony
         for i in 1 2 3 4 5; do
           if composer audit --locked; then
             break
