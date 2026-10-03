@@ -18,7 +18,7 @@
 //! (default 4), each configured with the fail-fast timeouts below.
 //! Timeouts: the sync `redis` crate has no `ConnectionConfig`/response
 //! timeout (that is the async API); the equivalent sync settings are
-//! `Client::get_connection_with_timeout` (connection, 5 ms) and
+//! `Client::get_connection_with_timeout` (connection, 75 ms) and
 //! `Connection::set_read_timeout`/`set_write_timeout` (command, 10 ms).
 //!
 //! Broken connections are evicted, never reused (the same policy the
@@ -233,9 +233,12 @@ impl ConnectionPool {
 }
 
 impl RedisRiskStateStore {
-    /// Connection timeout used for establishing the TCP connection.
-    pub const CONNECTION_TIMEOUT_MS: u64 = 5;
-    /// Command (read/write) timeout applied to the socket.
+    /// Connection timeout used for establishing the TCP connection. The
+    /// 75 ms default tolerates TLS, managed and cross-AZ handshakes while
+    /// staying fail-fast.
+    pub const CONNECTION_TIMEOUT_MS: u64 = 75;
+    /// Command (read/write) timeout applied to the socket. The tight 10 ms
+    /// default keeps one wedged socket from wedging the assessment path.
     pub const COMMAND_TIMEOUT_MS: u64 = 10;
 
     /// Builds a store with the contract defaults (namespace `d`,
@@ -367,8 +370,8 @@ impl RedisRiskStateStore {
     }
 
     /// Override the connection/command timeouts: the
-    /// production fail-fast consts (5 ms / 10 ms) stay the defaults; tests
-    /// exercising long real-time sequences (storms, TTL expiry) use
+    /// production defaults (75 ms connect, 10 ms command) stay in place;
+    /// tests exercising long real-time sequences use
     /// generous timeouts so CI scheduling jitter can never produce a
     /// spurious `Timeout` — the tight-timeout behavior is a production
     /// tuning knob, not a test oracle.
@@ -663,9 +666,10 @@ impl RedisRiskStateStore {
             )));
         }
 
-        // Clamped slot decode: the script guarantees the bands, a tampered
-        // or shifted reply must never widen them (a raw i64 -> u16 cast
-        // would wrap).
+        // Clamped slot decode: the typed `Vec<i64>` above already rejected
+        // malformed slot types, so only integers reach these clamps. The
+        // script guarantees the bands, and a shifted integer reply must
+        // never widen them — a raw i64 -> u16 cast would wrap.
         let global_level = clamp_level(reply[13]);
         let cooldown_until_ms = clamp_cooldown(reply[14]);
         let is_duplicate = reply[15] != 0;
@@ -818,55 +822,52 @@ impl RedisRiskStateStore {
             )));
         }
 
-        let value_i64 = |v: &redis_crate::Value| -> i64 {
+        // The tag slots are strings or absent by contract. Any other reply
+        // type is a malformed/shifted reply: fail closed instead of
+        // silently decoding it as "no recorded tag" (the same fail-closed
+        // rule every other slot follows).
+        let value_string = |v: &redis_crate::Value| -> Result<String, RiskStoreError> {
             match v {
-                redis_crate::Value::Int(i) => *i,
-                redis_crate::Value::BulkString(b) => std::str::from_utf8(b)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0),
-                _ => 0,
-            }
-        };
-        let value_string = |v: &redis_crate::Value| -> String {
-            match v {
-                redis_crate::Value::BulkString(b) => String::from_utf8_lossy(b).into_owned(),
-                redis_crate::Value::Int(i) => i.to_string(),
-                _ => String::new(),
+                redis_crate::Value::BulkString(b) => Ok(String::from_utf8_lossy(b).into_owned()),
+                redis_crate::Value::Nil => Ok(String::new()),
+                _ => Err(RiskStoreError::ScriptError(
+                    "risk script returned a non-string tag slot".to_string(),
+                )),
             }
         };
 
-        // Clamped slot decode: the script guarantees the bands, a tampered
-        // or shifted reply must never widen them (a raw i64 -> u16 cast
-        // would wrap).
-        let global_level = clamp_level(value_i64(&reply[13]));
-        let cooldown_until_ms = clamp_cooldown(value_i64(&reply[14]));
-        let is_duplicate = value_i64(&reply[15]) != 0;
+        // Clamped slot decode: only decoded integer slots reach these
+        // clamps, because a malformed slot type already failed closed
+        // above. The script guarantees the bands, and a shifted integer
+        // reply must never widen them — a raw i64 -> u16 cast would wrap.
+        let global_level = clamp_level(value_i64(&reply[13])?);
+        let cooldown_until_ms = clamp_cooldown(value_i64(&reply[14])?);
+        let is_duplicate = value_i64(&reply[15])? != 0;
         self.last_global_level
             .store(global_level, Ordering::Relaxed);
         self.last_cooldown_until_ms
             .store(cooldown_until_ms, Ordering::Relaxed);
 
-        let existing_context_tag = value_string(&reply[16]);
-        let existing_tls_tag = value_string(&reply[17]);
-        let registration_status = value_i64(&reply[18]) != 0;
+        let existing_context_tag = value_string(&reply[16])?;
+        let existing_tls_tag = value_string(&reply[17])?;
+        let registration_status = value_i64(&reply[18])? != 0;
 
         Ok(AssessV2Reply {
             observed: Observed {
                 vector: SignalVector {
-                    source_fast: clamp_signal(value_i64(&reply[0])),
-                    source_slow: clamp_signal(value_i64(&reply[1])),
-                    subnet_fast: clamp_signal(value_i64(&reply[2])),
-                    issue_debt: clamp_signal(value_i64(&reply[3])),
-                    bad_proof: clamp_signal(value_i64(&reply[4])),
-                    malformed: clamp_signal(value_i64(&reply[5])),
-                    replay: clamp_signal(value_i64(&reply[6])),
-                    action_failure: clamp_signal(value_i64(&reply[7])),
-                    scope_switch: clamp_signal(value_i64(&reply[8])),
-                    global_pressure: clamp_signal(value_i64(&reply[9])),
+                    source_fast: clamp_signal(value_i64(&reply[0])?),
+                    source_slow: clamp_signal(value_i64(&reply[1])?),
+                    subnet_fast: clamp_signal(value_i64(&reply[2])?),
+                    issue_debt: clamp_signal(value_i64(&reply[3])?),
+                    bad_proof: clamp_signal(value_i64(&reply[4])?),
+                    malformed: clamp_signal(value_i64(&reply[5])?),
+                    replay: clamp_signal(value_i64(&reply[6])?),
+                    action_failure: clamp_signal(value_i64(&reply[7])?),
+                    scope_switch: clamp_signal(value_i64(&reply[8])?),
+                    global_pressure: clamp_signal(value_i64(&reply[9])?),
                     network_risk: o.network_risk,
-                    trust_credit: clamp_signal(value_i64(&reply[11])),
-                    principal_credit: clamp_signal(value_i64(&reply[12])),
+                    trust_credit: clamp_signal(value_i64(&reply[11])?),
+                    principal_credit: clamp_signal(value_i64(&reply[12])?),
                 },
                 global_level,
                 cooldown_until_ms,
@@ -940,6 +941,36 @@ fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Decodes one integer slot of the consolidated script reply. The contract
+/// types slots 0..15 and 18 as integers; only the tag slots 16 and 17 are
+/// strings, and they never pass through this decoder. A malformed or
+/// shifted reply fails closed with the script error instead of decoding
+/// as 0. Int, a parseable bulk string and a parseable simple string stay
+/// accepted, matching the typed `Vec<i64>` reply decoder
+/// [`RedisRiskStateStore::observe_full`] uses; every other reply type
+/// (Nil, an array, a map, a boolean, a non-numeric string) is refused.
+fn value_i64(v: &redis_crate::Value) -> Result<i64, RiskStoreError> {
+    match v {
+        redis_crate::Value::Int(i) => Ok(*i),
+        redis_crate::Value::BulkString(b) => std::str::from_utf8(b)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                RiskStoreError::ScriptError(
+                    "risk script returned a non-integer signal slot".to_string(),
+                )
+            }),
+        redis_crate::Value::SimpleString(s) => s.parse().map_err(|_| {
+            RiskStoreError::ScriptError(
+                "risk script returned a non-integer signal slot".to_string(),
+            )
+        }),
+        _ => Err(RiskStoreError::ScriptError(
+            "risk script returned a non-integer signal slot".to_string(),
+        )),
+    }
 }
 
 /// Clamps a raw i64 signal slot to the 0..1000 band (the script guarantees
@@ -1426,105 +1457,122 @@ mod tests {
         ));
     }
 
-    /// A miniature fake Redis endpoint that answers every command with one
-    /// fixed RESP payload: the tampered-reply harness. The script reply's
-    /// integer slots are out of band (negative / >1000 / level 9 / negative
-    /// cooldown) — the store must clamp every slot to the contract bands
-    /// instead of wrapping the raw i64 casts.
+    /// A miniature fake Redis endpoint that answers every complete command
+    /// with one fixed RESP payload: the reply-fidelity harness. The
+    /// listener lives inside the spawned thread, so the port stays bound
+    /// for the test's duration.
+    fn serve_fixed_reply(payload: String) -> u16 {
+        // The bytes consumed by the first complete RESP array in
+        // `acc` (a `*N` header followed by N complete bulk strings),
+        // or 0 while the frame is still partial.
+        fn complete_resp_array(acc: &[u8]) -> usize {
+            if acc.first() != Some(&b'*') {
+                return 0;
+            }
+            let Some(header_end) = acc.windows(2).position(|w| w == b"\r\n") else {
+                return 0;
+            };
+            let Some(count) = std::str::from_utf8(&acc[1..header_end])
+                .ok()
+                .and_then(|h| h.trim().parse::<usize>().ok())
+            else {
+                return acc.len();
+            };
+            let mut pos = header_end + 2;
+            for _ in 0..count {
+                // A frame that stops short of its next bulk header
+                // is incomplete until more bytes arrive.
+                if acc.get(pos) != Some(&b'$') {
+                    return 0;
+                }
+                let Some(len_end) = acc[pos..].windows(2).position(|w| w == b"\r\n") else {
+                    return 0;
+                };
+                let Some(len) = std::str::from_utf8(&acc[pos + 1..pos + len_end])
+                    .ok()
+                    .and_then(|l| l.trim().parse::<usize>().ok())
+                else {
+                    return acc.len();
+                };
+                pos += len_end + 2 + len + 2;
+                if pos > acc.len() {
+                    return 0;
+                }
+            }
+            pos
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::time::Duration;
+            // One handler thread per connection: a client that
+            // reconnects (the pool evicts and re-acquires after a
+            // failed reply) never waits behind a prior connection's
+            // reply cycle.
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let payload = payload.clone();
+                std::thread::spawn(move || {
+                    // Every read is bounded so the reply loop always
+                    // re-checks its deadline instead of blocking past
+                    // it on a quiet client. One payload per complete
+                    // RESP frame keeps the pipelined setup commands
+                    // and the script call each paired with a reply.
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
+                    let mut buf = [0u8; 4096];
+                    let mut acc: Vec<u8> = Vec::new();
+                    let idle = std::time::Instant::now() + Duration::from_millis(2_000);
+                    while std::time::Instant::now() < idle {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => acc.extend_from_slice(&buf[..n]),
+                            Err(_) => continue,
+                        }
+                        while let consumed_at @ 1.. = complete_resp_array(&acc) {
+                            acc.drain(..consumed_at);
+                            let _ = stream.write_all(payload.as_bytes());
+                            let _ = stream.flush();
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Builds one fixed RESP reply with `slots` elements, each rendered by
+    /// `slot`: the malformed-reply tests substitute single slots without
+    /// hand-counting the payload.
+    fn fixed_reply(slots: usize, slot: impl Fn(usize) -> &'static str) -> String {
+        let mut reply = format!("*{slots}\r\n");
+        for i in 0..slots {
+            reply.push_str(slot(i));
+        }
+        reply
+    }
+
+    /// A store on a fresh fake endpoint serving `payload`.
+    fn fake_store(payload: String, namespace: &str) -> RedisRiskStateStore {
+        let port = serve_fixed_reply(payload);
+        let client = redis_crate::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap();
+        RedisRiskStateStore::with_pool_size(client, namespace, 1).with_io_timeouts(2_000, 2_000)
+    }
+
+    /// The clamp contract: the script reply's integer slots are out of
+    /// band (negative / >1000 / level 9 / negative cooldown) — the store
+    /// must clamp every decoded slot to the contract bands instead of
+    /// wrapping the raw i64 casts.
     #[test]
     fn reply_slots_are_clamped_to_the_contract_bands() {
         // Serves the fixed RESP payload once per complete command: the
         // client pipelines its connection-setup commands ahead of the
         // script call, so the frame count (not the byte count) decides
-        // the reply count. The listener lives inside the spawned thread,
-        // so the port stays bound for the test's duration.
-        let serve = |payload: String| -> u16 {
-            // The bytes consumed by the first complete RESP array in
-            // `acc` (a `*N` header followed by N complete bulk strings),
-            // or 0 while the frame is still partial.
-            fn complete_resp_array(acc: &[u8]) -> usize {
-                if acc.first() != Some(&b'*') {
-                    return 0;
-                }
-                let Some(header_end) = acc.windows(2).position(|w| w == b"\r\n") else {
-                    return 0;
-                };
-                let Some(count) = std::str::from_utf8(&acc[1..header_end])
-                    .ok()
-                    .and_then(|h| h.trim().parse::<usize>().ok())
-                else {
-                    return acc.len();
-                };
-                let mut pos = header_end + 2;
-                for _ in 0..count {
-                    // A frame that stops short of its next bulk header
-                    // is incomplete until more bytes arrive.
-                    if acc.get(pos) != Some(&b'$') {
-                        return 0;
-                    }
-                    let Some(len_end) = acc[pos..].windows(2).position(|w| w == b"\r\n") else {
-                        return 0;
-                    };
-                    let Some(len) = std::str::from_utf8(&acc[pos + 1..pos + len_end])
-                        .ok()
-                        .and_then(|l| l.trim().parse::<usize>().ok())
-                    else {
-                        return acc.len();
-                    };
-                    pos += len_end + 2 + len + 2;
-                    if pos > acc.len() {
-                        return 0;
-                    }
-                }
-                pos
-            }
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
-            std::thread::spawn(move || {
-                use std::io::{Read, Write};
-                use std::time::Duration;
-                // One handler thread per connection: a client that
-                // reconnects (the pool evicts and re-acquires after a
-                // failed reply) never waits behind a prior connection's
-                // reply cycle.
-                for stream in listener.incoming() {
-                    let Ok(mut stream) = stream else { continue };
-                    let payload = payload.clone();
-                    std::thread::spawn(move || {
-                        // Every read is bounded so the reply loop always
-                        // re-checks its deadline instead of blocking past
-                        // it on a quiet client. One payload per complete
-                        // RESP frame keeps the pipelined setup commands
-                        // and the script call each paired with a reply.
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(25)));
-                        let mut buf = [0u8; 4096];
-                        let mut acc: Vec<u8> = Vec::new();
-                        let idle = std::time::Instant::now() + Duration::from_millis(2_000);
-                        while std::time::Instant::now() < idle {
-                            match stream.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => acc.extend_from_slice(&buf[..n]),
-                                Err(_) => continue,
-                            }
-                            while let consumed_at @ 1.. = complete_resp_array(&acc) {
-                                acc.drain(..consumed_at);
-                                let _ = stream.write_all(payload.as_bytes());
-                                let _ = stream.flush();
-                            }
-                        }
-                    });
-                }
-            });
-            port
-        };
-
+        // the reply count.
         // observe_full: the 16-slot tampered reply.
         let reply = b"*16\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n".to_vec();
-        let port = serve(String::from_utf8(reply).unwrap());
-        let client = redis_crate::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap();
-        let store =
-            RedisRiskStateStore::with_pool_size(client, "clamp", 1).with_io_timeouts(2_000, 2_000);
+        let store = fake_store(String::from_utf8(reply).unwrap(), "clamp");
         let observed = store
             .observe(&observation(&event_id(1), 0, T0, 0))
             .expect("the tampered reply must still parse");
@@ -1539,10 +1587,7 @@ mod tests {
         // assess_v2_full: the same clamps in the 19-slot consolidated
         // reply (slots 16..18 are the tag/registration strings).
         let reply = b"*19\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n".to_vec();
-        let port2 = serve(String::from_utf8(reply).unwrap());
-        let client = redis_crate::Client::open(format!("redis://127.0.0.1:{port2}/")).unwrap();
-        let store = RedisRiskStateStore::with_pool_size(client, "clampv2", 1)
-            .with_io_timeouts(2_000, 2_000);
+        let store = fake_store(String::from_utf8(reply).unwrap(), "clampv2");
         let reply = store
             .assess_v2_full(&observation(&event_id(1), 0, T0, 0), None, None, None)
             .expect("the tampered consolidated reply must still parse");
@@ -1554,6 +1599,174 @@ mod tests {
         assert_eq!(reply.existing_context_tag.as_deref(), Some("aa"));
         assert_eq!(reply.existing_tls_tag, None);
         assert!(!reply.registration_status);
+    }
+
+    // ── Hermetic reply-fidelity tests (no Redis URL needed) ──
+
+    /// The integer-slot decoder accepts Int and numeric bulk/simple-string
+    /// replies and rejects every other reply type with the script error,
+    /// the same fail-closed shape the typed decode in `observe_full` gives.
+    #[test]
+    fn integer_slot_decoder_rejects_non_integer_reply_types() {
+        use redis_crate::Value;
+        assert_eq!(value_i64(&Value::Int(7)).unwrap(), 7);
+        assert_eq!(value_i64(&Value::BulkString(b"42".to_vec())).unwrap(), 42);
+        assert_eq!(
+            value_i64(&Value::SimpleString("43".to_string())).unwrap(),
+            43
+        );
+        for unexpected in [
+            Value::Nil,
+            Value::Array(vec![Value::Int(1)]),
+            Value::BulkString(b"abc".to_vec()),
+            Value::SimpleString("abc".to_string()),
+            Value::Boolean(true),
+        ] {
+            assert!(
+                matches!(value_i64(&unexpected), Err(RiskStoreError::ScriptError(_))),
+                "expected the script error for {unexpected:?}"
+            );
+        }
+    }
+
+    /// A malformed or shifted integer slot must fail the consolidated
+    /// assessment closed with the script error, never decode as 0: a Nil,
+    /// an array, and a non-numeric bulk string each fail. The tag slots 16
+    /// and 17 stay the only slots that accept Nil or a string.
+    #[test]
+    fn assess_v2_full_fails_closed_on_malformed_integer_slots() {
+        let observation = observation(&event_id(1), 0, T0, 0);
+        let cases: [(&str, usize, &str, &str); 3] = [
+            ("nil", 0, "$-1\r\n", "a Nil signal slot"),
+            ("arr", 12, "*1\r\n:5\r\n", "an array signal slot"),
+            (
+                "str",
+                11,
+                "$3\r\nabc\r\n",
+                "a non-numeric string signal slot",
+            ),
+        ];
+        for (namespace, malformed_slot, malformed_reply, label) in cases {
+            let reply = fixed_reply(19, |i| {
+                if i == malformed_slot {
+                    malformed_reply
+                } else if i == 16 {
+                    "$2\r\naa\r\n"
+                } else if i == 17 {
+                    "$0\r\n\r\n"
+                } else {
+                    ":0\r\n"
+                }
+            });
+            let store = fake_store(reply, namespace);
+            let err = store
+                .assess_v2_full(&observation, None, None, None)
+                .expect_err("the malformed reply must fail closed");
+            assert!(
+                matches!(err, RiskStoreError::ScriptError(_)),
+                "{label} must fail closed with the script error (got {err:?})"
+            );
+        }
+    }
+
+    /// The tag slots 16 and 17 accept Nil or a string: a Nil tag decodes
+    /// as no recorded tag, a string tag decodes as the recorded value.
+    #[test]
+    fn assess_v2_full_tag_slots_accept_nil_and_strings() {
+        let observation = observation(&event_id(1), 0, T0, 0);
+        let reply = fixed_reply(19, |i| match i {
+            16 => "$-1\r\n",
+            17 => "$2\r\nbb\r\n",
+            _ => ":0\r\n",
+        });
+        let store = fake_store(reply, "tagnil");
+        let reply = store
+            .assess_v2_full(&observation, None, None, None)
+            .expect("Nil and string tags must decode");
+        assert_eq!(reply.existing_context_tag, None, "a Nil tag means none");
+        assert_eq!(reply.existing_tls_tag.as_deref(), Some("bb"));
+
+        let reply = fixed_reply(19, |i| match i {
+            16 => "$2\r\naa\r\n",
+            17 => "$-1\r\n",
+            _ => ":0\r\n",
+        });
+        let store = fake_store(reply, "tagnil2");
+        let reply = store
+            .assess_v2_full(&observation, None, None, None)
+            .expect("a string and a Nil tag must decode");
+        assert_eq!(reply.existing_context_tag.as_deref(), Some("aa"));
+        assert_eq!(reply.existing_tls_tag, None);
+    }
+
+    /// Tag slots 16 and 17 are strings-or-Nil only: a shifted non-string
+    /// reply (an integer or an array in a tag slot) fails closed instead
+    /// of silently decoding as "no recorded tag".
+    #[test]
+    fn assess_v2_full_fails_closed_on_non_string_tag_slots() {
+        let observation = observation(&event_id(1), 0, T0, 0);
+        for (namespace, tag_slot, malformed_reply, label) in [
+            ("tagint", 16, ":5\r\n", "an integer context tag"),
+            ("tagarr", 17, "*1\r\n:5\r\n", "an array TLS tag"),
+        ] {
+            let reply = fixed_reply(19, |i| {
+                if i == tag_slot {
+                    malformed_reply
+                } else if i == 16 || i == 17 {
+                    "$0\r\n\r\n"
+                } else {
+                    ":0\r\n"
+                }
+            });
+            let store = fake_store(reply, namespace);
+            let err = store
+                .assess_v2_full(&observation, None, None, None)
+                .expect_err("a non-string tag slot must fail closed");
+            assert!(
+                matches!(err, RiskStoreError::ScriptError(_)),
+                "{label} must fail closed with the script error (got {err:?})"
+            );
+        }
+    }
+
+    /// observe_full decodes into a typed vector, so the same malformed Nil
+    /// slot fails closed there too.
+    #[test]
+    fn observe_full_fails_closed_on_a_malformed_integer_slot() {
+        let reply = fixed_reply(16, |i| if i == 0 { "$-1\r\n" } else { ":0\r\n" });
+        let store = fake_store(reply, "obsnil");
+        assert!(store.observe(&observation(&event_id(1), 0, T0, 0)).is_err());
+    }
+
+    /// The connect default tolerates a TLS, managed or cross-AZ handshake,
+    /// the command timeout stays tight, and the calibration store shares
+    /// both values. The builder overrides both knobs.
+    #[test]
+    fn io_timeout_defaults_and_builder() {
+        assert_eq!(RedisRiskStateStore::CONNECTION_TIMEOUT_MS, 75);
+        assert_eq!(RedisRiskStateStore::COMMAND_TIMEOUT_MS, 10);
+        assert_eq!(
+            crate::calibration::RedisCalibrationStore::CONNECTION_TIMEOUT_MS,
+            RedisRiskStateStore::CONNECTION_TIMEOUT_MS,
+            "the calibration store shares the state store's connect default"
+        );
+        assert_eq!(
+            crate::calibration::RedisCalibrationStore::COMMAND_TIMEOUT_MS,
+            RedisRiskStateStore::COMMAND_TIMEOUT_MS,
+            "the calibration store shares the state store's command default"
+        );
+
+        let store = RedisRiskStateStore::new(dead_port_client(), "timeouts");
+        assert_eq!(store.connection_timeout_ms, 75);
+        assert_eq!(store.command_timeout_ms, 10);
+        assert_eq!(store.pool.connection_timeout_ms, 75);
+        assert_eq!(store.pool.command_timeout_ms, 10);
+
+        let tuned = store.with_io_timeouts(120, 15);
+        assert_eq!(tuned.connection_timeout_ms, 120);
+        assert_eq!(tuned.command_timeout_ms, 15);
+        assert_eq!(tuned.pool.connection_timeout_ms, 120);
+        assert_eq!(tuned.pool.command_timeout_ms, 15);
     }
 
     // ── Redis-backed tests (skipped unless the Redis test URL is set) ──

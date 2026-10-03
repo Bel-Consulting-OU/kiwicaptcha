@@ -15,7 +15,11 @@
 //! state script applies NO change, so the issued-and-abandoned challenge
 //! keeps its issue-debt contribution (`iss`, which decays naturally and is
 //! repaid only by an actual `SolveSuccess`). The kind stays for
-//! replay/compat compatibility.
+//! replay/compat compatibility and observability — the cancellation is a
+//! resource-lifecycle operation (the record is terminalized and the
+//! live-cap bookkeeping freed), never a debt refund. Cancellation is
+//! client-influenceable (the endpoint accepts possession of a pending
+//! nonce), so it must never erase the issued-but-unsolved signal.
 //!
 //! The trust-source invariant: `SolveSuccess` is trust-neutral. A valid
 //! PoW proves expenditure (which the economic model explicitly permits
@@ -24,11 +28,6 @@
 //! `ConfirmedLegitimate`) may decrement risk; attacker-controllable
 //! evidence may add risk or repay a specific debt, never subtract it.
 //! Mirrored in the canonical risk Lua and in the PHP risk package.
-//! observability — the cancellation is a resource-lifecycle operation
-//! (the record is terminalized and the live-cap bookkeeping freed), never
-//! a debt refund. Cancellation is client-influenceable (the endpoint
-//! accepts possession of a pending nonce), so it must never erase the
-//! issued-but-unsolved signal.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};

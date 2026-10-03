@@ -617,7 +617,10 @@ if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or rec['obligationId'] ~= ARGV[2] then
+if rec == nil or not isValidChainRecord(rec) then
+  return 'corrupt'
+end
+if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -626,7 +629,7 @@ if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
-if mapped == false then
+if not mapped then
   return 'already_completed'
 end
 if mapped ~= ARGV[1] then
@@ -647,7 +650,7 @@ end
 rec['state'] = 'denied'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'denied_new'
 LUA;
@@ -699,7 +702,10 @@ if chainKeyLifetimeMissing(tonumber(redis.call('PTTL', KEYS[1]))) then
   return 'corrupt'
 end
 local rec = decodeUniqueObject(existing)
-if rec == nil or rec['obligationId'] ~= ARGV[2] then
+if rec == nil or not isValidChainRecord(rec) then
+  return 'corrupt'
+end
+if rec['obligationId'] ~= ARGV[2] then
   return 'obligation_moved'
 end
 -- The signed-expiry guard: an expired-but-live record is stale, never
@@ -708,7 +714,7 @@ if chainRecordExpired(rec, tonumber(redis.call('TIME')[1])) then
   return 'missing'
 end
 local mapped = redis.call('GET', KEYS[2])
-if mapped == false then
+if not mapped then
   return 'already_completed'
 end
 if mapped ~= ARGV[1] then
@@ -729,7 +735,7 @@ end
 rec['state'] = 'step_up_required'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return 'step_up_required_new'
 LUA;
@@ -767,7 +773,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 rec['stage2Nonce'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
@@ -811,7 +817,7 @@ end
 rec['state'] = 'available'
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return true
 LUA;
@@ -870,7 +876,7 @@ rec['state'] = 'completed'
 rec['stage2Nonce'] = ARGV[2]
 rec['owner'] = cjson.null
 rec['leaseUntil'] = cjson.null
-  rec['reservedRequirementGeneration'] = cjson.null
+rec['reservedRequirementGeneration'] = cjson.null
 redis.call('SET', KEYS[1], cjson.encode(rec), 'KEEPTTL')
 return cjson.encode(rec)
 LUA;

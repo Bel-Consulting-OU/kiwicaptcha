@@ -866,8 +866,9 @@ Validation notes:
 - `difficulty_bits`: SHA-256 difficulty, 1..=20 (the browser solver
   ceiling); the config tree ceiling tracks the core constant. The
   default 18 is the ordinary baseline (mean ≈ 262k hashes, p99 ≈
-  1.21M, exhaustion ≈ 5.2×10⁻⁹ within the solver cap); 20 is the
-  elevated rung, reached via adaptive risk escalation.
+  1.21M, exhaustion ≈ 7.3×10⁻³⁴ within the 20,000,000-hash solver
+  cap); 20 is the elevated rung (exhaustion ≈ 5.2×10⁻⁹ within the
+  same cap), reached via adaptive risk escalation.
 - `argon_t >= 3` and `argon_p == 1`: the intentional Argon2id protocol
   profile (libsodium's raw Argon2id interface, so Rust and PHP verify
   identical hashes).
@@ -1340,19 +1341,36 @@ kiwi_captcha:
         #                                   # fixed-window issuance cap
         #                                   # (0 = unlimited); > 0 requires
         #                                   # Redis; the window key carries
-        #                                   # hex(hmac_sha256(scope, K_scope))
-        #                                   # — the raw scope is never a
-        #                                   # Redis key component
+        #                                   # the canonical server-owned
+        #                                   # scope id (UNKNOWN_QUOTA_ID for
+        #                                   # an unmapped scope) — the raw
+        #                                   # scope is never a Redis key
+        #                                   # component
         #     policy_version: 1             # CHALLENGE security-policy epoch,
         #                                   # signed into every issued record
-        #                                   # and enforced at verification —
-        #                                   # BUMP it to immediately
-        #                                   # invalidate ALL outstanding
-        #                                   # challenges (origin/action-policy
-        #                                   # changes, emergency revocation,
-        #                                   # compromised tenant); cosmetic
-        #                                   # changes must NOT bump it.
-        #                                   # Independent of the risk-v1
+        #                                   # and enforced at verification. A
+        #                                   # node stamps and enforces the
+        #                                   # effective epoch max(configured,
+        #                                   # central min_policy_epoch):
+        #                                   # raising the central
+        #                                   # {kiwi:<ns>}:security-policy
+        #                                   # min_policy_epoch revokes only
+        #                                   # older challenges while new
+        #                                   # issuances verify immediately,
+        #                                   # and the readiness probe stays
+        #                                   # ready for a node whose configured
+        #                                   # value is behind. The strict-
+        #                                   # equality contract stays — a record
+        #                                   # stamped under a different
+        #                                   # effective epoch is rejected with
+        #                                   # WrongPolicyVersion. Changing this
+        #                                   # configured value is a coordinated
+        #                                   # cutover, not a local restart:
+        #                                   # previously issued challenges are
+        #                                   # invalidated across every node
+        #                                   # that follows the central state.
+        #                                   # Cosmetic changes must NOT bump
+        #                                   # it. Independent of the risk-v1
         #                                   # contract version.
         #     weights: { ... }              # 13 risk-v1 weights (defaults = contract)
         #     global_floors:                # minimum action per global level

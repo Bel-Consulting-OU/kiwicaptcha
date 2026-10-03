@@ -82,7 +82,7 @@ steps:
       - bash tools/ci/release-governance-fixture.sh
       - |
         set -eu
-        for f in risk-v1.lua calibration.lua confirm.lua correction.lua \
+        for f in risk-v1.lua assess_v2.lua calibration.lua confirm.lua correction.lua \
                   outcome_confirm.lua outcome_correct.lua outcome_register.lua \
                   register_decision.lua sampling_metrics.lua; do
           test -f "protocol/risk-v1/$$f"
@@ -91,7 +91,7 @@ steps:
           cmp -s "protocol/risk-v1/$$f" "packages/kiwicaptcha-risk/resources/$$f"
           cmp -s "protocol/risk-v1/$$f" "packages/kiwicaptcha-risk-php/resources/$$f"
         done
-        echo "all canonical Lua copies byte-identical"
+        echo "all 10 canonical Lua copies byte-identical"
       - |
         set -eu
         PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'

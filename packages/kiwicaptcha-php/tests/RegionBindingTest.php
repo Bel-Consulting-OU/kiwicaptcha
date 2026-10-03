@@ -173,6 +173,7 @@ final class RegionBindingTest extends TestCase
             $recordA->region,
             $recordA->policyVersion ?? 1,
             $recordA->requestBinding,
+            serverMacCommitted: true,
         );
         $canonicalB = Issuer::canonicalPayload(
             2,
@@ -191,6 +192,7 @@ final class RegionBindingTest extends TestCase
             $recordB->region,
             $recordB->policyVersion ?? 1,
             $recordB->requestBinding,
+            serverMacCommitted: true,
         );
         foreach ([[$recordA, $canonicalA, 'eu'], [$recordB, $canonicalB, 'us']] as [$record, $canonical, $region]) {
             self::assertStringContainsString('|'.$region.'|1|', $canonical, 'the canonical must carry region then policy_version');

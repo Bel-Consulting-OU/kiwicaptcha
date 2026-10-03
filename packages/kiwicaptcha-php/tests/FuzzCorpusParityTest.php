@@ -13,7 +13,7 @@ use PHPUnit\Framework\TestCase;
  * corpus (protocol/risk-v1/fuzz-corpus.json, 1000 mutations of a valid
  * record, seed 0x5EED0001) must be accepted and rejected identically by
  * the PHP and Rust parsers. The Rust side pins 576 accepted records
- * under the shared serde boundary (protocol_version 1..4, kid >= 1,
+ * under the shared serde boundary (protocol_version 1..5, kid >= 1,
  * policy_version >= 1); fromArray is the strict serde mirror, so it
  * must land on the same 576.
  */

@@ -823,6 +823,52 @@ final class RealRedisChainedChallengeTest extends TestCase
         }
     }
 
+    public function testTransactionTerminalizationRefusesAStructurallyCorruptRecordAgainstRealRedis(): void
+    {
+        // The store's live pre-read refuses a corrupt record, so the Lua
+        // guard is pinned directly: a record whose rank contradicts its
+        // action would pass the old decode-only obligation check and
+        // transition, but the strict v2 predicate must answer 'corrupt'
+        // with zero writes, even with a matching obligation and mapping.
+        $obligationId = str_repeat('a', 64);
+        $chainId = 'corrupt-terminalization';
+        $recordKey = '{kiwi:'.self::NAMESPACE.'}:chain:'.$chainId;
+        $obligationKey = '{kiwi:'.self::NAMESPACE.'}:chain-obligation:'.$obligationId;
+        $corrupt = [
+            'v' => 2,
+            'stage1Nonce' => $this->nonce(),
+            'scope' => 'login',
+            'obligationId' => $obligationId,
+            'requiredAction' => 'sha20',
+            'requiredRank' => 8,
+            'policyVersion' => 1,
+            'chainDepth' => 2,
+            'state' => 'available',
+            'owner' => null,
+            'leaseUntil' => null,
+            'stage2Nonce' => null,
+            'requestBinding' => 'auth',
+            'expiresAt' => time() + 300,
+            'requirementGeneration' => 1,
+            'reservedRequirementGeneration' => null,
+        ];
+        $raw = (string) json_encode($corrupt, JSON_THROW_ON_ERROR);
+        $this->client->set($recordKey, $raw, 'EX', 300);
+        $this->client->set($obligationKey, $chainId, 'EX', 300);
+
+        $reflection = new \ReflectionClass(RedisChainedChallengeStateStore::class);
+        $scripts = [
+            'MARK_TRANSACTION_DENIED_LUA' => 'denied',
+            'MARK_TRANSACTION_STEP_UP_REQUIRED_LUA' => 'step-up',
+        ];
+        foreach ($scripts as $constant => $label) {
+            $script = (string) $reflection->getConstant($constant);
+            $result = $this->client->eval($script, 2, $recordKey, $obligationKey, $chainId, $obligationId);
+            self::assertSame('corrupt', $result, $label.': a structurally corrupt record must answer corrupt');
+            self::assertSame($raw, (string) $this->client->get($recordKey), $label.': the corrupt record is never transitioned');
+        }
+    }
+
     public function testIssuedStage2NonceStaysTerminalAfterAnotherTokensTransactionTerminalization(): void
     {
         // THE critical scenario over real Redis: the chain is issued(S);

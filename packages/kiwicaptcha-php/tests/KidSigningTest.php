@@ -109,7 +109,7 @@ final class KidSigningTest extends TestCase
         [$record] = $this->issue(kid: 2);
 
         $canonical = base64_decode(explode('.', $record->challenge)[0], true);
-        self::assertStringEndsWith('|2', (string) $canonical, 'the canonical must end with the kid segment');
+        self::assertStringEndsWith('|2|m=1', (string) $canonical, 'the canonical must end with the kid segment and the m= marker');
         self::assertSame('2', explode('|', (string) $canonical)[18], 'kid is the 19th (final base) canonical field, after issuer');
     }
 

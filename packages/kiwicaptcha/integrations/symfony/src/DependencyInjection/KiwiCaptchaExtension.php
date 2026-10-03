@@ -1974,11 +1974,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // runs. /health/ready is 200 only when the signing keys are
         // configured, the security Redis answers a (cached) PING and the
         // central security-policy state is compatible
-        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 4,
-        // min_execution_version <= the generator max and min_policy_epoch
-        // <= risk.policy_version; key absent = the binary's own config is
-        // authoritative). Argon queue fullness and transient probe
-        // timeouts never fail readiness.
+        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 5,
+        // min_execution_version <= the generator max; key absent = the
+        // binary's own config is authoritative; a central min_policy_epoch
+        // above risk.policy_version is a warning only — issuance follows
+        // max(configured, central) and the node stays ready). Argon queue
+        // fullness and transient probe timeouts never fail readiness.
         // When the execution dimension is armed (risk.execution_challenge
         // on), readiness additionally requires the required execution
         // tier to be satisfiable against the effective fleet tier
@@ -2079,6 +2080,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $dispositionTtlSecs,
                 $riskConfig['redis']['wait_replicas'],
                 $riskConfig['redis']['wait_timeout_ms'],
+                // The chain store resolves the obligation provenance for
+                // the disposition guard. On migrating_v2 a pre-cutover
+                // obligation lives in the legacy namespace, which the
+                // primary script cannot read, so a Pass candidate is
+                // refused rather than accepted blind. Null when chaining
+                // is not wired.
+                $chainStoreRef,
             ]));
             $dispositionStoreRef = new Reference(RedisPostSolveDispositionStore::class);
         } else {

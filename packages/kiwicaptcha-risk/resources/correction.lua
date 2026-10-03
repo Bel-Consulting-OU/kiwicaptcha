@@ -9,10 +9,18 @@
 --                           string only)
 --
 -- KEYS[1]  outcome ledger entry (STRING, JSON
---          {"o","scope","hour","score","w","c"}), where `c` records
+--          {"o","scope","hour","score","w","c","v"}), where `c` records
 --          whether the first confirmation contributed a calibration
 --          sample (1) or was deliberately unsampled (0); a legacy
---          ledger without `c` reads as 0
+--          ledger without `c` reads as 0. `v` marks the writer
+--          generation: 2 means the ledger was written by the
+--          generation-2 writer (which stamps v = 2 on every first
+--          confirmation, counted or deliberately unsampled c=0). The
+--          clipped legit_above_sum / abuse_below_sum legs are reversed
+--          and redone only for a counted v=2 sample (ledger.c == 1 AND
+--          ledger.v == 2); an unsampled ledger (c=0) only flips the
+--          outcome, and a legacy ledger (no v) reverses the count and
+--          score sums without touching the clipped legs.
 -- KEYS[2]  DECISION-TIME calibration bucket (scope, ledger.hour)
 -- ARGV[1]  new outcome ('L' = legitimate, 'A' = abuse)
 -- ARGV[2]  weight (decimal string; the inverse sampling probability, 1
@@ -33,12 +41,20 @@
 -- The correction of a counted sample REVERSES the original contribution
 -- using the exact weight recorded by the first confirmation (ledger.w)
 -- and adds the corrected contribution: abuse_count/abuse_score_sum <->
--- legit_count/legit_score_sum. If the decision-time bucket has already
--- expired (outside the calibration window), the ledger still flips — the
--- corrected outcome is authoritative for future events while the
--- superseded ephemeral reputation pressure is left to decay naturally
--- (Kiwi does not pretend to reverse already-decayed leaky counters).
--- Reversed fields are clamped at zero.
+-- legit_count/legit_score_sum. The clipped legs
+-- (legit_above_sum / abuse_below_sum) are reversed and redone only for
+-- a counted v=2 sample (ledger.c == 1 AND ledger.v == 2); an unsampled
+-- confirmation (c=0) contributes no bucket sample at all, and a legacy
+-- ledger (no v) never wrote the clipped terms. Such a legacy ledger
+-- still reverses the count/score sums, yet never touches the clipped
+-- sums, because the bucket may hold post-upgrade counted samples whose
+-- clipped terms are not this decision's to subtract. If
+-- the decision-time bucket has already expired (outside the calibration
+-- window), the ledger still flips — the corrected outcome is
+-- authoritative for future events while the superseded ephemeral
+-- reputation pressure is left to decay naturally (Kiwi does not pretend
+-- to reverse already-decayed leaky counters). Reversed fields are
+-- clamped at zero.
 --
 -- ALL arguments are validated BEFORE the first read or write: the new
 -- outcome, the weight and both TTLs. A malformed retry therefore leaves
@@ -109,6 +125,13 @@ if score > 1000 then score = 1000 end
 -- Reverse the original contribution (exact recorded weight).
 local old_w = tonumber(ledger.w or 1)
 local counted = tonumber(ledger.c or 0) == 1
+-- The writer-generation marker: only a counted v=2 sample's
+-- confirmation wrote the clipped terms, so only its correction
+-- reverses and redoes them. An unsampled ledger (c=0) only flips the
+-- outcome, and a legacy ledger (no v) reverses the count/score sums
+-- alone: the bucket may hold post-upgrade samples whose clipped terms
+-- are not this decision's to subtract.
+local clipped = tonumber(ledger.v or 0) == 2
 
 -- PRODUCT GUARD (pre-mutation, the calibration.lua non-finite-guard style):
 -- both bucket contributions are score * weight products (the reversal uses
@@ -134,15 +157,19 @@ if counted then
     if ledger.o == 'L' then
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_count', -old_w)
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_score_sum', -(score * old_w))
-        local old_above = score - BOUNDARY_T
-        if old_above < 0 then old_above = 0 end
-        redis.call('HINCRBYFLOAT', KEYS[2], 'legit_above_sum', -(old_above * old_w))
+        if clipped then
+            local old_above = score - BOUNDARY_T
+            if old_above < 0 then old_above = 0 end
+            redis.call('HINCRBYFLOAT', KEYS[2], 'legit_above_sum', -(old_above * old_w))
+        end
     else
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_count', -old_w)
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_score_sum', -(score * old_w))
-        local old_below = BOUNDARY_T - score
-        if old_below < 0 then old_below = 0 end
-        redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_below_sum', -(old_below * old_w))
+        if clipped then
+            local old_below = BOUNDARY_T - score
+            if old_below < 0 then old_below = 0 end
+            redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_below_sum', -(old_below * old_w))
+        end
     end
 
     -- Clamp the reversed fields at zero.
@@ -154,24 +181,30 @@ if counted then
     end
     clamp_field('legit_count')
     clamp_field('legit_score_sum')
-    clamp_field('legit_above_sum')
     clamp_field('abuse_count')
     clamp_field('abuse_score_sum')
-    clamp_field('abuse_below_sum')
+    if clipped then
+        clamp_field('legit_above_sum')
+        clamp_field('abuse_below_sum')
+    end
 
     -- Add the corrected contribution.
     if new_o == 'L' then
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_count', weight)
         redis.call('HINCRBYFLOAT', KEYS[2], 'legit_score_sum', score * weight)
-        local new_above = score - BOUNDARY_T
-        if new_above < 0 then new_above = 0 end
-        redis.call('HINCRBYFLOAT', KEYS[2], 'legit_above_sum', new_above * weight)
+        if clipped then
+            local new_above = score - BOUNDARY_T
+            if new_above < 0 then new_above = 0 end
+            redis.call('HINCRBYFLOAT', KEYS[2], 'legit_above_sum', new_above * weight)
+        end
     else
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_count', weight)
         redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_score_sum', score * weight)
-        local new_below = BOUNDARY_T - score
-        if new_below < 0 then new_below = 0 end
-        redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_below_sum', new_below * weight)
+        if clipped then
+            local new_below = BOUNDARY_T - score
+            if new_below < 0 then new_below = 0 end
+            redis.call('HINCRBYFLOAT', KEYS[2], 'abuse_below_sum', new_below * weight)
+        end
     end
     redis.call('EXPIRE', KEYS[2], bucket_ttl)
 end

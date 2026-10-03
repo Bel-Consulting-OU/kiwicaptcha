@@ -292,28 +292,41 @@ impl FakeEndpoint {
                         Some(match stored {
                             Some(_) if guard_refuses => "$-1\r\n".to_string(),
                             Some(v) if v.contains("\"state\":\"pending\"") => {
+                                let splice_ready = v.contains("\"operation_identity\":null");
                                 let mut consumed =
                                     v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
-                                if !args[4].is_empty() {
+                                if !args[4].is_empty() && splice_ready {
                                     consumed = consumed.replace(
                                         "\"operation_identity\":null",
                                         &format!("\"operation_identity\":{}", args[4]),
                                     );
                                 }
+                                // The third reply element is the identity-
+                                // splice flag the client contract requires:
+                                // a requested identity that could not be
+                                // spliced must fail the consume closed.
+                                let spliced = args[4].is_empty() || splice_ready;
                                 self.records.lock().unwrap().insert(key, consumed.clone());
-                                format!("*2\r\n${}\r\n{}\r\n:1\r\n", consumed.len(), consumed)
+                                format!(
+                                    "*3\r\n${}\r\n{}\r\n:1\r\n:{}\r\n",
+                                    consumed.len(),
+                                    consumed,
+                                    if spliced { 1 } else { 0 }
+                                )
                             }
                             Some(v) if v.contains("\"state\":\"consumed\"") => {
-                                format!("*2\r\n${}\r\n{}\r\n:0\r\n", v.len(), v)
+                                format!("*3\r\n${}\r\n{}\r\n:0\r\n:1\r\n", v.len(), v)
                             }
                             _ => "$-1\r\n".to_string(),
                         })
                     }
-                    // commit ([`EVALSHA`, sha, numkeys, key, valid, binding]).
-                    // The result is spliced into the stored envelope the
-                    // way the real Lua splice does, so a later
-                    // runtime-state read resolves the committed outcome.
-                    6 if args[4] == "0" || args[4] == "1" => {
+                    // commit ([`EVALSHA`, sha, numkeys, key, valid, binding,
+                    // consumed-result MAC]). The result is spliced into the
+                    // stored envelope the way the real Lua splice does, so a
+                    // later runtime-state read resolves the committed
+                    // outcome (and its MAC, which the hardened retained path
+                    // verifies).
+                    7 if args[4] == "0" || args[4] == "1" => {
                         let key = args[3].clone();
                         let mut records = self.records.lock().unwrap();
                         match records.get_mut(&key) {
@@ -321,13 +334,21 @@ impl FakeEndpoint {
                                 if v.contains("\"state\":\"consumed\"")
                                     && v.contains("\"consumed_result\":null") =>
                             {
-                                let encoded = match args.get(5).filter(|b| !b.is_empty()) {
-                                    Some(binding) => format!(
-                                        r#"{{"valid":{},"binding":"{binding}"}}"#,
-                                        args[4] == "1"
+                                let valid = args[4] == "1";
+                                let binding = args.get(5).filter(|b| !b.is_empty());
+                                let mac = args.get(6).filter(|m| !m.is_empty());
+                                let encoded = match (binding, mac) {
+                                    (Some(binding), Some(mac)) => format!(
+                                        r#"{{"valid":{valid},"binding":"{binding}","mac":"{mac}"}}"#
                                     ),
-                                    None => {
-                                        format!(r#"{{"valid":{},"binding":null}}"#, args[4] == "1")
+                                    (Some(binding), None) => {
+                                        format!(r#"{{"valid":{valid},"binding":"{binding}"}}"#)
+                                    }
+                                    (None, Some(mac)) => format!(
+                                        r#"{{"valid":{valid},"binding":null,"mac":"{mac}"}}"#
+                                    ),
+                                    (None, None) => {
+                                        format!(r#"{{"valid":{valid},"binding":null}}"#)
                                     }
                                 };
                                 *v = v.replace(

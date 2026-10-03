@@ -24,6 +24,40 @@ final class Configuration implements ConfigurationInterface
 {
     private const RISK_ACTIONS = ['allow', 'sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'step_up', 'deny'];
 
+    /**
+     * True when the configured value is an unresolved Symfony env
+     * placeholder (`%env(...)%`) or its resolved placeholder form, or the
+     * empty-string type fixture Symfony's ValidateEnvPlaceholdersPass
+     * substitutes when it re-processes this tree. Such a value is resolved
+     * at runtime, so a compile-time length floor cannot judge it; the same
+     * floor is enforced when the core Config/service is constructed,
+     * exactly like secret_key.
+     */
+    private static function isEnvPlaceholder(mixed $v): bool
+    {
+        if (!\is_string($v)) {
+            return false;
+        }
+        if ($v === '') {
+            return true;
+        }
+
+        return preg_match('/^%env\([^%]+\)%$/D', $v) === 1
+            || preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $v) === 1;
+    }
+
+    /**
+     * True when the literal configured secret is under the core
+     * `Config::MIN_SECRET_BYTES` floor. An env placeholder is not a
+     * literal secret and is not judged here (see isEnvPlaceholder()).
+     */
+    private static function isShortSecret(mixed $v): bool
+    {
+        return \is_string($v)
+            && !self::isEnvPlaceholder($v)
+            && \strlen($v) < Config::MIN_SECRET_BYTES;
+    }
+
     public function getConfigTreeBuilder(): TreeBuilder
     {
         $treeBuilder = new TreeBuilder('kiwi_captcha');
@@ -66,7 +100,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(1)
                 ->end()
                 ->arrayNode('secrets_by_kid')
-                    ->info('Verification-only secrets for historical signing key ids (map of canonical kid => secret, each >= 16 bytes). Rotation: move the superseded old kid and its key here, update secret_key to the new key, then bump kid — the current kid must never appear in this map. Verification of records signed under superseded kids uses these secrets.')
+                    ->info('Verification-only secrets for historical signing key ids (map of canonical kid => secret, each >= 32 bytes, the same floor as secret_key). Rotation: move the superseded old kid and its key here, update secret_key to the new key, then bump kid — the current kid must never appear in this map. Verification of records signed under superseded kids uses these secrets.')
                     ->scalarPrototype()->end()
                     ->useAttributeAsKey('kid')
                     ->normalizeKeys(false)
@@ -117,15 +151,15 @@ final class Configuration implements ConfigurationInterface
                     ->end()
                     ->validate()
                         ->ifTrue(static function (array $secrets): bool {
-                            foreach ($secrets as $k => $v) {
-                                if (!\is_string($v) || \strlen($v) < 16) {
+                            foreach ($secrets as $v) {
+                                if (!\is_string($v) || self::isShortSecret($v)) {
                                     return true;
                                 }
                             }
 
                             return false;
                         })
-                        ->thenInvalid('secrets_by_kid values must be strings of at least 16 bytes')
+                        ->thenInvalid('secrets_by_kid values must be strings of at least 32 bytes (the core Config::MIN_SECRET_BYTES floor): a shorter historical key cannot verify and would only surface when a rotation makes it live. Rotate to a randomly generated 32-byte-or-longer secret. An %%env()%% placeholder is length-checked at runtime by the verifier constructor')
                     ->end()
                 ->end()
                 ->arrayNode('revoked_kids')
@@ -253,7 +287,7 @@ final class Configuration implements ConfigurationInterface
                     ->min(1)
                 ->end()
                 ->integerNode('difficulty_bits')
-                    ->info('Leading zero bits for SHA-256 challenges (default 18). 18 is the ordinary baseline: mean ≈ 262k hashes, p99 ≈ 1.21M, and exhaustion within the widget\'s 5,000,000-hash cap ≈ 5.2×10⁻⁹. 20 is the elevated rung, reached via adaptive risk escalation (Argon and StepUp sit above it) — as the default it would collapse the ladder, because the risk resolver treats the configured difficulty as the floor and Allow/SHA16/SHA18/SHA20 would all issue SHA20, whose 5,000,000-hash exhaustion probability is ≈ 0.8494% (about 1 in 118 legitimate solves).')
+                    ->info('Leading zero bits for SHA-256 challenges (default 18). 18 is the ordinary baseline: mean ≈ 262k hashes, p99 ≈ 1.21M, and exhaustion within the widget\'s 20,000,000-hash cap is cryptographically negligible (≈ 7.3×10⁻³⁴). 20 is the elevated rung, reached via adaptive risk escalation (Argon and StepUp sit above it) — as the default it would collapse the ladder, because the risk resolver treats the configured difficulty as the floor and Allow/SHA16/SHA18/SHA20 would all issue SHA20, whose 20,000,000-hash exhaustion probability is ≈ 5.2×10⁻⁹.')
                     ->defaultValue(18)
                     ->min(1)
                     // Do not re-derive the protocol ceiling here: the single
@@ -467,7 +501,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultNull()
                         ->end()
                         ->scalarNode('namespace')
-                            ->info('Per-deployment discriminator for the risk Redis keys (hash tag {kiwi:<namespace>}). Defaults to kernel.project_dir; sanitized to [A-Za-z0-9_.-]. Two deployments sharing one Redis instance must use different namespaces so their risk state does not compete.')
+                            ->info('Per-deployment discriminator for the risk Redis keys (hash tag {kiwi:<namespace>}). Defaults to kernel.project_dir; derived into the key segment through the versioned namespace derivation (namespace_key_version): version 1 sanitizes to [A-Za-z0-9_.-], version 2 emits the digest form (n_ + the first 128 bits of SHA-256 over the complete raw bytes). Two deployments sharing one Redis instance must use different namespaces so their risk state does not compete.')
                             ->defaultValue('%kernel.project_dir%')
                         ->end()
                         ->scalarNode('master_secret')
@@ -567,7 +601,7 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->integerNode('policy_version')
-                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification: bumping it (origin/action-policy changes, emergency revocation, compromised tenant) immediately invalidates ALL outstanding challenges — the verifier rejects any record whose policy_version differs from the configured value with WrongPolicyVersion. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
+                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification. A node stamps and enforces max(configured, central min_policy_epoch), so raising the central {kiwi:<ns>}:security-policy min_policy_epoch above this configured value revokes only older challenges: every node follows the central epoch, the readiness probe stays ready for a node whose configured value is behind, and new issuances verify immediately. The strict-equality contract stays: a record stamped under a different effective epoch is rejected with WrongPolicyVersion. Changing this configured value is therefore a coordinated cutover, not a local restart, because the node's own previously issued challenges (stamped under the old value) are invalidated across every node that follows the central state. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
                             ->defaultValue(1)
                             ->min(1)
                         ->end()
@@ -762,11 +796,11 @@ final class Configuration implements ConfigurationInterface
                                     ->max(60)
                                 ->end()
                                 ->scalarNode('hmac_secret')
-                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret of at least 16 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter configured secret is refused at compile time. When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
+                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal secret is refused at compile time and an env-resolved secret is floor-checked when the ticket service is constructed (an env placeholder cannot be judged at build time). When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
                                     ->defaultNull()
                                     ->validate()
-                                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
-                                        ->thenInvalid('risk.chaining.hmac_secret must be a string of at least 16 bytes when configured')
+                                        ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
+                                        ->thenInvalid('risk.chaining.hmac_secret must be a string of at least 32 bytes when configured (the core Config::MIN_SECRET_BYTES floor): a shorter ticket-signing key is not a rotation-grade secret. An %%env()%% placeholder is length-checked when the ticket service is constructed')
                                     ->end()
                                 ->end()
                             ->end()
@@ -1016,7 +1050,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultNull()
                         ->end()
                         ->arrayNode('health')
-                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 4 (this binary\'s max protocol: the execution-capable v4 canonical) AND min_policy_epoch <= risk.policy_version; when absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
+                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 5 (this binary\'s max protocol: the identity-bearing rsw v5 canonical) and min_execution_version <= the binary execution max. A central min_policy_epoch above the configured risk.policy_version no longer takes the node out of the pool: issuance stamps the effective epoch max(configured, central), so the node follows a central bump, and the lag is logged as a warning instead of failing readiness. When the key is absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->booleanNode('enabled')->defaultTrue()->end()
@@ -1072,8 +1106,8 @@ final class Configuration implements ConfigurationInterface
                     ->info('EXECUTIONCHALLENGEV1 KEYED-PRF KEY (string of at least 32 bytes, default null): the secret that generates the deterministic browser-execution programs (the Cap-style dimension, see ExecutionChallengeGenerator). Null (default) = execution challenges are never issued — arming without the key is refused. The key NEVER leaves the server: it only feeds the program generator; the browser digest uses the program blob itself as its content-derived key, so the deployment can rotate it without invalidating outstanding challenges. Requires the risk.execution_challenge gate to be on to have any effect; the gate on without a key is deliberately INERT (no execution program is ever issued) and the kiwicaptcha:doctor command flags it as a WARN.')
                     ->defaultNull()
                     ->validate()
-                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
-                        ->thenInvalid('execution_key must be a string of at least 16 bytes when configured')
+                        ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
+                        ->thenInvalid('execution_key must be a string of at least 32 bytes when configured (the core Config::MIN_EXECUTION_KEY_BYTES floor): a shorter keyed-PRF key weakens the execution dimension and rotation safety. An %%env()%% placeholder is length-checked when the core Config is constructed')
                     ->end()
                 ->end()
                 ->integerNode('execution_version')

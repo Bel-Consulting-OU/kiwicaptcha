@@ -32,8 +32,11 @@ use Predis\Response\ServerException;
  * only samples that landed on the wrong side of the boundary the policy
  * switches on move the bias. The clipped distances are accumulated per
  * sample at confirmation and reversed/redone by correction
- * (legit_above_sum / abuse_below_sum; legacy buckets without them
- * contribute 0). Only human- or support-verified outcomes should feed confirmOutcome,
+ * (legit_above_sum / abuse_below_sum). Only a v=2 ledger (the confirmation
+ * wrote the clipped terms) is reversed that way; a legacy ledger without
+ * `v` reverses the count/score sums alone, never the clipped sums. Legacy
+ * buckets without clipped terms contribute 0. Only human- or
+ * support-verified outcomes should feed confirmOutcome,
  * never an automatic success signal such as any successful login: a
  * credentialed attacker can otherwise manufacture "legitimate" labels
  * and pull the bias down. Class normalization removes label-volume
@@ -63,11 +66,16 @@ use Predis\Response\ServerException;
  * {"o":"P","scope","hour","score","w"}) atomically with the receipt and
  * denominator. confirm.lua performs the ledger CAS pending ->
  * legitimate/abuse exactly once, records whether the confirmation
- * contributed a calibration sample (`c`), and, as the downstream
- * observer, records the calibration bucket contribution. correction.lua
- * validates its arguments first, refuses a pending ledger (confirmation
- * is the only transition out of pending) and flips the ledger L <-> A,
- * reversing/redoing the bucket contribution only when `c == 1`. Confirmed outcomes work identically with or without
+ * contributed a calibration sample (`c`). It records the clipped-sums
+ * generation (`v` = 2: this confirmation wrote the legit_above_sum /
+ * abuse_below_sum terms) and, as the downstream observer, the
+ * calibration bucket contribution. correction.lua validates its
+ * arguments first, refuses a pending ledger (confirmation is the only
+ * transition out of pending) and flips the ledger L <-> A,
+ * reversing/redoing the bucket contribution only when `c == 1`. The
+ * clipped legs are reversed/redone only when `v == 2`; a legacy ledger
+ * without `v` reverses the count/score sums alone. Confirmed outcomes
+ * work identically with or without
  * calibration; with calibration disabled the store writes the same ledger
  * (outcome_register/outcome_confirm/outcome_correct.lua) under the same
  * key.
@@ -184,7 +192,9 @@ final class AggregateCalibrator implements CalibrationStore
      * (ledger.scope, ledger.hour). Its argv is the new outcome ('L'/'A'),
      * weight (decimal string; validated), bucket TTL (seconds),
      * outcome-ledger TTL (seconds), expected scope and expected
-     * decision_hour. It returns 1 when applied, 0 when
+     * decision_hour. The clipped legs are reversed/redone only when the
+     * ledger carries v == 2; a legacy ledger without `v` reverses the
+     * count/score sums alone. It returns 1 when applied, 0 when
      * unknown/expired/already target.
      *
      * sampling_metrics.lua computes per-scope sampling statistics: keys
@@ -473,7 +483,7 @@ final class AggregateCalibrator implements CalibrationStore
             [$receiptKey, $bucketKey, $ledgerKey],
             [
                 (string) $mode,
-                (string) ($weight ?? 1.0),
+                self::weightText($weight ?? 1.0),
                 $legitimate ? '1' : '0',
                 (string) self::BUCKET_TTL_SECS,
                 (string) $this->outcomeTtlSecs,
@@ -498,6 +508,9 @@ final class AggregateCalibrator implements CalibrationStore
      * the corrected contribution. The decision-time bucket key is derived
      * from the ledger's own scope/hour; the pre-read only derives the key,
      * and the script re-validates ledger.scope/hour atomically. The
+     * clipped legit_above_sum / abuse_below_sum legs are reversed and
+     * redone only for a v=2 ledger; a legacy ledger without `v` reverses
+     * the count/score sums alone. The
      * corrected outcome is authoritative for future events. If the
      * decision-time bucket already expired, the ledger still flips and the
      * prior ephemeral reputation pressure decays naturally.
@@ -529,7 +542,7 @@ final class AggregateCalibrator implements CalibrationStore
             [$ledgerKey, $bucketKey],
             [
                 $legitimate ? 'L' : 'A',
-                (string) ($weight ?? 1.0),
+                self::weightText($weight ?? 1.0),
                 (string) self::BUCKET_TTL_SECS,
                 (string) $this->outcomeTtlSecs,
                 (string) $scope,

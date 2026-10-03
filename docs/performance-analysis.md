@@ -257,12 +257,12 @@ execution-interpreter copy (execution-interpreter.js, the lazy
 ExecutionChallengeV1 asset) is 33,039 bytes raw, 9,998 bytes gzip and
 8,675 bytes brotli, against caps of 36,000 / 11,200 / 9,500 bytes; the
 same budgets section also records the measured raw bytes of the worker
-at 145,507 bytes, the wasm glue runtime at 116,196 bytes and the widget
+at 155,097 bytes, the wasm glue runtime at 125,053 bytes and the widget
 stylesheet at 13,014 bytes, each byte-identical across the three
 copies. Since the r8 glue-embedding change the worker row describes the
 assembled release asset (tools/embed-worker: the `var window = self;`
 prelude plus the full wasm glue text plus the worker solver source —
-145,507 raw), so the files-mode worker boots with wasm in scope and
+155,097 raw), so the files-mode worker boots with wasm in scope and
 the optional rsw sequential solver still lives inside the worker's
 solver source; the runtime row quotes the glue asset alone, whose
 embedded workerSource copy is regenerated from that same solver

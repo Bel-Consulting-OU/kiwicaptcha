@@ -174,7 +174,7 @@ procedure and its failure modes are maintainer material in
 
 Execution-armed issuance (`risk.execution_challenge: on`) writes
 protocol v4 — the decoy-capable canonical plus the signed
-`|execution_version|execution_commitment` segments (hex SHA-256 of the
+`|e=execution_version,execution_commitment` segment (hex SHA-256 of the
 stored program) inside the HMAC canonical, so stripping, substituting
 or injecting a program always invalidates the challenge.
 Older binaries reject protocol 4 as unknown, so the same two-phase
@@ -283,11 +283,12 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 2 min_policy_epoch 2
 ```
 
-The issuance side must then also bump `risk.policy_version` before new
-challenges are minted. The monitor revokes old challenges; the issuer
-stamps the new epoch. The max-stale fail-closed window
-(`risk.security_epoch_max_stale_secs`) bounds how long a node serves
-from a cached read: past it, the node stops issuing and verifying
+Issuance stamps the effective epoch max(configured, central
+`min_policy_epoch`), so a central bump revokes older challenges while
+new ones verify immediately. An explicit `risk.policy_version` bump is
+only needed for a coordinated policy cutover. The max-stale fail-closed
+window (`risk.security_epoch_max_stale_secs`) bounds how long a node
+serves from a cached read: past it, the node stops issuing and verifying
 rather than trusting a potentially-revoked cache.
 
 ## Asymmetric result receipts

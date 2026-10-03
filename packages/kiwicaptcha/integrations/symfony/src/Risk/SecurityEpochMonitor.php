@@ -15,8 +15,12 @@ use KiwiCaptcha\Verifier;
  * hash's `min_policy_epoch` field, the same key the readiness probe
  * consults, with a short cache (risk.security_epoch_cache_secs, default
  * 1 s). It feeds the {@see Verifier}'s expected policy epoch per
- * verification, so a central policy bump revokes outstanding challenges
- * within one cache window instead of waiting for a redeploy.
+ * verification. The bundle's issuance path stamps every new record with
+ * the same effective epoch, read through {@see self::currentEpoch()}.
+ * A central bump revokes only older challenges: the outstanding ones
+ * fall outside the expected epoch within one cache window, while new
+ * challenges verify immediately on every node that follows the central
+ * state. The revocation path stays independent of deploys.
  *
  * The same cached central read also exposes the `min_protocol_version`
  * field, the fleet-wide writer floor the challenge controller consults
@@ -66,18 +70,23 @@ use KiwiCaptcha\Verifier;
  *     challenge controller refuses issuance with 503
  *     `SERVICE_UNAVAILABLE`. Within the
  *     window the cached max keeps serving, so availability is preserved
- *     for a bounded outage. A monitor without a Redis client is never
- *     stale: "no central state by design" is a configured posture, not a
- *     failure.
+ *     for a bounded outage. A monitor without a Redis client stays
+ *     permanently fresh: "no central state by design" is a configured
+ *     posture rather than a failure.
  *
  * The effective epoch is `max(configuredEpoch, observedMax)`: the local
- * risk.policy_version is the floor, a node never expects less than its own
- * issuance epoch since its own challenges must verify, and the central
- * value only ever raises it. The readiness gate
+ * risk.policy_version is a floor, a node always expects and issues at
+ * least its own configured epoch, and the central value only ever raises
+ * it. The same effective epoch stamps new records through
+ * {@see self::currentEpoch()}. A node whose configured value trails a
+ * central bump still issues challenges that its own verifier accepts
+ * immediately, as does every other node following the central state.
+ * The readiness gate
  * ({@see \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController})
- * keeps a binary whose configured epoch is behind the central epoch out of
- * the pool, so a serving node's configured epoch is always >= the central
- * value.
+ * keeps a binary whose max protocol or execution grammar is behind the
+ * central floors out of the pool. A node whose configured policy epoch
+ * trails the central epoch remains in the pool, because the effective
+ * epoch covers the gap.
  *
  * The epoch is applied to the shared {@see Verifier} via its public
  * {@see Verifier::setExpectedPolicyVersion()} seam: this monitor owns
@@ -169,8 +178,9 @@ final class SecurityEpochMonitor
      *                                                   safety net).
      * @param int                        $configuredEpoch the local
      *                                                   risk.policy_version
-     *                                                   (the floor and the
-     *                                                   issuance-side stamp).
+     *                                                   (the configured
+     *                                                   floor of the
+     *                                                   effective epoch).
      * @param int                        $cacheSecs     short cache window
      *                                                   (risk.security_epoch_cache_secs).
      * @param callable(): float|null     $nowMs         clock override (tests).
@@ -220,6 +230,11 @@ final class SecurityEpochMonitor
      * Re-read the central policy when the cache window elapsed, apply the
      * monotonic max of the epoch to the verifier, refresh the protocol
      * floor, and return the current effective epoch.
+     *
+     * The returned value is the epoch the bundle stamps into new records
+     * (the effective epoch) and the epoch the verifier enforces: a node
+     * whose configured value trails the central state follows the central
+     * value on both sides of the transaction.
      *
      * Never throws: a central-read failure serves the last-observed max
      * (fail-safe) and the last-confirmed protocol floor (null when none

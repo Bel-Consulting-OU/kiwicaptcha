@@ -714,15 +714,13 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $this->writeEnvelope($nonce, $after);
 
         // Only the inert runtime labels may leave a pending record
-        // verifiable, plus the stripped record MAC on this floorless
-        // issuance (the clock and hostname are then unauthenticated and
-        // never reported; pinned by the dedicated test). A tamper that
-        // is a no-op on this state (a result-field rewrite on a record
-        // without a result) leaves the untampered outcome. Every
+        // verifiable. A stripped record MAC on an m=1-signed issuance is
+        // no longer among them: the signed marker refuses it. A tamper
+        // that is a no-op on this state (a result-field rewrite on a
+        // record without a result) leaves the untampered outcome. Every
         // metadata rewrite under the MAC fails closed.
         $mayVerify = $state === 'pending'
             && ($after === $before
-                || \in_array($label, ['server_mac stripped', 'hostname injected with the mac stripped'], true)
                 || \in_array($label, self::pendingInertLabels(), true));
         $this->assertVerifierFailClosed($storage, $nonce, $token, $state, $label, $before, $after, $mayVerify);
         // The store-boundary probes run after the verifier assertions:
@@ -1044,10 +1042,12 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
     /**
      * The hostname and issued_at_ns are outside the challenge HMAC but
      * covered by the record-metadata MAC: any rewrite fails at the
-     * record-signature gate. A stripped MAC fails closed under a floor
-     * (MalformedRecord); on a floorless record the stripped MAC still
-     * verifies but reports neither a duration nor a hostname, so a
-     * writer can suppress that evidence, never fabricate it.
+     * record-signature gate. A stripped MAC on a record signed with the
+     * m=1 marker fails closed (BadSignature); the only floorless path is
+     * a record whose canonical was signed without the marker — an absent
+     * MAC there still verifies but reports neither a duration nor a
+     * hostname, so a writer can suppress that evidence, never fabricate
+     * it.
      */
     public function testServerMetadataTamperFailsClosedUnderTheRecordMac(): void
     {
@@ -1084,14 +1084,54 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $data4['issued_at_ns'] = (int) $data4['issued_at_ns'] - 60_000_000;
         $this->writeEnvelope($nonce4, $data4);
         $stripped = $this->verifier($storage4)->verify($token4, self::SECRET, 'login', self::CLIENT_IP, $at);
-        self::assertSame(VerifyError::MalformedRecord, $stripped->error, 'a floor without the record-metadata MAC fails closed');
+        self::assertSame(VerifyError::BadSignature, $stripped->error, 'a stripped MAC breaks the signed m=1 marker');
 
+        // The documented floorless path: a record signed without the
+        // marker accepts an absent MAC. The production issuer always
+        // seals one, so the test re-signs the canonical without it.
         [$storage5, $nonce5, $token5] = $this->issueAndSolve();
+        $record5 = $storage5->find($nonce5);
+        self::assertNotNull($record5);
         $data5 = $this->envelope($nonce5);
         unset($data5['server_mac']);
+        $canonical5 = Issuer::canonicalPayload(
+            $record5->protocolVersion,
+            $record5->nonce,
+            $record5->scope,
+            $record5->bindingTag,
+            $record5->issuedAt,
+            $record5->expiresAt,
+            $record5->algorithm,
+            $record5->mKib,
+            $record5->t,
+            $record5->p,
+            $record5->targetBits,
+            $record5->salt,
+            $record5->minDurationMs,
+            $record5->region,
+            $record5->policyVersion ?? 1,
+            $record5->requestBinding,
+            $record5->issuer,
+            $record5->kid ?? 1,
+            $record5->decoyField,
+            $record5->executionVersion,
+            $record5->executionCommitment,
+            $record5->rswModulusSha256,
+        );
+        $data5['challenge'] = base64_encode($canonical5).'.'.Issuer::signPayloadV2($canonical5, self::SECRET);
+        $data5['prefix'] = $data5['challenge'].'|'.$data5['salt'].'|';
         $data5['hostname'] = 'evil.example.com';
         $data5['issued_at_ns'] = (int) $data5['issued_at_ns'] - 60_000_000;
         $this->writeEnvelope($nonce5, $data5);
+        // The re-signed canonical changes the prefix, so re-solve the
+        // counter against it.
+        $saltBytes5 = base64_decode((string) $data5['salt'], true);
+        $counter5 = 0;
+        do {
+            $hash = hash('sha256', $data5['prefix'].$counter5.$saltBytes5, true);
+            $counter5++;
+        } while (Verifier::leadingZeroBits($hash) < (int) $data5['target_bits']);
+        $token5 = SolutionToken::create($nonce5, $counter5 - 1, 5000, [])->encode();
         $record5 = $storage5->find($nonce5);
         self::assertNotNull($record5);
         self::assertNull($this->verifier($storage5)->authenticatedHostname($record5, self::SECRET), 'an unauthenticated hostname is never reported');

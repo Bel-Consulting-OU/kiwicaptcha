@@ -16,11 +16,14 @@ use PHPUnit\Framework\TestCase;
  * when the signing keys are configured, the security Redis answers a
  * (cached, debounced) ping, and the central security-policy state
  * ({kiwi:<ns>}:security-policy) is compatible. Compatible means
- * min_protocol_version <= 4 (this binary's max protocol: the
- * execution-capable v4 canonical), min_execution_version <= the
+ * min_protocol_version <= 5 (this binary's max protocol: the
+ * identity-bearing rsw v5 canonical) and min_execution_version <= the
  * generator max (this binary's max execution-program version; an
- * absent execution floor imposes nothing) and min_policy_epoch <= the
- * configured risk.policy_version. When risk.execution_challenge is on
+ * absent execution floor imposes nothing). A central min_policy_epoch
+ * above the configured risk.policy_version is only a logged warning:
+ * issuance and verification follow the effective epoch
+ * max(configured, central) and the node stays ready. When
+ * risk.execution_challenge is on
  * the required execution tier must additionally be satisfiable
  * against the effective fleet tier, or the probe answers 503 with the
  * security_policy_incompatible:execution_required_R_effective_E
@@ -170,15 +173,79 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent());
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsANewerEpoch(): void
+    public function testReadyWithACentralPolicyEpochAheadOfTheConfiguredValue(): void
     {
+        // A central min_policy_epoch above the configured
+        // risk.policy_version no longer takes the node out of the pool:
+        // issuance stamps the effective epoch max(configured, central),
+        // so the node follows the bump. Readiness stays ready, and the
+        // lag is logged as a non-fatal warning.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 2, 2);
+        $this->setPolicy($client, 5, 2);
         $controller = $this->controller($client, policyVersion: 1);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'min_policy_epoch 2 > the configured risk.policy_version 1 — the policy was revoked while this binary still issues under it');
-        self::assertStringContainsString('security_policy_incompatible', (string) $response->getContent());
+        self::assertSame(200, $response->getStatusCode(), 'a central epoch ahead of the configured value must not fail readiness: issuance stamps the effective epoch');
+        self::assertStringNotContainsString('min_policy_epoch', (string) $response->getContent(), 'the lag is a log warning, never a public reason');
+    }
+
+    public function testEpochLagIsLoggedAsANonFatalWarning(): void
+    {
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 5, 3);
+        $logs = [];
+        $logger = new class($logs) extends \Psr\Log\NullLogger {
+            /** @param list<array{message: string, context: array<string,mixed>}> $logs */
+            public function __construct(private array &$logs)
+            {
+            }
+
+            public function warning(string|\Stringable $message, array $context = []): void
+            {
+                $this->logs[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
+        $controller = new KiwiHealthController(
+            self::SECRET,
+            $client,
+            'health-test',
+            1,
+            null,
+            0,
+            null,
+            16384,
+            [],
+            null,
+            false,
+            1,
+            1,
+            \BelConsulting\KiwiCaptchaBundle\RedisNamespace::VERSION_LEGACY,
+            true,
+            $logger,
+        );
+
+        self::assertSame(200, $controller->ready()->getStatusCode());
+        self::assertNotSame([], $logs, 'the epoch lag is logged');
+        $detail = (string) ($logs[0]['context']['detail'] ?? '');
+        self::assertStringContainsString('security policy epoch lag', $detail);
+        self::assertStringContainsString('min_policy_epoch is 3', $detail);
+        self::assertStringContainsString('risk.policy_version is 1', $detail);
+    }
+
+    public function testReadinessCacheKeyIsNamespacedPerDeployment(): void
+    {
+        // Two apps on one APCu segment must never share a readiness
+        // answer: the key digest binds the derived identity (namespace)
+        // and the secret, and never embeds either raw.
+        $a = KiwiHealthController::readinessCacheKey('/srv/app-a', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        $b = KiwiHealthController::readinessCacheKey('/srv/app-b', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+        $c = KiwiHealthController::readinessCacheKey('/srv/app-a', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+
+        self::assertNotSame($a, $b, 'different namespaces derive different keys');
+        self::assertNotSame($a, $c, 'different secrets derive different keys');
+        self::assertStringNotContainsString('/srv/app-a', $a, 'the raw namespace is never embedded');
+        self::assertStringNotContainsString('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', $a, 'the raw secret is never embedded');
+        self::assertStringStartsWith('kiwicaptcha.health.readiness.', $a);
     }
 
     public function testReadyOkWithTheExecutionFloorAtTheBinaryMax(): void

@@ -1608,7 +1608,7 @@ jobs:
         # is asserted to exist in all three locations and byte-compared.
         run: |
           set -euo pipefail
-          for f in risk-v1.lua calibration.lua confirm.lua correction.lua \
+          for f in risk-v1.lua assess_v2.lua calibration.lua confirm.lua correction.lua \
                     outcome_confirm.lua outcome_correct.lua outcome_register.lua \
                     register_decision.lua sampling_metrics.lua; do
             test -f "protocol/risk-v1/$f" || { echo "missing protocol/risk-v1/$f"; exit 1; }
@@ -1619,7 +1619,7 @@ jobs:
             cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk-php/resources/$f" \
               || { echo "mismatch: $f (protocol vs php)"; exit 1; }
           done
-          echo "all 9 canonical Lua copies byte-identical"
+          echo "all 10 canonical Lua copies byte-identical"
 
   rust-redis-verify:
     name: Rust core Redis verifier (redis feature)

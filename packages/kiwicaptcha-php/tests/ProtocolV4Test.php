@@ -100,9 +100,9 @@ final class ProtocolV4Test extends TestCase
         $canonical = base64_decode(substr($record->challenge, 0, strpos($record->challenge, '.')), true);
         self::assertNotFalse($canonical);
         self::assertStringEndsWith(
-            '|e='.$record->executionVersion.','.$record->executionCommitment,
+            '|e='.$record->executionVersion.','.$record->executionCommitment.'|m=1',
             $canonical,
-            'the signed canonical carries the tagged e=version,commitment segment',
+            'the signed canonical carries the tagged e=version,commitment segment and the m= marker',
         );
         // And the verifier's byte-exact reconstruction equals it.
         self::assertSame($canonical, Issuer::canonicalPayload(
@@ -127,6 +127,7 @@ final class ProtocolV4Test extends TestCase
             $record->decoyField,
             $record->executionVersion,
             $record->executionCommitment,
+            serverMacCommitted: true,
         ), 'the canonical payload reconstruction is byte-exact');
 
         // The unarmed twin stays byte-identical to the pre-execution
@@ -138,7 +139,7 @@ final class ProtocolV4Test extends TestCase
         self::assertNull($unarmedRecord->executionVersion);
         self::assertNull($unarmedRecord->executionCommitment);
         $unarmedCanonical = base64_decode(substr($unarmedRecord->challenge, 0, strpos($unarmedRecord->challenge, '.')), true);
-        self::assertStringEndsWith('|1', $unarmedCanonical, 'the unarmed canonical keeps the plain 18-field shape (kid final)');
+        self::assertStringEndsWith('|1|m=1', $unarmedCanonical, 'the unarmed canonical keeps the plain 19-field shape (kid then the m= marker)');
     }
 
     public function testIssuanceVersionMatrix(): void
@@ -153,9 +154,9 @@ final class ProtocolV4Test extends TestCase
         self::assertNotNull($bothRecord->decoyField);
         $bothCanonical = base64_decode(substr($bothRecord->challenge, 0, strpos($bothRecord->challenge, '.')), true);
         self::assertStringEndsWith(
-            '|d='.$bothRecord->decoyField.'|e=1,'.$bothRecord->executionCommitment,
+            '|d='.$bothRecord->decoyField.'|e=1,'.$bothRecord->executionCommitment.'|m=1',
             $bothCanonical,
-            'v4 with a decoy: |d=decoy|e=execution_version,execution_commitment',
+            'v4 with a decoy: |d=decoy|e=execution_version,execution_commitment|m=1',
         );
 
         // Decoy only: protocol v3, no execution segments.
@@ -165,7 +166,7 @@ final class ProtocolV4Test extends TestCase
         self::assertNull($decoyRecord->executionProgram);
         $decoyCanonical = base64_decode(substr($decoyRecord->challenge, 0, strpos($decoyRecord->challenge, '.')), true);
         self::assertStringEndsWith(
-            '|d='.$decoyRecord->decoyField, $decoyCanonical, 'a decoy-only record stays protocol v3');
+            '|d='.$decoyRecord->decoyField.'|m=1', $decoyCanonical, 'a decoy-only record stays protocol v3');
     }
 
     public function testArmedChallengeVerifiesEndToEnd(): void
@@ -471,7 +472,8 @@ final class ProtocolV4Test extends TestCase
 
     public function testV4AcceptedByTheCurrentVerifierAndRejectedByOldGenerations(): void
     {
-        // The current verifier accepts versions 1..4; the parent
+        // The current verifier accepts versions 1..5 (v5 is the rsw
+        // identity canonical); the parent
         // revision (max protocol 2) and the decoy generation (max
         // protocol 3) reject a v4 record as unknown — the explicit
         // capability rule the two-phase rollout protects.
@@ -602,6 +604,8 @@ final class ProtocolV4Test extends TestCase
             executionProgram: $record->executionProgram,
             executionVersion: $version,
             executionCommitment: $record->executionCommitment,
+            rswModulusSha256: $record->rswModulusSha256,
+            serverMac: $record->serverMac,
         );
     }
 }

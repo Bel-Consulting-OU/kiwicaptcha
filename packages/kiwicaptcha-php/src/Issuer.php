@@ -14,7 +14,7 @@ namespace KiwiCaptcha;
  *   binding_tag = HMAC-SHA256 over the canonical IP, see
  *                {@see self::bindingTag()}; nonce-bound, so the stored
  *                binding is never a stable IP-derived identifier.
- *   canonical  = "v3|{protocol_version}|{nonce}|{scope}|{binding_tag}|
+ *   canonical  = "v4|{protocol_version}|{nonce}|{scope}|{binding_tag}|
  *                {issued_at}|{expires_at}|{algorithm}|{m_kib}|{t}|{p}|
  *                {target_bits}|{salt}|{min_duration_ms}|{region}|
  *                {policy_version}|{request_binding}|{issuer}|{kid}".
@@ -25,12 +25,13 @@ namespace KiwiCaptcha;
  *                signed, and every armed extension is appended tagged:
  *                d={decoy_field} (protocol v3+), e={version},
  *                {commitment} (protocol v4+), r={modulus_sha256}
- *                (protocol v5). The tags make the encoding injective.
- *                Revision 2 appended the same values untagged, so a v5
- *                rsw identity could collide with a v3 decoy name. A
- *                stored version flip or extension swap now always
- *                breaks the signature. Unarmed issuance stays protocol
- *                v2 with the same revision-3 base shape.
+ *                (protocol v5), m=1 (the record-metadata MAC marker,
+ *                revision 4). The tags make the encoding injective.
+ *                The m=1 marker commits the sealed server_mac, so
+ *                stripping the MAC breaks the signature. A stored
+ *                version flip or extension swap always breaks the
+ *                signature. Unarmed issuance stays protocol v2 with
+ *                the same revision-4 base shape.
  *                The commitment is the hex SHA-256 of the program's
  *                base64 wire string, so the signed canonical is the
  *                exact mirror of the stored program. Stripping,
@@ -423,8 +424,8 @@ final class Issuer
      * An armed issuance writes protocol v4: the stored record carries
      * `execution_program` plus the authenticated `execution_version`
      * and `execution_commitment` (hex SHA-256 of the program) signed
-     * into the canonical payload as the final
-     * `|execution_version|execution_commitment` segments.
+     * into the canonical payload as the tagged
+     * `|e=execution_version,execution_commitment` segment.
      * Stripping, substituting or injecting a program always breaks the
      * signature.
      *
@@ -716,10 +717,11 @@ final class Issuer
             ? self::executionCommitment($executionProgram)
             : null;
         // The authenticated rsw trapdoor identity (protocol v5): the
-        // canonical-byte modulus fingerprint, signed as the final
-        // canonical segment. It may compose with the decoy/execution
+        // canonical-byte modulus fingerprint, signed as the tagged `r=`
+        // segment. It may compose with the decoy/execution
         // segments (their own signed segments stay authoritative); the
-        // identity is appended last, see {@see self::canonicalPayload()}.
+        // identity is appended before the m= marker, see
+        // {@see self::canonicalPayload()}.
         $rswIdentity = null;
         if ($isRsw
             && $this->config->rswModulusN !== null
@@ -728,7 +730,7 @@ final class Issuer
             $rswIdentity = self::rswModulusSha256($this->config->rswModulusN);
         }
         // The protocol version is part of the signed canonical (revision
-        // 3): a stored version flip must break the signature. Compute it
+        // 4): a stored version flip must break the signature. Compute it
         // before signing and reuse the exact value in the stored record.
         $issuedProtocolVersion = $rswIdentity !== null
             ? ChallengeRecord::RSW_IDENTITY_PROTOCOL_VERSION
@@ -765,6 +767,9 @@ final class Issuer
             // The rsw trapdoor identity: only an identity-armed rsw
             // issuance carries it.
             $rswIdentity,
+            // Every issuance seals a record-metadata MAC below, so the
+            // signed canonical commits the m=1 marker.
+            true,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey, $this->config->tenantId);
 
@@ -774,9 +779,10 @@ final class Issuer
         // hrtime(true) is monotonic and per-host, so it must never be
         // persisted to shared storage). The name/JSON key stay
         // issuedAtNs for ChallengeRecord serialization stability. The
-        // value and the hostname are not part of the signed canonical,
-        // so they are authenticated by the record-metadata MAC under
-        // the server-state purpose key.
+        // value and the hostname are not part of the signed canonical
+        // fields, so the record-metadata MAC authenticates them under
+        // the server-state purpose key; the signed m=1 marker commits
+        // that the MAC exists.
         $issuedAtNs = (int) (microtime(true) * 1_000_000);
         $serverMac = ServerStateMac::recordMeta(
             ServerStateMac::key($this->config->secretKey, $this->config->tenantId),
@@ -802,17 +808,17 @@ final class Issuer
             minDurationMs: $minDurationMs,
             issuedAtNs: $issuedAtNs,
             // Protocol version by arm: an identity-armed rsw record
-            // carries the identity-capable v5 canonical (the final
-            // `|rsw_modulus_sha256` segment), so it is protocol v5 — a
+            // carries the identity-capable v5 canonical (the tagged
+            // `r=` segment before the m= marker), so it is protocol v5 — a
             // pre-v5 verifier rejects the unknown version instead of
             // silently ignoring the identity; an execution-armed record
             // carries the execution-capable canonical (the
-            // `|execution_version|execution_commitment` segments after
-            // the decoy/kid), so it is protocol v4; a decoy-only record
-            // carries the decoy-capable canonical (the `|decoy_field`
-            // segment after the kid), so it is protocol v3; an unarmed
-            // record keeps protocol v2 with the byte-identical 18-field
-            // canonical.
+            // `e=version,commitment` segments after the decoy/kid), so it
+            // is protocol v4; a decoy-only record
+            // carries the decoy-capable canonical (the `d=` segment
+            // after the kid), so it is protocol v3; an unarmed
+            // record keeps protocol v2 with the plain base
+            // canonical and the trailing m= marker.
             protocolVersion: $issuedProtocolVersion,
             region: $this->region,
             policyVersion: $this->config->policyVersion,
@@ -1145,13 +1151,13 @@ final class Issuer
     }
 
     /**
-     * Canonical payload (revision 3): the exact byte string that is
+     * Canonical payload (revision 4): the exact byte string that is
      * signed and base64-encoded into the challenge. Shared with the
      * verifier so issuance and verification can never drift apart.
      *
      * Byte-identical to the Rust `canonical_signing_input_v2`:
      *
-     *     v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|
+     *     v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|
      *       algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|
      *       policy_version|request_binding|issuer|kid
      *
@@ -1164,7 +1170,7 @@ final class Issuer
      * Each armed extension is appended after the base with an explicit
      * tag, in capability order:
      *
-     *     ...|kid|d={decoy_field}|e={version},{commitment}|r={modulus_sha256}
+     *     ...|kid|d={decoy_field}|e={version},{commitment}|r={modulus_sha256}|m=1
      *
      * - `d=` (protocol v3): the armed decoy name, see
      *   {@see self::issueWithDecoyField()}. `null` renders no segment.
@@ -1175,6 +1181,10 @@ final class Issuer
      *   program, and the verifier additionally checks
      *   SHA256(stored program) == commitment.
      * - `r=` (protocol v5): the canonical-byte rsw modulus fingerprint.
+     * - `m=1` (revision 4): the record-metadata MAC marker, appended last
+     *   whenever the record carries a `server_mac`. The marker is what
+     *   makes stripping the MAC break the signature and lets the verifier
+     *   require a valid MAC without trusting the stored MAC presence.
      *
      * # Why the tags and the signed version
      *
@@ -1187,11 +1197,10 @@ final class Issuer
      * reshape a record while keeping a valid signature, for example
      * downgrading v5 to v3 and stripping the rsw identity pinning.
      * Revision 3 signs `protocol_version` and tags every extension, so
-     * distinct capability shapes can never collide. The shared grammar
-     * gate still enforces which shape each version allows. Supporting
-     * both layouts by version would keep the attack alive for stored
-     * records, so revision 3 is a hard cutover: a challenge issued by a
-     * revision-2 node does not verify after a rolling deploy.
+     * distinct capability shapes can never collide. Revision 4 adds the
+     * signed `m=1` marker. Supporting both layouts by version would keep
+     * the attack alive for stored records, so the current revision is a
+     * hard cutover.
      */
     public static function canonicalPayload(
         int $protocolVersion,
@@ -1216,9 +1225,10 @@ final class Issuer
         ?int $executionVersion = null,
         ?string $executionCommitment = null,
         ?string $rswModulusSha256 = null,
+        bool $serverMacCommitted = false,
     ): string {
         $base = sprintf(
-            'v3|%d|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
+            'v4|%d|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
             $protocolVersion,
             $nonce,
             $scope,
@@ -1240,8 +1250,9 @@ final class Issuer
         );
 
         // The decoy segment is appended only when armed: null renders
-        // nothing extra, so the unarmed canonical stays byte-identical to
-        // the legacy 18-field format.
+        // nothing extra, so the unarmed base keeps the plain field set.
+        // The m= marker is appended separately when the record carries
+        // a server_mac.
         if ($decoyField !== null) {
             $base .= '|d='.$decoyField;
         }
@@ -1265,15 +1276,45 @@ final class Issuer
         if ($rswModulusSha256 !== null) {
             $base .= '|r='.$rswModulusSha256;
         }
+        // The record-metadata MAC marker is appended last whenever the
+        // signed record carries a server_mac: stripping the MAC then
+        // changes the signed bytes.
+        if ($serverMacCommitted) {
+            $base .= '|m=1';
+        }
 
         return $base;
+    }
+
+    /**
+     * True when the challenge's signed canonical carries the
+     * record-metadata MAC marker (`m=1`). The marker is parsed from the
+     * base64 canonical embedded in the challenge string, never inferred
+     * from the stored `server_mac` presence. A record whose signature
+     * covers `m=1` must carry a valid MAC, while a record signed without
+     * the marker accepts an absent MAC. A malformed challenge decodes to
+     * false. Mirrors the Rust `signed_canonical_commits_record_meta`.
+     */
+    public static function signedCanonicalCommitsRecordMeta(string $challenge): bool
+    {
+        $pos = strrpos($challenge, '.');
+        if ($pos === false) {
+            return false;
+        }
+        $canonical = base64_decode(substr($challenge, 0, $pos), true);
+        if ($canonical === false) {
+            return false;
+        }
+
+        return str_starts_with($canonical, 'v4|') && str_ends_with($canonical, '|m=1');
     }
 
     /**
      * The authenticated execution commitment of a stored program: hex
      * SHA-256 of the program's base64 wire string, 64 lowercase hex
      * characters. This is the value signed into the protocol v4
-     * canonical (the final `|execution_commitment` segment), so the
+     * canonical (the second element of the tagged `|e=execution_version,
+     * execution_commitment` segment), so the
      * verifier's constant-time equivalence check
      * `SHA256(stored program) == signed commitment` is byte-exact in
      * both languages. Mirrors the Rust `execution_commitment` helper.

@@ -222,7 +222,7 @@ final class RiskPolicy
 
     /**
      * Full decision: band action (with enter/exit hysteresis when the
-     * engine's per-process scope map is passed), clamped to the scope
+     * engine's per-client map is passed), clamped to the scope
      * minimum and the global floor, then hard overrides with reasons.
      *
      * Argon re-escalation ordering: ladder → strongest(minimum, floor) →
@@ -231,13 +231,14 @@ final class RiskPolicy
      * action with argonCapacity < 300 escalates to StepUp.
      *
      * Hysteresis: with $hysteresis the band selection uses the
-     * scope's previous action — escalate to the next band only at its
-     * enter threshold (upper + 10), de-escalate only below its exit
-     * threshold (lower − 10). Fresh scopes and StepUp/Deny use the
-     * plain mapping. The map stores the score-selected action, so hard
-     * overrides never poison the profile. Passing null (the default)
-     * keeps the plain band mapping, byte-identical with the previous
-     * behavior.
+     * (scope, clientKey) entry — the session pseudonym when present, else
+     * the source pseudonym. The selection escalates to the next band only
+     * at its enter threshold (upper + 10), de-escalates only below its
+     * exit threshold (lower − 10), and jumps straight to the plain action
+     * when the score clears the target band margin. Fresh keys and
+     * StepUp/Deny use the plain mapping. The map stores the score-selected
+     * action, so hard overrides never poison the profile. Passing null (the
+     * default) keeps the plain band mapping.
      *
      * Reasons: policy override reasons first, then the top signal
      * contributors, contribution = (v * w) / 1000, sorted by
@@ -251,7 +252,14 @@ final class RiskPolicy
      *                                registers the outcome atomically with
      *                                the observation, so the returned
      *                                decision carries the same id); null
-     *                                draws a fresh random id
+     *                                draws a fresh random id.
+     *
+     * @param string $clientKey hysteresis client key: the session
+     *                          pseudonym when present, else the source
+     *                          pseudonym; required (non-empty) when
+     *                          $hysteresis is set — an empty key would
+     *                          collapse every client of the scope into
+     *                          one shared entry
      */
     public function decide(
         int $scope,
@@ -263,9 +271,13 @@ final class RiskPolicy
         int $cooldownUntilMs = 0,
         ?ScopeActionHysteresis $hysteresis = null,
         ?string $decisionId = null,
+        string $clientKey = '',
     ): RiskDecision {
+        if ($hysteresis !== null && $clientKey === '') {
+            throw new \InvalidArgumentException('a non-empty clientKey is required when a ScopeActionHysteresis is supplied: an empty key would key every client of the scope to one shared entry');
+        }
         $plain = RiskAction::actionForScore($score);
-        $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $score, $plain, $nowMs) : $plain;
+        $bandAction = $hysteresis !== null ? $hysteresis->select($scope, $clientKey, $score, $plain, $nowMs) : $plain;
         $minimum = $this->minimum($scope);
         $floor = $this->globalFloors[min(4, max(0, $globalLevel))] ?? RiskAction::Allow;
         $action = $this->strongest($bandAction, $minimum, $floor);

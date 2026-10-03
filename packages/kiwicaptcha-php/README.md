@@ -27,10 +27,11 @@ Byte-for-byte compatible with the reference implementation in
 - challenge = `base64(canonical_payload) + "." + hex(hmac_sha256(secret, canonical_payload))`.
   Every record field that shapes verification is covered by the HMAC, so
   a tampered record cannot pass.
-- Protocol v3/v4 extensions: a decoy-armed issuance appends
-  `|decoy_field` after `kid` (protocol 3); an execution-armed issuance
-  additionally appends `|execution_version|execution_commitment`, the
-  hex SHA-256 of the stored program (protocol 4). Armed issuance writes
+- Protocol v3/v4 extensions: a decoy-armed issuance appends the
+  tagged `|d={decoy_field}` segment after `kid` (protocol 3); an
+  execution-armed issuance additionally appends the tagged
+  `|e={execution_version},{execution_commitment}` segment, the hex
+  SHA-256 of the stored program (protocol 4). Armed issuance writes
   the higher version, and older verifiers reject the new version as
   unknown — the capability is inferable from `protocol_version`.
 - prefix = `challenge + "|" + salt + "|"`, with salt = base64 of 16 random bytes.

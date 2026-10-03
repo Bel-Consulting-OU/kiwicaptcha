@@ -32,7 +32,7 @@ final class Config
      * client-performance lab measures the SHA 16/18/20 ladder, and 18
      * is the benchmark-selected ordinary baseline (mean ≈ 262k hashes,
      * p99 ≈ 1.21M, exhaustion within the 20,000,000-hash cap
-     * ≈ 2.4×10⁻¹⁰). SHA20 stays the elevated rung, reached via adaptive
+     * ≈ 7.3×10⁻³⁴). SHA20 stays the elevated rung, reached via adaptive
      * risk escalation: at 20 a legitimate solve still fails within the
      * 20,000,000-hash cap with probability ≈ 5.2×10⁻⁹, so 20 is never
      * the default.

@@ -23,9 +23,13 @@
 //!   "sampled":0|1}`, expire `receipt_ttl_secs`, consumed once by the atomic
 //!   confirm script.
 //! - Outcome-ledger entries `{kiwi:<ns>}:outcome:<decision_id>` — a
-//!   string JSON `{"o":"P|L|A","scope","hour","score","w","c"}` (`c`
+//!   string JSON `{"o":"P|L|A","scope","hour","score","w","c","v"}` (`c`
 //!   records whether the first confirmation contributed a calibration
-//!   sample; absent on legacy ledgers and read as 0) with expire
+//!   sample; absent on legacy ledgers and read as 0. `v` is the
+//!   clipped-sums generation: 2 means the confirmation wrote the
+//!   `legit_above_sum` / `abuse_below_sum` terms, so correction reverses
+//!   and redoes them; absent on legacy ledgers and read as 0, and a
+//!   legacy correction then leaves the clipped sums alone) with expire
 //!   `outcome_ttl_secs` (default 86400 s). The outcome ledger is always on
 //!   and independent of calibration: with calibration enabled it is created
 //!   atomically by `register_decision.lua` at decision time; with
@@ -125,7 +129,11 @@
 //! Correction is atomic via `resources/correction.lua` (one script
 //! invocation: GET the outcome ledger → validate scope/hour → reverse the
 //! original contribution with the exact recorded weight (ledger.w, clamped
-//! at zero) → add the corrected contribution → flip the ledger). If the
+//! at zero) → add the corrected contribution → flip the ledger). The
+//! clipped legs (`legit_above_sum` / `abuse_below_sum`) are reversed and
+//! redone only when `ledger.v == 2`; a legacy ledger without `v` reverses
+//! the count/score sums alone, because the bucket may hold post-upgrade
+//! samples whose clipped terms are not that decision's to subtract. If the
 //! decision-time bucket already expired the ledger still flips — the
 //! corrected outcome is authoritative for future events while the prior
 //! ephemeral reputation pressure is left to decay naturally (Kiwi does not
@@ -343,6 +351,14 @@ pub struct RedisCalibrationStore {
     namespace_version: NamespaceVersion,
     scope_hmac_key: [u8; 32],
     conn: Mutex<Option<redis::Connection>>,
+    /// Connect timeout (ms) for the lazy calibration connection, seeded
+    /// from [`RedisCalibrationStore::CONNECTION_TIMEOUT_MS`] and tunable
+    /// through [`RedisCalibrationStore::with_io_timeouts`].
+    connection_timeout_ms: u64,
+    /// Socket read/write timeout (ms), seeded from
+    /// [`RedisCalibrationStore::COMMAND_TIMEOUT_MS`] and tunable through
+    /// [`RedisCalibrationStore::with_io_timeouts`].
+    command_timeout_ms: u64,
     min_samples: i64,
     max_adjustment: i32,
     max_change_per_minute: i32,
@@ -474,12 +490,14 @@ impl RedisCalibrationStore {
     pub const CACHE_TTL_S: u64 = 30;
     /// Bounded in-process cache capacity (oldest entries are evicted).
     pub const CACHE_CAP: usize = 1024;
-    /// Connection timeout for establishing the TCP connection (the risk
-    /// state store's fail-fast value).
-    pub const CONNECTION_TIMEOUT_MS: u64 = 5;
-    /// Command (read/write) timeout applied to the socket (the risk state
-    /// store's fail-fast value).
-    pub const COMMAND_TIMEOUT_MS: u64 = 10;
+    /// Connection timeout for establishing the TCP connection, shared with
+    /// the risk state store. The 75 ms default tolerates TLS, managed and
+    /// cross-AZ handshakes while staying fail-fast.
+    pub const CONNECTION_TIMEOUT_MS: u64 = crate::redis::RedisRiskStateStore::CONNECTION_TIMEOUT_MS;
+    /// Command (read/write) timeout applied to the socket, shared with the
+    /// risk state store. The tight 10 ms default keeps one wedged socket
+    /// from wedging the calibration path.
+    pub const COMMAND_TIMEOUT_MS: u64 = crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS;
 
     /// Builds a store on a fresh connection (lazy) with the default safety
     /// knobs (min_samples 1000, max_adjustment 150, max_change_per_minute
@@ -503,6 +521,19 @@ impl RedisCalibrationStore {
     /// without it scope-based keys fall back to the raw scope (deprecated).
     pub fn with_scope_key(mut self, key: [u8; 32]) -> Self {
         self.scope_hmac_key = key;
+        self
+    }
+
+    /// Overrides the connect and command (read/write) timeouts in
+    /// milliseconds, the same knobs
+    /// [`crate::redis::RedisRiskStateStore::with_io_timeouts`] exposes for
+    /// the risk state store. The shared defaults (75 ms connect, 10 ms
+    /// command) suit a local or same-region Redis; a TLS, managed or
+    /// cross-AZ endpoint may need a larger connect timeout while the
+    /// command timeout stays tight.
+    pub fn with_io_timeouts(mut self, connection_timeout_ms: u64, command_timeout_ms: u64) -> Self {
+        self.connection_timeout_ms = connection_timeout_ms;
+        self.command_timeout_ms = command_timeout_ms;
         self
     }
 
@@ -657,6 +688,8 @@ impl RedisCalibrationStore {
             namespace_version: NamespaceVersion::Legacy,
             scope_hmac_key: [0u8; 32],
             conn: Mutex::new(None),
+            connection_timeout_ms: Self::CONNECTION_TIMEOUT_MS,
+            command_timeout_ms: Self::COMMAND_TIMEOUT_MS,
             min_samples,
             max_adjustment,
             max_change_per_minute,
@@ -800,20 +833,21 @@ impl RedisCalibrationStore {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
-    /// Lazy single connection with the fail-fast timeouts of the risk
-    /// state store (connection 5 ms, command read/write 10 ms): the
-    /// calibration read runs synchronously in the assessment hot path, so
-    /// a wedged socket must never wedge every assessment thread.
+    /// Lazy single connection with the store's IO timeouts (connection
+    /// 75 ms and command read/write 10 ms by default — see
+    /// [`RedisCalibrationStore::with_io_timeouts`]): the calibration read
+    /// runs synchronously in the assessment hot path, so a wedged socket
+    /// must never wedge every assessment thread.
     fn connection(&self) -> Result<MutexGuard<'_, Option<redis::Connection>>, CalibrationError> {
         let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_none() {
             let conn = self
                 .client
-                .get_connection_with_timeout(Duration::from_millis(Self::CONNECTION_TIMEOUT_MS))
+                .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
                 .map_err(|e| CalibrationError::Backend(e.to_string()))?;
-            conn.set_read_timeout(Some(Duration::from_millis(Self::COMMAND_TIMEOUT_MS)))
+            conn.set_read_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
                 .map_err(|e| CalibrationError::Backend(e.to_string()))?;
-            conn.set_write_timeout(Some(Duration::from_millis(Self::COMMAND_TIMEOUT_MS)))
+            conn.set_write_timeout(Some(Duration::from_millis(self.command_timeout_ms)))
                 .map_err(|e| CalibrationError::Backend(e.to_string()))?;
             *guard = Some(conn);
         }
@@ -2645,6 +2679,143 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ledger_correction_leaves_the_clipped_sums_alone() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = store_mode("lclip", SamplingMode::Complete, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+
+        // A post-upgrade counted sample: score 900 legit books the clipped
+        // distance 900 - 600 = 300.
+        register(&s, "clip-new", 7, 4, 900, true);
+        assert_eq!(s.confirm_outcome("clip-new", true, None).unwrap(), 1);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_above_sum"), 300.0);
+        let raw: String = conn.get(ledger_key(&ns, "clip-new")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(
+            value["v"], 2,
+            "a confirmation records the clipped-sums generation"
+        );
+        assert_eq!(
+            value["c"], 1,
+            "a counted first confirmation records the counted flag"
+        );
+
+        // A legacy ledger (no v, no clipped leg): fabricated exactly as a
+        // pre-upgrade confirmation wrote it, with its count/score terms in
+        // the bucket.
+        register(&s, "clip-leg", 7, 4, 900, true);
+        let legacy = serde_json::json!({
+            "o": "L",
+            "scope": 7,
+            "hour": hour(),
+            "score": 900,
+            "w": 1.0,
+            "c": 1,
+        });
+        let ledger = ledger_key(&ns, "clip-leg");
+        let _: () = redis::cmd("SET")
+            .arg(&ledger)
+            .arg(legacy.to_string())
+            .arg("EX")
+            .arg(300)
+            .query(&mut conn)
+            .expect("set legacy ledger");
+        let _: f64 = redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg("legit_count")
+            .arg(1)
+            .query(&mut conn)
+            .expect("seed legacy count");
+        let _: f64 = redis::cmd("HINCRBYFLOAT")
+            .arg(&key)
+            .arg("legit_score_sum")
+            .arg(900)
+            .query(&mut conn)
+            .expect("seed legacy score");
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 2.0);
+
+        // The legacy correction reverses count/score yet leaves the
+        // clipped sums exactly as the post-upgrade sample booked them.
+        assert!(s.correct_outcome("clip-leg", false, None).unwrap());
+        assert_eq!(hget_f64(&mut conn, &key, "legit_count"), 1.0);
+        assert_eq!(hget_f64(&mut conn, &key, "legit_score_sum"), 900.0);
+        assert_eq!(
+            hget_f64(&mut conn, &key, "legit_above_sum"),
+            300.0,
+            "a legacy correction must not reverse the clipped sums"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_below_sum"), 0.0);
+
+        // A v=2 ledger still reverses and redoes the clipped legs:
+        // correcting the post-upgrade sample to abuse removes its 300.
+        assert!(s.correct_outcome("clip-new", false, None).unwrap());
+        assert_eq!(
+            hget_f64(&mut conn, &key, "legit_above_sum"),
+            0.0,
+            "a v=2 correction reverses the clipped sum"
+        );
+        assert_eq!(hget_f64(&mut conn, &key, "abuse_count"), 2.0);
+    }
+
+    #[test]
+    fn unsampled_confirmation_writes_c0_and_its_correction_leaves_the_bucket_untouched() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration test: RISK_REDIS_URL not set");
+            return;
+        };
+        // Random-sample mode: a receipt whose decision was discarded
+        // (sampled = false) confirms with status 2.
+        let s = store_mode("unclip", SamplingMode::RandomSample, 0);
+        let ns = s.namespace().to_string();
+        let mut conn = client().get_connection().expect("connection");
+        let key = bucket_key(&ns, 7);
+
+        register(&s, "unclip-1", 7, 4, 900, false);
+        assert_eq!(
+            s.confirm_outcome("unclip-1", true, None).unwrap(),
+            2,
+            "an unsampled random-sample decision is consumed with status 2"
+        );
+
+        // The writer generation still stamps v = 2, but the uncounted
+        // sample records c = 0 and books nothing in the bucket.
+        let raw: String = conn.get(ledger_key(&ns, "unclip-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "L");
+        assert_eq!(
+            value["v"], 2,
+            "generation-2 stamps v = 2 even on an unsampled confirmation"
+        );
+        assert_eq!(
+            value["c"], 0,
+            "an unsampled first confirmation records c = 0"
+        );
+        let fields: Vec<(String, String)> = conn.hgetall(&key).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "an unsampled confirmation must not book a bucket sample"
+        );
+
+        // Correcting it flips the ledger outcome yet leaves the bucket
+        // exactly as it was: no sample existed to reverse or redo.
+        assert!(s.correct_outcome("unclip-1", false, None).unwrap());
+        let raw: String = conn.get(ledger_key(&ns, "unclip-1")).expect("get");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["o"], "A");
+        assert_eq!(value["w"], 1.0);
+        let fields: Vec<(String, String)> = conn.hgetall(&key).expect("hgetall");
+        assert!(
+            fields.is_empty(),
+            "an unsampled correction must leave every bucket field untouched"
+        );
+    }
+
+    #[test]
     fn weighted_confirm_without_weight_is_a_typed_error() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
@@ -2948,5 +3119,28 @@ mod tests {
         assert_eq!(crate::score::score(0, &saturated, &w), 1000);
         assert_eq!(crate::score::score(1000, &saturated, &w), 1000);
         assert!(crate::score::score(1000, &saturated, &w) <= 1000);
+    }
+
+    /// The calibration store seeds its IO timeouts from the shared risk
+    /// state store contract and exposes the same `with_io_timeouts`
+    /// override, so a TLS/managed/cross-AZ calibration endpoint can raise
+    /// the connect timeout without loosening the tight command timeout.
+    /// Hermetic: construction never connects (the connection is lazy).
+    #[test]
+    fn io_timeouts_default_to_the_shared_contract_and_are_tunable() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("url parses");
+        let store = RedisCalibrationStore::new(client, "caltimeouts");
+        assert_eq!(
+            store.connection_timeout_ms,
+            crate::redis::RedisRiskStateStore::CONNECTION_TIMEOUT_MS
+        );
+        assert_eq!(
+            store.command_timeout_ms,
+            crate::redis::RedisRiskStateStore::COMMAND_TIMEOUT_MS
+        );
+
+        let tuned = store.with_io_timeouts(120, 15);
+        assert_eq!(tuned.connection_timeout_ms, 120);
+        assert_eq!(tuned.command_timeout_ms, 15);
     }
 }

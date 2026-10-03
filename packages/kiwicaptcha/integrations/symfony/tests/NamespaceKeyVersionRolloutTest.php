@@ -178,8 +178,12 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
         self::assertSame(self::CENTRAL_EPOCH, $monitor->currentEpoch(), 'the legacy revocation raises the effective epoch to 7');
         self::assertSame(self::CENTRAL_EPOCH, $monitor->observedMax(), 'the observed max carries the legacy revocation');
 
-        // Readiness: the epoch-6 node is not admitted. A node that read
-        // only the digest key would answer 200.
+        // Readiness: the epoch-6 node stays in the pool. The legacy
+        // revocation raises the effective epoch to 7, which issuance
+        // stamps and the verifier enforces, so the node follows the
+        // legacy floor instead of leaving the pool; a node that read only
+        // the digest key would serve max(6, 0) = 6 and accept the revoked
+        // epoch-6 challenges. The readiness lag is a log warning.
         $controller = new KiwiHealthController(
             self::SECRET,
             $client,
@@ -197,13 +201,9 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
             RedisNamespace::VERSION_DIGEST,
         );
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'the epoch-6 node must not be admitted while the legacy floor is 7');
+        self::assertSame(200, $response->getStatusCode(), 'the epoch-6 node follows the effective epoch 7 and stays ready');
         $body = json_decode((string) $response->getContent(), true);
-        self::assertStringContainsString(
-            'security_policy_incompatible',
-            (string) ($body['reason'] ?? ''),
-            'the readiness reason names the legacy revocation',
-        );
+        self::assertSame('ready', $body['status'] ?? '', 'the effective-epoch follow keeps the node ready');
     }
 
     public function testThePolicyFloorsMergeConservativelyAcrossBothNamespaces(): void

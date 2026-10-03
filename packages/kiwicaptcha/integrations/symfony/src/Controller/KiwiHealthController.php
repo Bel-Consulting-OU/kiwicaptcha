@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalExc
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use KiwiCaptcha\ChallengeProfile;
+use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -39,13 +40,15 @@ use Symfony\Component\HttpFoundation\Response;
  *         binary's max protocol version, the identity-bearing rsw
  *         canonical), min_execution_version <=
  *         {@see self::MAX_EXECUTION_VERSION} (an absent field imposes
- *         nothing) and min_policy_epoch <= the configured
- *         risk.policy_version. A newer central policy
- *         (mixed-version rolling deployments, rollbacks) takes an
- *         outdated binary out of the pool before it serves traffic it
- *         cannot honor (execution programs and identity-bearing rsw
- *         records). When the key is absent the binary's own
- *         configuration is authoritative.
+ *         nothing). A protocol or execution floor above the
+ *         binary's maximum (mixed-version rolling deployments,
+ *         rollbacks) takes an outdated binary out of the pool before it
+ *         serves traffic it cannot honor. A central min_policy_epoch
+ *         above the configured risk.policy_version is only a warning:
+ *         the node stays in the pool, and issuance and verification
+ *         follow the effective epoch max(configured, central); the lag
+ *         is logged and never drains the node. When the key is absent
+ *         the binary's own configuration is authoritative.
  *      4. when the execution dimension is armed
  *         (risk.execution_challenge on), the required execution tier
  *         must be satisfiable. The effective fleet tier is the policy
@@ -97,11 +100,13 @@ final class KiwiHealthController
      * identity-armed rsw issuance writes version 5 and the verifier
      * accepts versions 1..5. A central security-policy hash demanding a
      * higher version means this binary cannot verify the challenges the
-     * fleet now issues, so it must not be ready. Mirrored by the php-core
-     * (`ChallengeRecord::MAX_PROTOCOL_VERSION`) and the Rust crate
-     * (`challenge::MAX_PROTOCOL_VERSION`).
+     * fleet now issues, so it must not be ready. The single shared
+     * maximum: the php-core
+     * ({@see \KiwiCaptcha\ChallengeRecord::MAX_PROTOCOL_VERSION}), the
+     * Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the
+     * kiwicaptcha:doctor deploy gate all pin the same value.
      */
-    public const MAX_PROTOCOL_VERSION = 5;
+    public const MAX_PROTOCOL_VERSION = ChallengeRecord::MAX_PROTOCOL_VERSION;
 
     /**
      * The binary's maximum execution-program version, taken from the
@@ -120,13 +125,20 @@ final class KiwiHealthController
     /** In-process probe/state cache window in ms. */
     private const CACHE_MS = 1000;
 
-    private ?bool $lastProbeOk = null;
-    private bool $pendingProbeFailure = false;
-    private float $probeAtMs = -PHP_FLOAT_MAX;
-
     private ?bool $lastPolicyOk = null;
     private ?string $policyReason = null;
+    private ?string $policyEpochLag = null;
+    private ?string $lastLoggedEpochLag = null;
     private float $policyAtMs = -PHP_FLOAT_MAX;
+
+    /**
+     * The in-process fallback used when the APCu extension is absent or
+     * disabled: the debounce state. With APCu available it lives in APCu
+     * keyed per deployment (namespace and secret), so separate apps
+     * sharing one APCu segment cannot read each other's debounce state;
+     * see {@see self::readinessStateGet()}.
+     */
+    private ?array $localReadinessState = null;
 
     /**
      * @param \Redis|\Predis\Client|null $redis         the security Redis
@@ -245,15 +257,20 @@ final class KiwiHealthController
      */
     public function ready(): JsonResponse
     {
-        $now = (int) (microtime(true) * 1000);
         $cached = $this->readinessCacheGet();
         if ($cached !== null) {
             return $this->json($cached['body'], $cached['status']);
         }
 
-        [$status, $body, $detail] = $this->evaluateReadiness();
+        [$status, $body, $detail, $lag] = $this->evaluateReadiness();
         if ($detail !== null) {
             $this->logReadinessDetail($detail);
+        }
+        if ($lag !== null && $lag !== $this->lastLoggedEpochLag) {
+            // The readiness endpoint is polled: log the lag when it
+            // appears or changes, not on every ~1 s evaluation.
+            $this->logReadinessWarning($lag);
+            $this->lastLoggedEpochLag = $lag;
         }
         $this->readinessCachePut(['body' => $body, 'status' => $status]);
 
@@ -262,65 +279,137 @@ final class KiwiHealthController
 
     /**
      * The readiness evaluation, returning [http status, public body,
-     * optional private detail for the log].
+     * optional private detail for the log, optional non-fatal epoch-lag
+     * warning for the log].
      *
-     * @return array{0: int, 1: array<string, string>, 2: ?string}
+     * @return array{0: int, 1: array<string, string>, 2: ?string, 3: ?string}
      */
     private function evaluateReadiness(): array
     {
         if ($this->secretKey === '') {
-            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'signing_keys_not_configured'], null];
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'signing_keys_not_configured'], null, null];
         }
         if (!$this->securityRedisReachable()) {
-            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_redis_unreachable'], 'security redis unreachable'];
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_redis_unreachable'], 'security redis unreachable', null];
         }
-        [$policyOk, $reason] = $this->securityPolicyCompatible();
+        [$policyOk, $reason, $lag] = $this->securityPolicyCompatible();
         if (!$policyOk) {
-            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_policy_incompatible'], 'security policy incompatible: '.($reason ?? 'unknown')];
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'security_policy_incompatible'], 'security policy incompatible: '.($reason ?? 'unknown'), $lag];
         }
         if (!$this->memoryBudgetOk()) {
-            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], 'memory budget invariant failed'];
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], 'memory budget invariant failed', $lag];
         }
         [$authorityOk, $authorityReason, $authorityLabel] = $this->authorityEligible();
         if (!$authorityOk) {
-            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'authority_not_eligible'], 'authority not eligible: '.$authorityReason.' ('.($authorityLabel ?? 'unknown').')'];
+            return [Response::HTTP_SERVICE_UNAVAILABLE, ['status' => 'not_ready', 'reason' => 'authority_not_eligible'], 'authority not eligible: '.$authorityReason.' ('.($authorityLabel ?? 'unknown').')', $lag];
         }
 
-        return [Response::HTTP_OK, ['status' => 'ready'], null];
+        return [Response::HTTP_OK, ['status' => 'ready'], null, $lag];
     }
 
-    private const READINESS_CACHE_APCU_KEY = 'kiwicaptcha.health.readiness';
+    /**
+     * The per-deployment APCu key: namespace and secret keep two apps
+     * that share one APCu segment from reading each other's readiness
+     * answer or debounce state.
+     */
+    public static function readinessCacheKey(string $namespace, string $secretKey): string
+    {
+        return 'kiwicaptcha.health.readiness.'.hash('sha256', $namespace."\0".$secretKey);
+    }
 
     /**
-     * The 1 s readiness cache is APCu-backed where available (the usual
-     * production setup). Without APCu the probe evaluates per request:
-     * a process-local static would leak a result across unrelated
-     * requests in long-lived runtimes (and across tests), and correctness
-     * beats the burst-saving.
+     * The 1 s readiness cache is APCu-backed and per-deployment keyed;
+     * without APCu the probe evaluates per request. A process-local
+     * fallback would serve a stale answer past an authority change and
+     * leak across unrelated requests in long-lived runtimes, and across
+     * tests, so correctness beats the burst-saving. The probe debounce
+     * state keeps an instance fallback instead, see
+     * {@see self::readinessStateGet()}.
      *
      * @return array{body: array<string,string>, status: int}|null
      */
     private function readinessCacheGet(): ?array
     {
-        if (!function_exists('apcu_fetch')) {
+        $now = (int) $this->nowMs();
+        $hit = $this->apcuGet(self::readinessCacheKey($this->namespace, $this->secretKey));
+        if (!\is_array($hit) || !isset($hit['atMs'], $hit['body'], $hit['status'])) {
             return null;
         }
-        $now = (int) (microtime(true) * 1000);
-        $hit = apcu_fetch(self::READINESS_CACHE_APCU_KEY);
-        if (\is_array($hit) && isset($hit['atMs'], $hit['body'], $hit['status']) && $now - (int) $hit['atMs'] < 1000) {
-            return ['body' => $hit['body'], 'status' => (int) $hit['status']];
+        if ($now - (int) $hit['atMs'] >= self::CACHE_MS) {
+            return null;
         }
 
-        return null;
+        return ['body' => $hit['body'], 'status' => (int) $hit['status']];
     }
 
     /** @param array{body: array<string,string>, status: int} $result */
     private function readinessCachePut(array $result): void
     {
-        if (!function_exists('apcu_store')) {
+        $this->apcuPut(self::readinessCacheKey($this->namespace, $this->secretKey), [
+            'body' => $result['body'],
+            'status' => $result['status'],
+            'atMs' => (int) $this->nowMs(),
+        ]);
+    }
+
+    /**
+     * The security-Redis probe debounce state, kept next to the readiness
+     * cache: in APCu when available (shared across workers of one
+     * deployment), otherwise per-instance.
+     *
+     * @return array{probeOk: ?bool, pendingProbeFailure: bool, probeAtMs: float}
+     */
+    private function readinessStateGet(): array
+    {
+        $state = $this->apcuGet(self::readinessCacheKey($this->namespace, $this->secretKey).'.state');
+        if (!\is_array($state)) {
+            $state = $this->localReadinessState;
+        }
+        if (!\is_array($state)) {
+            return ['probeOk' => null, 'pendingProbeFailure' => false, 'probeAtMs' => -PHP_FLOAT_MAX];
+        }
+
+        return [
+            'probeOk' => \is_bool($state['probeOk'] ?? null) ? $state['probeOk'] : null,
+            'pendingProbeFailure' => (bool) ($state['pendingProbeFailure'] ?? false),
+            'probeAtMs' => (float) ($state['probeAtMs'] ?? -PHP_FLOAT_MAX),
+        ];
+    }
+
+    /**
+     * @param array{probeOk: ?bool, pendingProbeFailure: bool, probeAtMs: float} $state
+     */
+    private function readinessStatePut(array $state): void
+    {
+        $this->apcuPut(self::readinessCacheKey($this->namespace, $this->secretKey).'.state', $state);
+        $this->localReadinessState = $state;
+    }
+
+    private function apcuGet(string $key): mixed
+    {
+        if (!\function_exists('apcu_fetch')) {
+            return null;
+        }
+        $ok = false;
+        $value = @apcu_fetch($key, $ok);
+        if (!$ok) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Store with the 1 s window; a disabled or failing APCu (for
+     * example a CLI process without apc.enable_cli) degrades to the
+     * instance fallback, so the probe debounce stays correct.
+     */
+    private function apcuPut(string $key, mixed $value): void
+    {
+        if (!\function_exists('apcu_store')) {
             return;
         }
-        @apcu_store(self::READINESS_CACHE_APCU_KEY, ['body' => $result['body'], 'status' => $result['status'], 'atMs' => (int) (microtime(true) * 1000)], 1);
+        @apcu_store($key, $value, 1);
     }
 
     private function logReadinessDetail(string $detail): void
@@ -331,6 +420,20 @@ final class KiwiHealthController
             return;
         }
         error_log('KiwiCaptcha readiness failed: '.$detail);
+    }
+
+    /**
+     * Log a non-fatal readiness warning, distinct from a refusal: the
+     * public status stays ready.
+     */
+    private function logReadinessWarning(string $detail): void
+    {
+        if ($this->logger !== null) {
+            $this->logger->warning('KiwiCaptcha readiness warning: {detail}', ['detail' => $detail]);
+
+            return;
+        }
+        error_log('KiwiCaptcha readiness warning: '.$detail);
     }
 
     /**
@@ -447,7 +550,10 @@ final class KiwiHealthController
     }
 
     /**
-     * Security Redis reachability: a PING probe, cached ~1 s.
+     * Security Redis reachability: a PING probe, cached ~1 s. The
+     * debounce state lives next to the readiness cache: in APCu when
+     * available so it is shared across the workers of one deployment,
+     * otherwise per instance.
      *
      * Transient timeouts never fail readiness on their own: the first
      * failed probe is debounced for one cache window. A blip that recovers
@@ -463,8 +569,9 @@ final class KiwiHealthController
             return true;
         }
         $now = $this->nowMs();
-        if ($now - $this->probeAtMs < self::CACHE_MS) {
-            return $this->lastProbeOk ?? true;
+        $state = $this->readinessStateGet();
+        if ($now - $state['probeAtMs'] < self::CACHE_MS) {
+            return $state['probeOk'] ?? true;
         }
 
         $ok = false;
@@ -477,31 +584,38 @@ final class KiwiHealthController
         }
 
         if (!$ok) {
-            if ($this->lastProbeOk === true && !$this->pendingProbeFailure) {
+            if ($state['probeOk'] === true && !$state['pendingProbeFailure']) {
                 // First failure after a healthy state: debounce, keeping
                 // the last healthy result for one more cache window.
-                $this->pendingProbeFailure = true;
+                $state['pendingProbeFailure'] = true;
             } else {
-                $this->lastProbeOk = false;
-                $this->pendingProbeFailure = false;
+                $state['probeOk'] = false;
+                $state['pendingProbeFailure'] = false;
             }
         } else {
-            $this->lastProbeOk = true;
-            $this->pendingProbeFailure = false;
+            $state['probeOk'] = true;
+            $state['pendingProbeFailure'] = false;
         }
-        $this->probeAtMs = $now;
+        $state['probeAtMs'] = $now;
+        $this->readinessStatePut($state);
 
-        return $this->lastProbeOk;
+        return $state['probeOk'] ?? true;
     }
 
     /**
      * Central security-policy compatibility (cached ~1 s):
      * `{kiwi:<ns>}:security-policy` hash. When present, ready requires
-     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION},
+     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION} and
      * min_execution_version <= {@see self::MAX_EXECUTION_VERSION} (an
-     * absent execution floor imposes nothing) and min_policy_epoch <=
-     * the configured risk.policy_version. When absent (or when no Redis
-     * is configured) the binary's own configuration is authoritative.
+     * absent execution floor imposes nothing). When absent (or when no
+     * Redis is configured) the binary's own configuration is
+     * authoritative.
+     *
+     * A central min_policy_epoch above the configured risk.policy_version
+     * does NOT remove the node: issuance stamps the effective epoch
+     * max(configured, central), so the node can follow a central bump.
+     * The lag is reported as a non-fatal warning for the log, never a
+     * readiness failure.
      *
      * On top of the central state, the execution-gate leg applies
      * whenever risk.execution_challenge is on. The shared
@@ -513,7 +627,8 @@ final class KiwiHealthController
      * state, so the node must not serve until the fleet floor reaches
      * the required tier.
      *
-     * @return array{0: bool, 1: ?string} [compatible, machine-readable reason]
+     * @return array{0: bool, 1: ?string, 2: ?string} [compatible,
+     *         machine-readable reason, epoch-lag warning detail]
      */
     private function securityPolicyCompatible(): array
     {
@@ -521,16 +636,17 @@ final class KiwiHealthController
             // No security Redis by design: the central policy legs are
             // vacuous, but the execution-gate leg still applies with an
             // unconfirmed floor (effective tier 1 at best).
-            return $this->withExecutionGateLeg(true, null, null);
+            [$ok, $reason] = $this->withExecutionGateLeg(true, null, null);
+
+            return [$ok, $reason, null];
         }
         $now = $this->nowMs();
         if ($now - $this->policyAtMs < self::CACHE_MS) {
-            return [$this->lastPolicyOk ?? true, $this->policyReason];
+            return [$this->lastPolicyOk ?? true, $this->policyReason, $this->policyEpochLag];
         }
 
         $ok = true;
         $reason = null;
-        $parsed = [];
         $minProtocol = null;
         $minEpoch = null;
         $minExecution = null;
@@ -573,13 +689,9 @@ final class KiwiHealthController
                 $minExecution = max($minExecution ?? 0, (int) ($policy['min_execution_version'] ?? 0));
             }
             if ($ok && $minEpoch !== null) {
-                $parsed['min_execution_version'] = $minExecution;
                 if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
                     $ok = false;
                     $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
-                } elseif ($minEpoch > $this->policyVersion) {
-                    $ok = false;
-                    $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
                 } elseif ($minExecution > self::MAX_EXECUTION_VERSION) {
                     $ok = false;
                     $reason = 'security_policy_incompatible:min_execution_version_'.$minExecution;
@@ -589,12 +701,31 @@ final class KiwiHealthController
             $ok = false;
             $reason = 'security_policy_state_unavailable';
         }
-        [$ok, $reason] = $this->withExecutionGateLeg($ok, $reason, $parsed['min_execution_version'] ?? null);
+        [$ok, $reason] = $this->withExecutionGateLeg($ok, $reason, $minExecution);
+        $lag = $minEpoch !== null && $minEpoch > $this->policyVersion
+            ? $this->epochLagDetail($minEpoch)
+            : null;
         $this->lastPolicyOk = $ok;
         $this->policyReason = $reason;
+        $this->policyEpochLag = $lag;
         $this->policyAtMs = $now;
 
-        return [$ok, $reason];
+        return [$ok, $reason, $lag];
+    }
+
+    /**
+     * The non-fatal epoch-lag warning detail: the central
+     * min_policy_epoch is ahead of the configured risk.policy_version,
+     * so issuance follows the central value. The node stays ready.
+     */
+    private function epochLagDetail(int $centralEpoch): string
+    {
+        return sprintf(
+            'security policy epoch lag: the central min_policy_epoch is %d while risk.policy_version is %d. Issuance and verification follow the effective epoch %d, so new challenges verify immediately. Raise risk.policy_version to the central value at the next coordinated deploy to align the configured floor',
+            $centralEpoch,
+            $this->policyVersion,
+            max($centralEpoch, $this->policyVersion),
+        );
     }
 
     /**

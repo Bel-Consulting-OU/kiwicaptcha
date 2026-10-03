@@ -933,6 +933,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             now_ms,
             cooldown_until_ms,
             Some(&self.hysteresis),
+            hysteresis_client_key(&observation),
         );
         self.merge_contributor_reasons(&mut decision, &vector);
         self.record_decision_metrics(ctx.scope, &decision);
@@ -1509,6 +1510,18 @@ fn fresh_decision_id() -> [u8; 16] {
     id
 }
 
+/// The hysteresis client key: the session pseudonym when present, else
+/// the source pseudonym. One memory per scope and client keeps a burst on
+/// one client from steering another client's action selection.
+fn hysteresis_client_key(observation: &RiskObservation) -> &[u8] {
+    observation
+        .session_id
+        .as_ref()
+        .map_or(observation.source_id.as_bytes(), |session| {
+            session.as_slice()
+        })
+}
+
 /// The client-context tag to present to the consolidated assessment call:
 /// the v2 context's tag when a session pseudonym exists and the tag is
 /// non-empty, else `None` (no record is written). Mirrors the guards of
@@ -1908,6 +1921,79 @@ mod tests {
 
     impl SessionContextTagStore for OscillatingStore {}
     impl SessionTlsTagStore for OscillatingStore {}
+
+    /// Store whose score depends on the observation's client: the bot
+    /// session scores at the Argon64 band, every other session at Allow.
+    struct PerClientScoreStore {
+        bot: [u8; 16],
+        outcomes: OutcomeLedger,
+    }
+
+    impl PerClientScoreStore {
+        fn new(bot: [u8; 16]) -> PerClientScoreStore {
+            PerClientScoreStore {
+                bot,
+                outcomes: OutcomeLedger::default(),
+            }
+        }
+    }
+
+    impl RiskStateStore for PerClientScoreStore {
+        fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            let vector = if o.session_id == Some(self.bot) {
+                SignalVector {
+                    source_fast: 900,
+                    bad_proof: 1000,
+                    issue_debt: 1000,
+                    malformed: 700,
+                    subnet_fast: 700,
+                    scope_switch: 700,
+                    ..Default::default()
+                }
+            } else {
+                SignalVector::zero()
+            };
+            Ok(Observed {
+                vector,
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.register(decision_id))
+        }
+
+        fn confirm_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(self.outcomes.confirm(decision_id, legitimate))
+        }
+
+        fn correct_outcome(
+            &self,
+            decision_id: &str,
+            legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(self.outcomes.correct(decision_id, legitimate))
+        }
+
+        fn last_global_level(&self) -> u8 {
+            0
+        }
+    }
+
+    impl SessionContextTagStore for PerClientScoreStore {}
+    impl SessionTlsTagStore for PerClientScoreStore {}
 
     /// Store with the risk-v2 session first-tag record semantics (SET NX:
     /// the first tag a session presents is recorded and returned forever).
@@ -2522,7 +2608,7 @@ mod tests {
         assert!(snapshot.iter().any(|(k, _)| k == "store:observe:count"));
     }
 
-    /// Engine-level wiring: the engine passes its per-process
+    /// Engine-level wiring: the engine passes its per-client
     /// scope-action hysteresis map into the policy, so an oscillating
     /// boundary score (449/451/449…) yields a stable action instead of a
     /// flip-flopping challenge profile.
@@ -2542,6 +2628,103 @@ mod tests {
                 "iteration {i}: the oscillating boundary score must not flip the profile"
             );
         }
+    }
+
+    /// Engine-level keying: the hysteresis memory follows the session
+    /// pseudonym, so the bot's Argon64 history never steers another
+    /// client's action in the same scope.
+    #[test]
+    fn scope_action_hysteresis_is_keyed_per_client() {
+        fn with_session(session: &[u8; 16]) -> RiskContext<'_> {
+            RiskContext {
+                session_id: Some(session),
+                ..context()
+            }
+        }
+        let identity = RiskIdentityFactory::new(keys());
+        let bot_pseudonym = identity.session_id(&[0xB0; 16]);
+        let legit: [u8; 16] = [0x41; 16];
+        let bot: [u8; 16] = [0xB0; 16];
+        let fresh: [u8; 16] = [0x42; 16];
+        let engine = RiskEngine::new(
+            PerClientScoreStore::new(bot_pseudonym),
+            classifier(),
+            policy(),
+            keys(),
+        );
+
+        // The legitimate client establishes an Allow history.
+        let first = engine.assess_pre_issue(with_session(&legit), None).unwrap();
+        assert_eq!(first.action, RiskAction::Allow);
+
+        // The bot's own key jumps straight to Argon64; a scope-wide
+        // memory would hold it at one band after the Allow history.
+        let attack = engine.assess_pre_issue(with_session(&bot), None).unwrap();
+        assert_eq!(attack.score, 921);
+        assert_eq!(attack.action, RiskAction::Argon64);
+
+        // The legitimate client still reads its own Allow entry.
+        let again = engine.assess_pre_issue(with_session(&legit), None).unwrap();
+        assert_eq!(again.action, RiskAction::Allow);
+
+        // A second fresh client after the bot keeps the plain mapping.
+        let later = engine.assess_pre_issue(with_session(&fresh), None).unwrap();
+        assert_eq!(later.action, RiskAction::Allow);
+    }
+
+    /// Engine-level keying fallback: with NO session, the hysteresis
+    /// memory follows the source pseudonym, so two different sources in
+    /// the same scope keep independent entries while each source's own
+    /// held action survives. A scope-keyed memory (the regression this
+    /// pins) would leak the first source's held action into the second's
+    /// fresh assessment.
+    #[test]
+    fn scope_action_hysteresis_falls_back_to_the_source_pseudonym() {
+        fn with_source(ip: &str) -> RiskContext<'static> {
+            RiskContext {
+                source_ip: ip.parse().expect("test IP parses"),
+                ..context()
+            }
+        }
+        let engine = RiskEngine::new(OscillatingStore::default(), classifier(), policy(), keys());
+
+        // Source A: 449 -> Sha18 (its own fresh entry).
+        let first = engine
+            .assess_pre_issue(with_source("203.0.113.27"), None)
+            .unwrap();
+        assert_eq!(first.score, 449);
+        assert_eq!(first.action, RiskAction::Sha18);
+
+        // Source B (different source pseudonym, same scope, no session):
+        // 451 must use the plain mapping (Sha20). A scope-keyed memory
+        // would hold A's Sha18 instead.
+        let second = engine
+            .assess_pre_issue(with_source("198.51.100.9"), None)
+            .unwrap();
+        assert_eq!(second.score, 451);
+        assert_eq!(
+            second.action,
+            RiskAction::Sha20,
+            "a second source must not inherit the first source's hysteresis"
+        );
+
+        // Source A still holds its own Sha18 entry: the same source is held.
+        let third = engine
+            .assess_pre_issue(with_source("203.0.113.27"), None)
+            .unwrap();
+        assert_eq!(third.score, 449);
+        assert_eq!(
+            third.action,
+            RiskAction::Sha18,
+            "the same source keeps its held action"
+        );
+
+        // And source B keeps its own entry too.
+        let fourth = engine
+            .assess_pre_issue(with_source("198.51.100.9"), None)
+            .unwrap();
+        assert_eq!(fourth.score, 451);
+        assert_eq!(fourth.action, RiskAction::Sha20);
     }
 
     #[test]

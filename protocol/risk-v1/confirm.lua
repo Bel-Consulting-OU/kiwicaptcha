@@ -18,11 +18,19 @@
 --          sha20→argon16 edge in action.rs): legit_above_sum and
 --          abuse_below_sum, which calibration.lua averages.
 -- KEYS[3]  outcome ledger entry (STRING, JSON
---          {"o","scope","hour","score","w","c"}), where `c` records
+--          {"o","scope","hour","score","w","c","v"}), where `c` records
 --          whether THIS confirmation contributed a calibration sample
 --          (1) or was deliberately unsampled (0). correction.lua uses it
 --          to reverse bucket contributions exactly once; a legacy
---          ledger without `c` reads as 0.
+--          ledger without `c` reads as 0. `v` marks the writer
+--          generation: this (generation-2) writer sets v = 2 on EVERY
+--          first confirmation it writes, counted or deliberately
+--          unsampled (c=0). correction.lua reverses the clipped
+--          legit_above_sum / abuse_below_sum legs only for a counted
+--          v=2 sample (ledger.c == 1 AND ledger.v == 2); an unsampled
+--          ledger (c=0) only flips the outcome, and a legacy ledger
+--          (no v) only reverses the count/score sums, never the
+--          clipped legs.
 -- ARGV[1]  sampling mode: 0 = complete, 1 = random_sample, 2 = weighted
 -- ARGV[2]  weight (decimal string; required and validated when mode == 2)
 -- ARGV[3]  legitimate (0 = abuse, 1 = legitimate)
@@ -154,6 +162,14 @@ ledger.w = weight
 -- must never reverse or re-add bucket contributions for a DIFFERENT
 -- decision (`c` reads as 0 on legacy ledgers).
 ledger.c = status == 1 and 1 or 0
+-- The writer-generation marker: EVERY first confirmation written by
+-- this (generation-2) writer sets v = 2, counted or deliberately
+-- unsampled (c=0). It records the writer, not that clipped terms were
+-- written: correction.lua reverses and redoes the clipped
+-- legit_above_sum / abuse_below_sum terms only when the sample was
+-- counted (c == 1) AND v == 2. An unsampled or legacy ledger never has
+-- its clipped legs reversed.
+ledger.v = 2
 redis.call('SET', KEYS[3], cjson.encode(ledger), 'EX', ledger_ttl)
 
 if status == 1 then

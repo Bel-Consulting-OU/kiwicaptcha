@@ -697,8 +697,9 @@ per-mode limits:
   may fail (time out or error), not ~5%.
 - `sha20` alone keeps the 2% allowance, and only for the measured
   driver-exhaustion tail: the 20-bit pure-JS files-mode search can
-  exhaust the 5M-hash cap, and the committed lab evidence for that
-  cell contains one such event.
+  exhaust the 20,000,000-hash solver cap (`MAX_SHA_HASHES` in the widget
+  driver, `SOLVER_MAX_HASHES` in the core), and the committed lab
+  evidence for that cell contains one such event.
 - The allowance is pre-justified, never per-sample. The lab's own
   sha20 warm files-mode evidence was 1 exhaustion event in 24 merged
   samples (4.2%) — above even the 2% carve-out. That is exactly why

@@ -45,7 +45,7 @@ import { test, expect } from '@playwright/test';
 //      immediately after destroy() returns, so it can only ever see
 //      stale writes. The test then lets the background solve run to
 //      completion (≥2 s settle; the expected residual after the first
-//      tick is well under a second and the run is capped by the 5M-hash
+//      tick is well under a second and the run is capped by the 20M-hash
 //      ceiling) and asserts that nothing mutated the widget since the
 //      destroy: no data-progress write, no state/lang/label change, no
 //      childList activity, no token, no kiwi:* event, no error.

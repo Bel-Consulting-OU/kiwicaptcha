@@ -131,9 +131,9 @@ pub enum BindingMode {
 ///   key via serde alias. Kept verifiable for the migration window (max TTL).
 /// - `protocol_version == 2` (current, unarmed): signed with the v2
 ///   full-parameter canonical input and a nonce-bound `binding_tag` —
-///   byte-identical to the pre-decoy record format.
+///   no extension segment (the base canonical).
 /// - `protocol_version == 3` (decoy-capable): the v2 canonical base plus
-///   the `|decoy_field` segment appended after `kid`. The decoy is
+///   the tagged `|d=decoy_field` segment appended after `kid`. The decoy is
 ///   mandatory on v3 — a v3 record without a decoy is rejected by
 ///   validation, so a stored version flip (a signed v2 record re-versioned
 ///   to 3) can never verify: the authenticated canonical shape itself
@@ -214,9 +214,10 @@ pub struct ChallengeRecord {
     pub attempts_used: u32,
     /// Protocol version: 1 = legacy v1 canonical signing + legacy `ip_hash`
     /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`
-    /// (the unarmed issuance format, byte-identical to the pre-decoy
-    /// records); 3 = the decoy-capable canonical — the v2 18-field base
-    /// plus the `|decoy_field` segment appended after `kid`, with the
+    /// (the unarmed issuance format: no extension segment); 3 = the
+    /// decoy-capable canonical — the 18-field base
+    /// (`protocol_version` plus the v2 parameter fields) with the tagged
+    /// `|d=decoy_field` segment appended after `kid`, the
     /// decoy mandatory on v3. New records are issued with 3 when a decoy
     /// is armed and 2 otherwise; 1 is the serde default so stored pre-v2
     /// records keep verifying during the migration window (max TTL). The
@@ -274,9 +275,9 @@ pub struct ChallengeRecord {
     /// challenge, drawn from the combinatorial grammar (see
     /// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
-    /// an authenticated canonical field of protocol v3 — the final segment
-    /// `|<decoy_field>`, appended after the `kid` (the canonical signing
-    /// input, documented below) — so a stored/tampered record cannot
+    /// an authenticated canonical field of protocol v3 — the tagged
+    /// `d=<decoy_field>` segment, appended after the `kid` (the canonical
+    /// signing input, documented below) — so a stored/tampered record cannot
     /// change or drop it without breaking the signature.
     ///
     /// Wire compatibility: unarmed records are byte-identical to the
@@ -306,14 +307,17 @@ pub struct ChallengeRecord {
     /// The execution-dimension protocol version: the canonical numeric
     /// byte within the register 1..=MAX_EXECUTION_VERSION (u8 on the
     /// wire, rendered as decimal in the canonical input). Authenticated
-    /// as the `|execution_version` protocol v4 canonical segment. Present
+    /// as the first element of the tagged
+    /// `|e=execution_version,execution_commitment` protocol v4 canonical
+    /// segment. Present
     /// iff the record carries an execution program; the JSON key is
     /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_version: Option<u8>,
     /// The authenticated mirror of the stored execution program: hex
     /// SHA-256 of the program's base64 wire string (64 lowercase hex),
-    /// the final `|execution_commitment` protocol v4 canonical segment.
+    /// the second element of the tagged `|e=execution_version,
+    /// execution_commitment` protocol v4 canonical segment.
     /// Present iff the record carries an execution program; the JSON key
     /// is absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,8 +344,10 @@ pub struct ChallengeRecord {
     /// The record-metadata MAC (64 lowercase hex) authenticating the
     /// server-side fields the challenge signature does not cover
     /// (`issued_at_ns`, `hostname`), keyed with the server-state purpose
-    /// key (see [`record_meta_mac`]). `None` on records issued before the
-    /// MAC existed: such a record verifies only floorless, without a
+    /// key (see [`record_meta_mac`]). Its presence commits the `m=1`
+    /// canonical marker, so stripping it breaks the signature and a
+    /// committed marker demands a valid MAC. `None` on records issued
+    /// before the marker: such a record verifies only floorless, without a
     /// server-measured duration and without a hostname. The JSON key is
     /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -872,15 +878,15 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2..v5 canonical input (canonical revision 3), the full
+/// Protocol v2..v5 canonical input (canonical revision 4), the full
 /// parameter set plus the protocol version and every armed extension, so
 /// no issuance parameter, version flip or extension swap can be made
 /// without breaking the signature:
-/// `v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
+/// `v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`
 /// `region`, `request_binding` and `issuer` render as the empty segment
 /// when unset; `kid` is the final base field.
 ///
-/// # Why revision 3 (injectivity)
+/// # Why revision 4 (the signed MAC capability)
 ///
 /// Revision 2 signed `v2|...` for every protocol version and appended
 /// the decoy, execution pair and rsw identity as bare untagged
@@ -894,7 +900,29 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// protocol version as a segment and tags every extension (`d=` decoy,
 /// `e=` execution pair, `r=` rsw identity), so distinct capability
 /// shapes can never collide; [`protocol_extension_grammar_ok`]
-/// independently enforces which shape each version allows.
+/// independently enforces which shape each version allows. Revision 4
+/// adds the `m=` marker: the signed canonical commits the record-metadata
+/// MAC capability, so stripping `server_mac` breaks the signature and a
+/// committed marker demands a valid MAC at verification.
+///
+/// # The record-metadata MAC marker (revision 4)
+///
+/// The `m=1` segment is appended as the final canonical segment whenever
+/// the record carries a `server_mac` (Some):
+///
+/// ```text
+/// v4|...|kid[|d=decoy_field][|e=execution_version,execution_commitment]
+///   [|r=modulus_sha256]|m=1
+/// ```
+///
+/// The tag order is fixed: `d=`, `e=`, `r=`, then `m=`. The marker is
+/// the stable commitment that the record carries a server-state MAC.
+/// Stripping the MAC from a signed `m=1` record leaves the committed
+/// marker without its tag: the verifier requires the MAC and refuses
+/// the record. Rewriting `issued_at_ns` or `hostname` keeps the segment,
+/// so the MAC check fails. A record signed without the marker stays
+/// floorless when the operator disables the timing floor; a present MAC
+/// still verifies there.
 ///
 /// # The decoy-field extension (protocol v3)
 ///
@@ -903,7 +931,7 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// final segment after the `kid`:
 ///
 /// ```text
-/// v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
 ///   issuer|kid|d=decoy_field
 /// ```
@@ -918,21 +946,22 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// - The `d=` segment is appended only when a decoy is armed, and an
 ///   armed record is issued as `protocol_version == 3` (or 4 when the
 ///   execution dimension is armed too). `None` renders nothing extra and
-///   the record stays `protocol_version == 2`. Revision 3 deliberately
-///   changed the signed bytes of every record, so a challenge issued by
-///   a pre-revision-3 node does not verify after a rolling deploy; the
-///   migration is a hard cutover, which is the point of the repair.
+///   the record stays `protocol_version == 2`. The hard cutover is
+///   deliberate: any record signed by an earlier canonical revision does
+///   not verify after a rolling deploy.
 /// - The grammar is total: v2 => no decoy segment, v3 => decoy segment
 ///   present. Validation enforces both directions, so the protocol
 ///   capability is fully inferable from the authenticated canonical
 ///   shape — a stored version flip (a signed v2 record re-versioned to
-///   3) keeps the plain 18-field canonical and is rejected as
+///   3) keeps the plain base canonical and is rejected as
 ///   malformed, and a v2 record carrying `decoy_field` is rejected too
 ///   (an old verifier rejects version 3 as unknown — the capability
 ///   becomes inferable from `protocol_version`, which is the point).
-/// - PHP parity (exact recipe for the PHP core): build the same 18-field
-///   base string, then append `'|' . $decoyField` if and only if the record
-///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
+/// - PHP parity (exact recipe for the PHP core): build the same base
+///   string, then append `'|d=' . $decoyField` if and only if the record
+///   carries a non-null `decoy_field`; append the matching extension
+///   segments and the trailing `|m=1` when the record carries a
+///   `server_mac`; sign/HMAC-verify the result with the
 ///   `HKDF`-derived challenge key (`K_challenge`) exactly as before. The
 ///   stored record JSON carries the optional string key `decoy_field`
 ///   (absent when null — not a JSON `null` key); the client-facing
@@ -943,11 +972,12 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///
 /// When the issuer arms the ExecutionChallengeV1 dimension
 /// (`issue_challenge_with_execution`), the execution version and the
-/// program commitment are appended as two more final segments after the
+/// program commitment are appended as the tagged
+/// `|e=execution_version,execution_commitment` segment after the
 /// decoy segment (or after the `kid` when no decoy is armed):
 ///
 /// ```text
-/// v3|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+/// v4|protocol_version|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
 ///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
 ///   issuer|kid[|d=decoy_field]|e=execution_version,execution_commitment
 /// ```
@@ -972,7 +1002,8 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   verifier. The rsw modulus identity is signed as `r=<sha256>` when
 ///   present (protocol v5), so stripping, swapping or replaying it
 ///   breaks the signature and it can never be mistaken for a decoy name
-///   (`d=`) or an execution pair (`e=`).
+///   (`d=`) or an execution pair (`e=`). The `m=1` marker follows the
+///   `r=` segment when the record carries a MAC.
 ///
 /// The canonical signing input of a record — public so cross-language
 /// tests and integrations can pin the byte-exact reconstruction against
@@ -987,8 +1018,12 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// and carries no execution, v4 requires the execution triplet and
 /// may also carry the decoy (the canonical appends both segments), and
 /// v5 requires the authenticated rsw modulus identity (the identity
-/// segment is the final canonical field; the decoy/execution segments
-/// stay governed by their own signed equivalence). Identity-bearing
+/// segment is the final tagged extension, followed by the m= marker
+/// when the record carries a MAC; the decoy/execution segments stay
+/// governed by their own signed equivalence). The m= marker is not
+/// protocol-version-bound: it rides any v2..v5 record whose
+/// `server_mac` is Some, and the verifier parses it from the signed
+/// canonical to demand a valid MAC. Identity-bearing
 /// records at v2..=4 are the pre-v5 legacy shape, accepted for the
 /// bounded migration window.
 /// The one structural record contract at every deserialization
@@ -1028,9 +1063,18 @@ pub fn protocol_extension_grammar_ok(
     }
 }
 
-pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+/// The canonical signing input with an explicit MAC-marker choice: the
+/// `m=1` segment is appended exactly when `server_mac_committed` is set.
+/// Issuance commits the marker before the MAC value exists; the verifier
+/// passes the marker parsed from the signed challenge (see
+/// [`signed_canonical_commits_record_meta`]), never the stored MAC
+/// presence.
+pub fn canonical_signing_input_v2_with_mac(
+    record: &ChallengeRecord,
+    server_mac_committed: bool,
+) -> String {
     let mut canonical = format!(
-        "v3|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "v4|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.protocol_version,
         record.nonce,
         record.scope,
@@ -1051,9 +1095,12 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.kid
     );
     // Every extension is tagged and ordered by capability: d= decoy,
-    // e= execution (version,commitment), r= rsw modulus identity. The
-    // tags make the encoding injective across capability shapes; the
-    // signed protocol_version makes a stored version flip fail.
+    // e= execution (version,commitment), r= rsw modulus identity, and
+    // m= the record-metadata MAC marker last. The tags make the encoding
+    // injective across capability shapes; the signed protocol_version
+    // makes a stored version flip fail. The committed m=1 marker rides
+    // the records that carry a server_mac, so stripping the MAC from
+    // such a record is refused.
     if let Some(decoy) = record.decoy_field.as_deref() {
         canonical.push_str("|d=");
         canonical.push_str(decoy);
@@ -1068,13 +1115,44 @@ pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         canonical.push_str("|r=");
         canonical.push_str(identity);
     }
+    if server_mac_committed {
+        canonical.push_str("|m=1");
+    }
     canonical
+}
+
+/// The canonical signing input of a record, with the marker committed
+/// exactly when the record carries a `server_mac` (Some). Public so
+/// cross-language tests and integrations can pin the byte-exact
+/// reconstruction; the verifier uses the parsed marker variant.
+pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+    canonical_signing_input_v2_with_mac(record, record.server_mac.is_some())
+}
+
+/// True when the challenge's signed canonical carries the record-metadata
+/// MAC marker (`m=1`). The marker is parsed from the base64 canonical
+/// embedded in the challenge string, never inferred from the stored
+/// `server_mac` presence: a record whose signature covers `m=1` must
+/// carry a valid MAC, while a record signed without the marker accepts
+/// an absent MAC. A malformed challenge decodes to false.
+pub fn signed_canonical_commits_record_meta(challenge: &str) -> bool {
+    let Some((payload, _signature)) = challenge.rsplit_once('.') else {
+        return false;
+    };
+    let Ok(bytes) = B64.decode(payload) else {
+        return false;
+    };
+    let Ok(canonical) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    canonical.starts_with("v4|") && canonical.ends_with("|m=1")
 }
 
 /// The authenticated execution commitment of a stored program: hex
 /// SHA-256 of the program's base64 wire string, 64 lowercase hex
 /// characters. This is the value signed into the protocol v4 canonical
-/// (the final `|execution_commitment` segment), so the verifier's
+/// (the second element of the tagged `|e=execution_version,
+/// execution_commitment` segment), so the verifier's
 /// constant-time equivalence check
 /// `SHA256(stored program) == signed commitment` is byte-exact in both
 /// languages. Mirrors the PHP `Issuer::executionCommitment`.
@@ -1321,7 +1399,10 @@ pub fn verify_signature_v2_with_tenant(
     tenant: Option<&str>,
 ) -> Result<bool, SignError> {
     verify_canonical_v2(
-        &canonical_signing_input_v2(record),
+        &canonical_signing_input_v2_with_mac(
+            record,
+            signed_canonical_commits_record_meta(&record.challenge),
+        ),
         signature,
         secret_key,
         tenant,
@@ -1340,7 +1421,14 @@ pub(crate) fn verify_signature_v2_with_keys(
     signature: &str,
     derived: &DerivedKeys,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2_with_keys(&canonical_signing_input_v2(record), signature, derived)
+    verify_canonical_v2_with_keys(
+        &canonical_signing_input_v2_with_mac(
+            record,
+            signed_canonical_commits_record_meta(&record.challenge),
+        ),
+        signature,
+        derived,
+    )
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
@@ -2605,12 +2693,13 @@ fn issue_challenge_inner(
         issued_at_ns: now_ns,
         attempts_used: 0,
         // Armed issuance writes protocol v4 (the execution-capable
-        // canonical, signed with the execution commitment segments when
+        // canonical, signed with the tagged `e=` execution segment when
         // the dimension is armed); decoy-only issuance writes protocol
-        // v3 (the decoy-capable canonical); unarmed issuance stays v2,
-        // byte-identical to the pre-decoy format. An rsw issuance
-        // writes protocol v5: the identity-bearing canonical (the
-        // identity is the final signed segment) — a pre-v5 verifier
+        // v3 (the decoy-capable canonical); unarmed issuance stays v2
+        // with no extension segment. An rsw issuance
+        // writes protocol v5: the identity-bearing canonical (the tagged
+        // `r=` identity segment, followed by `m=1` when the record
+        // carries a server-state MAC) — a pre-v5 verifier
         // rejects the unknown version instead of silently ignoring the
         // identity.
         protocol_version: if rsw_identity.is_some() {
@@ -2642,7 +2731,10 @@ fn issue_challenge_inner(
         // fingerprint, set before canonical_signing_input_v2()/signing
         // so the identity segment is covered by the signature.
         rsw_modulus_sha256: rsw_identity.clone(),
-        server_mac: None, // sealed below once the challenge is signed
+        // A placeholder MAC so the canonical commits the m=1 marker
+        // before signing. The real tag is sealed below over the signed
+        // challenge; only its presence is read while signing.
+        server_mac: Some(String::new()),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key, tenant)?;
@@ -4047,13 +4139,13 @@ mod tests {
 
         let canonical = canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with(&format!("|d={decoy}")),
-            "the decoy name must be the FINAL canonical segment, tagged d=: {canonical}"
+            canonical.ends_with(&format!("|d={decoy}|m=1")),
+            "the decoy name is the final tagged extension before the m= marker: {canonical}"
         );
         assert_eq!(
             canonical.split('|').count(),
-            20,
-            "revision-3 v3 canonical: the 19-field base + the tagged decoy segment"
+            21,
+            "revision-4 v3 canonical: the 19-field base + the tagged decoy and m= segments"
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
@@ -4068,7 +4160,7 @@ mod tests {
             .rsplit_once('.')
             .expect("challenge is base64.signature");
         let decoded = B64.decode(payload).expect("challenge payload decodes");
-        assert!(String::from_utf8_lossy(&decoded).ends_with(&format!("|d={decoy}")));
+        assert!(String::from_utf8_lossy(&decoded).ends_with(&format!("|d={decoy}|m=1")));
 
         // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
@@ -4420,11 +4512,24 @@ mod tests {
     }
 
     #[test]
+    fn max_protocol_version_is_pinned_to_the_shared_fleet_contract() {
+        // One value every reader advertises: the doctor command, the
+        // extension readiness probe (KiwiHealthController) and the PHP core
+        // (ChallengeRecord) must never disagree, or issuance outruns
+        // verification somewhere in the fleet. A move here moves all of
+        // them in the same change.
+        assert_eq!(
+            MAX_PROTOCOL_VERSION, 5,
+            "MAX_PROTOCOL_VERSION must stay 5: the doctor, the readiness probe and the PHP core pin the same shared contract"
+        );
+    }
+
+    #[test]
     fn decoy_field_disabled_keeps_the_plain_canonical_shape() {
         // The plain path (and the explicit false arm) issues NO decoy and
-        // stays protocol v2: the canonical keeps the revision-3 base
-        // shape (19 fields, kid last, protocol_version signed as the
-        // second segment) and neither JSON surface carries the key.
+        // stays protocol v2: the canonical keeps the revision-4 base
+        // shape (19 fields plus the m= marker, protocol_version signed as
+        // the second segment) and neither JSON surface carries the key.
         for issued in [
             issue_challenge(
                 &profile_base_config(),
@@ -4452,21 +4557,21 @@ mod tests {
             assert!(issued.record.decoy_field.is_none());
             assert_eq!(
                 issued.record.protocol_version, 2,
-                "an unarmed issuance stays protocol v2, byte-identical to the pre-decoy format"
+                "an unarmed issuance stays protocol v2 with no extension segment"
             );
             let canonical = canonical_signing_input_v2(&issued.record);
             assert_eq!(
                 canonical.split('|').count(),
-                19,
-                "the revision-3 base canonical has 19 fields (canonical tag + protocol_version + 17 record fields; no extension)"
+                20,
+                "the revision-4 base canonical has 19 fields plus the m= marker (canonical tag + protocol_version + 17 record fields)"
             );
             assert!(
-                canonical.starts_with("v3|2|"),
+                canonical.starts_with("v4|2|"),
                 "the canonical revision and the signed protocol version lead the base"
             );
             assert!(
-                canonical.ends_with(&issued.record.kid.to_string()),
-                "kid stays the final field when no decoy is armed"
+                canonical.ends_with(&format!("{}|m=1", issued.record.kid)),
+                "kid stays the final base field before the m= marker"
             );
             let record_json = serde_json::to_value(&issued.record).unwrap();
             assert!(
@@ -4899,12 +5004,12 @@ mod tests {
         // always ends with `|<kid>`.
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with("|auth-gw-eu|1"),
+            canonical.ends_with("|auth-gw-eu|1|m=1"),
             "canonical: {canonical}"
         );
         let unbound_canonical = crate::challenge::canonical_signing_input_v2(&unbound.record);
         assert!(
-            unbound_canonical.ends_with("||1"),
+            unbound_canonical.ends_with("||1|m=1"),
             "unbound issuer renders as the empty segment before the final kid: {unbound_canonical}"
         );
         // The record's signature covers the issuer: tampering with it breaks
@@ -5124,8 +5229,9 @@ mod tests {
     #[test]
     fn issuance_stamps_and_signs_the_kid() {
         // config.kid is stamped on the record and signed as the
-        // final canonical field — the record JSON carries it and
-        // the signed challenge string embeds it byte-exactly.
+        // final base canonical field before the m= marker — the record
+        // JSON carries it and the signed challenge string embeds it
+        // byte-exactly.
         let base = profile_base_config();
         let with_kid = ChallengeConfig {
             kid: 5,
@@ -5145,8 +5251,8 @@ mod tests {
         assert_eq!(issued.record.kid, 5);
         let canonical = crate::challenge::canonical_signing_input_v2(&issued.record);
         assert!(
-            canonical.ends_with("|5"),
-            "the kid must be the FINAL canonical field: {canonical}"
+            canonical.ends_with("|5|m=1"),
+            "the kid must be the final base field before the m= marker: {canonical}"
         );
         // The challenge's base64 half is byte-exactly the canonical.
         let b64 = issued.record.challenge.split('.').next().unwrap();

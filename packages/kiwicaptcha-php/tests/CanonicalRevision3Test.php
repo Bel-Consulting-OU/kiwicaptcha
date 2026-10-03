@@ -69,7 +69,7 @@ final class CanonicalRevision3Test extends TestCase
         $v5 = Issuer::canonicalPayload(5, ...array_merge($this->baseArgs(), [null, 1, null, null, 1, null, null, null, str_repeat('b', 64)]));
         $v3 = Issuer::canonicalPayload(3, ...array_merge($this->baseArgs(), [null, 1, null, null, 1, 'b'.str_repeat('b', 63)]));
         self::assertNotSame($v5, $v3, 'the signed protocol_version must change the canonical bytes');
-        self::assertStringStartsWith('v3|5|', $v5);
-        self::assertStringStartsWith('v3|3|', $v3);
+        self::assertStringStartsWith('v4|5|', $v5);
+        self::assertStringStartsWith('v4|3|', $v3);
     }
 }

@@ -188,16 +188,19 @@ Files:
     `{kiwi:<ns>}:cal:receipt:<decision_id>` (EX = receipt TTL, default 300):
     `{"scope","band","action","score","sampled"}` — no IP or identity.
     Confirmation is atomic via the canonical `confirm.lua` (GET receipt →
-    validate → DEL receipt → `HINCRBYFLOAT` bucket → `EXPIRE` → return
-    scope); a confirmed outcome is either fully recorded or not consumed.
+    validate → DEL receipt → ledger CAS → `HINCRBYFLOAT` bucket →
+    `EXPIRE` → return status 0/1/2); a confirmed outcome is either fully
+    recorded or not consumed.
     Bias is boundary-relative exact score calibration on class-normalized
     means. T = 600 is the decision boundary where the default ladder
     leaves the sha20 band and enters the first Argon band
     (`action.rs`/`score.rs`). fp_mean = Σ max(0, legit_score − T) /
     legit_count and fn_mean = Σ max(0, T − abuse_score) / abuse_count,
     then error = fn_mean·fn_cost − fp_mean·fp_cost. The clipped sums
-    (`legit_above_sum`, `abuse_below_sum`) are accumulated per sample at
-    confirmation and reversed/redone by correction; a legacy bucket
+    (`legit_above_sum`, `abuse_below_sum`) are accumulated at confirmation
+    for every counted sample and reversed/redone by correction only for a
+    counted v=2 sample (`ledger.c == 1` AND `ledger.v == 2`); an unsampled
+    (c=0) or legacy (no v) ledger leaves them untouched. A legacy bucket
     without them contributes 0. raw = (error*2)/10, clamped to
     ±max_adjustment, and moved toward the target through the proportional
     per-minute rate limiter (milli-points, max change per minute). Below
@@ -218,9 +221,9 @@ Files:
 
 17. Outcome ledger (always on, independent of calibration):
     `{kiwi:<ns>}:outcome:<decision_id>` holds the decision's outcome state
-    as JSON `{"o":"P|L|A","scope","hour","score","w","c"}` (pending /
-    legitimate / abuse, exact decision score, recorded weight, sample
-    marker), EX = outcome receipt TTL. Registration is atomic with the
+    as JSON `{"o":"P|L|A","scope","hour","score","w","c","v"}` (pending /
+    legitimate / abuse, exact decision score, recorded weight, counted
+    flag `c`, writer generation `v`), EX = outcome receipt TTL. Registration is atomic with the
     calibration receipt + sample denominator (register_decision.lua:
     validate → SET receipt NX EX → pending ledger `SET NX EX` → gated
     sample_total `INCR`). The ledger NX means a late re-registration can
@@ -238,7 +241,12 @@ Files:
     sample (`c == 1`; a missing marker reads as 0) reverses the original
     bucket contribution, using the recorded weight, and adds the
     corrected one (clamped at zero), so an unsampled decision never
-    deletes another decision's sample. `outcome_correct.lua` preserves
+    deletes another decision's sample. The clipped legs are reversed and
+    redone only for a counted v=2 sample (`c == 1` AND `v == 2`): the
+    generation-2 writer stamps `v = 2` on every first confirmation it
+    writes (counted or deliberately unsampled c=0), and a legacy ledger
+    (no `v`) reverses the count/score sums without touching the clipped
+    legs. `outcome_correct.lua` preserves
     the stored TTL (`SET ... KEEPTTL`) instead of extending it on every
     correction. The
     corrected outcome is authoritative for future events while the prior

@@ -655,7 +655,7 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // window), 2 (unarmed), 3 (decoy-capable) and 4 (execution-capable)
     // exist — anything else is a corrupt/foreign record. The
     // protocol-vs-decoy-vs-execution grammar is explicit and total: the
-    // `|decoy_field` segment is a protocol v3/v4 canonical extension, so
+    // tagged `d=` segment is a protocol v3/v4 canonical extension, so
     // a v2 record carrying a `decoy_field` is rejected here (the v2
     // canonical never includes the segment and such a record cannot have
     // been signed by a conforming issuer — an armed issuance writes
@@ -1257,10 +1257,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         Ok(false) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
         Err(_) => return VerifyOutcome::Invalid(VerifyError::BadSignature),
     }
-    // 1b'. The record-metadata MAC: a present `server_mac` must verify
-    //      under the record's kid secret and the tenant — a rewritten
-    //      issuance clock or hostname is a forged record
+    // 1b'. The record-metadata MAC: when the signed canonical commits
+    //      the m=1 marker, a valid `server_mac` is required and verified
+    //      regardless of the timing floor. A present MAC always verifies.
+    //      A rewritten issuance clock or hostname is a forged record
     //      (BadSignature), exactly like the PHP verifier.
+    let signed_mac = crate::challenge::signed_canonical_commits_record_meta(&ctx.record.challenge);
+    if signed_mac && ctx.record.server_mac.is_none() {
+        return VerifyOutcome::Invalid(VerifyError::BadSignature);
+    }
     if ctx.record.server_mac.is_some()
         && !crate::challenge::verify_record_meta(
             &crate::keys::DerivedKeys::from_master(secret, ctx.tenant),
@@ -1923,22 +1928,29 @@ mod tests {
     }
 
     fn resign_v2_tenant(record: &mut ChallengeRecord, secret: &str, tenant: Option<&str>) {
+        // The production order: a placeholder MAC commits the m=1 marker
+        // before signing, then the real tag is sealed over the signed
+        // challenge. A record without a MAC signs without the marker.
+        let had_mac = record.server_mac.is_some();
+        record.server_mac = if had_mac { Some(String::new()) } else { None };
         let canonical = super::super::challenge::canonical_signing_input_v2(record);
         let sig = super::super::challenge::sign_canonical_v2(&canonical, secret, tenant).unwrap();
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
-        // The server-state MAC authenticates the unsigned server-side
-        // fields (issued_at_ns, hostname) against the exact challenge
-        // string: a re-sign changes the challenge, so the MAC must be
-        // re-sealed exactly as the production issuer seals it after
-        // signing.
-        record.server_mac = Some(super::super::challenge::record_meta_mac(
-            &super::super::keys::DerivedKeys::from_master(secret, tenant),
-            &record.challenge,
-            record.issued_at_ns,
-            record.hostname.as_deref(),
-        ));
+        if had_mac {
+            // The server-state MAC authenticates the unsigned server-side
+            // fields (issued_at_ns, hostname) against the exact challenge
+            // string: a re-sign changes the challenge, so the MAC must be
+            // re-sealed exactly as the production issuer seals it after
+            // signing.
+            record.server_mac = Some(super::super::challenge::record_meta_mac(
+                &super::super::keys::DerivedKeys::from_master(secret, tenant),
+                &record.challenge,
+                record.issued_at_ns,
+                record.hostname.as_deref(),
+            ));
+        }
     }
 
     // ── tenant-scoped verification ─────────────────────────────────────
@@ -2696,7 +2708,7 @@ mod tests {
 
     #[test]
     fn protocol_version_two_with_a_decoy_is_rejected_explicitly() {
-        // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+        // The protocol-vs-decoy grammar: the tagged `d=` segment is a
         // protocol v3 canonical extension, so a v2 record carrying a
         // decoy is malformed — the v2 canonical never includes the
         // segment, and such a record cannot have been signed by a
@@ -4116,9 +4128,9 @@ mod tests {
         );
 
         // The cap value itself is also rejected: the official decoder
-        // rejects counter >= 5,000,000 (the JS solver searches
-        // 0..4,999,999), so the direct verifier must match (protocol
-        // parity).
+        // rejects counter >= SOLVER_MAX_HASHES (20,000,000; the JS solver
+        // searches 0..19,999,999), so the direct verifier must match
+        // (protocol parity).
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
         assert_eq!(
@@ -6290,8 +6302,14 @@ mod tests {
     const FIXTURE_SALT: &str = "MTIzNDU2Nzg5MGFiY2RlZg==";
     const FIXTURE_BINDING_TAG: &str =
         "5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f";
-    const FIXTURE_CANONICAL_V2: &str = "v3|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
-    const FIXTURE_CHALLENGE_V2: &str = "djN8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDE=.ad26185231b547fe467ef8de28029e0fbaff955bc5f31350d0421fd89f3e525e";
+    const FIXTURE_CANONICAL_V2: &str = "v4|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1";
+    const FIXTURE_CHALLENGE_V2: &str = "djR8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDE=.b4f93cd65ffa1184b72854237382c225fb8fe195f6657682a8aa4e542759500f";
+    // The signed record-metadata MAC vector: the same base canonical plus
+    // the m=1 marker, and the server-state MAC the issuer seals over it.
+    const FIXTURE_CANONICAL_V2_MAC: &str = "v4|2|QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5b105424fe3a5cfa3afdccda95f734c9e66ee703e8b8d426a07cfe1cb9c8954f|1700000000|1700000120|sha256|0|1|1|8|MTIzNDU2Nzg5MGFiY2RlZg==|0||1|||1|m=1";
+    const FIXTURE_CHALLENGE_V2_MAC: &str = "djR8MnxRVUpEUkVWR1IwaEpTa3RNVFU1UFVGRlNVMVJWVmxkWVdWcGhZbU5rWldZPXxsb2dpbnw1YjEwNTQyNGZlM2E1Y2ZhM2FmZGNjZGE5NWY3MzRjOWU2NmVlNzAzZThiOGQ0MjZhMDdjZmUxY2I5Yzg5NTRmfDE3MDAwMDAwMDB8MTcwMDAwMDEyMHxzaGEyNTZ8MHwxfDF8OHxNVEl6TkRVMk56ZzVNR0ZpWTJSbFpnPT18MHx8MXx8fDF8bT0x.faac3b0327610efab95b2595f12ba6cccfd5d414a6130b5c869fb15cb36bdbfb";
+    const FIXTURE_SERVER_MAC: &str =
+        "e78e7182608185bf8fa24b46bedc2816b99224c5e6a57fd301f42a97f646a7b6";
     const FIXTURE_LEGACY_IP_HASH: &str =
         "5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf";
     const FIXTURE_CANONICAL_V1: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY=|login|5fdd75a9ee78cf4ebabff4683f396b04e13d969578a6e14483c38eb7668fbaaf|1700000000";
@@ -6398,6 +6416,12 @@ mod tests {
         // The challenge's base64 half is byte-exactly the v2 canonical.
         let b64 = FIXTURE_CHALLENGE_V2.split('.').next().unwrap();
         assert_eq!(B64.decode(b64).unwrap(), FIXTURE_CANONICAL_V2.as_bytes());
+        // No MAC at issue means no signed marker, and the floorless
+        // record stays verifiable: the documented floorless path.
+        assert!(record.server_mac.is_none());
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &record.challenge
+        ));
         assert!(
             matches!(
                 verify_fixture(&mut record, false),
@@ -6435,6 +6459,82 @@ mod tests {
             ),
             "v1 shared fixture vector must verify with the migration flag"
         );
+    }
+
+    #[test]
+    fn v2_fixture_record_with_signed_mac_verifies_and_refuses_tampering() {
+        // The signed m=1 vector: the canonical carries the marker and the
+        // record carries the server-state MAC over the exact challenge.
+        let mut record = fixture_record(2);
+        record.challenge = FIXTURE_CHALLENGE_V2_MAC.into();
+        record.prefix = format!("{}|{FIXTURE_SALT}|", record.challenge);
+        record.server_mac = Some(FIXTURE_SERVER_MAC.into());
+        let b64 = FIXTURE_CHALLENGE_V2_MAC.split('.').next().unwrap();
+        assert_eq!(
+            B64.decode(b64).unwrap(),
+            FIXTURE_CANONICAL_V2_MAC.as_bytes()
+        );
+        assert!(crate::challenge::signed_canonical_commits_record_meta(
+            &record.challenge
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            FIXTURE_CHALLENGE_V2
+        ));
+        let mut signed = record.clone();
+        assert!(
+            matches!(
+                verify_fixture(&mut signed, false),
+                VerifyOutcome::Valid { .. }
+            ),
+            "the signed m=1 fixture must verify"
+        );
+
+        // Stripping the MAC leaves the signed marker without its tag:
+        // the required-MAC gate refuses the record.
+        let mut stripped = record.clone();
+        stripped.server_mac = None;
+        assert_eq!(
+            verify_fixture(&mut stripped, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+
+        // Rewriting the sealed clock keeps the marker and breaks the MAC.
+        let mut backdated = record.clone();
+        backdated.issued_at_ns -= 1;
+        assert_eq!(
+            verify_fixture(&mut backdated, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+
+        // A no-marker record with a foreign MAC fails the MAC check.
+        let mut forged = fixture_record(2);
+        forged.server_mac = Some(FIXTURE_SERVER_MAC.into());
+        assert_eq!(
+            verify_fixture(&mut forged, false),
+            VerifyOutcome::Invalid(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn record_meta_marker_parser_rejects_malformed_challenges() {
+        // The marker parser is total: no dot, invalid base64, a non-v4
+        // revision and a canonical without the trailing marker all read
+        // as uncovered, so only a signed v4 marker can demand a MAC.
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            "no-dot"
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            "!!!.###"
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v3|1|...|m=1"))
+        ));
+        assert!(!crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v4|1|..."))
+        ));
+        assert!(crate::challenge::signed_canonical_commits_record_meta(
+            &format!("{}.00", B64.encode(b"v4|1|...|m=1"))
+        ));
     }
 
     #[test]

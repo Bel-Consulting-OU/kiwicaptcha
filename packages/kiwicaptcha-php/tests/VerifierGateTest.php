@@ -1086,12 +1086,12 @@ final class VerifierGateTest extends TestCase
         $ip = '192.168.1.5';
         $bindingTag = Issuer::bindingTag($nonce, $ip, $secret);
 
-        // Revision-3 canonical layout: the canonical tag, the signed
+        // Revision-4 canonical layout: the canonical tag, the signed
         // protocol version 2, then the field order with
         // region/request_binding/issuer as empty segments, policy_version
         // 1, and the final kid segment 1. This is byte-identical to the
         // Rust shared fixture vector.
-        $canonicalV2 = 'v3|2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
+        $canonicalV2 = 'v4|2|'.$nonce.'|'.$scope.'|'.$bindingTag.'|'.$issuedAt.'|'.$expiresAt.'|sha256|0|1|1|8|'.$salt.'|0||1|||1';
         self::assertSame(
             $canonicalV2,
             Issuer::canonicalPayload(
@@ -1112,7 +1112,34 @@ final class VerifierGateTest extends TestCase
             'canonicalPayload must produce the exact shared vector'
         );
 
+        // The signed m=1 vector, byte-identical to the Rust shared
+        // fixture: the same base canonical plus the marker, and the
+        // marker parser accepts only that challenge shape.
+        $canonicalV2Mac = $canonicalV2.'|m=1';
+        self::assertSame(
+            $canonicalV2Mac,
+            Issuer::canonicalPayload(
+                2,
+                $nonce,
+                $scope,
+                $bindingTag,
+                $issuedAt,
+                $expiresAt,
+                PoWAlgorithm::Sha256,
+                0,
+                1,
+                1,
+                8,
+                $salt,
+                0,
+                serverMacCommitted: true,
+            ),
+            'canonicalPayload must produce the exact signed-marker shared vector'
+        );
+        $macChallenge = base64_encode($canonicalV2Mac).'.'.Issuer::signPayloadV2($canonicalV2Mac, $secret);
+        self::assertTrue(Issuer::signedCanonicalCommitsRecordMeta($macChallenge));
         $challenge = base64_encode($canonicalV2).'.'.Issuer::signPayloadV2($canonicalV2, $secret);
+        self::assertFalse(Issuer::signedCanonicalCommitsRecordMeta($challenge));
         $prefix = $challenge.'|'.$salt.'|';
         $record = new ChallengeRecord(
             nonce: $nonce,

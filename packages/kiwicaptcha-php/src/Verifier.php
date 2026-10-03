@@ -1877,7 +1877,7 @@ final class Verifier
         // record. The protocol-vs-decoy-vs-execution grammar is total:
         // a protocol-v2 record that carries a decoy is rejected
         // explicitly (the v2 canonical never includes the
-        // `|decoy_field` segment, so the combination cannot come from a
+        // tagged `d=` segment, so the combination cannot come from a
         // conforming issuer — an armed issuance writes protocol v3),
         // and a protocol-v3 record without one is rejected too. The
         // decoy is mandatory on v3, so a signed v2 record with its
@@ -2868,23 +2868,32 @@ final class Verifier
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
      * carries an armed decoy (honeypot) field, the name is covered too:
-     * it is the `|<decoy_field>` segment appended after the kid
+     * it is the tagged `|d={decoy_field}` segment appended after the kid
      * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
      * splicing it breaks the signature. When the record carries an armed
-     * execution program, its commitment is covered too: the final
-     * `|execution_version|execution_commitment` segments, so stripping,
-     * substituting or injecting a program breaks the signature. The
+     * execution program, its commitment is covered too: the tagged
+     * `|e={execution_version},{execution_commitment}` segment, so
+     * stripping, substituting or injecting a program breaks the
+     * signature. When the record carries the rsw trapdoor identity, the
+     * signed `|r={modulus_sha256}` segment pins the modulus, so
+     * substituting a different trapdoor breaks the signature. The
      * decoy segment rides a protocol v3/v4 record: armed issuance writes
      * version 3 (or 4 when the execution dimension is armed too), and the
      * v2-plus-decoy combination is rejected by the structural gate.
-     * An unarmed record (a v2) renders the legacy 18-field canonical
-     * bytes, byte-identical to the pre-extension format.
+     * An unarmed record (a v2) renders the plain base canonical
+     * bytes.
      * A v3 record always carries the decoy segment (the decoy is
      * mandatory on v3) and a v4 record always carries the execution
      * segments (the commitment is mandatory on v4).
+     * The signed canonical also commits the `m=1` record-metadata MAC
+     * marker whenever the record carries a `server_mac`. The marker is
+     * parsed from the challenge itself, never inferred from the stored
+     * MAC presence: an m=1 record must carry a valid MAC regardless of
+     * the timing floor, and stripping the MAC breaks the signature.
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
+        $commitsMac = Issuer::signedCanonicalCommitsRecordMeta($record->challenge);
         $expected = $record->protocolVersion === 1
             ? Issuer::signPayload(sprintf(
                 '%s|%s|%s|%d',
@@ -2916,21 +2925,29 @@ final class Verifier
                 $record->executionVersion,
                 $record->executionCommitment,
                 $record->rswModulusSha256,
+                $commitsMac,
             ), $secretKey, $this->tenantId);
 
         if (!hash_equals($expected, self::signatureFromChallenge($record->challenge))) {
             return false;
         }
 
-        // The record-metadata MAC (issued_at_ns + hostname, not part of
-        // the signed canonical): a present MAC must verify under the
-        // same kid secret and tenant, so a storage writer cannot
-        // backdate the issuance clock or rewrite the hostname of an
-        // issuer-written record. An absent MAC is judged where the
-        // metadata is consumed (the duration floor fails closed, the
+        // The record-metadata MAC authenticates issued_at_ns and hostname,
+        // which the canonical fields do not cover. A signed m=1 marker
+        // requires a valid MAC regardless of the timing floor; a present
+        // MAC always verifies, so a storage writer cannot backdate the
+        // clock or rewrite the hostname of an issuer-written record. An
+        // absent MAC on a record signed without the marker is judged where
+        // the metadata is consumed (the duration floor fails closed, the
         // measured duration and the hostname are withheld).
+        $key = ServerStateMac::key($secretKey, $this->tenantId);
+        if ($commitsMac) {
+            return $record->serverMac !== null
+                && ServerStateMac::verifyRecordMeta($key, $record);
+        }
+
         return $record->serverMac === null
-            || ServerStateMac::verifyRecordMeta(ServerStateMac::key($secretKey, $this->tenantId), $record);
+            || ServerStateMac::verifyRecordMeta($key, $record);
     }
 
     /**

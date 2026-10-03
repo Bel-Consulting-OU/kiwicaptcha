@@ -484,6 +484,158 @@ final class AdaptiveRiskEngineTest extends TestCase
         }
     }
 
+    /**
+     * Engine-level keying: the hysteresis memory follows the session
+     * pseudonym, so the bot's Argon64 history never steers another
+     * client's action in the same scope.
+     */
+    public function testScopeActionHysteresisIsKeyedPerClient(): void
+    {
+        $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
+        $botPseudonym = (new RiskIdentityFactory($keys))->sessionId(str_repeat('b0', 16));
+        $store = new class($botPseudonym) extends RiskStateStoreStub {
+            public function __construct(private readonly string $botPseudonym)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                if ($observation->sessionId === $this->botPseudonym) {
+                    return SignalVector::fromArray([
+                        'source_fast' => 900,
+                        'bad_proof' => 1000,
+                        'issue_debt' => 1000,
+                        'malformed' => 700,
+                        'subnet_fast' => 700,
+                        'scope_switch' => 700,
+                    ]);
+                }
+
+                return SignalVector::zero();
+            }
+        };
+        $engine = $this->engine($store);
+        $context = function (string $session): RiskContext {
+            return new RiskContext(
+                scope: 1,
+                sourceIp: '203.0.113.27',
+                sessionId: $session,
+                principalId: null,
+                event: RiskEventKind::PreIssue,
+                networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify('203.0.113.27'),
+                resources: new ResourcePressure(1000, 1000),
+            );
+        };
+
+        // The legitimate client establishes an Allow history.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('41', 16)))->action
+        );
+        // The bot's own key jumps straight to Argon64.
+        $bot = $engine->assessPreIssue($context(str_repeat('b0', 16)));
+        self::assertSame(921, $bot->score);
+        self::assertSame(RiskAction::Argon64, $bot->action);
+        // The legitimate client still reads its own Allow entry.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('41', 16)))->action
+        );
+        // A second fresh client after the bot keeps the plain mapping.
+        self::assertSame(
+            RiskAction::Allow,
+            $engine->assessPreIssue($context(str_repeat('42', 16)))->action
+        );
+    }
+
+    /**
+     * Engine-level keying without a session: when the session pseudonym
+     * is absent the hysteresis client key falls back to the source
+     * pseudonym (never the subnet or a shared constant), so two sources
+     * in the same scope — even in the same /24 — keep independent
+     * entries. The bot source's fresh key selects Argon64; an ordinary
+     * source's request must read its own fresh entry (the plain band for
+     * 845), and the bot source's next, lower score stays held at
+     * Argon64 by its own entry.
+     */
+    public function testScopeActionHysteresisIsKeyedPerSourceWhenSessionIsAbsent(): void
+    {
+        // 921 = 100 base + the saturated bot vector (the same vector as
+        // the per-client test above); 845 maps plain to Argon32 (band
+        // [750, 850)) and sits inside Argon64's hold window (>= 850 − 10).
+        $vectors = [
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 700,
+                'scope_switch' => 700,
+            ],
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 275,
+            ],
+            [
+                'source_fast' => 900,
+                'bad_proof' => 1000,
+                'issue_debt' => 1000,
+                'malformed' => 700,
+                'subnet_fast' => 275,
+            ],
+        ];
+        $store = new class($vectors) extends RiskStateStoreStub {
+            private int $call = 0;
+
+            /** @param list<array<string, int>> $vectors */
+            public function __construct(private readonly array $vectors)
+            {
+            }
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::fromArray($this->vectors[$this->call++]);
+            }
+        };
+        $engine = $this->engine($store);
+        $context = function (string $ip): RiskContext {
+            return new RiskContext(
+                scope: 1,
+                sourceIp: $ip,
+                sessionId: null,
+                principalId: null,
+                event: RiskEventKind::PreIssue,
+                networkFlags: (new CidrNetworkClassifier([['cidr' => '203.0.113.0/24', 'flags' => ['hosting']]]))->classify($ip),
+                resources: new ResourcePressure(1000, 1000),
+            );
+        };
+
+        // Both sources share the 203.0.113.0/24 subnet pseudonym, so only
+        // the source pseudonym can keep the two entries apart.
+        $bot = $engine->assessPreIssue($context('203.0.113.27'));
+        self::assertSame(921, $bot->score);
+        self::assertSame(RiskAction::Argon64, $bot->action, 'the fresh bot source key uses the plain mapping');
+
+        $ordinary = $engine->assessPreIssue($context('203.0.113.28'));
+        self::assertSame(845, $ordinary->score);
+        self::assertSame(
+            RiskAction::Argon32,
+            $ordinary->action,
+            "the other source's own fresh entry must apply — the bot's Argon64 hold must not leak"
+        );
+
+        $held = $engine->assessPreIssue($context('203.0.113.27'));
+        self::assertSame(845, $held->score);
+        self::assertSame(
+            RiskAction::Argon64,
+            $held->action,
+            "the bot source's own entry holds Argon64 inside its exit window (845 >= 850 − 10)"
+        );
+    }
+
     public function testAssessIsAliasOfAssessPreIssue(): void
     {
         $limiter = new ProcessEmergencyCap(processPerSecond: 1);

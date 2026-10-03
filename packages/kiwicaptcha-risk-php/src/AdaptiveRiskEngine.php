@@ -21,7 +21,7 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
  *
  * Pipeline: emergency limiter (single per-process window, before any state
  * backend) -> observation -> circuit breaker -> state store (evalsha) ->
- * scorer -> policy (with the per-process scope-action hysteresis map:
+ * scorer -> policy (with the per-client scope-action hysteresis map:
  * enter/exit smoothing of the score band selection) -> decision.
  * Backend failure degrades instead of failing the request.
  *
@@ -409,6 +409,7 @@ final class AdaptiveRiskEngine
             cooldownUntilMs: $cooldownUntilMs,
             hysteresis: $this->hysteresis,
             decisionId: $decisionId,
+            clientKey: $observation->sessionId ?? $observation->sourceId,
         );
 
         $this->metrics->gauge('global:level', $decision->globalLevel);

@@ -21,11 +21,11 @@ namespace KiwiCaptcha;
  * together, matching serde's duplicate-field rejection. Legacy records
  * carrying only `ip_hash` decode as `protocol_version` 1.
  *
- * Protocol v3 is the decoy-capable canonical: the v2 18-field base plus
- * the `|decoy_field` segment appended after `kid`. The decoy is
- * mandatory on v3, so an armed issuance writes protocol v3 with the
- * segment and an unarmed issuance stays protocol v2, byte-identical to
- * the pre-decoy format. The protocol-vs-decoy grammar is total and
+ * Protocol v3 is the decoy-capable canonical: the 18-field base plus
+ * the tagged `|d={decoy_field}` segment appended after `kid`. The decoy
+ * is mandatory on v3, so an armed issuance writes protocol v3 with the
+ * segment and an unarmed issuance stays protocol v2 with no extension
+ * segment. The protocol-vs-decoy grammar is total and
  * enforced on both acceptance surfaces. A protocol-v2 record that
  * carries `decoy_field` is rejected explicitly, since the v2 canonical
  * never includes the segment. A protocol-v3 record without one is
@@ -35,10 +35,10 @@ namespace KiwiCaptcha;
  * as unknown.
  *
  * Protocol v4 is the execution-capable canonical: the decoy-capable
- * canonical plus the `|execution_version|execution_commitment` segments
- * appended after the decoy (or after `kid` when no decoy is armed). The
- * execution segments are mandatory on v4 and are present iff the record
- * carries an execution program.
+ * canonical plus the tagged `|e=execution_version,execution_commitment`
+ * segment appended after the decoy (or after `kid` when no decoy is
+ * armed). The execution segment is mandatory on v4 and is present iff
+ * the record carries an execution program.
  * The signed commitment is therefore the exact mirror of the stored
  * program: commitment absent = program absent, commitment present =
  * program present, and SHA256(stored program) must equal the signed
@@ -145,12 +145,11 @@ namespace KiwiCaptcha;
  * `decoyField` is the server-issued decoy (honeypot) form-field name
  * armed for this challenge, drawn from the combinatorial grammar (see
  * {@see Issuer::composeDecoyName()}). Null =
- * no decoy armed (the default, and the shape every pre-decoy record
- * carries). The name is an authenticated canonical field: the final
- * segment `|<decoy_field>`, appended after the `kid` (see
- * {@see Issuer::canonicalPayload()}), so a stored/tampered record cannot
- * change or drop it without breaking the signature. Wire compatibility:
- * unarmed records are byte-identical to the pre-decoy format. The JSON
+ * no decoy armed (the default). The name is an authenticated canonical
+ * field: the tagged `|d={decoy_field}` segment, appended after the `kid`
+ * (see {@see Issuer::canonicalPayload()}), so a stored/tampered record
+ * cannot change or drop it without breaking the signature. Wire
+ * compatibility: unarmed records carry no extension segment. The JSON
  * key is absent when null (`skip_serializing_if`), so pre-decoy writers
  * and readers keep their exact byte format. A decoy-armed record is
  * protocol v3 (or v4 when the execution dimension is armed too) and
@@ -166,7 +165,7 @@ namespace KiwiCaptcha;
  * version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
  * (an old record without the field is an unarmed record). It is an
  * authenticated canonical field of
- * protocol v4: the `|execution_version` segment, see
+ * protocol v4: the first element of the tagged `e=` segment, see
  * {@see Issuer::canonicalPayload()}, so a stored/tampered record cannot
  * change or drop it without breaking the signature. The JSON key is
  * absent when null (`skip_serializing_if`).
@@ -174,7 +173,7 @@ namespace KiwiCaptcha;
  * `executionCommitment` is the authenticated mirror of the stored
  * execution program: hex SHA-256 of the program's base64 wire string,
  * 64 lowercase hex characters. It is an authenticated canonical field
- * of protocol v4 (the final `|execution_commitment` segment), so a
+ * of protocol v4 (the `e=` segment's second element), so a
  * stored/tampered record cannot strip, substitute or inject a program
  * without breaking the signature. The equivalence is exact and
  * enforced on every acceptance surface: signed commitment absent =
@@ -320,13 +319,13 @@ final class ChallengeRecord
         // The execution-dimension protocol version (the canonical
         // numeric byte carrying the program's execution grammar version,
         // up to ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
-        // authenticated as the `|execution_version`
+        // authenticated as the first element of the tagged `e=`
         // protocol v4 canonical segment. Present iff the record carries
         // an execution program; the JSON key is omitted when null.
         public readonly ?int $executionVersion = null,
         // The authenticated mirror of the stored execution program: hex
         // SHA-256 of the program's base64 wire string (64 lowercase hex),
-        // the final `|execution_commitment` protocol v4 canonical
+        // the second element of the tagged `e=` protocol v4 canonical
         // segment. Present iff the record carries an execution program;
         // the JSON key is omitted when null.
         public readonly ?string $executionCommitment = null,
@@ -518,7 +517,7 @@ final class ChallengeRecord
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
      *   `issuer` null, `kid` 1).
-     * - Protocol versions 1, 2, 3 and 4 are accepted. The
+     * - Protocol versions 1 through 5 are accepted. The
      *   protocol-vs-decoy-vs-execution grammar is total: a protocol-v2
      *   record that carries `decoy_field` is rejected explicitly, and a
      *   protocol-v3 record without one is rejected too (the decoy

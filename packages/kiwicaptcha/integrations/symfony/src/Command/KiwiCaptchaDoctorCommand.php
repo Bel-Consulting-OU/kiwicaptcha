@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Command;
 
+use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
@@ -44,13 +45,15 @@ use Symfony\Component\Console\Output\OutputInterface;
 final class KiwiCaptchaDoctorCommand extends Command
 {
     /**
-     * The binary's maximum supported challenge protocol version: 4
-     * since the execution-capable canonical (protocol v4) landed. The
-     * central floor check compares the fleet floor against this max.
-     * Mirrors the core verifier's accepted protocol range (1..4) and
-     * the readiness probe's max.
+     * The binary's maximum supported challenge protocol version, the
+     * single shared maximum the readiness probe uses
+     * ({@see KiwiHealthController::MAX_PROTOCOL_VERSION}, itself pinned
+     * to the php-core ChallengeRecord::MAX_PROTOCOL_VERSION and the Rust
+     * crate's challenge::MAX_PROTOCOL_VERSION). The central floor check
+     * compares the fleet floor against this max, so the deploy gate and
+     * readiness can never disagree.
      */
-    private const SUPPORTED_PROTOCOL_MAX = 4;
+    private const SUPPORTED_PROTOCOL_MAX = KiwiHealthController::MAX_PROTOCOL_VERSION;
 
     /**
      * The SLO safety margin (ms) between the Argon admission lease and
@@ -414,8 +417,22 @@ final class KiwiCaptchaDoctorCommand extends Command
     {
         $secret = $this->config['secret_key'];
         $length = \strlen($secret);
-        if ($length < 16) {
-            return ['FAIL', sprintf('secret_key is %d bytes; the core refuses secrets under 32 bytes', $length)];
+        if ($length < Config::MIN_SECRET_BYTES) {
+            return ['FAIL', sprintf('secret_key is %d bytes; the core refuses secrets under %d bytes', $length, Config::MIN_SECRET_BYTES)];
+        }
+        $historicalShort = [];
+        foreach (($this->config['secrets_by_kid'] ?? []) as $kid => $historicalSecret) {
+            if (!\is_string($historicalSecret) || \strlen($historicalSecret) < Config::MIN_SECRET_BYTES) {
+                $historicalShort[] = (string) $kid;
+            }
+        }
+        if ($historicalShort !== []) {
+            return ['WARN', sprintf(
+                'secrets_by_kid entries for kid %s are under the %d-byte floor: the historical secrets cannot verify once their kid becomes live again. Move to randomly generated %d-byte-or-longer secrets before the next rotation',
+                implode(', ', $historicalShort),
+                Config::MIN_SECRET_BYTES,
+                Config::MIN_SECRET_BYTES,
+            )];
         }
         $normalized = strtolower($secret);
         if (preg_match('/^(change|replace|your|example|sample|test)[-_]?/', $normalized) === 1
@@ -515,7 +532,7 @@ final class KiwiCaptchaDoctorCommand extends Command
      * scheme at the PHP layer is the proxy's plain-http hop unless
      * X-Forwarded-Proto is propagated and trusted. The cookie can then
      * be minted without Secure and dropped by the browser — the warn
-     * tells the operator to set risk.contuity_cookie.secure explicitly
+     * tells the operator to set risk.continuity_cookie.secure explicitly
      * (or keep a `__Host-` name).
      *
      * @return array{0: string, 1: string} [status, detail]
@@ -581,11 +598,15 @@ final class KiwiCaptchaDoctorCommand extends Command
      * @return array{0: string, 1: string} [status, detail]
      */
     /**
-     * Scopes in use that risk.scopes does not list use the conservative
-     * built-in default row (base_risk 100, minimum/degraded sha20)
-     * instead of Allow. The sources are risk.allowed_scopes and every
-     * risk.sitekeys target. The operator should still name them
+     * The scopes in use that risk.scopes does not list use the
+     * conservative built-in default row (base_risk 100, minimum/degraded
+     * sha20) instead of Allow. The sources are risk.allowed_scopes,
+     * every risk.sitekey_allowlist target, and every scope a
+     * risk.sitekeys entry can resolve to: its default_scope and every
+     * value in its actions map. The operator should still name them
      * explicitly so the policy intent is reviewable.
+     *
+     * @return array{0: string, 1: string} [status, detail]
      */
     private function checkScopePolicy(): array
     {
@@ -596,10 +617,27 @@ final class KiwiCaptchaDoctorCommand extends Command
         $configured = array_map('strval', array_keys($risk['scopes'] ?? []));
         $inUse = [];
         foreach (($risk['allowed_scopes'] ?? []) as $name) {
-            $inUse[] = (string) $name;
+            if (\is_string($name)) {
+                $inUse[] = $name;
+            }
         }
-        foreach (($risk['sitekeys'] ?? []) as $name) {
-            $inUse[] = (string) $name;
+        foreach (($risk['sitekey_allowlist'] ?? []) as $mappedScope) {
+            if (\is_string($mappedScope)) {
+                $inUse[] = $mappedScope;
+            }
+        }
+        foreach (($risk['sitekeys'] ?? []) as $sitekey) {
+            if (!\is_array($sitekey)) {
+                continue;
+            }
+            if (isset($sitekey['default_scope']) && \is_string($sitekey['default_scope'])) {
+                $inUse[] = $sitekey['default_scope'];
+            }
+            foreach (($sitekey['actions'] ?? []) as $actionScope) {
+                if (\is_string($actionScope)) {
+                    $inUse[] = $actionScope;
+                }
+            }
         }
         $inUse = array_values(array_unique(array_filter($inUse, static fn (string $name): bool => $name !== '')));
         $missing = array_values(array_diff($inUse, $configured));
@@ -619,15 +657,42 @@ final class KiwiCaptchaDoctorCommand extends Command
         if ($this->epochMonitor->isStale()) {
             return ['FAIL', 'the central security-policy read is stale: verification fails closed until the policy Redis answers again'];
         }
+        $epochLag = $this->epochLagWarning();
         $floor = $this->epochMonitor->minProtocolVersion();
         if ($floor === null) {
-            return ['PASS', 'no central min_protocol_version floor confirmed; the binary\'s own configuration is authoritative'];
+            return $epochLag ?? ['PASS', 'no central min_protocol_version floor confirmed; the binary\'s own configuration is authoritative'];
         }
         if ($floor > self::SUPPORTED_PROTOCOL_MAX) {
             return ['FAIL', sprintf('central floor demands protocol %d but this binary supports up to %d; readiness would refuse this node', $floor, self::SUPPORTED_PROTOCOL_MAX)];
         }
 
-        return ['PASS', sprintf('central floor %d within the supported set 1..%d', $floor, self::SUPPORTED_PROTOCOL_MAX)];
+        return $epochLag ?? ['PASS', sprintf('central floor %d within the supported set 1..%d', $floor, self::SUPPORTED_PROTOCOL_MAX)];
+    }
+
+    /**
+     * The non-fatal central epoch-lag warning: the central
+     * min_policy_epoch is above the configured risk.policy_version. The
+     * node follows the effective epoch max(configured, central) and
+     * readiness stays ready, but the deploy should align the configured
+     * floor with the central value. Null when there is no lag.
+     *
+     * @return array{0: string, 1: string}|null
+     */
+    private function epochLagWarning(): ?array
+    {
+        $effective = $this->epochMonitor->currentEpoch();
+        $configured = (int) ($this->config['risk']['policy_version'] ?? 1);
+        if ($effective <= $configured) {
+            return null;
+        }
+
+        return ['WARN', sprintf(
+            'the central min_policy_epoch is %d while risk.policy_version is %d: this node follows the effective epoch %d, so issuance and verification stay consistent, but the configured floor trails the central state. Raise risk.policy_version to %d at the next coordinated deploy to align the floor',
+            $effective,
+            $configured,
+            $effective,
+            $effective,
+        )];
     }
 
     /**
@@ -763,6 +828,14 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
         if (!\is_string($this->config['execution_key'] ?? null)) {
             return ['WARN', 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is INERT (no execution program is ever issued and execution_required_version has no effect). Configure kiwi_captcha.execution_key to actually arm the execution dimension, or set risk.execution_challenge off to state the intent'];
+        }
+        if (\strlen($this->config['execution_key']) < Config::MIN_SECRET_BYTES) {
+            return ['WARN', sprintf(
+                'execution_key is %d bytes, under the %d-byte floor: the keyed-PRF key is shorter than the configured minimum. Generate a random %d-byte-or-longer key before relying on the execution dimension',
+                \strlen($this->config['execution_key']),
+                Config::MIN_SECRET_BYTES,
+                Config::MIN_SECRET_BYTES,
+            )];
         }
         $cap = (int) ($this->config['execution_version'] ?? 1);
         $required = (int) ($this->config['execution_required_version'] ?? 1);

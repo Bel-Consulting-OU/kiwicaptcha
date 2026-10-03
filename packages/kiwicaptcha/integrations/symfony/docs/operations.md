@@ -128,7 +128,7 @@ audited. The primes themselves stay off the servers: only the
 An rsw record can carry the authenticated modulus identity: the
 canonical-byte fingerprint, exactly the keygen's
 rsw_modulus_n_sha256 (the sha256 of the decoded 256-byte modulus).
-Identity-armed issuance signs it as the final canonical segment and
+Identity-armed issuance signs it as the tagged `r=` canonical segment (followed by the trailing `m=1` marker whenever the record carries a server-state MAC) and
 stamps protocol v5. The verifier resolves the trapdoor by that
 authenticated identity, so an accepted proof is always under the
 exact signed modulus. The writer switch is `kiwi_captcha.rsw_identity`
@@ -307,7 +307,8 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical), `min_execution_version <= 5` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical) and `min_execution_version <= 5` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing).
+    A central `min_policy_epoch` above the configured `risk.policy_version` is a WARNING only: the node follows the effective epoch `max(configured, central)` and STAYS ready — the lag is logged but never drains the node, so issuance and verification immediately honor a central bump.
     When absent, the binary's own configuration is authoritative.
   - the required execution tier is satisfiable, only when `risk.execution_challenge` is on. The effective fleet tier is the policy minimum of the node's `kiwi_captcha.execution_version` cap, the central `min_execution_version` floor (absent or 0 counts as version 1) and the generator's maximum execution version.
     A configured `kiwi_captcha.execution_required_version` above the effective tier refuses readiness (503 `security_policy_incompatible:execution_required_R_effective_E`), because every armed request would refuse every client until the confirmed floor reaches the required tier.
@@ -349,18 +350,21 @@ Operator contract (mixed-version deployments): set the policy hash on the securi
 
 ```bash
 # The fleet is moving to protocol v2 / policy epoch 2: old binaries
-# (max protocol 1, or policy_version 1) must not serve traffic.
+# (max protocol 1) must not serve traffic, and every node follows the
+# central epoch 2 regardless of its configured risk.policy_version.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 2 min_policy_epoch 2
 ```
 
-A binary whose max protocol or configured `risk.policy_version` is below the hash exits readiness (503) and is drained by the load balancer before it can issue or verify challenges it cannot honor.
+A binary whose max protocol is below the hash exits readiness (503) and is drained by the load balancer before it can issue or verify challenges it cannot honor.
+A configured `risk.policy_version` below the central `min_policy_epoch` does NOT drain the node: issuance and verification follow the effective epoch `max(configured, central)` and the lag is only a logged warning; an explicit `risk.policy_version` bump is needed only for a coordinated policy cutover.
+A protocol or execution floor above the binary's maximum still fails readiness (503).
 Remove the key (or lower the fields) only after every node runs a compatible binary.
 When the key is absent, every binary's own configuration is authoritative (the default behavior).
 
 ## Protocol v3 two-phase rollout
 
-Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
+Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|d=decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
 The rollout must therefore be two-phase: reader capability first, writer emission second.
 The central `min_protocol_version` is a reader-capability floor: readiness keeps every binary whose max protocol is below it out of the pool.
 It is never a writer switch, so a new binary must not emit v3 while any serving verifier rejects it.
@@ -417,7 +421,7 @@ The two-phase procedure above is preserved unchanged: raise the floor to 3, then
 
 ## Protocol v4 execution rollout
 
-Protocol v4 is the execution-capable canonical: an execution-armed record carries the authenticated `|execution_version|execution_commitment` segments (the hex SHA-256 of the stored program) inside the HMAC-signed canonical, and a parent-revision verifier rejects protocol 4 as malformed.
+Protocol v4 is the execution-capable canonical: an execution-armed record carries the tagged `|e=execution_version,execution_commitment` segment (the hex SHA-256 of the stored program) inside the HMAC-signed canonical, and a parent-revision verifier rejects protocol 4 as malformed.
 The armed/unarmed equivalence is exact and enforced on every acceptance surface: signed commitment absent ⇔ stored program absent, signed commitment present ⇔ stored program present, and SHA256(stored program) == the signed commitment (constant-time).
 Stripping, substituting or injecting a program always invalidates the challenge.
 

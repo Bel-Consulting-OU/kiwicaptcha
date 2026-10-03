@@ -144,6 +144,11 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      *             mapping, else 0 (the placeholder must not be read).
      *             argv[9] = the expected obligation id ('' when the
      *             transaction guard is off).
+     *             argv[10] = 1 when the obligation resolves in the
+     *             chain store's legacy namespace (migrating_v2), else
+     *             0. A stored Pass is then refused as
+     *             'obligation-changed', since this script cannot read
+     *             that key across hash slots.
      * Returns a JSON object {status, record}: status is
      * 'claimed' | 'pending' | 'taken_over' | 'complete' | 'corrupt'. The
      * record field carries the record the caller needs for that outcome:
@@ -234,8 +239,15 @@ if rec['state'] == 'complete' then
   if ARGV[7] == '1' then
     local disp = rec['disposition']
     if type(disp) == 'table' and disp['kind'] == 'pass' then
+      if ARGV[10] == '1' then
+        -- The transaction's obligation lives in the legacy namespace,
+        -- which this primary-namespace script cannot read across hash
+        -- slots. Refuse the stored Pass instead of accepting it while
+        -- the transaction is not clear.
+        return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
+      end
       local mapped = redis.call('GET', KEYS[3])
-      if mapped == nil then
+      if not mapped then
         if ARGV[6] ~= '' then
           return cjson.encode({ status = 'complete', record = rec, guard = 'obligation-changed' })
         end
@@ -353,7 +365,7 @@ if rec['owner'] ~= ARGV[1] then
 end
 if ARGV[6] == '1' and ARGV[3] == 'pass' then
   local mapped = redis.call('GET', KEYS[2])
-  if mapped == nil then
+  if not mapped then
     if ARGV[4] ~= '' then
       return 'obligation-changed'
     end
@@ -480,6 +492,14 @@ LUA;
      *                                             RedisStorage.
      * @param int                   $waitTimeoutMs WAIT timeout in ms (default
      *                                             100).
+     * @param ?RedisChainedChallengeStateStore $chainStore the chain store the
+     *                                             guard consults for the
+     *                                             obligation provenance
+     *                                             (migrating_v2 legacy
+     *                                             fallback). Null when
+     *                                             chaining is not wired or
+     *                                             the store is the array
+     *                                             mirror.
      */
     public function __construct(
         private readonly \Predis\Client|\Redis $redis,
@@ -487,9 +507,26 @@ LUA;
         private readonly int $ttlSecs = 0,
         private readonly int $waitReplicas = 0,
         private readonly int $waitTimeoutMs = 100,
+        private readonly ?RedisChainedChallengeStateStore $chainStore = null,
     ) {
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
         $this->lua = new RedisSecurityCommandExecutor($redis);
+    }
+
+    /**
+     * Whether the transaction's obligation resolves in the chain store's
+     * legacy namespace. The primary-namespace guard script cannot read
+     * that key: it lives in another hash slot. The caller refuses the
+     * Pass candidate instead, so a pre-cutover obligation stays visible.
+     */
+    private function hasLegacyObligation(string $obligationId): bool
+    {
+        if ($this->chainStore === null) {
+            return false;
+        }
+        $lookup = $this->chainStore->obligationLookup($obligationId);
+
+        return $lookup !== null && $lookup['namespace'] === 'legacy';
     }
 
     public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
@@ -515,6 +552,13 @@ LUA;
         // snapshot chain id is the legitimate no-chain snapshot (the
         // guard must still see an obligation that opened after it).
         $guardEnabled = $obligationId !== null;
+        // Migration guard: on the migrating_v2 key version an obligation
+        // written before the cutover lives in the legacy namespace. The
+        // chain store resolves the provenance here, before the script,
+        // and the script refuses a stored Pass when the obligation is
+        // legacy. The primary script must not read that key itself: it
+        // lives in another hash slot.
+        $legacyObligation = $guardEnabled && $this->hasLegacyObligation($obligationId);
         $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
         // When the snapshot saw no chain, pre-resolve the current mapped
         // chain id (a plain read, re-verified inside the script against
@@ -553,6 +597,7 @@ LUA;
             $guardEnabled ? '1' : '0',
             $guardEnabled ? $resolvedChainId : '',
             $guardEnabled ? $obligationId : '',
+            $legacyObligation ? '1' : '0',
         ]);
 
         try {
@@ -762,6 +807,17 @@ LUA;
     {
         $recordKey = $this->key($nonce);
         $guardEnabled = $obligationId !== null;
+        // Migration guard: a Pass candidate is refused before the script
+        // runs when the transaction's obligation resolves in the legacy
+        // namespace. The primary script cannot read that key across hash
+        // slots, so a pre-cutover obligation would otherwise be
+        // invisible and let the stale Pass commit.
+        if ($guardEnabled
+            && $disposition->kind === PostSolveDispositionKind::Pass
+            && $this->hasLegacyObligation($obligationId)
+        ) {
+            return PostSolveFinalizeOutcome::ObligationChanged;
+        }
         $obligationKey = $guardEnabled ? sprintf('{kiwi:%s}:chain-obligation:%s', $this->namespace, $obligationId) : $recordKey;
         // Same pre-resolution as the claim: a snapshot without a chain
         // needs the mapped chain record read at the current id, re-

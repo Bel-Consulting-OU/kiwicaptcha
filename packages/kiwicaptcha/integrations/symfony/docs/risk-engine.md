@@ -166,23 +166,45 @@ outstanding verification work an attacker can hoard.
 
 `risk.max_challenges_per_scope_per_minute` (default 0 = unlimited): when >
 0, a Redis fixed-window counter
-`{kiwi:<ns>}:issuance:<hex(hmac_sha256(scope, K_scope))>:<minute>` uses
+`{kiwi:<ns>}:issuance:<canonicalScopeId>:<minute>` uses
 `INCR` + `EXPIRE` 60 in one atomic Lua script and bounds how many challenges
 a scope may issue per minute. The controller denies HTTP 429
 `{"error":{"code":"SCOPE_LIMITED"}}` beyond the cap, before any challenge
 is minted. The public site key plus claimed origin can therefore no longer
-create unlimited billed verification work per scope. The raw scope string
-is never a Redis key component. The scope is attacker-controlled (bounded
-alphabet `[A-Za-z0-9._:-]{1,128}`, unbounded cardinality), so the window
-key carries the keyed pseudonym `hex(hmac_sha256(scope, K_scope))`.
-`K_scope = hash_hkdf('sha256', master, 32, 'kiwi/v2/scope-rate')` is
-derived from the risk master (`risk.master_secret`, falling back to
-`secret_key`), purpose-separated from the risk identity keys, and identical
-across the bundle and the risk package's calibration scope keys. Each scope
-gets an independent window. A Redis failure propagates (fail closed, no
-challenge without a checked scope bound), and the config is refused at
-compile time when no Redis client is available. The minute is derived from
-the Redis server clock so all workers share one window.
+create unlimited billed verification work per scope. The key carries the
+server-owned canonical scope identity: the configured
+`risk.scopes.<name>.id`, the shared synthetic unknown-scope id, or
+`ScopeIssuanceCap::UNKNOWN_QUOTA_ID` for every unresolved scope. The raw
+attacker-controlled scope string is never a Redis key component, and an
+attacker can never mint fresh quota windows by inventing scope names (the
+per-name HMAC form is confined to the legacy `allowSoftLegacy()` path and
+is not a security bound). Each scope gets an independent window. A Redis
+failure propagates (fail closed, no challenge without a checked scope
+bound), and the config is refused at compile time when no Redis client is
+available. The minute is derived from the Redis server clock so all
+workers share one window.
+
+Operational contract: the counter is GLOBAL to the scope, not per user or
+per source. Exhausting a well-known scope's cap (for example login)
+refuses every user of that scope with `SCOPE_LIMITED` for the rest of the
+minute — a distributed kill switch for that surface. Set the cap as an
+emergency billed-work ceiling well above peak issuance and ALERT when it
+fires rather than letting it fire routinely. The fixed window can
+additionally admit up to twice the cap across a minute boundary (a late
+burst in one minute plus the next minute's fresh window); a sliding window
+would remove that allowance.
+
+## Redis IO timeouts (Rust stores)
+
+Both Rust stores expose the same IO-timeout knob:
+`RedisRiskStateStore::with_io_timeouts(connect_ms, command_ms)` and
+`RedisCalibrationStore::with_io_timeouts(connect_ms, command_ms)`. The
+defaults are 75 ms connect and 10 ms command. The command (socket
+read/write) timeout is the fail-fast bound on the assessment hot path, so
+keep it tight; a TLS, managed or cross-AZ endpoint may need a larger
+connect timeout, and the two knobs are independent. Raise the command
+timeout only deliberately: it bounds how long a wedged socket can stall
+assessment threads.
 
 ## Related material
 

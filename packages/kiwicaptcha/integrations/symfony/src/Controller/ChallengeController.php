@@ -21,6 +21,7 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\StorageInterface;
@@ -197,8 +198,15 @@ final class ChallengeController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadataStore $metadataStore = null,
         /** Server-owned sitekey policy map. */
         private readonly array $sitekeyPolicy = [],
-        /** Lazily-built TTL-variant issuers (per-sitekey override), keyed by TTL. */
-        private array $ttlOverrideIssuers = [],
+        /**
+         * Lazily-built issuance-variant issuers, keyed by "ttl:epoch":
+         * an issuance mints through an issuer whose Config carries the
+         * effective security-policy epoch and any per-sitekey TTL
+         * override. A central min_policy_epoch bump then revokes only
+         * older challenges, and a new challenge verifies immediately
+         * without a redeploy.
+         */
+        private array $issuanceVariants = [],
         /**
          * One-shot chain-ticket service for stage-2 issuance; null =
          * chaining disabled (a ticket-bearing request is then refused).
@@ -226,8 +234,11 @@ final class ChallengeController
          */
         private readonly array $trustedTlsProxies = [],
         /**
-         * The security-policy epoch a presented chain ticket must match
-         * (risk.policy_version).
+         * The configured floor of the security-policy epoch
+         * (risk.policy_version), also the epoch a presented chain ticket
+         * must match when no epoch monitor is wired. With the monitor
+         * wired, the chain ticket and every new record carry the
+         * effective epoch max(configured, central) instead.
          */
         private readonly int $policyVersion = 1,
         /**
@@ -1209,7 +1220,7 @@ final class ChallengeController
                 }
                 if ($direct === null
                     || $direct->scope !== $scope
-                    || $direct->policyVersion !== $this->policyVersion
+                    || $direct->policyVersion !== $this->effectivePolicyEpoch()
                     || $direct->requestBinding !== ($requestBinding ?? '')
                 ) {
                     return $this->privateJson(
@@ -1334,7 +1345,7 @@ final class ChallengeController
         // unchained stage-1 issuance. A plain read, no transition.
         if ($this->chainTickets !== null && $this->risk !== null && $chainTicket === null && $chainId === null) {
             try {
-                $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->policyVersion);
+                $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->effectivePolicyEpoch());
             } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
                 // The chain record is corrupt server state: a stage-2
                 // issuance cannot be authorized. Fail closed with the
@@ -1648,9 +1659,11 @@ final class ChallengeController
             // the hostname stays null.
             $hostname = $this->expectedOrigin?->host();
             // Issuance always uses the canonical client IP. A per-sitekey
-            // ttl_secs override mints through a TTL-variant issuer,
-            // {@see self::issuerForTtl()}, so the signed lifetime carries
-            // the override. The adaptive-risk surface (risk wired) arms
+            // ttl_secs override mints through a TTL-variant issuer, and a
+            // central policy bump mints through an epoch-variant issuer,
+            // {@see self::issuerForIssuance()}: the signed lifetime
+            // carries the override and the record carries the effective
+            // epoch, so new challenges verify immediately. The adaptive-risk surface (risk wired) arms
             // the authenticated decoy: the issuer picks a random
             // pool name per issuance, {@see Issuer::issueWithDecoyField()},
             // signs it into the canonical payload (protocol v3 record) and
@@ -1660,10 +1673,10 @@ final class ChallengeController
             // invariant, {@see self::protocolV3EmissionEnabled()}: the
             // operator's writer switch (risk.decoy_v3_enabled) must be
             // true AND the confirmed central min_protocol_version floor
-            // must be >= 3; otherwise issuance emits protocol v2,
-            // byte-identical to the pre-decoy format, so a new node can
+            // must be >= 3; otherwise issuance emits protocol v2 with no
+            // decoy extension segment, so a new node can
             // never emit a challenge a parent-revision verifier rejects.
-            $issuer = $this->issuerForTtl($ttlSecs);
+            $issuer = $this->issuerForIssuance($ttlSecs);
             $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
             // The ExecutionChallengeV1 seam: the dimension is armed when
             // the risk.execution_challenge gate is on AND a risk trigger
@@ -2527,20 +2540,116 @@ final class ChallengeController
     }
 
     /**
-     * The issuer to mint with for a given challenge lifetime: the wired
-     * issuer when $ttlSecs is null or equals its Config's TTL, otherwise a
-     * TTL-variant issuer built once per TTL,
-     * {@see self::buildTtlVariantIssuer()}. The core signs the lifetime
-     * from the issuer Config, so the per-sitekey override
-     * (risk.sitekeys.<sitekey>.ttl_secs) requires a variant issuer.
+     * The effective security-policy epoch of this request:
+     * max(configured, central), refreshed through the monitor within its
+     * short cache window. Without a monitor the configured
+     * risk.policy_version is authoritative.
      */
-    private function issuerForTtl(?int $ttlSecs): Issuer
+    private function effectivePolicyEpoch(): int
     {
-        if ($ttlSecs === null || $ttlSecs === $this->issuer->config()->ttlSecs) {
+        return $this->epochMonitor?->currentEpoch() ?? $this->policyVersion;
+    }
+
+    /**
+     * The issuer to mint with, carrying the effective policy epoch and
+     * the requested challenge lifetime: the base issuer when its Config
+     * already stamps that epoch and TTL, otherwise a variant built once
+     * per (TTL, epoch) pair. A central min_policy_epoch bump then
+     * revokes only older challenges: the record minted here carries the
+     * effective epoch and verifies immediately, instead of being stamped
+     * with the stale configured value and failing equality on the next
+     * verification.
+     */
+    private function issuerForIssuance(?int $ttlSecs): Issuer
+    {
+        $base = $this->issuer->config();
+        $epoch = $this->effectivePolicyEpoch();
+        if (($ttlSecs === null || $ttlSecs === $base->ttlSecs) && $epoch === $base->policyVersion) {
             return $this->issuer;
         }
+        $ttl = $ttlSecs ?? $base->ttlSecs;
 
-        return $this->ttlOverrideIssuers[$ttlSecs] ??= $this->buildTtlVariantIssuer($ttlSecs);
+        return $this->issuanceVariants[$ttl.':'.$epoch] ??= $this->buildIssuanceVariantIssuer($ttl, $epoch);
+    }
+
+    /**
+     * An issuance-variant Issuer: the wired issuer's Config rebuilt with
+     * only ttlSecs and policyVersion replaced, issued against the same
+     * storage and carrying the same deployment state (clock, region, rsw
+     * trapdoor keyring, legacy-identity migration mode). The core Issuer
+     * stamps both values from its Config, which is readonly, so this
+     * seam rebuilds the Config and the issuer instead of mutating
+     * either.
+     *
+     * @throws \LogicException when the controller has no storage wired
+     *                         (the extension always wires one)
+     */
+    private function buildIssuanceVariantIssuer(int $ttlSecs, int $policyVersion): Issuer
+    {
+        // The same storage as the wired issuer: the controller's own
+        // reference when the extension injected one (the production
+        // wiring), otherwise the issuer's private storage read once.
+        $storage = $this->storage ?? $this->issuerPrivateProperty('storage');
+        if (!$storage instanceof StorageInterface) {
+            throw new \LogicException('an effective-epoch or overridden-TTL issuance requires the storage service (the extension always wires it)');
+        }
+        $c = $this->issuer->config();
+        $config = new Config(
+            secretKey: $c->secretKey,
+            algorithm: $c->algorithm,
+            mKib: $c->mKib,
+            t: $c->t,
+            p: $c->p,
+            targetBits: $c->targetBits,
+            argon2TargetBits: $c->argon2TargetBits,
+            ttlSecs: $ttlSecs,
+            minDurationMs: $c->minDurationMs,
+            solverMaxHashes: $c->solverMaxHashes,
+            bindingMode: $c->bindingMode,
+            policyVersion: $policyVersion,
+            issuer: $c->issuer,
+            kid: $c->kid,
+            executionKey: $c->executionKey,
+            rswModulusN: $c->rswModulusN,
+            rswLambda: $c->rswLambda,
+            rswT: $c->rswT,
+            tenantId: $c->tenantId,
+        );
+
+        // The core Issuer owns its region and keyring privately, so they
+        // are read once from the wired issuer: the variant must keep a
+        // region-bound deployment's signed region and resolve the same
+        // outstanding rsw records.
+        $region = $this->issuerPrivateProperty('region');
+        $rswKeyring = $this->issuerPrivateProperty('rswVerificationKeys');
+        $legacyIdentity = $this->issuerPrivateProperty('allowLegacyRswIdentity');
+
+        return new Issuer(
+            $config,
+            $storage,
+            null,
+            \is_string($region) ? $region : null,
+            \is_array($rswKeyring) ? $rswKeyring : [],
+            $legacyIdentity === true,
+        );
+    }
+
+    /**
+     * Read a private core Issuer constructor field through reflection:
+     * the only read seam for deployment state the core keeps off its
+     * public Config (region, rsw keyring, legacy-identity mode). A core
+     * variant without the field reads null, so the variant simply keeps
+     * the constructor default.
+     */
+    private function issuerPrivateProperty(string $name): mixed
+    {
+        try {
+            $property = new \ReflectionProperty(Issuer::class, $name);
+        } catch (\ReflectionException) {
+            return null;
+        }
+
+        return $property->getValue($this->issuer);
     }
 
     /**
@@ -3693,21 +3802,6 @@ final class ChallengeController
         $required = RiskAction::from($requiredAction);
 
         return $decisionAction->rank() > $required->rank() ? $decisionAction : $required;
-    }
-
-    /**
-     * A TTL-variant Issuer: a clone of the wired issuer's Config with only
-     * ttlSecs replaced, issued against the same storage as the wired
-     * issuer and replicating its clock and region. A region-bound
-     * deployment (risk.region) keeps its signed region on overridden-TTL
-     * challenges, so the verifier's expected-region check still passes.
-     *
-     * @throws \LogicException when the controller has no storage wired
-     *                         (the extension always wires one)
-     */
-    private function buildTtlVariantIssuer(int $ttlSecs): Issuer
-    {
-        return $this->issuer->withTtl($ttlSecs);
     }
 
     /**

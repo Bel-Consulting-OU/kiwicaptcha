@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CommandCountingRedisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
@@ -613,6 +614,86 @@ final class RealRedisPostSolveDispositionTest extends TestCase
         [$claim, , $guard] = $store->claim($nonce2, 'owner-b', 300, null, self::GUARD_OBLIGATION, null, null);
         self::assertSame('complete', $claim);
         self::assertNotSame(PostSolveFinalizeOutcome::Finalized, $guard, 'the malformed chain record must never authorize the stored Pass replay');
+    }
+
+    public function testOrdinaryPassWithChainingWiredAndNoObligationFinalizesAndReplaysAgainstRealRedis(): void
+    {
+        // The guard-enabled path with no open obligation: the missing
+        // obligation mapping is the Lua false under RESP2, never nil.
+        // The ordinary Pass must commit and its replay must claim
+        // complete with the finalized guard, so chaining being wired
+        // never blocks an ordinary pass.
+        $chainStore = new RedisChainedChallengeStateStore($this->client, 'ci-postsolve-chain');
+        $store = new RedisPostSolveDispositionStore($this->client, 'ci-postsolve-chain', 300, 0, 100, $chainStore);
+        $nonce = bin2hex(random_bytes(16));
+        $obligationId = self::GUARD_OBLIGATION;
+
+        [$claim, , $guard] = $store->claim($nonce, 'owner-a', 300, null, $obligationId, null, null);
+        self::assertSame('claimed', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $guard, 'a claim with no obligation is authorized');
+
+        $outcome = $store->finalizeGuarded(
+            $nonce,
+            'owner-a',
+            new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-plain'),
+            $obligationId,
+            null,
+            null,
+        );
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'the ordinary Pass with no open obligation commits');
+
+        [$replay, $record, $replayGuard] = $store->claim($nonce, 'owner-b', 300, null, $obligationId, null, null);
+        self::assertSame('complete', $replay);
+        self::assertSame(PostSolveFinalizeOutcome::Finalized, $replayGuard, 'the replay claims complete with no guard refusal');
+        self::assertSame(PostSolveDispositionKind::Pass, $record?->disposition?->kind);
+        self::assertSame('decision-plain', $record?->disposition?->decisionId);
+    }
+
+    public function testLegacyNamespaceObligationRefusesThePassAgainstRealRedis(): void
+    {
+        // migrating_v2: the obligation was written before the namespace
+        // cutover, so it lives in the legacy namespace while the
+        // disposition store guards on the digest namespace. The chain
+        // store resolves the provenance; the Pass candidate must be
+        // refused instead of accepted blind.
+        $rawNamespace = 'ci-postsolve-mig';
+        $namespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_DIGEST);
+        $legacyNamespace = RedisNamespace::deriveOr($rawNamespace, 'kiwi', RedisNamespace::VERSION_LEGACY);
+        $chainStore = new RedisChainedChallengeStateStore($this->client, $rawNamespace, 0, 100, RedisNamespace::VERSION_DIGEST, true);
+        $store = new RedisPostSolveDispositionStore($this->client, $namespace, 300, 0, 100, $chainStore);
+        $obligationId = self::GUARD_OBLIGATION;
+        $legacyObligationKey = '{kiwi:'.$legacyNamespace.'}:chain-obligation:'.$obligationId;
+        $this->client->set($legacyObligationKey, self::GUARD_CHAIN, 'EX', 300);
+
+        $nonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($nonce, 'owner-a', 300, null, $obligationId, null, null)[0]);
+        $outcome = $store->finalizeGuarded(
+            $nonce,
+            'owner-a',
+            new PostSolveDisposition(PostSolveDispositionKind::Pass, 'decision-legacy'),
+            $obligationId,
+            null,
+            null,
+        );
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $outcome, 'a pre-cutover obligation refuses the Pass');
+        $record = json_decode((string) $this->client->get('{kiwi:'.$namespace.'}:postsolve:'.$nonce), true, 8, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $record['state'], 'the refused Pass performs no write');
+
+        // A stored Pass replay takes the same refusal.
+        $storedNonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($storedNonce, 'owner-a', 300)[0]);
+        self::assertTrue($store->finalize($storedNonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Pass)));
+        [$claim, , $guard] = $store->claim($storedNonce, 'owner-b', 300, null, $obligationId, null, null);
+        self::assertSame('complete', $claim);
+        self::assertSame(PostSolveFinalizeOutcome::ObligationChanged, $guard, 'the legacy obligation refuses the stored Pass replay');
+
+        // A Deny candidate is not the guard's concern and still commits.
+        $denyNonce = bin2hex(random_bytes(16));
+        self::assertSame('claimed', $store->claim($denyNonce, 'owner-a', 300)[0]);
+        self::assertSame(
+            PostSolveFinalizeOutcome::Finalized,
+            $store->finalizeGuarded($denyNonce, 'owner-a', new PostSolveDisposition(PostSolveDispositionKind::Deny), $obligationId, null, null),
+        );
     }
 
     public function testChainRequiredDispositionWireShapeAgainstRealRedis(): void

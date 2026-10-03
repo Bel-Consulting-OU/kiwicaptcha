@@ -113,7 +113,7 @@ final class ConfigurationTest extends TestCase
     {
         $processed = $this->process();
 
-        self::assertSame(18, $processed['difficulty_bits'], 'difficulty_bits defaults to 18 — the ordinary SHA baseline (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap ≈ 5.2×10⁻⁹); 20 stays reachable as the elevated rung via risk escalation (Argon/StepUp above it), never a default that collapses the ladder');
+        self::assertSame(18, $processed['difficulty_bits'], 'difficulty_bits defaults to 18 — the ordinary SHA baseline (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the 20,000,000-hash cap ≈ 7.3×10⁻³⁴); 20 stays reachable as the elevated rung via risk escalation (Argon/StepUp above it), never a default that collapses the ladder');
     }
 
     public function testTreeCeilingTracksCoreConstant(): void
@@ -624,20 +624,141 @@ final class ConfigurationTest extends TestCase
         }
     }
 
-    public function testChainingHmacSecretRequiresAtLeastSixteenBytesWhenConfigured(): void
+    public function testChainingHmacSecretRequiresAtLeastThirtyTwoBytesWhenConfigured(): void
     {
-        // A configured secret below 16 bytes is refused at compile time;
-        // the null fallback (master_secret -> secret_key) is unchanged.
-        foreach (['short', '0123456789abcde'] as $weak) {
+        // A configured secret below the core 32-byte floor is refused at
+        // compile time; the null fallback (master_secret -> secret_key)
+        // is unchanged.
+        foreach (['short', '0123456789abcdef', '0123456789abcdef0123456789abcde'] as $weak) {
             try {
                 $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => $weak]]]);
-                self::fail('a chaining hmac_secret under 16 bytes must be rejected: '.$weak);
-            } catch (InvalidConfigurationException) {
-                self::assertTrue(true);
+                self::fail('a chaining hmac_secret under 32 bytes must be rejected: '.$weak);
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
             }
         }
-        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => '0123456789abcdef']]])['risk']['chaining'];
-        self::assertSame('0123456789abcdef', $processed['hmac_secret'], 'a 16-byte chaining secret is accepted');
+        $secret = str_repeat('a', 32);
+        $processed = $this->process(['risk' => ['request_binding_authority' => 'app.binding_authority', 'chaining' => ['enabled' => true, 'hmac_secret' => $secret]]])['risk']['chaining'];
+        self::assertSame($secret, $processed['hmac_secret'], 'a 32-byte chaining secret is accepted');
+    }
+
+    public function testSecretsByKidValuesRequireTheCoreSecretFloor(): void
+    {
+        // 31 bytes is refused, 32 accepted: the historical keyring
+        // follows the core Config::MIN_SECRET_BYTES floor.
+        try {
+            $this->process(['kid' => 2, 'secrets_by_kid' => [1 => str_repeat('b', 31)]]);
+            self::fail('a 31-byte historical secret must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+            self::assertStringContainsString('MIN_SECRET_BYTES', $e->getMessage());
+        }
+        $accepted = $this->process(['kid' => 2, 'secrets_by_kid' => [1 => str_repeat('b', 32)]])['secrets_by_kid'];
+        self::assertSame(str_repeat('b', 32), $accepted[1], 'a 32-byte historical secret is accepted');
+    }
+
+    public function testExecutionKeyRequiresTheCoreSecretFloor(): void
+    {
+        try {
+            $this->process(['execution_key' => str_repeat('c', 31), 'risk' => ['execution_challenge' => 'on']]);
+            self::fail('a 31-byte execution_key must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+        }
+        $accepted = $this->process(['execution_key' => str_repeat('c', 32), 'risk' => ['execution_challenge' => 'on']])['execution_key'];
+        self::assertSame(str_repeat('c', 32), $accepted, 'a 32-byte execution_key is accepted');
+    }
+
+    /**
+     * The compile-time secret floors must never judge an env-managed
+     * value: `%env(...)%` (unresolved), its resolved `env_...` placeholder
+     * form, and the empty-string type fixture Symfony's
+     * ValidateEnvPlaceholdersPass substitutes are all accepted and
+     * preserved; the same floor is enforced when the runtime service/Config
+     * is constructed. Literal short values stay refused (pinned above).
+     */
+    public function testEnvPlaceholdersAreExemptFromTheCompileTimeSecretFloors(): void
+    {
+        $resolvedPlaceholder = 'env_0123456789abcdef_KIWI_RISK_SECRET_0123456789abcdef0123456789abcdef';
+
+        foreach ([
+            'execution_key' => [
+                ['execution_key' => '%env(KIWI_EXECUTION_KEY)%', 'risk' => ['execution_challenge' => 'on']],
+                ['execution_key' => $resolvedPlaceholder, 'risk' => ['execution_challenge' => 'on']],
+                ['execution_key' => '', 'risk' => ['execution_challenge' => 'on']],
+            ],
+            'hmac_secret' => [
+                ['risk' => ['chaining' => ['hmac_secret' => '%env(KIWI_RISK_SECRET)%']]],
+                ['risk' => ['chaining' => ['hmac_secret' => $resolvedPlaceholder]]],
+                ['risk' => ['chaining' => ['hmac_secret' => '']]],
+            ],
+            'secrets_by_kid' => [
+                ['kid' => 2, 'secrets_by_kid' => [1 => '%env(OLD_SECRET)%']],
+                ['kid' => 2, 'secrets_by_kid' => [1 => $resolvedPlaceholder]],
+                ['kid' => 2, 'secrets_by_kid' => [1 => '']],
+            ],
+        ] as $label => $cases) {
+            foreach ($cases as $case) {
+                try {
+                    $this->process($case);
+                } catch (InvalidConfigurationException $e) {
+                    self::fail(sprintf('the %s env placeholder/fixture must be accepted, got: %s', $label, $e->getMessage()));
+                }
+            }
+        }
+
+        $processed = $this->process(['execution_key' => '%env(KIWI_EXECUTION_KEY)%', 'risk' => ['execution_challenge' => 'on']]);
+        self::assertSame('%env(KIWI_EXECUTION_KEY)%', $processed['execution_key'], 'the env placeholder is preserved for runtime resolution');
+    }
+
+    public function testPolicyVersionInfoDocumentsTheEffectiveEpochAndCutover(): void
+    {
+        $info = $this->treeInfoText('risk.policy_version');
+        self::assertStringContainsString('max(configured, central min_policy_epoch)', $info);
+        self::assertStringContainsString('coordinated cutover', $info);
+        self::assertStringContainsString('WrongPolicyVersion', $info);
+    }
+
+    public function testProtocolCeilingInfoTextUsesTheSolverCapAndCurrentExhaustionFigures(): void
+    {
+        $info = $this->treeInfoText('difficulty_bits');
+        self::assertStringContainsString('20,000,000-hash cap', $info);
+        self::assertStringNotContainsString('5,000,000', $info);
+        self::assertStringNotContainsString('0.8494%', $info);
+        self::assertStringNotContainsString('1 in 118', $info);
+        self::assertStringContainsString('5.2×10⁻⁹', $info);
+    }
+
+    public function testNamespaceInfoTextNamesBothKeyVersions(): void
+    {
+        $info = $this->treeInfoText('risk.namespace');
+        self::assertStringContainsString('namespace_key_version', $info);
+        self::assertStringContainsString('version 1 sanitizes to [A-Za-z0-9_.-]', $info);
+        self::assertStringContainsString('version 2 emits the digest form', $info);
+    }
+
+    public function testHealthInfoTextNamesTheV5CeilingAndTheEpochWarning(): void
+    {
+        $info = $this->treeInfoText('risk.health');
+        self::assertStringContainsString('min_protocol_version <= 5', $info);
+        self::assertStringContainsString('warning instead of failing readiness', $info);
+    }
+
+    /**
+     * The info text of a configuration path from the tree definition
+     * (the operator-facing documentation the tree carries).
+     */
+    private function treeInfoText(string $path): string
+    {
+        $node = (new Configuration())->getConfigTreeBuilder()->buildTree();
+        foreach (explode('.', $path) as $segment) {
+            $children = $node->getChildren();
+            self::assertArrayHasKey($segment, $children, 'the tree exposes the path segment '.$segment);
+            $node = $children[$segment];
+        }
+        self::assertInstanceOf(\Symfony\Component\Config\Definition\BaseNode::class, $node);
+
+        return $node->getInfo() ?? '';
     }
 
     public function testArgonEscalationLadderDefaultsToTheMonotonicThreeRungLadder(): void

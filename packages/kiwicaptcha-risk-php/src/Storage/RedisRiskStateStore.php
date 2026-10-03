@@ -381,9 +381,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
         return new ObservationReply(
             vector: $this->signalVectorFromReply($result, $observation->networkRisk),
-            globalLevel: (int) $result[13],
-            cooldownUntilMs: (int) $result[14],
-            isDuplicate: ((int) $result[15]) === 1,
+            globalLevel: self::scriptInteger($result[13], 'global level'),
+            cooldownUntilMs: self::scriptInteger($result[14], 'cooldown deadline'),
+            isDuplicate: self::scriptInteger($result[15], 'duplicate flag') !== 0,
         );
     }
 
@@ -494,12 +494,12 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
         return new AssessV2Reply(
             vector: $this->signalVectorFromReply($result, $observation->networkRisk),
-            globalLevel: (int) $result[13],
-            cooldownUntilMs: (int) $result[14],
-            isDuplicate: ((int) $result[15]) === 1,
-            existingContextTag: (is_string($result[16]) && $result[16] !== '') ? $result[16] : null,
-            existingTlsTag: (is_string($result[17]) && $result[17] !== '') ? $result[17] : null,
-            registrationStatus: ((int) $result[18]) === 1,
+            globalLevel: self::scriptInteger($result[13], 'global level'),
+            cooldownUntilMs: self::scriptInteger($result[14], 'cooldown deadline'),
+            isDuplicate: self::scriptInteger($result[15], 'duplicate flag') !== 0,
+            existingContextTag: self::scriptTag($result[16], 'client-context tag'),
+            existingTlsTag: self::scriptTag($result[17], 'TLS tag'),
+            registrationStatus: self::scriptInteger($result[18], 'registration status') !== 0,
         );
     }
 
@@ -697,23 +697,70 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         ];
     }
 
+    /**
+     * Decodes one integer slot of a script reply with the same fail-closed
+     * contract as the Rust core's `value_i64`: only an integer reply or a
+     * parseable integer string is accepted, matching the typed `Vec<i64>`
+     * decode the observation path uses. A malformed or shifted reply (a
+     * Nil, an array, a non-numeric string) raises RiskStoreException
+     * instead of coercing to 0, so a shifted reply can never zero a
+     * signal slot.
+     *
+     * @throws RiskStoreException
+     */
+    private static function scriptInteger(mixed $value, string $slot): int
+    {
+        if (\is_int($value)) {
+            return $value;
+        }
+        if (\is_string($value) && preg_match('/^[+-]?[0-9]+$/D', $value) === 1) {
+            $parsed = filter_var($value, \FILTER_VALIDATE_INT);
+            if ($parsed !== false) {
+                return $parsed;
+            }
+        }
+
+        throw new RiskStoreException(sprintf('Risk script returned a non-integer value for %s', $slot));
+    }
+
+    /**
+     * Decodes one tag slot of a script reply: a string, or null for the
+     * Redis Nil reply (an empty string is the normalization of "no
+     * recorded tag"). Every other reply type fails closed exactly like
+     * scriptInteger(), so a shifted integer/array in a tag slot can never
+     * silently read as "no recorded tag".
+     *
+     * @throws RiskStoreException
+     */
+    private static function scriptTag(mixed $value, string $slot): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (\is_string($value)) {
+            return $value === '' ? null : $value;
+        }
+
+        throw new RiskStoreException(sprintf('Risk script returned a non-string value for %s', $slot));
+    }
+
     /** Maps the script reply's 13 signal slots onto the SignalVector. */
     private function signalVectorFromReply(array $result, int $networkRisk): SignalVector
     {
         return new SignalVector(
-            sourceFast: (int) $result[0],
-            sourceSlow: (int) $result[1],
-            subnetFast: (int) $result[2],
-            issueDebt: (int) $result[3],
-            badProof: (int) $result[4],
-            malformed: (int) $result[5],
-            replay: (int) $result[6],
-            actionFailure: (int) $result[7],
-            scopeSwitch: (int) $result[8],
-            globalPressure: (int) $result[9],
+            sourceFast: self::scriptInteger($result[0], 'source_fast'),
+            sourceSlow: self::scriptInteger($result[1], 'source_slow'),
+            subnetFast: self::scriptInteger($result[2], 'subnet_fast'),
+            issueDebt: self::scriptInteger($result[3], 'issue_debt'),
+            badProof: self::scriptInteger($result[4], 'bad_proof'),
+            malformed: self::scriptInteger($result[5], 'malformed'),
+            replay: self::scriptInteger($result[6], 'replay'),
+            actionFailure: self::scriptInteger($result[7], 'action_failure'),
+            scopeSwitch: self::scriptInteger($result[8], 'scope_switch'),
+            globalPressure: self::scriptInteger($result[9], 'global_pressure'),
             networkRisk: $networkRisk,
-            trustCredit: (int) $result[11],
-            principalCredit: (int) $result[12],
+            trustCredit: self::scriptInteger($result[11], 'trust_credit'),
+            principalCredit: self::scriptInteger($result[12], 'principal_credit'),
         );
     }
 

@@ -121,7 +121,7 @@ final class RswIdentityEmissionGateTest extends TestCase
     {
         // The operator completed the two-phase rollout: rsw_identity on
         // AND the central floor confirms the feature version. Issuance
-        // signs the canonical identity as the final canonical segment and
+        // signs the canonical identity as the tagged `r=` segment and
         // stamps protocol v5. A later global maximum (6) must not shut the
         // feature off: the gate compares against the feature constant,
         // never the binary's global maximum.

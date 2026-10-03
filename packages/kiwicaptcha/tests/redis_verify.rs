@@ -352,6 +352,32 @@ fn verifier_for(url: &str, prefix: &str) -> ProductionVerifier {
     ProductionVerifier::new(store_for(url, prefix), SECRET)
 }
 
+/// Commits a consumed result together with its server-state MAC, exactly
+/// as the production verify path commits it: the hardened retained-valid
+/// acceptance only replays a MACed success, so a hand-seeded stored
+/// result must be authenticated the same way (the unauthenticated
+/// `commit_result` is the legacy shape and replaying it is the
+/// deterministic MalformedRecord).
+fn commit_authenticated_result(
+    store: &RedisChallengeStore,
+    record: &ChallengeRecord,
+    valid: bool,
+    binding: Option<&str>,
+    operation_identity: Option<&str>,
+) -> bool {
+    let keys = kiwicaptcha::DerivedKeys::from_master(SECRET, None);
+    let mac = kiwicaptcha::challenge::consumed_result_mac(
+        &keys,
+        &record.challenge,
+        valid,
+        binding,
+        operation_identity,
+    );
+    store
+        .commit_result_with_mac(&record.nonce, valid, binding, Some(&mac))
+        .expect("the authenticated commit lands")
+}
+
 /// A counter that provably does NOT meet the record's target: the
 /// deterministic replacement for the small-counter guess
 /// (`if valid == 0 { 1 } else { 0 }`) that was flaky whenever the
@@ -884,13 +910,13 @@ fn consumed_argon_record_with_matching_identity_replays_without_admission() {
             .expect("the pending record consumes")
             .first
     );
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -957,13 +983,13 @@ fn consumed_argon_record_with_wrong_or_null_identity_is_already_consumed_without
             .expect("the pending record consumes")
             .first
     );
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -1389,9 +1415,7 @@ fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
         Some("op-evidence"),
         "the winner's own identity rides back on the transition result"
     );
-    store
-        .commit_result(&issued.record.nonce, true, None)
-        .unwrap();
+    commit_authenticated_result(&store, &issued.record, true, None, Some("op-evidence"));
 
     // Advance the verifier clock past the signed expiry: the cheap TTL
     // check fails, but the record is consumed — the failure routes to the
@@ -2097,7 +2121,7 @@ fn sha256_records_are_never_gated() {
 #[test]
 fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
     // The protocol-v3 contract end to end: an armed issuance
-    // writes protocol v3 with the `|decoy_field` canonical segment, the
+    // writes protocol v3 with the tagged `d=` canonical segment, the
     // record stores and verifies like any other, and the armed
     // challenge string carries the decoy name in its base64 payload.
     let Some(url) = redis_url() else { return };
@@ -2455,7 +2479,7 @@ fn unarmed_v2_record_verifies_unchanged() {
 
 #[test]
 fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
-    // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+    // The protocol-vs-decoy grammar: the tagged `d=` segment is a
     // protocol v3 canonical extension, so a v2 record carrying one is
     // malformed — such a record cannot have been signed by a conforming
     // issuer. The explicit rejection fires before any signature work and
@@ -2963,8 +2987,10 @@ fn record_json_keys_match_php_cross_language_format() {
     // exact key set a PHP RedisStorage writes and fromArray() reads. The
     // `region` and `issuer` keys are always present: null
     // when unbound, exactly like PHP; `kid` is always present
-    // (default 1). No Redis needed: pure language-neutral schema parity.
-    const PHP_KEYS: [&str; 23] = [
+    // (default 1); `server_mac` is present because every issuance seals
+    // the record-metadata MAC (both writers emit the key iff non-null).
+    // No Redis needed: pure language-neutral schema parity.
+    const PHP_KEYS: [&str; 24] = [
         "nonce",
         "scope",
         "binding_tag",
@@ -2988,6 +3014,7 @@ fn record_json_keys_match_php_cross_language_format() {
         "issuer",
         "kid",
         "hostname",
+        "server_mac",
     ];
 
     let issued = issue_challenge(
@@ -3563,13 +3590,13 @@ fn consume_issues_the_verified_wait_only_on_the_fresh_transition() {
                                         let key = args.get(3).map(String::as_str).unwrap_or("");
                                         if key.ends_with("-pending") {
                                             format!(
-                                                "*2\r\n${}\r\n{}\r\n:1\r\n",
+                                                "*3\r\n${}\r\n{}\r\n:1\r\n:1\r\n",
                                                 consumed_json.len(),
                                                 consumed_json
                                             )
                                         } else if key.ends_with("-consumed") {
                                             format!(
-                                                "*2\r\n${}\r\n{}\r\n:0\r\n",
+                                                "*3\r\n${}\r\n{}\r\n:0\r\n:1\r\n",
                                                 consumed_json.len(),
                                                 consumed_json
                                             )
@@ -4343,7 +4370,8 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
         third.stored_result,
         Some(StoredConsumedResult {
             valid: true,
-            binding: None
+            binding: None,
+            mac: None,
         })
     );
 
@@ -4386,7 +4414,8 @@ fn consumed_state_transition_and_outcome_commit_lifecycle() {
         replay2.stored_result,
         Some(StoredConsumedResult {
             valid: true,
-            binding: Some("txn-1".into())
+            binding: Some("txn-1".into()),
+            mac: None,
         })
     );
 
@@ -5209,9 +5238,7 @@ fn consumed_committed_record(
         .unwrap()
         .expect("pending record consumes");
     assert!(consumed.first);
-    store
-        .commit_result(&issued.record.nonce, true, None)
-        .unwrap();
+    commit_authenticated_result(&store, &issued.record, true, None, Some("op-replay"));
 
     (issued.record.nonce.clone(), token, issued_at_ns)
 }
@@ -5671,13 +5698,13 @@ fn resume_resolves_an_already_completed_record_without_redriving() {
         .consume_with_operation_identity(&issued.record.nonce, Some(identity))
         .unwrap()
         .is_some());
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let gate = CountingGate {
         active: Arc::new(AtomicUsize::new(0)),
@@ -6104,13 +6131,13 @@ fn resume_committed_result_fast_path_rejects_a_changed_context() {
         .consume_with_operation_identity(&issued.record.nonce, Some(identity))
         .unwrap()
         .is_some());
-    store
-        .commit_result(
-            &issued.record.nonce,
-            true,
-            issued.record.request_binding.as_deref(),
-        )
-        .unwrap();
+    commit_authenticated_result(
+        &store,
+        &issued.record,
+        true,
+        issued.record.request_binding.as_deref(),
+        Some(identity),
+    );
 
     let verifier = ProductionVerifier::new(
         RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
@@ -6330,9 +6357,14 @@ fn verify_costs_three_checkouts_and_three_store_commands_on_the_happy_path() {
     };
     assert_eq!(evalsha(5), 1, "one consume transition");
     assert_eq!(
-        evalsha(6),
+        evalsha(7),
         1,
-        "one outcome commit (6-arg EVALSHA: key + valid flag + binding)"
+        "one outcome commit (7-arg EVALSHA: key + valid flag + binding + consumed-result MAC)"
+    );
+    assert_eq!(
+        evalsha(6),
+        0,
+        "no 6-arg commit remains: the consumed-result MAC is part of the commit wire shape"
     );
     assert_eq!(
         evalsha(4),
@@ -7157,7 +7189,7 @@ fn commit_write_failure_keeps_the_valid_outcome_and_the_retry_is_indeterminate()
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     endpoint.seed(&prefix, &issued.record);
 
-    endpoint.arm_fault(evalsha_with_argc(6), FaultReply::Error);
+    endpoint.arm_fault(evalsha_with_argc(7), FaultReply::Error);
     let outcome = verifier.verify(
         &encode_token(&issued.record.nonce, counter),
         "login",

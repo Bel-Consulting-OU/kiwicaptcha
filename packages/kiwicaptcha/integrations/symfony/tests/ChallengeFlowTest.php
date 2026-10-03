@@ -11,6 +11,7 @@ use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
@@ -242,6 +243,56 @@ final class ChallengeFlowTest extends TestCase
         $t2 = \KiwiCaptcha\SolutionToken::create($ch2['nonce'], $c2, 5000, [])->encode();
         $wrongScope = $verifier2->verify($t2, self::SECRET, 'signup', '198.51.100.7');
         self::assertSame(\KiwiCaptcha\VerifyError::WrongScope, $wrongScope->error);
+    }
+
+    public function testEffectiveEpochIssuanceFollowsACentralBump(): void
+    {
+        // A central min_policy_epoch ahead of the configured
+        // risk.policy_version: issuance stamps the effective epoch
+        // max(configured, central) instead of the stale configured value,
+        // so a new challenge verifies immediately after the bump.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+            policyVersion: 1,
+        ), $storage);
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        // The verifier represents every node following the central state.
+        $verifier = new Verifier($storage, null, null, false, null, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 300);
+        $controller = new ChallengeController($issuer, epochMonitor: $monitor, policyVersion: 1);
+
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $challenge = json_decode((string) $response->getContent(), true);
+        $this->waitOutMinDuration((float) $challenge['minDurationMs']);
+
+        // The signed canonical carries the effective epoch 2, not the
+        // configured 1: decode the policy_version segment of the payload.
+        $canonical = base64_decode(explode('.', (string) $challenge['challenge'])[0], true);
+        self::assertIsString($canonical);
+        $segments = explode('|', $canonical);
+        // v4 canonical: version|nonce|scope|binding|issued|expires|...
+        // algorithm|m|t|p|bits|salt|min_duration|region|policy_version|...
+        self::assertSame('2', $segments[15], 'the issued record carries the effective epoch, not the configured floor');
+
+        // Solve in pure PHP (8 bits) and verify with the effective epoch.
+        $counter = 0;
+        $saltBytes = base64_decode($challenge['salt'], true);
+        do {
+            $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        --$counter;
+        $token = \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [])->encode();
+
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('a challenge issued during the bump must verify immediately, got %s', $outcome->code()));
     }
 
     public function testArgon2ChallengeIssuesAndVerifiesLocally(): void
@@ -1654,7 +1705,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             if (str_contains($firstKey, ':issuance:')) {
                 $sawScopeCap = true;
                 self::assertStringContainsString('{kiwi:order-test}:issuance:', $firstKey);
-                self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries hex(hmac_sha256(scope, K_scope)), never the raw scope');
+                self::assertStringNotContainsString('login', $firstKey, 'the scope cap key carries the canonical server-owned scope id (UNKNOWN_QUOTA_ID for an unmapped scope), never the raw scope');
             }
         }
         self::assertTrue($sawScopeCap, 'the per-scope issuance cap must have run');

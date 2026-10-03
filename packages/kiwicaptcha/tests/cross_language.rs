@@ -642,7 +642,7 @@ fn decoy_grammar_vocabularies_match_php() {
 }
 
 /// Real-Redis protocol-v3 decoy interop: the decoy-armed issuance
-/// canonical (protocol v3, the `|decoy_field` segment appended after the
+/// canonical (protocol v3, the tagged `d=` segment appended after the
 /// kid) must verify across languages, and the v2-plus-decoy combination
 /// must be rejected on both sides. Runs only when a Redis URL is
 /// provided and the PHP core's autoloader is reachable from this crate.
@@ -1577,10 +1577,18 @@ fn rust_verifies_php_issued_v4_record() {
         canonical_from_challenge,
         "the Rust canonical reconstruction must be byte-exact against the PHP-signed canonical"
     );
-    assert!(canonical_reconstructed.ends_with(&format!("|1|{commitment}")));
+    assert!(canonical_reconstructed.ends_with(&format!(
+        "|e={},{}|m=1",
+        record.execution_version.expect("armed"),
+        commitment
+    )));
 
-    let digest = kiwicaptcha::execution::expected_digest(program, &record.nonce)
-        .expect("the PHP-issued program must parse in Rust");
+    let decoded = kiwicaptcha::execution::decode(program)
+        .expect("the PHP-issued program must decode in Rust");
+    let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
+    let digest = kiwicaptcha::execution::expected_digest_over_trace(program, &record.nonce, &trace)
+        .expect("the digest over the executed trace must compute in Rust");
+    let trace_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(trace.as_bytes());
     let counter = solve_for_test(&record).expect("Rust solver finds a counter");
     let mut rec = record;
     let now_ns = rec.issued_at_ns + 1_000_000;
@@ -1607,7 +1615,7 @@ fn rust_verifies_php_issued_v4_record() {
         expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: Some(&digest),
-        execution_trace: None,
+        execution_trace: Some(&trace_b64),
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,

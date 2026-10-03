@@ -349,11 +349,12 @@ impl RiskPolicy {
             now_ms,
             cooldown_until_ms,
             None,
+            &[],
         )
     }
 
     /// Full decision: band action (with enter/exit hysteresis when the
-    /// engine's per-process scope map is passed), clamped to the scope
+    /// engine's per-client map is passed), clamped to the scope
     /// minimum and the global floor, then hard overrides with reasons.
     ///
     /// Argon re-escalation order: `action = strongest(band, minimum,
@@ -362,13 +363,15 @@ impl RiskPolicy {
     /// capacity check is last, so floors/minimum can never reintroduce
     /// Argon after a demotion.
     ///
-    /// Hysteresis: with `hysteresis` the band selection uses
-    /// the scope's previous action — escalate to the next band only at its
-    /// enter threshold (upper + 10), de-escalate only below its exit
-    /// threshold (lower − 10); fresh scopes and StepUp/Deny use the plain
-    /// mapping. The map stores the SCORE-selected action, so hard
-    /// overrides never poison the profile. `None` keeps the plain band
-    /// mapping.
+    /// Hysteresis: with `hysteresis` the band selection uses the
+    /// `(scope, client)` entry named by `client` — the session pseudonym
+    /// when present, else the source pseudonym. The selection escalates to
+    /// the next band only at its enter threshold (upper + 10), de-escalates
+    /// only below its exit threshold (lower − 10), and jumps straight to
+    /// the plain action when the score clears the target band margin.
+    /// Fresh keys and StepUp/Deny use the plain mapping. The map stores the
+    /// SCORE-selected action, so hard overrides never poison the profile.
+    /// `None` keeps the plain band mapping.
     #[allow(clippy::too_many_arguments)]
     pub fn decide_with_hysteresis(
         &self,
@@ -380,9 +383,11 @@ impl RiskPolicy {
         now_ms: u64,
         cooldown_until_ms: u64,
         hysteresis: Option<&ScopeActionHysteresis>,
+        client: &[u8],
     ) -> RiskDecision {
         let plain = RiskAction::action_for_score(score);
-        let band_action = hysteresis.map_or(plain, |h| h.select(scope, score, plain, now_ms));
+        let band_action =
+            hysteresis.map_or(plain, |h| h.select(scope, client, score, plain, now_ms));
         let minimum = self.minimum(scope);
         let floor = self.global_floors[(global_level as usize).min(4)];
         let mut action = strongest(band_action, minimum, floor);
@@ -1504,6 +1509,7 @@ mod tests {
                 now + i as u64,
                 0,
                 Some(&h),
+                b"client",
             );
             actions.push(d.action);
         }
@@ -1545,6 +1551,7 @@ mod tests {
                     now,
                     0,
                     Some(&h),
+                    b"client",
                 );
                 assert!(
                     d.action.rank() >= p.minimum(scope).rank(),
@@ -1559,6 +1566,7 @@ mod tests {
                     now + 1,
                     0,
                     Some(&h),
+                    b"client",
                 );
                 assert!(
                     d.action.rank() >= RiskAction::Sha20.rank(),
@@ -1567,5 +1575,52 @@ mod tests {
                 now += 2;
             }
         }
+    }
+
+    /// Hysteresis on the decision path is keyed per client: a bot burst
+    /// does not leak into another client's memory.
+    #[test]
+    fn hysteresis_is_keyed_per_client() {
+        let p = policy();
+        let h = ScopeActionHysteresis::new();
+        let now = 1_700_000_000_000;
+        let legit = p.decide_with_hysteresis(
+            1,
+            100,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now,
+            0,
+            Some(&h),
+            b"legit",
+        );
+        assert_eq!(legit.action, RiskAction::Allow);
+        // The bot's own key jumps straight to Argon64.
+        let bot = p.decide_with_hysteresis(
+            1,
+            900,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now + 1,
+            0,
+            Some(&h),
+            b"bot",
+        );
+        assert_eq!(bot.action, RiskAction::Argon64);
+        // A client with no history keeps the plain mapping.
+        let fresh = p.decide_with_hysteresis(
+            1,
+            100,
+            &zero_vector(),
+            &healthy(),
+            0,
+            now + 2,
+            0,
+            Some(&h),
+            b"fresh",
+        );
+        assert_eq!(fresh.action, RiskAction::Allow);
     }
 }

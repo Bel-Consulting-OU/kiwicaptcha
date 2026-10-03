@@ -126,6 +126,15 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
     private ?string $lastReceiptSignature = null;
 
     /**
+     * The effective security-policy epoch of the current validate() call,
+     * max(configured, central) refreshed at the start: the same value
+     * the verifier enforces and the issuance path stamps. The chain
+     * obligation identity uses it so a chain opened and resumed across a
+     * central bump stays one transaction.
+     */
+    private int $effectivePolicyEpoch = 1;
+
+    /**
      * @param Verifier $verifier the bundle's configured Argon2id admission
      *                           gate (capacity exhaustion reports as a
      *                           VerifyOutcome, never a 500).
@@ -171,9 +180,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainTickets = null,
         /**
-         * The security-policy epoch (risk.policy_version) stamped into
-         * issued chain tickets — a chain ticket is bound to the epoch its
-         * stage-1 proof was verified under.
+         * The configured floor of the security-policy epoch
+         * (risk.policy_version). With the epoch monitor wired, the chain
+         * obligation identity uses the effective epoch
+         * max(configured, central) so a chain opened and resumed across
+         * a central bump stays one transaction.
          */
         private readonly int $policyVersion = 1,
         /**
@@ -321,6 +332,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         $this->lastVerifiedRequestBinding = null;
         $this->lastReceiptPayload = null;
         $this->lastReceiptSignature = null;
+        $this->effectivePolicyEpoch = $this->policyVersion;
     }
 
     public function validate(mixed $value, Constraint $constraint): void
@@ -356,6 +368,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // policy bump splits the retry's identity from the one the
         // consume recorded even for the exempt replay failures.
         $effectiveEpoch = $this->epochMonitor?->refresh() ?? $this->policyVersion;
+        // The same refreshed value binds the chain obligation identity
+        // for this validation, so a chain opened here and resumed by the
+        // challenge controller (which reads the same effective epoch)
+        // stays one transaction.
+        $this->effectivePolicyEpoch = $effectiveEpoch;
 
         // Once now exceeds the last successful central read by
         // risk.security_epoch_max_stale_secs, the cached epoch may be
@@ -1139,7 +1156,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             $obligationId = null;
             $snapshotChainId = null;
             if ($this->chainTickets !== null && $this->bindingAuthority !== null && $canonicalBinding !== null) {
-                $obligationId = $this->chainTickets->obligationIdFor($constraint->scope, $canonicalBinding, $this->policyVersion);
+                $obligationId = $this->chainTickets->obligationIdFor($constraint->scope, $canonicalBinding, $this->effectivePolicyEpoch);
                 $snapshotChainId = $requirement?->chainId ?? null;
             }
             [$claim, $claimRecord, $claimGuard] = $this->dispositionStore->claim($nonce, $owner, $ttl, $decisionKey, $obligationId, $snapshotChainId, $requirement?->stage2Nonce);
@@ -1684,7 +1701,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                                 $nonce,
                                 $constraint->scope,
                                 $canonicalBinding,
-                                $this->policyVersion,
+                                $this->effectivePolicyEpoch,
                                 $postSolve->action,
                                 $this->chainExpiresAt(),
                             );
@@ -1761,7 +1778,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     $nonce,
                     $constraint->scope,
                     $canonicalBinding,
-                    $this->policyVersion,
+                    $this->effectivePolicyEpoch,
                     $postSolve->action,
                     $this->chainExpiresAt(),
                 );
@@ -1992,7 +2009,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return null;
         }
         try {
-            return $this->chainTickets->findOpenRequirement($constraint->scope, $canonicalBinding, $this->policyVersion);
+            return $this->chainTickets->findOpenRequirement($constraint->scope, $canonicalBinding, $this->effectivePolicyEpoch);
         } catch (\Throwable $e) {
             throw new PostSolveDispositionUnavailableException('the chain requirement state is unavailable', 0, $e);
         }

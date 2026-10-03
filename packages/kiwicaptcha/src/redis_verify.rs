@@ -2774,6 +2774,31 @@ impl RedisChallengeStore {
         self.commit_result_with_conn(&mut conn, nonce, valid, binding, None)
     }
 
+    /// Commit a consumed result together with its server-state MAC — the
+    /// authenticated counterpart of [`Self::commit_result`], mirroring the
+    /// PHP `AuthenticatedResultCommitInterface`. `mac` is the
+    /// [`crate::challenge::consumed_result_mac`] tag over the record
+    /// challenge, the verdict, the binding and the recorded operation
+    /// identity (or `None` for the legacy unauthenticated shape). The
+    /// production verifier commits through the authenticated seam and only
+    /// replays a stored success whose MAC verifies, so a storage writer
+    /// who does not hold the master secret cannot forge `valid=true` on a
+    /// consumed record.
+    ///
+    /// Semantics are otherwise identical to [`Self::commit_result`]
+    /// (one-shot while the record is `consumed` with no result, best
+    /// effort, verified replica wait when configured).
+    pub fn commit_result_with_mac(
+        &self,
+        nonce: &str,
+        valid: bool,
+        binding: Option<&str>,
+        mac: Option<&str>,
+    ) -> redis::RedisResult<bool> {
+        let mut conn = self.checkout()?;
+        self.commit_result_with_conn(&mut conn, nonce, valid, binding, mac)
+    }
+
     /// The outcome commit on an already checked-out connection — the
     /// internal seam of the single-connection verify path (see
     /// [`Self::runtime_state_with_conn`]). Semantics identical to
@@ -4520,10 +4545,18 @@ impl ProductionVerifier {
             Ok(true) => {}
             _ => return Err(VerifyError::BadSignature),
         }
-        if record.server_mac.is_some()
-            && !crate::challenge::verify_record_meta(&self.resolve_derived_keys(record)?, record)
-        {
+        // The record-metadata MAC: when the signed canonical commits the
+        // m=1 marker, a valid `server_mac` is required regardless of the
+        // timing floor. A present MAC always verifies.
+        let signed_mac = crate::challenge::signed_canonical_commits_record_meta(&record.challenge);
+        if signed_mac && record.server_mac.is_none() {
             return Err(VerifyError::BadSignature);
+        }
+        if record.server_mac.is_some() {
+            let keys = self.resolve_derived_keys(record)?;
+            if !crate::challenge::verify_record_meta(&keys, record) {
+                return Err(VerifyError::BadSignature);
+            }
         }
 
         // 3c2. Hard Argon2id parameter ceilings — after the
@@ -4962,6 +4995,96 @@ mod tests {
         );
     }
 
+    /// The record-metadata MAC capability through the production
+    /// verifier's authenticated shape gate: a record whose signed
+    /// canonical commits `m=1` must carry the MAC regardless of the
+    /// timing floor. Stripping `server_mac` from an authentic record
+    /// (floor configured 0, so no floor exemption can mask it) is refused
+    /// with `BadSignature` by the cheap phase AND by the compositional
+    /// replay gate; the same record with the intact MAC reaches the
+    /// normal path. The store's client never dials: `check_cheap` and
+    /// `replay_security_check` are pure.
+    #[test]
+    fn stripped_server_mac_is_refused_by_the_production_verifier() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
+        let verifier =
+            ProductionVerifier::new(RedisChallengeStore::new(client, "meta-mac:"), SECRET);
+
+        let mut config = sha_config(4);
+        config.min_duration_ms = Some(0); // floor off: the committed marker must refuse the strip
+        let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None)
+            .expect("issuance");
+        assert_eq!(issued.record.min_duration_ms, 0);
+        assert!(issued.record.server_mac.is_some(), "issuance seals the MAC");
+        assert!(
+            crate::challenge::signed_canonical_commits_record_meta(&issued.record.challenge),
+            "issuance commits the m=1 marker"
+        );
+        let now_ns = issued.record.issued_at_ns + 1_000_000;
+
+        // Control: the intact m=1 record reaches the normal path in both
+        // gates it is composed from.
+        verifier
+            .check_cheap(
+                &issued.record,
+                &issued.record.nonce,
+                "login",
+                IP,
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            )
+            .expect("the intact m=1 record passes the cheap phase");
+        verifier
+            .replay_security_check(
+                &issued.record,
+                "login",
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            )
+            .expect("the intact m=1 record passes the replay gate");
+
+        // Attack: stripping the MAC leaves the signed m=1 marker without
+        // its tag. The signature still verifies (the marker is parsed from
+        // the signed challenge, never inferred from the stored field), so
+        // only the dedicated m=1 gate can refuse it.
+        let mut stripped = issued.record.clone();
+        stripped.server_mac = None;
+        assert_eq!(
+            verifier.check_cheap(
+                &stripped,
+                &stripped.nonce,
+                "login",
+                IP,
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            ),
+            Err(VerifyError::BadSignature),
+            "a stripped server_mac must be refused by the committed m=1 marker even with the floor off"
+        );
+        assert_eq!(
+            verifier.replay_security_check(
+                &stripped,
+                "login",
+                now_ns,
+                RequestBindingExpectation::Unenforced,
+                None,
+                None,
+                &mut ExecutionEvidenceCache::default(),
+            ),
+            Err(VerifyError::BadSignature),
+            "the replay gate must carry the same m=1 refusal"
+        );
+    }
+
     /// Deterministic fake clock for the final-revalidation race: returns
     /// the base time for the first two reads (the cheap phase's peek plus
     /// the post-consume re-check) and one second later afterwards —
@@ -5074,25 +5197,27 @@ mod tests {
             solve_for_test(&issued.record).expect("4-bit sha solves"),
         );
 
-        // The durable state: consume-with-identity + the deterministic
-        // valid commit via a plain wait-free store.
+        // The durable state exactly as production writes it: a full
+        // verification on a plain wait-free store consumes with the
+        // identity and commits the valid result WITH its consumed-result
+        // MAC. A hand-seeded MAC-less result is malformed by design
+        // (resolve_consumed refuses it) and would never reach the fence.
         let plain =
             RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
         plain.store(&issued.record).unwrap();
-        assert!(
-            plain
-                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
-                .unwrap()
-                .is_some(),
-            "the consume transition lands"
+        let plain_verifier = ProductionVerifier::new(plain, SECRET);
+        let fresh = plain_verifier.verify(
+            &token,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
+            Some(identity),
+            RequestBindingExpectation::Unenforced,
         );
-        plain
-            .commit_result(
-                &issued.record.nonce,
-                true,
-                issued.record.request_binding.as_deref(),
-            )
-            .unwrap();
+        assert!(
+            matches!(fresh, VerifyOutcome::Valid { .. }),
+            "the plain wait-free store accepts the fresh solve and commits the MAC: {fresh:?}"
+        );
 
         // The accepting verifier requires one acknowledged replica: the
         // fence WAIT returns 0 acked and must fail closed.

@@ -262,6 +262,7 @@ final class ParityTest extends TestCase
             $challenge->targetBits,
             $challenge->salt,
             $challenge->minDurationMs,
+            serverMacCommitted: true,
         );
         self::assertSame($canonical, base64_decode($payloadB64, true));
         self::assertSame(Issuer::signPayloadV2($canonical, Vectors::SECRET), $signature, 'v2 signatures use the HKDF-derived K_challenge');

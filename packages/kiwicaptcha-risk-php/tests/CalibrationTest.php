@@ -1097,6 +1097,80 @@ final class CalibrationTest extends TestCase
         self::assertSame('1000', (string) $client->hget($bucketKey, 'legit_score_sum'), 'score 200 x correction weight 5');
     }
 
+    public function testLegacyLedgerCorrectionLeavesTheClippedSumsAlone(): void
+    {
+        // A legacy ledger (no v, no clipped terms) corrected in a bucket
+        // that holds a post-upgrade counted sample must not touch the
+        // clipped sums; a v=2 ledger still reverses and redoes them.
+        $c = $this->calibrator();
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+        $bucketKey = $this->bucket($c, 7, $hour);
+
+        // The post-upgrade counted sample: score 900 legit books
+        // legit_above_sum = 900 - 600 = 300.
+        self::assertTrue($c->recordReceipt('clip-new', 7, 4, RiskAction::Argon16, 900, 1, $hour));
+        self::assertSame(1, $c->confirmOutcome('clip-new', true));
+        self::assertSame('300', (string) $client->hget($bucketKey, 'legit_above_sum'));
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:clip-new"), true);
+        self::assertSame(2, $ledger['v'], 'a counted first confirmation records the clipped-sums generation');
+        self::assertSame(1, $ledger['c'], 'a counted first confirmation records the counted flag');
+
+        // The legacy ledger: fabricated as a pre-clipped confirmation
+        // wrote it, with its count/score terms seeded in the bucket.
+        self::assertTrue($c->recordReceipt('clip-leg', 7, 4, RiskAction::Argon16, 900, 1, $hour));
+        $client->set("{kiwi:{$ns}}:outcome:clip-leg", json_encode([
+            'o' => 'L',
+            'scope' => 7,
+            'hour' => $hour,
+            'score' => 900,
+            'w' => 1.0,
+            'c' => 1,
+        ]), 'EX', 300);
+        $client->hincrbyfloat($bucketKey, 'legit_count', 1.0);
+        $client->hincrbyfloat($bucketKey, 'legit_score_sum', 900.0);
+
+        self::assertTrue($c->correctOutcome('clip-leg', false));
+        self::assertSame('1', (string) $client->hget($bucketKey, 'legit_count'));
+        self::assertSame('900', (string) $client->hget($bucketKey, 'legit_score_sum'));
+        self::assertSame('300', (string) $client->hget($bucketKey, 'legit_above_sum'), 'a legacy correction must not reverse the clipped sums');
+        self::assertSame(0.0, (float) $client->hget($bucketKey, 'abuse_below_sum'));
+
+        // A v=2 ledger still reverses the clipped leg.
+        self::assertTrue($c->correctOutcome('clip-new', false));
+        self::assertSame(0.0, (float) $client->hget($bucketKey, 'legit_above_sum'), 'a v=2 correction reverses the clipped sum');
+    }
+
+    public function testUnsampledConfirmationWritesC0AndItsCorrectionLeavesTheBucketUntouched(): void
+    {
+        // A random-sample decision whose receipt was discarded (sampled =
+        // 0) confirms with status 2: the ledger records the writer
+        // generation (v = 2) but the counted flag c = 0, and no bucket
+        // field is booked. Correcting it flips the ledger outcome and
+        // must leave the bucket untouched.
+        $c = new AggregateCalibrator($this->requireClient(), namespace: 'unclip' . bin2hex(random_bytes(4)), samplingMode: 'random_sample');
+        $client = $this->requireClient();
+        $ns = $c->namespace();
+        $hour = $this->decisionHour();
+        $bucketKey = $this->bucket($c, 7, $hour);
+
+        self::assertTrue($c->recordReceipt('unclip-1', 7, 4, RiskAction::Argon16, 900, 0, $hour));
+        self::assertSame(2, $c->confirmOutcome('unclip-1', true), 'an unsampled random-sample decision is consumed with status 2');
+
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:unclip-1"), true);
+        self::assertSame('L', $ledger['o']);
+        self::assertSame(2, $ledger['v'], 'generation-2 stamps v = 2 even on an unsampled confirmation');
+        self::assertSame(0, $ledger['c'], 'an unsampled first confirmation records c = 0');
+        self::assertSame([], $client->hgetall($bucketKey), 'an unsampled confirmation must not book a bucket sample');
+
+        self::assertTrue($c->correctOutcome('unclip-1', false));
+        $ledger = json_decode((string) $client->get("{kiwi:{$ns}}:outcome:unclip-1"), true);
+        self::assertSame('A', $ledger['o'], 'the correction flips the ledger outcome');
+        self::assertSame(1.0, (float) $ledger['w']);
+        self::assertSame([], $client->hgetall($bucketKey), 'an unsampled correction must leave every bucket field untouched');
+    }
+
     public function testBoundsKnobsRejectZeroAndBelowOne(): void
     {
         // maxAdjustment / maxChangePerMinute must be >= 1 (the Rust mirror

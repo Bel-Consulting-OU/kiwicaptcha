@@ -874,17 +874,34 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
      */
     private function doctorWithCookieConfig(array $cookie): CommandTester
     {
-        // The config tree refuses these pairings; a hand-built or stale
-        // config can still present them, so the command is constructed
-        // directly from a valid processed config with only the cookie
-        // block mutated (the container path would refuse the mutation at
-        // compile time for the wrong reason).
+        return $this->doctorWithConfig(static function (array $config) use ($cookie): array {
+            $config['risk']['continuity_cookie'] = array_replace($config['risk']['continuity_cookie'], $cookie);
+
+            return $config;
+        });
+    }
+
+    /**
+     * A doctor constructed directly from a processed configuration with
+     * an optional mutation callback, the shape the hand-built/stale-config
+     * diagnostics are exercised with (the container path validates first,
+     * which would refuse the very states under test for the wrong
+     * reason). The security Redis is a FakePredisClient so tests seed
+     * central policy state directly.
+     *
+     * @param callable(array<string, mixed>): array<string, mixed>|null $mutate
+     */
+    private function doctorWithConfig(?callable $mutate = null): CommandTester
+    {
         $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
             new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
             [['secret_key' => str_repeat('a', 32), 'risk' => ['enabled' => true]]],
         );
         self::assertIsArray($config);
-        $config['risk']['continuity_cookie'] = array_replace($config['risk']['continuity_cookie'], $cookie);
+        if ($mutate !== null) {
+            $config = $mutate($config);
+        }
+        $redis = new FakePredisClient();
         $command = new KiwiCaptchaDoctorCommand(
             'test',
             $config,
@@ -892,18 +909,169 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
             new \KiwiCaptcha\Config(secretKey: str_repeat('a', 32)),
             new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
                 new \KiwiCaptcha\Verifier(new \KiwiCaptcha\Storage\ArrayStorage()),
-                new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient(),
+                $redis,
                 'doctor-test',
-                60,
+                1,
                 300,
             ),
-            null,
-            null,
+            $redis,
+            $redis,
             null,
             null,
         );
 
         return new CommandTester($command);
+    }
+
+    public function testProtocolMaximumIsTheSingleSharedReadinessValue(): void
+    {
+        // The doctor's deploy gate and readiness must agree on the
+        // binary maximum; the readiness constant is pinned to the
+        // php-core ChallengeRecord::MAX_PROTOCOL_VERSION, so this test
+        // pins doctor == readiness == php core. The Rust crate mirrors
+        // the same value (challenge::MAX_PROTOCOL_VERSION, 5), pinned by
+        // the cross-language parity fixtures.
+        self::assertSame(
+            \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::MAX_PROTOCOL_VERSION,
+            \KiwiCaptcha\ChallengeRecord::MAX_PROTOCOL_VERSION,
+            'readiness must be pinned to the php-core protocol maximum',
+        );
+        $doctor = new \ReflectionClass(KiwiCaptchaDoctorCommand::class);
+        self::assertSame(
+            \BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::MAX_PROTOCOL_VERSION,
+            $doctor->getConstant('SUPPORTED_PROTOCOL_MAX'),
+            'the doctor deploy gate must use the single shared protocol maximum',
+        );
+        self::assertSame(5, \KiwiCaptcha\ChallengeRecord::MAX_PROTOCOL_VERSION, 'the php-core protocol maximum is 5 (the Rust crate mirrors it)');
+    }
+
+    public function testDoctorScopePolicyCollectsSitekeyScopesAndAllowlistTargets(): void
+    {
+        // risk.sitekeys values are arrays with default_scope, actions
+        // and ttl_secs; the check must collect each sitekey's
+        // default_scope and every actions value, plus every
+        // risk.sitekey_allowlist target, and report the ones missing
+        // from risk.scopes. A non-string allowed_scopes entry (the
+        // processed tree never produces one; a hand-edited/stale config
+        // can) must be skipped, not cast: `(string) $array` raises an
+        // Array-to-string PHP warning and turns into the phantom scope
+        // "Array".
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['allowed_scopes'] = ['login', 'admin_console', ['not', 'a', 'scope']];
+            $config['risk']['sitekey_allowlist'] = ['legacy-key' => 'legacy_scope'];
+            $config['risk']['sitekeys'] = [
+                'public-key' => [
+                    'default_scope' => 'sitekey_default',
+                    'actions' => ['checkout' => 'payments', 'signin' => 'login'],
+                ],
+            ];
+
+            return $config;
+        });
+        $phpWarnings = [];
+        set_error_handler(static function (int $errno, string $errstr) use (&$phpWarnings): bool {
+            if (($errno & \E_WARNING) !== 0) {
+                $phpWarnings[] = $errstr;
+            }
+
+            return true;
+        });
+        try {
+            $tester->execute([]);
+        } finally {
+            restore_error_handler();
+        }
+
+        $display = $tester->getDisplay();
+        self::assertSame([], $phpWarnings, 'a non-string allowed_scopes entry must not raise a PHP warning');
+        self::assertStringContainsString('[WARN] Risk scope policy', $display);
+        self::assertStringContainsString('admin_console', $display, 'a missing string allowed_scopes entry must still be collected');
+        self::assertStringContainsString('legacy_scope', $display, 'the sitekey_allowlist target must be collected');
+        self::assertStringContainsString('sitekey_default', $display, 'the sitekey default_scope must be collected');
+        self::assertStringContainsString('payments', $display, 'every actions scope must be collected');
+        self::assertStringNotContainsString('login,', $display, 'scopes listed in risk.scopes are not reported');
+        self::assertDoesNotMatchRegularExpression('/\bArray\b/', $display, 'a non-string allowed_scopes entry must not become a phantom "Array" scope');
+    }
+
+    public function testDoctorWarnsWhenTheCentralEpochIsAheadOfTheConfiguredPolicyVersion(): void
+    {
+        $redis = new FakePredisClient();
+        $redis->hashes['{kiwi:doctor-test}:security-policy'] = [
+            'min_policy_epoch' => '3',
+        ];
+        $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
+            new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
+            [['secret_key' => str_repeat('a', 32), 'risk' => ['enabled' => true, 'policy_version' => 1]]],
+        );
+        self::assertIsArray($config);
+        $monitor = new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+            new \KiwiCaptcha\Verifier(new \KiwiCaptcha\Storage\ArrayStorage()),
+            $redis,
+            'doctor-test',
+            1,
+            300,
+        );
+        $command = new KiwiCaptchaDoctorCommand(
+            'test',
+            $config,
+            new \KiwiCaptcha\Storage\ArrayStorage(),
+            new \KiwiCaptcha\Config(secretKey: str_repeat('a', 32)),
+            $monitor,
+            null,
+            null,
+            null,
+            null,
+        );
+        $tester = new CommandTester($command);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Protocol floor', $display, 'the epoch lag is a non-fatal warning on the protocol-floor check');
+        self::assertStringContainsString('min_policy_epoch is 3', $display);
+        self::assertStringContainsString('risk.policy_version is 1', $display);
+        self::assertStringContainsString('effective epoch 3', $display);
+        self::assertStringNotContainsString('[FAIL] Protocol floor', $display, 'the epoch lag must not fail the protocol-floor gate');
+    }
+
+    public function testDoctorSecretCheckUsesTheCoreFloorAndAuditsHistoricalSecrets(): void
+    {
+        // A 31-byte secret_key fails against the core
+        // Config::MIN_SECRET_BYTES floor.
+        $short = $this->doctorWithConfig(static function (array $config): array {
+            $config['secret_key'] = str_repeat('a', 31);
+
+            return $config;
+        });
+        $short->execute([]);
+        self::assertStringContainsString('[FAIL] Secret key', $short->getDisplay());
+        self::assertStringContainsString('32 bytes', $short->getDisplay());
+
+        // A 31-byte historical secret warns (the tree would refuse it,
+        // the hand-built/stale config path still audits it).
+        $historical = $this->doctorWithConfig(static function (array $config): array {
+            $config['secrets_by_kid'] = [1 => str_repeat('b', 31)];
+
+            return $config;
+        });
+        $historical->execute([]);
+        self::assertStringContainsString('[WARN] Secret key', $historical->getDisplay());
+        self::assertStringContainsString('secrets_by_kid entries for kid 1', $historical->getDisplay());
+    }
+
+    public function testDoctorWarnsOnAShortExecutionKey(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['execution_key'] = str_repeat('c', 31);
+            $config['risk']['execution_challenge'] = 'on';
+
+            return $config;
+        });
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('under the 32-byte floor', $display);
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
     }
 
     public function testDoctorPassesOnAHostPrefixedCookieBehindTrustedProxies(): void

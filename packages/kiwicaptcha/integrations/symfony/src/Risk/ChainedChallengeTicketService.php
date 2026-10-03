@@ -61,6 +61,15 @@ final class ChainedChallengeTicketService
         private readonly ?RequestBindingAuthorityInterface $bindingAuthority = null,
         private readonly ?\Closure $now = null,
     ) {
+        // The runtime half of the risk.chaining.hmac_secret floor: a
+        // literal secret is refused at container build by the config tree,
+        // but an env-resolved secret (and the master_secret/secret_key
+        // fallback) only exists at runtime, so the floor is enforced here.
+        if (\strlen($hmacSecret) < 32) {
+            throw new \InvalidArgumentException(
+                'risk.chaining.hmac_secret must be at least 32 bytes (the same floor as secret_key); the resolved chain ticket signing secret is too short'
+            );
+        }
     }
 
     /**

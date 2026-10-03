@@ -125,7 +125,7 @@ final class MalformedRecordException extends \RuntimeException
     /**
      * A protocol-v3 record without `decoy_field`: the decoy is mandatory
      * on v3, since the v3 canonical is the 18-field base plus the
-     * `|decoy_field` segment. A v3 record without one cannot have come
+     * tagged `d=` segment. A v3 record without one cannot have come
      * from a conforming issuer, because an armed issuance always writes
      * the segment. The rejection closes the stored-version-flip window:
      * a signed v2 record with its stored protocol_version flipped to 3
