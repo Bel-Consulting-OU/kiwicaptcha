@@ -31,6 +31,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
@@ -67,6 +68,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -87,6 +89,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -101,6 +104,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
@@ -117,6 +121,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -131,6 +136,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -146,6 +152,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -174,6 +181,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -211,6 +219,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -261,6 +270,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -291,6 +301,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -389,6 +400,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -411,6 +423,7 @@ steps:
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
+  - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
