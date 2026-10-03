@@ -346,7 +346,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
     }
 
     /**
-     * Wave-6: the execution-capability refusal happens AFTER a stage-2
+     * The execution-capability refusal happens after a stage-2
      * request has already reserved its chain. Every other post-reservation
      * refusal releases the reservation; this one must too, or the chain
      * stays "reserved" for the whole lease and the legitimate client

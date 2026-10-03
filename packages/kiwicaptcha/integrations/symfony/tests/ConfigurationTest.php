@@ -671,11 +671,12 @@ final class ConfigurationTest extends TestCase
 
     /**
      * The compile-time secret floors must never judge an env-managed
-     * value: `%env(...)%` (unresolved), its resolved `env_...` placeholder
+     * value. `%env(...)%` unresolved, its resolved `env_...` placeholder
      * form, and the empty-string type fixture Symfony's
      * ValidateEnvPlaceholdersPass substitutes are all accepted and
-     * preserved; the same floor is enforced when the runtime service/Config
-     * is constructed. Literal short values stay refused (pinned above).
+     * preserved. The same floor is enforced when the runtime
+     * service/Config is constructed. Literal short values stay refused,
+     * as pinned above.
      */
     public function testEnvPlaceholdersAreExemptFromTheCompileTimeSecretFloors(): void
     {

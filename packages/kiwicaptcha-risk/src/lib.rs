@@ -1108,12 +1108,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
         // The wrapper method's `event` is authoritative, exactly like the
-        // PHP mirror (`buildObservation($c, …, $event)` overrides
-        // `ctx.event`): the booked observation and the idempotency-key
-        // dedupe domain must be the event the method names, never
-        // whatever the caller put in the context. Otherwise a
-        // PreIssue-labelled call with a ConfirmedLegitimate context would
-        // book a confirmation event without the outcome-ledger gate.
+        // PHP mirror, whose buildObservation call overrides `ctx.event`:
+        // the booked observation and the idempotency-key dedupe domain
+        // must be the event the method names, never whatever the caller
+        // put in the context. Otherwise a PreIssue-labelled call with a
+        // ConfirmedLegitimate context would book a confirmation event
+        // without the outcome-ledger gate.
         let observation = self.build_observation(&ctx, now_ms, idempotency_key, Some(event))?;
 
         let confirmed = matches!(
@@ -1473,11 +1473,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         decision.reasons = out;
     }
 
-    /// Assigns the decision_id only — NO store or calibration call. The
-    /// degraded paths use this: while the breaker is open, after a store
-    /// failure on this assessment, and on a limiter hard-deny (which never
-    /// reached the state backend), the engine skips the state backend
-    /// entirely, receipt/ledger registration included.
+    /// Assigns the decision_id only — no store or calibration call. The
+    /// degraded paths use this: the breaker is open, a store failed on
+    /// this assessment, or a limiter hard-denied without reaching the
+    /// state backend. The engine then skips the state backend entirely,
+    /// receipt/ledger registration included.
     fn finalize_degraded_decision(&self, mut decision: RiskDecision) -> RiskDecision {
         decision.decision_id = hex::encode(fresh_decision_id());
         decision

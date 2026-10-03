@@ -1366,7 +1366,7 @@ kiwi_captcha:
         #                                   # WrongPolicyVersion. Changing this
         #                                   # configured value is a coordinated
         #                                   # cutover, not a local restart:
-        #                                   # previously issued challenges are
+        #                                   # challenges issued earlier are
         #                                   # invalidated across every node
         #                                   # that follows the central state.
         #                                   # Cosmetic changes must NOT bump

@@ -20,15 +20,14 @@ use PHPUnit\Framework\TestCase;
  * minute. The public site key and claimed origin can no longer create
  * unlimited billed verification work per scope.
  *
- * The key carries the server-owned canonical scope id (the configured
+ * The key carries the server-owned canonical scope id: the configured
  * risk.scopes.<name>.id, the shared synthetic unknown-scope id, or
- * ScopeIssuanceCap::UNKNOWN_QUOTA_ID for every unresolved scope), so the
- * raw attacker-controlled scope string is never a Redis key component
+ * ScopeIssuanceCap::UNKNOWN_QUOTA_ID for every unresolved scope. The
+ * raw attacker-controlled scope string is never a Redis key component,
  * and inventing scope names can never mint fresh quota windows. The
- * per-name HMAC form (hmac_sha256(scope, K_scope), with K_scope derived
- * from the bundle's master via hash_hkdf info 'kiwi/v2/scope-rate',
- * ScopeIssuanceCap::deriveScopeHmacKey) is confined to the legacy
- * allowSoftLegacy() path and is not a security bound.
+ * per-name HMAC form hmac_sha256(scope, K_scope) is confined to the
+ * legacy allowSoftLegacy() path and is not a security bound; K_scope
+ * comes from the bundle's master via hash_hkdf info 'kiwi/v2/scope-rate'.
  */
 final class ScopeIssuanceCapTest extends TestCase
 {

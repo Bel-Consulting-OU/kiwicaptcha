@@ -10,7 +10,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Hermetic tests of the RedisRiskStateStore reply-slot decoders
- * (scriptInteger()/scriptTag()): no Redis connection is required, the
+ * scriptInteger and scriptTag: no Redis connection is required, the
  * private static decoders are pinned through reflection. They are the
  * fail-closed boundary between the Lua reply and the typed
  * ObservationReply/AssessV2Reply objects — a malformed or shifted reply

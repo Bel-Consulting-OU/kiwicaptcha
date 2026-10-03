@@ -5199,7 +5199,7 @@ mod tests {
 
         // The durable state exactly as production writes it: a full
         // verification on a plain wait-free store consumes with the
-        // identity and commits the valid result WITH its consumed-result
+        // identity and commits the valid result with its consumed-result
         // MAC. A hand-seeded MAC-less result is malformed by design
         // (resolve_consumed refuses it) and would never reach the fence.
         let plain =

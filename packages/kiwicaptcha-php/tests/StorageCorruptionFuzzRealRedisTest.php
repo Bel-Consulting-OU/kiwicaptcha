@@ -1043,8 +1043,8 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
      * The hostname and issued_at_ns are outside the challenge HMAC but
      * covered by the record-metadata MAC: any rewrite fails at the
      * record-signature gate. A stripped MAC on a record signed with the
-     * m=1 marker fails closed (BadSignature); the only floorless path is
-     * a record whose canonical was signed without the marker — an absent
+     * m=1 marker fails closed (BadSignature). The only floorless path is
+     * a record whose canonical was signed without the marker. An absent
      * MAC there still verifies but reports neither a duration nor a
      * hostname, so a writer can suppress that evidence, never fabricate
      * it.

@@ -4128,9 +4128,9 @@ mod tests {
         );
 
         // The cap value itself is also rejected: the official decoder
-        // rejects counter >= SOLVER_MAX_HASHES (20,000,000; the JS solver
-        // searches 0..19,999,999), so the direct verifier must match
-        // (protocol parity).
+        // rejects counter >= the solver cap (20,000,000; the JS solver
+        // searches 0..19,999,999), so the direct verifier must match the
+        // protocol contract.
         let mut record2 = make_record(4);
         let outcome = verify(&mut record2, crate::challenge::SOLVER_MAX_HASHES, 5000);
         assert_eq!(

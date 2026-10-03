@@ -60,15 +60,15 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecu
  * is admitted, the next one in the same window is refused (the
  * controller returns 429 `SCOPE_LIMITED` before any challenge is minted).
  *
- * Operational contract (the audit's distributed kill switch): the
- * counter is GLOBAL to the scope, not per user or per source. Exhausting
- * a well-known scope's cap (for example login) refuses every user of
- * that scope with SCOPE_LIMITED for the rest of the minute. Treat the
- * cap as an emergency billed-work ceiling set well above peak issuance
- * and ALERT when it fires rather than letting it fire routinely. The
- * fixed window can additionally admit up to twice the cap across a
- * minute boundary (a late burst in one minute plus the next minute's
- * fresh window); a sliding window would remove that allowance.
+ * Operational contract: the counter is global to the scope rather than
+ * per user or per source. Exhausting a well-known scope's cap such as
+ * the login scope refuses every user of that scope for the rest of the
+ * minute with a rate-limited response. Treat the cap as an emergency
+ * billed-work ceiling set well above peak issuance, and alert when it
+ * fires instead of letting it fire routinely. The fixed window can
+ * additionally admit up to twice the cap across a minute boundary (a
+ * late burst in one minute plus the next minute's fresh window); a
+ * sliding window would remove that allowance.
  *
  * A Redis failure propagates, fail closed: the caller refuses issuance
  * rather than minting an unbilled challenge, so the deployment-wide

@@ -242,9 +242,9 @@ Files:
     bucket contribution, using the recorded weight, and adds the
     corrected one (clamped at zero), so an unsampled decision never
     deletes another decision's sample. The clipped legs are reversed and
-    redone only for a counted v=2 sample (`c == 1` AND `v == 2`): the
+    redone only for a counted v=2 sample (`c == 1` AND `v == 2`). The
     generation-2 writer stamps `v = 2` on every first confirmation it
-    writes (counted or deliberately unsampled c=0), and a legacy ledger
+    writes, counted or deliberately unsampled c=0. A legacy ledger
     (no `v`) reverses the count/score sums without touching the clipped
     legs. `outcome_correct.lua` preserves
     the stored TTL (`SET ... KEEPTTL`) instead of extending it on every

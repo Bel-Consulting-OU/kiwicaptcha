@@ -1006,7 +1006,7 @@ final class ChallengeController
         // sitekey, the scope is resolved from the server-owned mapping; an
         // unknown sitekey simply stays a scope name subject to the
         // allowed_scopes gate and the risk assessment below. The alias is
-        // applied ONLY to a client-presented scope: a scope already
+        // applied only to a client-presented scope: a scope already
         // resolved by the (sitekey, action) policy is authoritative and
         // must never be reinterpreted as a legacy sitekey name, otherwise
         // a policy whose resolved scope happens to equal an alias key

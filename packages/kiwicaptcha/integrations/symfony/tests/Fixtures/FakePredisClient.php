@@ -875,8 +875,8 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Scope issuance cap')) {
             // ScopeIssuanceCap::allow: keys[1] =
             // {kiwi:<ns>}:issuance:<canonical scope id>:<minute>
-            // (UNKNOWN_QUOTA_ID for an unmapped scope; the raw scope is
-            // never a key component);
+            // (the reserved unknown-scope quota id for an unmapped
+            // scope; the raw scope is never a key component);
             // argv[1] = cap. incr -> expire 60 on the first increment ->
             // refuse beyond the cap (0), else 1.
             $key = (string) $keys[0];

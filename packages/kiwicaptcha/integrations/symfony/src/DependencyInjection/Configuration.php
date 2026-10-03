@@ -26,7 +26,8 @@ final class Configuration implements ConfigurationInterface
 
     /**
      * True when the configured value is an unresolved Symfony env
-     * placeholder (`%env(...)%`) or its resolved placeholder form, or the
+     * placeholder such as `%env(NAME)%`, or its resolved placeholder
+     * form, or the
      * empty-string type fixture Symfony's ValidateEnvPlaceholdersPass
      * substitutes when it re-processes this tree. Such a value is resolved
      * at runtime, so a compile-time length floor cannot judge it; the same
@@ -49,7 +50,7 @@ final class Configuration implements ConfigurationInterface
     /**
      * True when the literal configured secret is under the core
      * `Config::MIN_SECRET_BYTES` floor. An env placeholder is not a
-     * literal secret and is not judged here (see isEnvPlaceholder()).
+     * literal secret and is not judged here; see isEnvPlaceholder().
      */
     private static function isShortSecret(mixed $v): bool
     {
@@ -601,7 +602,7 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->integerNode('policy_version')
-                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification. A node stamps and enforces max(configured, central min_policy_epoch), so raising the central {kiwi:<ns>}:security-policy min_policy_epoch above this configured value revokes only older challenges: every node follows the central epoch, the readiness probe stays ready for a node whose configured value is behind, and new issuances verify immediately. The strict-equality contract stays: a record stamped under a different effective epoch is rejected with WrongPolicyVersion. Changing this configured value is therefore a coordinated cutover, not a local restart, because the node's own previously issued challenges (stamped under the old value) are invalidated across every node that follows the central state. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
+                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification. A node stamps and enforces max(configured, central min_policy_epoch), so raising the central {kiwi:<ns>}:security-policy min_policy_epoch above this configured value revokes only older challenges: every node follows the central epoch, the readiness probe stays ready for a node whose configured value is behind, and new issuances verify immediately. The strict-equality contract stays: a record stamped under a different effective epoch is rejected with WrongPolicyVersion. Changing this configured value is therefore a coordinated cutover, not a local restart, because challenges the node issued earlier (stamped under the earlier value) are invalidated across every node that follows the central state. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
                             ->defaultValue(1)
                             ->min(1)
                         ->end()

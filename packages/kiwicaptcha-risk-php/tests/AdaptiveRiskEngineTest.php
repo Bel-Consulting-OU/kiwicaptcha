@@ -549,14 +549,13 @@ final class AdaptiveRiskEngineTest extends TestCase
     }
 
     /**
-     * Engine-level keying without a session: when the session pseudonym
-     * is absent the hysteresis client key falls back to the source
-     * pseudonym (never the subnet or a shared constant), so two sources
-     * in the same scope — even in the same /24 — keep independent
-     * entries. The bot source's fresh key selects Argon64; an ordinary
-     * source's request must read its own fresh entry (the plain band for
-     * 845), and the bot source's next, lower score stays held at
-     * Argon64 by its own entry.
+     * Engine-level keying without a session: the hysteresis client key
+     * falls back to the source pseudonym, never to the subnet or a
+     * shared constant. Two sources in the same scope, even in the same
+     * /24, keep independent entries. The bot source's fresh key selects
+     * Argon64; an ordinary source's request must read its own fresh
+     * entry (the plain band for 845). The bot source's next, lower score
+     * stays held at Argon64 by its own entry.
      */
     public function testScopeActionHysteresisIsKeyedPerSourceWhenSessionIsAbsent(): void
     {

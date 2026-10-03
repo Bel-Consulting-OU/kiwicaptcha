@@ -184,11 +184,11 @@ bound), and the config is refused at compile time when no Redis client is
 available. The minute is derived from the Redis server clock so all
 workers share one window.
 
-Operational contract: the counter is GLOBAL to the scope, not per user or
+Operational contract: the counter is global to the scope, not per user or
 per source. Exhausting a well-known scope's cap (for example login)
 refuses every user of that scope with `SCOPE_LIMITED` for the rest of the
 minute — a distributed kill switch for that surface. Set the cap as an
-emergency billed-work ceiling well above peak issuance and ALERT when it
+emergency billed-work ceiling well above peak issuance and alert when it
 fires rather than letting it fire routinely. The fixed window can
 additionally admit up to twice the cap across a minute boundary (a late
 burst in one minute plus the next minute's fresh window); a sliding window

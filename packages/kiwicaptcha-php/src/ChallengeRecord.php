@@ -128,9 +128,9 @@ namespace KiwiCaptcha;
  * kid, see {@see \KiwiCaptcha\VerifyError::UnknownKid} and the
  * rollback/forward guard.
  *
- * `hostname` is server-side issuance metadata (the Siteverify host the
- * challenge was issued for), always present in `toArray()` (null when
- * unset); it is never signed into the challenge and never sent to the
+ * `hostname` is server-side issuance metadata: the Siteverify host the
+ * challenge was issued for. It is always present in `toArray()`, null
+ * when unset, and is neither signed into the challenge nor sent to the
  * client. It is authenticated by `serverMac`.
  *
  * `serverMac` is the record-metadata MAC: 64 lowercase hex HMAC-SHA256
@@ -147,7 +147,7 @@ namespace KiwiCaptcha;
  * {@see Issuer::composeDecoyName()}). Null =
  * no decoy armed (the default). The name is an authenticated canonical
  * field: the tagged `|d={decoy_field}` segment, appended after the `kid`
- * (see {@see Issuer::canonicalPayload()}), so a stored/tampered record
+ * as documented on {@see Issuer::canonicalPayload()}, so a stored/tampered record
  * cannot change or drop it without breaking the signature. Wire
  * compatibility: unarmed records carry no extension segment. The JSON
  * key is absent when null (`skip_serializing_if`), so pre-decoy writers

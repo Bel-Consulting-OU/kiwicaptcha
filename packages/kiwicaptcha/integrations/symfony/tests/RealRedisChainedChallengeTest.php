@@ -827,7 +827,7 @@ final class RealRedisChainedChallengeTest extends TestCase
     {
         // The store's live pre-read refuses a corrupt record, so the Lua
         // guard is pinned directly: a record whose rank contradicts its
-        // action would pass the old decode-only obligation check and
+        // action would pass an earlier decode-only obligation check and
         // transition, but the strict v2 predicate must answer 'corrupt'
         // with zero writes, even with a matching obligation and mapping.
         $obligationId = str_repeat('a', 64);

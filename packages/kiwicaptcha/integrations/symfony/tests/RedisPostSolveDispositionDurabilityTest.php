@@ -284,10 +284,10 @@ final class RedisPostSolveDispositionDurabilityTest extends TestCase
      * the scripts by marker and mirrors the guard with PHP null). Pin
      * it at the source: a variable assigned from `redis.call(...)` must
      * never be compared with `== nil` inside an immediately following
-     * conditional — RESP2 converts a missing bulk/array reply to Lua
-     * `false`, so that branch never fires (the original high-severity
-     * post-solve guard bug). The scan covers every PHP/RS/Lua source in
-     * the repository (vendor/target/node_modules excluded).
+     * conditional. RESP2 converts a missing bulk/array reply to Lua
+     * `false`, so that branch never fires. The scan covers every
+     * PHP/RS/Lua source in the repository, with vendor, target and
+     * node_modules excluded.
      */
     public function testLuaTreatsAMissingRedisReplyAsFalseNeverNil(): void
     {

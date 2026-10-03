@@ -273,8 +273,9 @@ thread_local! {
 ///
 /// The buffer persists across calls and is reallocated only when the
 /// requested size changes, so a chunk of hashes performs one allocation
-/// instead of one per hash. Assigning the fresh vector drops the old
-/// allocation, so a large solve never pins memory for later small ones.
+/// instead of one per hash. Assigning the fresh vector releases the
+/// superseded allocation, so a large solve never pins memory for later
+/// small ones.
 fn with_argon2_memory<T>(block_count: usize, f: impl FnOnce(&mut [Block]) -> T) -> T {
     ARGON2_MEMORY.with(|cell| {
         let mut blocks = cell.borrow_mut();
