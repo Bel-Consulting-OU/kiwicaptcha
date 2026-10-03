@@ -11,9 +11,6 @@
 # pipeline.
 labels:
   capability: docker
-variables:
-  COMPOSE_FILE: deploy/docker-compose.yml
-  COMPOSE_ENV_FILES: deploy/.env
 when:
 - event:
   - push
@@ -53,6 +50,9 @@ steps:
     printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> deploy/.env'
 - name: docker-compose-up-(valkey-+-captcha)
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -61,6 +61,9 @@ steps:
   - docker compose up -d
 - name: retry-/healthz-until-200
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -92,6 +95,9 @@ steps:
         -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
 - name: solve-the-sha-256-proof-inside-the-captcha-container
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -162,6 +168,9 @@ steps:
       grep -q '"code":"INVALID_ALGORITHM"' $$CI_WORKSPACE/.ci-run-tmp/f1-invalid.json
 - name: f1-algorithm-ownership-table-(argon2id-profile-rows)
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -196,6 +205,9 @@ steps:
       done
 - name: f1-algorithm-ownership-table-(rsw-profile-rows)
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -243,6 +255,9 @@ steps:
       done
 - name: f1-table-done:-restore-the-default-sha256-profile
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -270,6 +285,9 @@ steps:
       test "$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
 - name: f2-request-binding-table-(real-/verify,-one-challenge-per-ro
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -354,6 +372,9 @@ steps:
       grep -q '"code":"record_not_found"' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
 - name: restart-the-captcha-container
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -362,6 +383,9 @@ steps:
   - docker compose restart captcha
 - name: retry-/healthz-after-the-restart
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -381,6 +405,9 @@ steps:
       exit 1
 - name: issue,-solve-and-verify-again-against-the-persistent-store
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
@@ -400,6 +427,9 @@ steps:
       php -r 'exit(json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
 - name: docker-compose-down
   image: docker:28-cli
+  environment:
+    COMPOSE_FILE: deploy/docker-compose.yml
+    COMPOSE_ENV_FILES: deploy/.env
   volumes:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
