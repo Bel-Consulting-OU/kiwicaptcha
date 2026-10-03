@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Risk\Calibration;
 
 use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use Predis\Client;
 use Predis\Response\ServerException;
 
@@ -248,6 +249,9 @@ final class AggregateCalibrator implements CalibrationStore
         if ($minSamples < 1 || $maxAdjustment < 1 || $maxChangePerMinute < 1 || $receiptTtlSecs < 1 || $outcomeTtlSecs < 1) {
             throw new \InvalidArgumentException('minSamples, maxAdjustment, maxChangePerMinute, receiptTtlSecs and outcomeTtlSecs must be >= 1');
         }
+        if ($receiptTtlSecs > 2_147_483_647 || $outcomeTtlSecs > 2_147_483_647) {
+            throw new \InvalidArgumentException('receiptTtlSecs and outcomeTtlSecs must be <= 2147483647 (the scripts expire ceiling)');
+        }
         if (!in_array($samplingMode, ['complete', 'random_sample', 'weighted'], true)) {
             throw new \InvalidArgumentException('samplingMode must be one of: complete, random_sample, weighted');
         }
@@ -356,6 +360,8 @@ final class AggregateCalibrator implements CalibrationStore
 
     public function ledgerKey(string $decisionId): string
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
+
         return "{kiwi:{$this->namespace}}:outcome:{$decisionId}";
     }
 
@@ -391,6 +397,7 @@ final class AggregateCalibrator implements CalibrationStore
      */
     public function recordReceipt(string $decisionId, int $scope, int $band, RiskAction $action, int $score, int $sampled, int $decisionHour, float $weight = 1.0): bool
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
         $bucketKey = "{kiwi:{$this->namespace}}:cal:{$this->scopeKey($scope)}:{$decisionHour}";
         $ledgerKey = $this->ledgerKey($decisionId);
@@ -452,6 +459,7 @@ final class AggregateCalibrator implements CalibrationStore
      */
     public function confirmOutcome(string $decisionId, bool $legitimate, ?float $weight = null): int
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $receiptKey = "{kiwi:{$this->namespace}}:cal:receipt:{$decisionId}";
         $raw = $this->client->get($receiptKey);
         if (!is_string($raw) || $raw === '') {

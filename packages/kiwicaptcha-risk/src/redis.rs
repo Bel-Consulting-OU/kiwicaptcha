@@ -558,6 +558,20 @@ impl RedisRiskStateStore {
         Ok(())
     }
 
+    /// Whether a caller-supplied identifier is safe as a Redis key
+    /// component: non-empty, free of control characters (including the C1
+    /// and U+2028/U+2029 separators the PHP regex names) and of the `:`/`}`
+    /// structure bytes. Mirrors PHP
+    /// `RedisRiskStateStore::assertKeySafeIdentifier`, which guards the
+    /// store's decision ids; the calibration store's receipt/ledger keys
+    /// enforce the same rule so every decision-id key path agrees.
+    pub(crate) fn valid_key_component(value: &str) -> bool {
+        !value.is_empty()
+            && !value
+                .chars()
+                .any(|c| c.is_control() || matches!(c, ':' | '}' | '\u{2028}' | '\u{2029}'))
+    }
+
     /// Cheap per-assessment cluster-safety check: every key must carry the
     /// store's hash-tag prefix (a shared prefix implies a shared cluster
     /// slot — the tag's slot is fixed at construction, so the per-key
@@ -1038,6 +1052,12 @@ impl RiskStateStore for RedisRiskStateStore {
         // outcome_register.lua: SET NX EX a pending ledger entry
         // {"o":"P","scope","hour","score","w":1}. Returns 1 when created,
         // 0 when the decision_id is already registered.
+        if !Self::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "decision_id is not a safe Redis key component (got 0x{})",
+                hex::encode(decision_id)
+            )));
+        }
         let key = self.outcome_ledger_key(decision_id);
         let mut invocation = self.outcome_register_script.prepare_invoke();
         invocation.key(key.as_str());
@@ -1053,6 +1073,12 @@ impl RiskStateStore for RedisRiskStateStore {
 
     fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
         // outcome_confirm.lua: pending -> L/A exactly once.
+        if !Self::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "decision_id is not a safe Redis key component (got 0x{})",
+                hex::encode(decision_id)
+            )));
+        }
         let key = self.outcome_ledger_key(decision_id);
         let mut invocation = self.outcome_confirm_script.prepare_invoke();
         invocation.key(key.as_str());
@@ -1067,6 +1093,12 @@ impl RiskStateStore for RedisRiskStateStore {
     fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError> {
         // outcome_correct.lua: flip L <-> A (no-op when the ledger already
         // carries the target outcome).
+        if !Self::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "decision_id is not a safe Redis key component (got 0x{})",
+                hex::encode(decision_id)
+            )));
+        }
         let key = self.outcome_ledger_key(decision_id);
         let mut invocation = self.outcome_correct_script.prepare_invoke();
         invocation.key(key.as_str());

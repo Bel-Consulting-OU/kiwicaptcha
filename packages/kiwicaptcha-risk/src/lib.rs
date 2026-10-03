@@ -78,10 +78,23 @@ pub enum RiskError {
     /// decision.
     #[error("confirmed outcomes require the decision_id of the assessed decision")]
     EmptyDecisionId,
+    /// The supplied inverse sampling probability is outside the
+    /// 1..=1_000_000 contract (0 would produce an infinite weight and a
+    /// value above 1_000_000 is not an inverse probability). PHP parity:
+    /// the mirror throws `InvalidArgumentException` before any store I/O.
+    #[error("sampling_probability_ppm must be within 1..=1000000")]
+    InvalidSamplingProbability,
     /// The calibration backend could not be reached; the confirm was not
     /// applied (callers treat calibration as best-effort).
     #[error("calibration backend failure: {0}")]
     Calibration(String),
+    /// Weighted calibration mode requires the caller's inverse sampling
+    /// probability at confirmation time. This is a caller configuration
+    /// error, not a backend failure: it is surfaced instead of being
+    /// masked as a duplicate no-op (PHP parity: the mirror throws
+    /// `InvalidArgumentException`).
+    #[error("weighted sampling requires a confirmation weight for decision {0}")]
+    CalibrationWeightRequired(String),
     /// The risk state backend could not serve the always-on outcome
     /// ledger operation (register/confirm/correct without calibration).
     #[error("risk state backend failure: {0}")]
@@ -102,6 +115,17 @@ pub enum RiskError {
     /// empty or tiny master deterministically derives predictable keys.
     #[error("the risk master secret must be at least 16 bytes (got {0})")]
     InvalidMasterLength(usize),
+}
+
+/// The engine-side inverse-probability contract: `Some(ppm)` must be
+/// within 1..=1_000_000 (the value is divided, so 0 would be infinite and
+/// above 1_000_000 is not an inverse probability); `None` means the caller
+/// supplied no weight and is always valid.
+fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
+    match ppm {
+        Some(p) if !(1..=1_000_000).contains(&p) => Err(RiskError::InvalidSamplingProbability),
+        _ => Ok(()),
+    }
 }
 
 /// The risk model generation implemented by this package.
@@ -791,7 +815,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Self::validate_v2_context(v2)?;
         }
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
+        let observation = self.build_observation(&ctx, now_ms, idempotency_key, None)?;
 
         if self.breaker.is_open() {
             self.metrics.incr_fixed(FixedMetric::DegradedBreaker);
@@ -1083,7 +1107,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         weight: Option<f64>,
     ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key)?;
+        // The wrapper method's `event` is authoritative, exactly like the
+        // PHP mirror (`buildObservation($c, …, $event)` overrides
+        // `ctx.event`): the booked observation and the idempotency-key
+        // dedupe domain must be the event the method names, never
+        // whatever the caller put in the context. Otherwise a
+        // PreIssue-labelled call with a ConfirmedLegitimate context would
+        // book a confirmation event without the outcome-ledger gate.
+        let observation = self.build_observation(&ctx, now_ms, idempotency_key, Some(event))?;
 
         let confirmed = matches!(
             event,
@@ -1102,6 +1133,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // retry applies the outcome exactly once instead of
                 // amplifying it.
                 match self.confirm_outcome(&receipt_id, legitimate, weight) {
+                    // A caller configuration error (weighted mode without a
+                    // weight) must never masquerade as a duplicate no-op:
+                    // the PHP mirror throws, and silently booking nothing
+                    // would hide the misconfiguration forever.
+                    Err(RiskError::CalibrationWeightRequired(id)) => {
+                        return Err(RiskError::CalibrationWeightRequired(id));
+                    }
                     Ok(0) | Err(_) => {
                         return Ok(EventReceipt {
                             event_id: observation.event_id,
@@ -1172,7 +1210,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         match &self.calibration {
             Some(calibration) => calibration
                 .confirm_outcome(decision_id, legitimate, weight)
-                .map_err(|e| RiskError::Calibration(e.to_string())),
+                .map_err(|e| match e {
+                    crate::calibration::CalibrationError::WeightRequired(id) => {
+                        RiskError::CalibrationWeightRequired(id)
+                    }
+                    other => RiskError::Calibration(other.to_string()),
+                }),
             None => self
                 .store
                 .confirm_outcome(decision_id, legitimate)
@@ -1257,6 +1300,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
+        reject_out_of_range_ppm(sampling_probability_ppm)?;
         let weight = sampling_probability_ppm.map(|ppm| 1_000_000.0 / ppm as f64);
         self.emit_feedback(
             RiskEventKind::ConfirmedLegitimate,
@@ -1290,6 +1334,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
+        reject_out_of_range_ppm(sampling_probability_ppm)?;
         let weight = sampling_probability_ppm.map(|ppm| 1_000_000.0 / ppm as f64);
         self.emit_feedback(
             RiskEventKind::ConfirmedAbuse,
@@ -1361,7 +1406,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         ctx: &RiskContext<'_>,
         now_ms: u64,
         idempotency_key: Option<String>,
+        event_override: Option<RiskEventKind>,
     ) -> Result<RiskObservation, RiskError> {
+        // The feedback wrappers pass the method's event; the assessment
+        // path passes None and takes the context's event. PHP parity:
+        // `buildObservation($c, …, $event)` with `$event ??= $c->event`.
+        let event = event_override.unwrap_or(ctx.event);
         let now_secs = (now_ms / 1000) as i64;
         let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
         let net_epoch = now_secs.div_euclid(self.timing.subnet_epoch_secs() as i64);
@@ -1375,12 +1425,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let event_id = normalize_idempotency_key(
             idempotency_key.as_deref(),
             ctx.scope,
-            ctx.event,
+            event,
             &self.keys.event,
         )?;
 
         Ok(RiskObservation {
-            event: ctx.event,
+            event,
             scope: ctx.scope,
             source_epoch: src_epoch,
             source_id_prev: self

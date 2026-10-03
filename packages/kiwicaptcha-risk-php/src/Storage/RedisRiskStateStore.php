@@ -647,7 +647,14 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      * its control interpretation is ambiguous. Throwing fails closed
      * before any key reaches Redis.
      */
-    private static function assertKeySafeIdentifier(string $name, string $value): void
+    /**
+     * The shared key-safety rule for caller-supplied identifiers: a
+     * 32-char lowercase hex id always passes; otherwise the value must be
+     * non-empty UTF-8 free of control characters, ":" and "}". Public so
+     * the calibrator (whose receipt/ledger keys embed the decision id
+     * verbatim) enforces the identical rule.
+     */
+    public static function assertKeySafeIdentifier(string $name, string $value): void
     {
         if (preg_match('/^[0-9a-f]{32}$/', $value) === 1) {
             return;

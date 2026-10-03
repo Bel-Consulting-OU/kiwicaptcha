@@ -52,6 +52,7 @@ end
 if ARGV[3] ~= '0' and ARGV[3] ~= '1' then
     return redis.error_reply('register_decision: sampled must be 0 or 1')
 end
+local sampled = tonumber(ARGV[3])
 local receipt_ttl = tonumber(ARGV[2])
 if ttl_out_of_bounds(receipt_ttl) then
     return redis.error_reply('register_decision: receipt_ttl_s must be a positive integer no greater than 2147483647')
@@ -65,6 +66,38 @@ if ttl_out_of_bounds(ledger_ttl) then
     return redis.error_reply('register_decision: outcome_ttl_s must be a positive integer no greater than 2147483647')
 end
 
+-- The remaining numeric/JSON arguments are validated BEFORE the first
+-- write too: the header's contract is "every argument is validated", and
+-- a malformed receipt or a non-numeric scope/hour/score would otherwise
+-- create a receipt and then either error (leaving an orphan receipt) or
+-- write a ledger entry with `tonumber(nil)` fields dropped.
+local scope = tonumber(ARGV[6])
+if scope == nil or scope < 1 or scope ~= math.floor(scope) then
+    return redis.error_reply('register_decision: scope must be a positive integer')
+end
+local decision_hour = tonumber(ARGV[7])
+if decision_hour == nil or decision_hour ~= math.floor(decision_hour) then
+    return redis.error_reply('register_decision: decision_hour must be an integer')
+end
+local score = tonumber(ARGV[8])
+if score == nil or score < 0 or score > 1000 or score ~= math.floor(score) then
+    return redis.error_reply('register_decision: score must be an integer within 0..1000')
+end
+local weight = tonumber(ARGV[9])
+if weight == nil or weight ~= weight or weight <= 0 or weight == math.huge then
+    return redis.error_reply('register_decision: weight must be a positive finite number')
+end
+local ok_decode, receipt = pcall(cjson.decode, ARGV[1])
+if not ok_decode or type(receipt) ~= 'table' then
+    return redis.error_reply('register_decision: receipt must be a JSON object')
+end
+if tonumber(receipt.scope) ~= scope
+    or tonumber(receipt.decision_hour) ~= decision_hour
+    or tonumber(receipt.score) ~= score
+    or tonumber(receipt.sampled) ~= sampled then
+    return redis.error_reply('register_decision: receipt JSON must agree with the numeric arguments')
+end
+
 local ok = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', receipt_ttl)
 if ok == false then
     return 0
@@ -72,10 +105,10 @@ end
 
 local ledger = cjson.encode({
     o = 'P',
-    scope = tonumber(ARGV[6]),
-    hour = tonumber(ARGV[7]),
-    score = tonumber(ARGV[8]),
-    w = tonumber(ARGV[9])
+    scope = scope,
+    hour = decision_hour,
+    score = score,
+    w = weight
 })
 local ledger_ok = redis.call('SET', KEYS[3], ledger, 'NX', 'EX', ledger_ttl)
 if ledger_ok == false then

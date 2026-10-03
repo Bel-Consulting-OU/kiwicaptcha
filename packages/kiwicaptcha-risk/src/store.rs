@@ -17,6 +17,12 @@ pub enum RiskStoreError {
     ScriptError(String),
     #[error("risk state backend timeout: {0}")]
     Timeout(String),
+    /// A caller-supplied identifier (decision id) is not safe as a Redis
+    /// key component: empty, a control character, or one of the key
+    /// structure bytes `:`/`}`. Mirrors the PHP
+    /// `RedisRiskStateStore::assertKeySafeIdentifier` rule.
+    #[error("invalid identifier: {0}")]
+    InvalidIdentifier(String),
 }
 
 /// The full reply of one store application: the signal vector plus the

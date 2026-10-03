@@ -6,12 +6,14 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RollbackFakeRedis;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Risk\TransactionalChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -27,6 +29,7 @@ use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\ReplicaWaitException;
 use KiwiCaptcha\StorageInterface;
+use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -340,6 +343,82 @@ final class ChainedIssuanceRollbackTest extends TestCase
         // because the decorator's recovery read fails on issued records).
         $records = (new \ReflectionObject($innerStore))->getProperty('records')->getValue($innerStore);
         self::assertSame('issued', $records[$chainId]['state'], 'the chain is durably issued — exactly why the rollback must NOT run');
+    }
+
+    /**
+     * Wave-6: the execution-capability refusal happens AFTER a stage-2
+     * request has already reserved its chain. Every other post-reservation
+     * refusal releases the reservation; this one must too, or the chain
+     * stays "reserved" for the whole lease and the legitimate client
+     * cannot retry with an upgraded widget.
+     */
+    public function testExecutionCapabilityRefusalReleasesTheStage2Reservation(): void
+    {
+        $storage = new ArrayStorage();
+        $client = new RollbackFakeRedis();
+        $outstanding = new OutstandingChallenges($client, '{kiwi:rollback-test}:outstanding:', RiskKeys::fromMaster(self::SECRET), 5, 100, 0);
+        $chainService = $this->chainService(new ArrayChainedChallengeStateStore());
+        ['chainId' => $chainId, 'ticket' => $ticket] = $this->openChain($chainService);
+
+        // A confirmed central protocol floor >= 4 arms the execution
+        // dimension; the node cap and the required tier are both 2, and
+        // this request advertises no client capability, so the effective
+        // version is 1 and the deterministic refusal fires.
+        $monitorClient = new FakePredisClient();
+        $monitor = new SecurityEpochMonitor(new Verifier(new ArrayStorage()), $monitorClient, 'rollback-test', 1);
+        $monitorClient->hset($monitor->policyKey(), 'min_protocol_version', '4');
+        $issuer = new Issuer(
+            new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 120, executionKey: str_repeat('e', 32)),
+            $storage,
+        );
+        $controller = new ChallengeController(
+            $issuer,
+            null,
+            true,
+            $this->riskStack(),
+            new ContinuityCookie(),
+            outstanding: $outstanding,
+            storage: $storage,
+            challengeTtlSecs: 120,
+            chainTickets: $chainService,
+            policyVersion: 1,
+            epochMonitor: $monitor,
+            executionGate: true,
+            executionVersionCap: 1,
+            executionRequiredVersion: 2,
+        );
+
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR);
+        $response = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent());
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $response->getContent());
+        self::assertCount(0, (new \ReflectionObject($storage))->getProperty('records')->getValue($storage), 'the refusal must mint no challenge');
+
+        $requirement = $chainService->requirementFor($chainId);
+        self::assertNotNull($requirement);
+        self::assertSame('available', $requirement->state, 'the refusal must release the stage-2 reservation so the chain is not stuck busy for the lease');
+
+        // The released ticket stays reusable: a retry reaches the same
+        // deterministic refusal instead of a reserved/busy 503.
+        $second = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(422, $second->getStatusCode(), 'the released ticket must be retryable');
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $second->getContent());
+
+        // A client that falsely claims version 2 cannot raise itself past
+        // the node's own tier: the claimed capability is capped by the
+        // deployment ceiling, so the refusal repeats.
+        $claimed = JsonRequest::create(
+            '/kiwi-captcha/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7', 'HTTP_KIWI_EXECUTION_MAX_VERSION' => '2'],
+            $body,
+        );
+        $third = $controller->challenge($claimed);
+        self::assertSame(422, $third->getStatusCode(), 'a claimed client capability must never override the node tier');
+        self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $third->getContent());
     }
 }
 

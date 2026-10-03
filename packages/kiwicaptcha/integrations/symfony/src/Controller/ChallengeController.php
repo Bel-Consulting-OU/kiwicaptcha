@@ -978,7 +978,9 @@ final class ChallengeController
         // binding_mode only.
         $sitekey = isset($payload['sitekey']) && $payload['sitekey'] !== '' ? (string) $payload['sitekey'] : null;
         $sitekeyTtlSecs = null;
+        $scopeResolvedByPolicy = false;
         if ($sitekey !== null && isset($this->sitekeyPolicy[$sitekey])) {
+            $scopeResolvedByPolicy = true;
             $policy = $this->sitekeyPolicy[$sitekey];
             // Per-sitekey challenge lifetime: the provider-migration TTL
             // override (risk.sitekeys.<sitekey>.ttl_secs, bounded 1..300 by
@@ -1003,8 +1005,13 @@ final class ChallengeController
         // metadata, never a secret. When the client sends a configured
         // sitekey, the scope is resolved from the server-owned mapping; an
         // unknown sitekey simply stays a scope name subject to the
-        // allowed_scopes gate and the risk assessment below.
-        if (isset($this->sitekeyAllowlist[$scope])) {
+        // allowed_scopes gate and the risk assessment below. The alias is
+        // applied ONLY to a client-presented scope: a scope already
+        // resolved by the (sitekey, action) policy is authoritative and
+        // must never be reinterpreted as a legacy sitekey name, otherwise
+        // a policy whose resolved scope happens to equal an alias key
+        // would be silently re-mapped to a different scope.
+        if (!$scopeResolvedByPolicy && isset($this->sitekeyAllowlist[$scope])) {
             $scope = $this->sitekeyAllowlist[$scope];
         }
 
@@ -1705,8 +1712,14 @@ final class ChallengeController
             // outcome (code below) — never downgraded to the weaker
             // version-1 grammar, never issued an unarmed challenge.
             // The refusal happens before any admission slot or record
-            // commit, so nothing is minted or held.
+            // commit, but a chain stage-2 request may already hold the
+            // chain reservation taken by prepareStageTwo(); release it
+            // exactly like every other post-reservation refusal so the
+            // ticket stays reusable and the chain is not stuck busy for
+            // the reservation lease.
             if ($armExecution && $executionVersion < $this->executionRequiredVersion) {
+                $this->releaseChain($chainId, $chainOwner);
+
                 return $this->privateJson(
                     ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => sprintf('This deployment requires the execution version %d client; reload the page or upgrade the widget.', $this->executionRequiredVersion)]],
                     Response::HTTP_UNPROCESSABLE_ENTITY,
@@ -3991,33 +4004,6 @@ final class ChallengeController
     private function scanForDuplicateJsonKey(string $json): ?string
     {
         return $this->jsonDuplicateKeyScanner->scanForDuplicateJsonKey($json);
-    }
-
-    /**
-     * Strict form-urlencoded decoder: rejects duplicate parameter names
-     * and PHP bracket syntax, so the form transport has the same
-     * parser-ambiguity rigor as the JSON transport. Returns the decoded
-     * name=>value map, or null when the body is not strictly decodable.
-     */
-    private function decodeStrictFormBody(string $body): ?array
-    {
-        $decoded = [];
-        foreach (explode('&', $body) as $pair) {
-            if ($pair === '') {
-                continue;
-            }
-            $parts = explode('=', $pair, 2);
-            $name = rawurldecode($parts[0]);
-            if ($name === '' || str_contains($name, '[') || str_contains($name, ']')) {
-                return null;
-            }
-            if (\array_key_exists($name, $decoded)) {
-                return null;
-            }
-            $decoded[$name] = rawurldecode($parts[1] ?? '');
-        }
-
-        return $decoded;
     }
 
     /**

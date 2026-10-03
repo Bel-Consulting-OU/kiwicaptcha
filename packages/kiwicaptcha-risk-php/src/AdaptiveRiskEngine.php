@@ -574,6 +574,9 @@ final class AdaptiveRiskEngine
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedLegitimate requires the decision id being confirmed');
         }
+        if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
+            throw new \InvalidArgumentException('samplingProbabilityPpm must be within 1..1000000');
+        }
         $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
         if ($this->confirmOutcome($decisionId, true, $weight) === 0) {
             return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
@@ -606,6 +609,9 @@ final class AdaptiveRiskEngine
     {
         if ($decisionId === null || $decisionId === '') {
             throw new \InvalidArgumentException('confirmedAbuse requires the decision id being confirmed');
+        }
+        if ($samplingProbabilityPpm !== null && ($samplingProbabilityPpm < 1 || $samplingProbabilityPpm > 1_000_000)) {
+            throw new \InvalidArgumentException('samplingProbabilityPpm must be within 1..1000000');
         }
         $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
         if ($this->confirmOutcome($decisionId, false, $weight) === 0) {

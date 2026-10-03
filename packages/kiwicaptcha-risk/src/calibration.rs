@@ -177,6 +177,11 @@ pub enum CalibrationError {
     /// bias the population, so it is a typed error instead of a silent 1.0.
     #[error("weighted sampling requires a confirmation weight for decision {0}")]
     WeightRequired(String),
+    /// A caller-supplied decision id is not safe as a Redis key component
+    /// (empty, control characters, or the `:`/`}` structure bytes) — the
+    /// receipt and outcome-ledger keys are built from it verbatim.
+    #[error("decision id is not a safe Redis key component (got 0x{0})")]
+    InvalidIdentifier(String),
 }
 
 /// Per-scope sampling metrics from [`CalibrationStore::sampling_metrics`]:
@@ -670,6 +675,24 @@ impl RedisCalibrationStore {
         assert!(receipt_ttl_secs >= 1, "receipt_ttl_secs must be >= 1");
         assert!(outcome_ttl_secs >= 1, "outcome_ttl_secs must be >= 1");
         assert!(
+            receipt_ttl_secs <= 2_147_483_647 && outcome_ttl_secs <= 2_147_483_647,
+            "receipt_ttl_secs and outcome_ttl_secs must be <= 2147483647 (the scripts' expire ceiling)"
+        );
+        // The ppm is consumed only by the random-sample mode (Complete
+        // and Weighted always sample and ignore it; the PHP mirror's
+        // Complete/Weighted fixtures likewise carry an unused value).
+        // In random_sample mode 0 means "never sample" (a coherent
+        // kill switch, like the PHP calibrator's); above 1_000_000 the
+        // value is not a probability and is refused. The engine's
+        // confirmation path separately refuses ppm outside 1..=1_000_000
+        // because the inverse (1_000_000/ppm) is only defined there.
+        if mode == SamplingMode::RandomSample {
+            assert!(
+                sampling_probability_ppm <= 1_000_000,
+                "sampling_probability_ppm must be <= 1000000 for random_sample mode"
+            );
+        }
+        assert!(
             (0.0..=1.0).contains(&minimum_resolution_ratio),
             "minimum_resolution_ratio must be within 0..=1"
         );
@@ -958,6 +981,11 @@ impl CalibrationStore for RedisCalibrationStore {
         decision_hour: i64,
         weight: f64,
     ) -> Result<bool, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         let receipt_key = self.receipt_key(decision_id);
         let bucket_key = self.bucket_key(scope, decision_hour);
         let ledger_key = self.outcome_ledger_key(decision_id);
@@ -1002,6 +1030,11 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         // Weighted sampling requires the caller's inverse sampling
         // probability: a missing weight would silently bias the population,
         // so it is a typed error, never a silent 1.0.
@@ -1086,6 +1119,11 @@ impl CalibrationStore for RedisCalibrationStore {
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<bool, CalibrationError> {
+        if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(CalibrationError::InvalidIdentifier(hex::encode(
+                decision_id,
+            )));
+        }
         let ledger_key = self.outcome_ledger_key(decision_id);
 
         // Key discovery: the decision-time bucket needs the ledger's scope
@@ -2135,10 +2173,24 @@ mod tests {
         assert_eq!(SamplingMode::RandomSample.as_int(), 1);
         assert_eq!(SamplingMode::Weighted.as_int(), 2);
         // Complete/Weighted always sample; RandomSample follows the ppm.
-        assert!(make(SamplingMode::Complete, 0).sample());
-        assert!(make(SamplingMode::Weighted, 0).sample());
-        assert!(!make(SamplingMode::RandomSample, 0).sample());
+        // The constructor enforces the PHP-parity 1..=1_000_000 ppm range,
+        // so the minimum admissible value is 1 (0 is the rejected
+        // "calibration permanently inert" configuration).
+        assert!(make(SamplingMode::Complete, 1).sample());
+        assert!(make(SamplingMode::Weighted, 1).sample());
         assert!(make(SamplingMode::RandomSample, 1_000_000).sample());
+        assert!(
+            !make(SamplingMode::RandomSample, 0).sample(),
+            "ppm 0 is the never-sample kill switch, mirroring the PHP calibrator"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(
+                SamplingMode::RandomSample,
+                1_000_001
+            )))
+            .is_err(),
+            "ppm above 1_000_000 is refused like the PHP constructor"
+        );
     }
 
     #[test]
