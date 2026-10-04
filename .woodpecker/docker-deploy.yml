@@ -48,7 +48,9 @@ steps:
 
     # every later .env rewrite in this lane.
 
-    printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> deploy/.env'
+    printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> deploy/.env
+
+    printf ''KIWI_TTL_SECS=900\n'' >> deploy/.env'
 - name: docker-compose-up-(valkey-+-captcha)
   image: docker:28-cli
   environment:
@@ -133,7 +135,7 @@ steps:
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
         http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify1.json
-      php -r 'exit(json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
+      php -r 'exit(json_decode(file_get_contents(getenv("CI_WORKSPACE")."/.ci-run-tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
 - name: post-the-same-/verify-again-(replay-rejection)
   image: docker:28-cli
   volumes:
@@ -150,7 +152,7 @@ steps:
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
         http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/replay.json
       # shellcheck disable=SC2016 # PHP variables inside single-quoted code
-      php -r '$$d = json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/replay.json"), true); exit($$d["ok"] === false && $$d["code"] === "already_consumed" ? 0 : 1);'
+      php -r '$$d = json_decode(file_get_contents(getenv("CI_WORKSPACE")."/.ci-run-tmp/replay.json"), true); exit($$d["ok"] === false && $$d["code"] === "already_consumed" ? 0 : 1);'
 - name: f1-algorithm-ownership-table-(sha256-profile-rows)
   image: docker:28-cli
   volumes:
@@ -201,6 +203,7 @@ steps:
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'KIWI_ALGORITHM=argon2id\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
+        printf 'KIWI_TTL_SECS=900\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
@@ -253,6 +256,7 @@ steps:
         printf 'KIWI_RSW_MODULUS_N=%s\n' "$$MODULUS_N"
         printf 'KIWI_RSW_LAMBDA=%s\n' "$$LAMBDA"
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
+        printf 'KIWI_TTL_SECS=900\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
@@ -291,6 +295,7 @@ steps:
         printf 'KIWI_SECRET_KEY=%s\n' "$$SECRET"
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
+        printf 'KIWI_TTL_SECS=900\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
@@ -448,7 +453,7 @@ steps:
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN2\",\"scope\":\"login\"}" \
         http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify2.json
-      php -r 'exit(json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
+      php -r 'exit(json_decode(file_get_contents(getenv("CI_WORKSPACE")."/.ci-run-tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
 - name: docker-compose-down
   image: docker:28-cli
   environment:
