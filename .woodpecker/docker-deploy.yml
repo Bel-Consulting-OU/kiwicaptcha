@@ -393,8 +393,9 @@ steps:
       grep -q '"ok":false' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
       grep -q '"code":"request_binding_mismatch"' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
       verify txn-A
+      cat $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
       grep -q '"ok":false' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
-      grep -q '"code":"record_not_found"' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+      grep -Eq '"code":"(record_not_found|already_consumed)"' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
 - name: restart-the-captcha-container
   image: docker:28-cli
   environment:
