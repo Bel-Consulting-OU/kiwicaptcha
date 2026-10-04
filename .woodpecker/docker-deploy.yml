@@ -69,12 +69,13 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
       for attempt in $$(seq 1 60); do
-        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+        if curl -fsS -o /dev/null http://$$CAPTCHA_HOST:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt"
           exit 0
         fi
@@ -90,12 +91,13 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
       curl -fsS -o $$CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \
-        -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+        -d '{"scope":"login"}' http://$$CAPTCHA_HOST:8080/challenge
 - name: solve-the-sha-256-proof-inside-the-captcha-container
   image: docker:28-cli
   environment:
@@ -122,6 +124,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -129,7 +132,7 @@ steps:
       TOKEN="$$(cat $$CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
-        http://127.0.0.1:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify1.json
+        http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify1.json
       php -r 'exit(json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
 - name: post-the-same-/verify-again-(replay-rejection)
   image: docker:28-cli
@@ -137,6 +140,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -144,7 +148,7 @@ steps:
       TOKEN="$$(cat $$CI_WORKSPACE/.ci-run-tmp/token-clean.txt)"
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN\",\"scope\":\"login\"}" \
-        http://127.0.0.1:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/replay.json
+        http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/replay.json
       # shellcheck disable=SC2016 # PHP variables inside single-quoted code
       php -r '$$d = json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/replay.json"), true); exit($$d["ok"] === false && $$d["code"] === "already_consumed" ? 0 : 1);'
 - name: f1-algorithm-ownership-table-(sha256-profile-rows)
@@ -153,13 +157,14 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
       challenge_row() {  # $$1 = request body; asserts a 200 challenge
         curl -fsS -X POST -H 'Content-Type: application/json' \
-          -d "$$1" http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+          -d "$$1" http://$$CAPTCHA_HOST:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
       }
       challenge_row '{"scope":"login"}'
       grep -q '"algorithm":"sha256"' $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
@@ -170,7 +175,7 @@ steps:
       STATUS="$$(curl -sS -o $$CI_WORKSPACE/.ci-run-tmp/f1-invalid.json -w '%{http_code}' -X POST \
         -H 'Content-Type: application/json' \
         -d '{"scope":"login","algorithm":"nonsense"}' \
-        http://127.0.0.1:8080/challenge)"
+        http://$$CAPTCHA_HOST:8080/challenge)"
       test "$$STATUS" = "422"
       grep -q '"code":"INVALID_ALGORITHM"' $$CI_WORKSPACE/.ci-run-tmp/f1-invalid.json
 - name: f1-algorithm-ownership-table-(argon2id-profile-rows)
@@ -182,6 +187,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -198,17 +204,17 @@ steps:
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
-        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+        if curl -fsS -o /dev/null http://$$CAPTCHA_HOST:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt under the argon2id profile"
           break
         fi
         sleep 1
       done
-      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://$$CAPTCHA_HOST:8080/healthz)" = "200"
       for body in '{"scope":"login"}' '{"scope":"login","algorithm":"argon2id"}' \
         '{"scope":"login","algorithm":"sha256"}'; do
         curl -fsS -X POST -H 'Content-Type: application/json' -d "$$body" \
-          http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+          http://$$CAPTCHA_HOST:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
         grep -q '"algorithm":"argon2id"' $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
       done
 - name: f1-algorithm-ownership-table-(rsw-profile-rows)
@@ -220,6 +226,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -249,17 +256,17 @@ steps:
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
-        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+        if curl -fsS -o /dev/null http://$$CAPTCHA_HOST:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt under the rsw profile"
           break
         fi
         sleep 1
       done
-      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://$$CAPTCHA_HOST:8080/healthz)" = "200"
       for body in '{"scope":"login","algorithm":"sha256"}' \
         '{"scope":"login","algorithm":"argon2id"}'; do
         curl -fsS -X POST -H 'Content-Type: application/json' -d "$$body" \
-          http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
+          http://$$CAPTCHA_HOST:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
         grep -q '"algorithm":"rsw"' $$CI_WORKSPACE/.ci-run-tmp/f1-challenge.json
       done
 - name: f1-table-done:-restore-the-default-sha256-profile
@@ -271,6 +278,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -286,13 +294,13 @@ steps:
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
-        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+        if curl -fsS -o /dev/null http://$$CAPTCHA_HOST:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt after the profile restore"
           break
         fi
         sleep 1
       done
-      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      test "$$(curl -sS -o /dev/null -w '%{http_code}' http://$$CAPTCHA_HOST:8080/healthz)" = "200"
 - name: f2-request-binding-table-(real-/verify,-one-challenge-per-ro
   image: docker:28-cli
   environment:
@@ -302,6 +310,7 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
@@ -312,7 +321,7 @@ steps:
           body="{\"scope\":\"login\",\"request_binding\":\"$$1\"}"
         fi
         curl -fsS -X POST -H 'Content-Type: application/json' -d "$$body" \
-          http://127.0.0.1:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json
+          http://$$CAPTCHA_HOST:8080/challenge > $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json
         docker compose cp $$CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
         docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \
           /tmp/f2-challenge.json > $$CI_WORKSPACE/.ci-run-tmp/f2-token.txt
@@ -328,7 +337,7 @@ steps:
           body="{\"token\":\"$$token\",\"scope\":\"login\",\"request_binding\":\"$$1\"}"
         fi
         curl -sS -X POST -H 'Content-Type: application/json' -d "$$body" \
-          http://127.0.0.1:8080/verify > $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
+          http://$$CAPTCHA_HOST:8080/verify > $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
       }
       # Issue bound to txn-A, verify with txn-A -> success.
       issue txn-A
@@ -401,12 +410,13 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
       for attempt in $$(seq 1 60); do
-        if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+        if curl -fsS -o /dev/null http://$$CAPTCHA_HOST:8080/healthz; then
           echo "healthz answered 200 on attempt $$attempt after the restart"
           exit 0
         fi
@@ -424,19 +434,20 @@ steps:
   - /var/run/docker.sock:/var/run/docker.sock
   commands:
   - apk add --no-cache curl php83 openssl ca-certificates >/dev/null && ln -sf /usr/bin/php83 /usr/local/bin/php
+  - export CAPTCHA_HOST="$$(ip route | awk '/^default/{print $$3}')"
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
       curl -fsS -o $$CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
-        -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+        -d '{"scope":"login"}' http://$$CAPTCHA_HOST:8080/challenge
       docker compose cp $$CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json
       docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > $$CI_WORKSPACE/.ci-run-tmp/token2.txt
       TOKEN2="$$(tr -d '\r\n' < $$CI_WORKSPACE/.ci-run-tmp/token2.txt)"
       test -n "$$TOKEN2"
       curl -fsS -X POST -H 'Content-Type: application/json' \
         -d "{\"token\":\"$$TOKEN2\",\"scope\":\"login\"}" \
-        http://127.0.0.1:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify2.json
+        http://$$CAPTCHA_HOST:8080/verify | tee $$CI_WORKSPACE/.ci-run-tmp/verify2.json
       php -r 'exit(json_decode(file_get_contents("$$CI_WORKSPACE/.ci-run-tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
 - name: docker-compose-down
   image: docker:28-cli
