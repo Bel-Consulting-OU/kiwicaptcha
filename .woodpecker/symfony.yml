@@ -42,6 +42,9 @@ steps:
       - &composer_audit |
         set -eu
         cd packages/kiwicaptcha/integrations/symfony
+        # The repository does not commit composer.lock; the install
+        # resolves and writes it first so the locked audit has a lock.
+        composer install --no-interaction --prefer-dist
         for i in 1 2 3 4 5; do
           if composer audit --locked; then
             break
