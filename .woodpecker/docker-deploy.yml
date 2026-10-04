@@ -50,7 +50,7 @@ steps:
 
     printf ''VALKEY_PASSWORD=%s\n'' "$$(openssl rand -hex 16)" >> deploy/.env
 
-    printf ''KIWI_TTL_SECS=900\n'' >> deploy/.env'
+    printf ''KIWI_TTL_SECS=300\n'' >> deploy/.env'
 - name: docker-compose-up-(valkey-+-captcha)
   image: docker:28-cli
   environment:
@@ -203,7 +203,7 @@ steps:
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'KIWI_ALGORITHM=argon2id\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-        printf 'KIWI_TTL_SECS=900\n'
+        printf 'KIWI_TTL_SECS=300\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
@@ -256,7 +256,7 @@ steps:
         printf 'KIWI_RSW_MODULUS_N=%s\n' "$$MODULUS_N"
         printf 'KIWI_RSW_LAMBDA=%s\n' "$$LAMBDA"
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-        printf 'KIWI_TTL_SECS=900\n'
+        printf 'KIWI_TTL_SECS=300\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
@@ -295,7 +295,7 @@ steps:
         printf 'KIWI_SECRET_KEY=%s\n' "$$SECRET"
         printf 'KIWI_SHA_TARGET_BITS=8\n'
         printf 'VALKEY_PASSWORD=%s\n' "$$VALKEY_PASSWORD"
-        printf 'KIWI_TTL_SECS=900\n'
+        printf 'KIWI_TTL_SECS=300\n'
       } > deploy/.env
       docker compose up -d --force-recreate captcha
       for attempt in $$(seq 1 60); do
