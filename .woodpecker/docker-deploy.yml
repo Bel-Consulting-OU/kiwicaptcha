@@ -1,6 +1,6 @@
 # Woodpecker CI: the Docker reference-deployment e2e (mirrors the
 # GitHub job docker-reference-deployment). The step scripts are the
-# same commands; the docker CLI talks to the agent's daemon through
+# same commands; the docker CLI talks to the agents daemon through
 # the mounted socket, so the agent must allow the socket volume. The
 # compose stack and the scratch files under .ci-run-tmp/ live in the
 # shared workspace (Woodpecker steps do not share /tmp); paths inside
@@ -238,7 +238,7 @@ steps:
       test -n "$$SECRET"
       # The committed rsw fixture pair (packages/kiwicaptcha-php
       # tests/Support/RswFixture.php) supplies the trapdoor values
-      # for the CI-only profile rows; the container's php reads them.
+      # for the CI-only profile rows; the containers php reads them.
       docker compose cp packages/kiwicaptcha-php/tests/Support/RswFixture.php \
         captcha:/tmp/RswFixture.php
       MODULUS_N="$$(docker compose exec -T captcha php -r \
@@ -363,7 +363,7 @@ steps:
       verify ''
       grep -q '"ok":true' $$CI_WORKSPACE/.ci-run-tmp/f2-verify.json
       # Issue unbound, verify with txn-A -> request_binding_mismatch.
-      # The mismatch is the core verifier's own hard cheap-phase
+      # The mismatch is the core verifiers own hard cheap-phase
       # verdict, which retires the pending record (one-shot
       # anti-oracle semantics): the same token is then gone.
       issue ''
