@@ -20,6 +20,10 @@ use crate::RiskError;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// The ASN dimension's rotation window in seconds (six hours), per the
+/// risk-v2 identity contract file `protocol/risk-v2/identity.json`.
+pub const ASN_EPOCH_SECS: i64 = 21_600;
+
 /// Canonical IP form: family byte (`0x04`/`0x06`) + packed bytes.
 ///
 /// IPv4-mapped IPv6 addresses normalize to the 4-byte IPv4 form, and so
@@ -235,6 +239,49 @@ impl RiskIdentityFactory {
     /// Principal pseudonym (context `b"prin"`, no epoch): 16 raw bytes.
     pub fn principal_id(&self, raw: &[u8]) -> [u8; 16] {
         pseudonym(&self.keys.principal, b"prin", 0, raw)
+    }
+
+    /// ASN pseudonym (hex) for the epoch covering `now_secs`: context
+    /// `b"asn"`, material = the ASN bucket id string, keyed by the
+    /// subnet HKDF key. The context string and the six-hour rotation
+    /// window are declared by the risk-v2 identity contract file
+    /// (`protocol/risk-v2/identity.json`), which is their source of
+    /// truth; the derivation itself mirrors the source/subnet epoch
+    /// pattern above (floor division, epoch big-endian in the HMAC
+    /// slot). The bucket id comes from the free ASN dataset and never
+    /// identifies a single host.
+    pub fn asn_id(&self, bucket: &str, now_secs: i64) -> String {
+        hex::encode(pseudonym(
+            &self.keys.subnet,
+            b"asn",
+            now_secs.div_euclid(ASN_EPOCH_SECS),
+            bucket.as_bytes(),
+        ))
+    }
+
+    /// Agent pseudonym (raw 16 bytes): context `b"agent"`, no epoch,
+    /// keyed by the principal HKDF key. The material is the configured
+    /// verified-agent key id, a deployment identifier with no per-user
+    /// cardinality. The context string and the key assignment are
+    /// declared by the risk-v2 identity contract file, which is their
+    /// source of truth.
+    pub fn agent_id(&self, agent_key_id: &str) -> [u8; 16] {
+        pseudonym(&self.keys.principal, b"agent", 0, agent_key_id.as_bytes())
+    }
+
+    /// Target pseudonym: the full 32-byte HMAC-SHA256 (64 lowercase hex
+    /// chars) over a normalized target identifier. The message mirrors
+    /// the shared pseudonym framing with context `b"tgt"` and the target
+    /// pipeline version in the epoch slot (`"kiwi-risk-id-v1\0tgt\0" ||
+    /// version.to_be_bytes() || normalized`), keyed by the master-derived
+    /// target key. Unlike the 16-byte identity pseudonyms this digest is
+    /// kept whole: the target dimension is keyed by the full digest, and
+    /// the version stamp means a pipeline change can never collide with
+    /// pseudonyms derived under an earlier pipeline. The caller passes
+    /// only the output of [`crate::target::normalize_target`] forward;
+    /// the normalized value itself never leaves this boundary.
+    pub fn target_id(&self, normalized: &str) -> String {
+        crate::target::target_id(&self.keys, normalized)
     }
 }
 

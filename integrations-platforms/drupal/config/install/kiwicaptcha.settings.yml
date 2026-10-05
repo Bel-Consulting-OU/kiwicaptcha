@@ -1,0 +1,13 @@
+verify_url: 'http://127.0.0.1:7371/verify'
+shim_url: ''
+bearer: ''
+mode: json
+trust_proxy: false
+enabled_login: true
+enabled_signup: true
+enabled_comment: false
+enabled_contact: false
+scope_login: login
+scope_signup: signup
+scope_comment: comment
+scope_contact: contact

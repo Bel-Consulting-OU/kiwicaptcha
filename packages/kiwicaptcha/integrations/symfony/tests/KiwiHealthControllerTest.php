@@ -70,6 +70,40 @@ final class KiwiHealthControllerTest extends TestCase
         return new PinnedPrimaryAuthorityGuard($client, 'health-test', $reverifySecs, 'storage');
     }
 
+    /**
+     * A fresh controller per call sharing the simulated APCu segment
+     * and the clock with the other "requests": the PHP-FPM shape (one
+     * instance per request, one shared segment), the seam the
+     * cross-process tests drive.
+     */
+    private function request(FakePredisClient $client, ?\Closure $apcu, ?callable $nowMs, ?\Psr\Log\LoggerInterface $logger = null): KiwiHealthController
+    {
+        return new KiwiHealthController(self::SECRET, $client, 'health-test', 1, $nowMs, 0, null, 16384, [], null, false, 1, 1, logger: $logger, apcu: $apcu);
+    }
+
+    /**
+     * The simulated APCu segment: two controllers wired with the same
+     * closure share state exactly like two PHP-FPM workers sharing one
+     * APCu segment (the extension is not loaded in the test lanes, so
+     * cross-process behavior is proven through this seam). Every store
+     * records its TTL so tests can pin the per-key windows.
+     *
+     * @param array<string, mixed> $segment key => value store
+     * @param array<string, int>   $ttls    the TTL each store carried
+     */
+    private function apcuSeam(array &$segment, array &$ttls): \Closure
+    {
+        return static function (string $op, string $key, mixed $value = null, int $ttl = 0) use (&$segment, &$ttls): mixed {
+            if ($op === 'fetch') {
+                return \array_key_exists($key, $segment) ? $segment[$key] : null;
+            }
+            $segment[$key] = $value;
+            $ttls[$key] = $ttl;
+
+            return null;
+        };
+    }
+
     private function requirePredis(): FakePredisClient
     {
         $nested = \dirname(__DIR__).'/vendor/kiwicaptcha/kiwicaptcha-php/vendor/autoload.php';
@@ -230,6 +264,54 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertStringContainsString('security policy epoch lag', $detail);
         self::assertStringContainsString('min_policy_epoch is 3', $detail);
         self::assertStringContainsString('risk.policy_version is 1', $detail);
+    }
+
+    public function testEpochLagLogsOncePerChangeAcrossProcesses(): void
+    {
+        // "Under PHP-FPM": one fresh controller per request sharing one
+        // simulated APCu segment — an unchanged lag logs exactly once
+        // in total (the marker dedupes across workers), a changed lag
+        // detail logs again.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 5, 3);
+        $segment = [];
+        $ttls = [];
+        $apcu = $this->apcuSeam($segment, $ttls);
+        $now = [0.0];
+        $clock = static function () use (&$now): float {
+            return $now[0];
+        };
+        $logs = [];
+        $logger = new class($logs) extends \Psr\Log\NullLogger {
+            /** @param list<array{message: string, context: array<string,mixed>}> $logs */
+            public function __construct(private array &$logs)
+            {
+            }
+
+            public function warning(string|\Stringable $message, array $context = []): void
+            {
+                $this->logs[] = ['message' => (string) $message, 'context' => $context];
+            }
+        };
+
+        $request1 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request1->ready()->getStatusCode());
+        self::assertCount(1, $logs, 'the lag is logged on first observation');
+
+        // Request 2 re-evaluates (past the 1 s readiness cache) with
+        // the same lag: the APCu marker suppresses the second warning.
+        $now[0] += 1100;
+        $request2 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request2->ready()->getStatusCode());
+        self::assertCount(1, $logs, 'an unchanged lag logs once per change, not once per request');
+
+        // The lag detail changes (the central epoch bumps): logs again.
+        $this->setPolicy($client, 5, 4);
+        $now[0] += 1100;
+        $request3 = $this->request($client, $apcu, $clock, $logger);
+        self::assertSame(200, $request3->ready()->getStatusCode());
+        self::assertCount(2, $logs, 'a changed lag detail logs again');
+        self::assertStringContainsString('min_policy_epoch is 4', (string) ($logs[1]['context']['detail'] ?? ''));
     }
 
     public function testReadinessCacheKeyIsNamespacedPerDeployment(): void
@@ -483,6 +565,46 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $controller->ready()->getStatusCode());
         self::assertGreaterThan($afterFirst, \count($client->calls));
         self::assertGreaterThan($probesBefore, $afterFirst);
+    }
+
+    public function testTheProbeDebounceStateSurvivesAcrossProcessesWithTheSixtySecondTtl(): void
+    {
+        // "Under PHP-FPM": one fresh controller per request sharing one
+        // simulated APCu segment. One failed PING keeps readiness; two
+        // consecutive failures flip it — the consecutive-failure
+        // counter crosses the process boundary, which only a debounce
+        // state outliving the 1 s readiness-result cache can deliver.
+        $client = $this->requirePredis();
+        $segment = [];
+        $ttls = [];
+        $apcu = $this->apcuSeam($segment, $ttls);
+        $now = [0.0];
+        $clock = static function () use (&$now): float {
+            return $now[0];
+        };
+
+        // Request 1 (process A): the probe is healthy.
+        $a = $this->request($client, $apcu, $clock);
+        self::assertSame(200, $a->ready()->getStatusCode());
+
+        // Request 2 (process B): the Redis starts timing out — the
+        // first failure is debounced and readiness holds.
+        $client->pingFails = true;
+        $now[0] += 1100;
+        $b = $this->request($client, $apcu, $clock);
+        self::assertSame(200, $b->ready()->getStatusCode(), 'one failed PING keeps readiness: the debounce state crossed the process boundary');
+
+        // Request 3 (process C): the second consecutive failure flips.
+        $now[0] += 1100;
+        $c = $this->request($client, $apcu, $clock);
+        self::assertSame(503, $c->ready()->getStatusCode(), 'two consecutive failures flip readiness, again across processes');
+
+        // The TTL split: the readiness result keeps the 1 s window
+        // while the debounce state outlives it (60 s), so a per-second
+        // cache rotation never resets the consecutive-failure counter.
+        $cacheKey = KiwiHealthController::readinessCacheKey('health-test', self::SECRET);
+        self::assertSame(1, $ttls[$cacheKey], 'the readiness-result cache keeps the 1 s window');
+        self::assertSame(60, $ttls[$cacheKey.'.state'], 'the probe-debounce state carries a 60 s TTL');
     }
 
 // ── memory-budget readiness invariant ─────────────────────────────────────

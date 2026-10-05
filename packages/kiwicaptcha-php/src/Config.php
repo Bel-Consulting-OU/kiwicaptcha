@@ -355,6 +355,57 @@ final class Config
     }
 
     /**
+     * A copy of this Config with only the given fields replaced: every
+     * parameter left null keeps its current value, a non-null one
+     * replaces it. The merged field set is re-validated by constructing
+     * a new Config, so an override can never produce a configuration
+     * the constructor would refuse.
+     */
+    public function withOverrides(
+        ?string $secretKey = null,
+        ?PoWAlgorithm $algorithm = null,
+        ?int $mKib = null,
+        ?int $t = null,
+        ?int $p = null,
+        ?int $targetBits = null,
+        ?int $argon2TargetBits = null,
+        ?int $ttlSecs = null,
+        ?int $minDurationMs = null,
+        ?int $solverMaxHashes = null,
+        ?BindingMode $bindingMode = null,
+        ?int $policyVersion = null,
+        ?string $issuer = null,
+        ?int $kid = null,
+        ?string $executionKey = null,
+        ?string $rswModulusN = null,
+        ?string $rswLambda = null,
+        ?int $rswT = null,
+        ?string $tenantId = null,
+    ): self {
+        return new self(
+            secretKey: $secretKey ?? $this->secretKey,
+            algorithm: $algorithm ?? $this->algorithm,
+            mKib: $mKib ?? $this->mKib,
+            t: $t ?? $this->t,
+            p: $p ?? $this->p,
+            targetBits: $targetBits ?? $this->targetBits,
+            argon2TargetBits: $argon2TargetBits ?? $this->argon2TargetBits,
+            ttlSecs: $ttlSecs ?? $this->ttlSecs,
+            minDurationMs: $minDurationMs ?? $this->minDurationMs,
+            solverMaxHashes: $solverMaxHashes ?? $this->solverMaxHashes,
+            bindingMode: $bindingMode ?? $this->bindingMode,
+            policyVersion: $policyVersion ?? $this->policyVersion,
+            issuer: $issuer ?? $this->issuer,
+            kid: $kid ?? $this->kid,
+            executionKey: $executionKey ?? $this->executionKey,
+            rswModulusN: $rswModulusN ?? $this->rswModulusN,
+            rswLambda: $rswLambda ?? $this->rswLambda,
+            rswT: $rswT ?? $this->rswT,
+            tenantId: $tenantId ?? $this->tenantId,
+        );
+    }
+
+    /**
      * Redacted dump shape: every field prints under its public name with
      * its exact value. The secrets print '<redacted>' — `secretKey`
      * always, `executionKey` and `rswLambda` only when set. Their null

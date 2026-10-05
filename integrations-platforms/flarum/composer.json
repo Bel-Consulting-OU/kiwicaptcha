@@ -1,0 +1,32 @@
+{
+    "name": "kiwi/flarum-captcha",
+    "description": "KiwiCaptcha sign-up protection for Flarum: an api middleware verifies the proof-of-work token against a self-hosted kiwi deployment before every registration.",
+    "type": "flarum-extension",
+    "license": "MIT",
+    "version": "1.0.0",
+    "authors": [
+        {
+            "name": "KiwiCaptcha contributors"
+        }
+    ],
+    "require": {
+        "php": ">=8.0",
+        "flarum/core": "^1.2",
+        "guzzlehttp/guzzle": "^7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Kiwi\\FlarumCaptcha\\": "src/"
+        }
+    },
+    "extra": {
+        "flarum-extension": {
+            "title": "KiwiCaptcha",
+            "icon": {
+                "name": "fas fa-shield-alt",
+                "backgroundColor": "#2e7d32",
+                "color": "#ffffff"
+            }
+        }
+    }
+}

@@ -14,7 +14,7 @@ environment, and the DSN builds every Redis-backed service:
 ```yaml
 # config/packages/kiwi_captcha.yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
     redis_dsn: '%env(KIWI_REDIS_DSN)%'
@@ -132,7 +132,7 @@ The layering semantics:
 
 ```yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility | ha_safe
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility | ha_safe
 ```
 
 | Knob | balanced | privacy_strict | high_abuse | compatibility | ha_safe |
@@ -203,8 +203,83 @@ Profile rationale:
 The profiles never override an explicitly configured knob: the profile
 defaults are merged as the lowest-precedence layer, so they apply only
 where the key is absent from your configuration. `protection_profile:
-null` (the default) selects no profile, and any value outside the five
+null` (the default) selects no profile, and any value outside the six
 names is refused.
+
+### The abuse_first name
+
+`abuse_first` is the specification name of the abuse posture (the
+project's change document, Part 5, calls the default profile
+`abuse_first`). It selects the identical matrix as `high_abuse`: the
+same derived knobs, the same chained step-up conditional, the same
+stage composition below. Either spelling is accepted everywhere the
+profile name appears; pick one and stay with it for readability.
+
+### Risk engine stage composition
+
+Beyond the knob table above, the profile decides which decision stages
+of the adaptive risk engine ride the composed engine (the stage list of
+the change document, Part 3). Every stage knob accepts an explicit
+boolean in any layer; `null` (the default) resolves from the profile:
+
+| Stage | Knob | abuse_first, high_abuse | balanced, ha_safe, privacy_strict, none | compatibility |
+|-------|------|--------------------------|------------------------------------------|---------------|
+| Long-memory marks with attacker denial | `risk.marks.enabled` | on | on | off |
+| Continuous work pricing | `risk.pricing.enabled` | on | on | off |
+| Bucket trust (ASN-bucket-local credit) | follows `risk.pricing.enabled` | on | on | off |
+| Target identifier resolver | per-scope `risk.scopes.<name>.target_field` | wired when configured | wired when configured | wired when configured |
+| Names-only decision explanation | `risk.explain` | on | off | off |
+| Typed outcomes facade (the mark writer) | rides the marks stage | on | on | off |
+| ASN dataset dimension | `risk.asn.dataset_path` | when configured | when configured | when configured |
+
+The stages and their knobs:
+
+- `risk.marks.enabled` wires the store-backed marks reader into the
+  engine. Every decision then consults the long-memory marks on the
+  requesting identity's own dimensions (session, principal, the ASN
+  bucket). A live mark escalates the action to at least the maximum
+  challenge rung. A mark combined with corroborating attacker evidence
+  (bad proof, replay, malformed traffic or decoy evidence at the policy
+  floor) denies for the remaining mark TTL. An unreadable marks surface
+  floors the request fail-closed instead of fabricating a deny.
+- `risk.pricing.enabled` wires the price context into the engine. Every
+  decision is then additionally priced as work: the risk score weighted
+  by the scope's value class, plus a pressure term gated by the
+  session's bucket trust. The price may only raise the composed action.
+  A trusted identity stays within one rung under a full-pressure storm;
+  an unproven one takes the whole ramp.
+- `risk.scopes.<name>.value_class` (low, standard, high, critical;
+  default standard) is the per-scope worth of the protected action for
+  the pricing stage. The class weights are 800, 1000, 1200 and 1400 per
+  mille of the risk score.
+- `risk.asn.dataset_path` points at a local, versioned IP-to-ASN
+  dataset file (the free IPtoASN tsv shapes, one
+  `first_ip TAB last_ip TAB asn` row per line, `#` comments). No
+  network call ever happens: the file is read once at boot into sorted
+  interval tables. A literal path that cannot be read or parsed fails
+  the container build. Without a dataset the pricing stage reads zero
+  bucket credit (fail closed) and the marks reader drops the asn
+  dimension; every other stage is unaffected.
+- `risk.explain` surfaces the names-only decision explanation through
+  the risk gateway (`currentDecisionExplanation()`, request-scoped
+  beside the decision id). The explanation carries reason names,
+  identity dimension names, the chosen action and the priced rung when
+  pricing is composed. The type has no path for pseudonym values, so a
+  serialized explanation can never leak a hex digest. On by default
+  under the abuse profiles, where operator-visible decisions are part
+  of the posture; off under the neutral postures, whose behavior
+  surface stays byte-identical.
+
+The typed outcomes facade arms with the marks stage (it is the mark
+writer): the application's own abuse confirmations always have a
+reporter, independently of the security auto-bridge and the step-up
+plane. The `risk.outcomes.auto_bridge` kill switch governs the bridge,
+never the facade.
+
+The ASN dataset is data, not a flag: the trust and marks stages engage
+their ASN dimension the moment a dataset path is configured. A
+deployment that does not ship routing-table data loses no other stage.
+
 
 ## HA authority: the mechanical replay-safety posture
 
@@ -1338,14 +1413,24 @@ kiwi_captcha:
         #                                   # result verification stays
         #                                   # CENTRAL-ONLY)
         #     max_challenges_per_scope_per_minute: 0 # per-scope
-        #                                   # fixed-window issuance cap
+        #                                   # sliding-window issuance cap
         #                                   # (0 = unlimited); > 0 requires
-        #                                   # Redis; the window key carries
-        #                                   # the canonical server-owned
-        #                                   # scope id (UNKNOWN_QUOTA_ID for
-        #                                   # an unmapped scope) — the raw
+        #                                   # Redis; one per-scope sorted
+        #                                   # set (pruned to the last 60 s
+        #                                   # in one atomic Lua script)
+        #                                   # bounds admissions so any 60 s
+        #                                   # window allows at most the
+        #                                   # cap — a boundary-straddling
+        #                                   # burst yields exactly the
+        #                                   # cap, never twice. The window
+        #                                   # key carries the canonical
+        #                                   # server-owned scope id
+        #                                   # (UNKNOWN_QUOTA_ID for an
+        #                                   # unmapped scope) — the raw
         #                                   # scope is never a Redis key
-        #                                   # component
+        #                                   # component. A warning is
+        #                                   # logged as the cap is
+        #                                   # approached (80%)
         #     policy_version: 1             # CHALLENGE security-policy epoch,
         #                                   # signed into every issued record
         #                                   # and enforced at verification. A
@@ -1359,10 +1444,12 @@ kiwi_captcha:
         #                                   # issuances verify immediately,
         #                                   # and the readiness probe stays
         #                                   # ready for a node whose configured
-        #                                   # value is behind. The strict-
-        #                                   # equality contract stays — a record
-        #                                   # stamped under a different
-        #                                   # effective epoch is rejected with
+        #                                   # value is behind. Outside a
+        #                                   # declared rollout window the
+        #                                   # strict-equality contract
+        #                                   # stays — a record stamped
+        #                                   # under a different effective
+        #                                   # epoch is rejected with
         #                                   # WrongPolicyVersion. Changing this
         #                                   # configured value is a coordinated
         #                                   # cutover, not a local restart:
@@ -1372,6 +1459,53 @@ kiwi_captcha:
         #                                   # Cosmetic changes must NOT bump
         #                                   # it. Independent of the risk-v1
         #                                   # contract version.
+        #     policy_rollout_min_epoch: ~   # declared rollout window for
+        #                                   # a mixed-epoch cutover. When
+        #                                   # set (and below
+        #                                   # policy_version), the
+        #                                   # verifier accepts records
+        #                                   # stamped with any epoch from
+        #                                   # this floor through the
+        #                                   # effective epoch, so an N/N+1
+        #                                   # fleet redeems cross-node
+        #                                   # with zero spurious
+        #                                   # rejections during the
+        #                                   # cutover. Unset (default):
+        #                                   # strict equality, a wrong
+        #                                   # epoch is still rejected.
+        #                                   # Remove the knob once every
+        #                                   # node runs the new epoch.
+        #     outcomes:                     # the typed outcomes plane
+        #         auto_bridge: true         # the Symfony security
+        #                                   # auto-bridge (default true):
+        #                                   # LoginSuccessEvent reports
+        #                                   # authenticationSuccess on
+        #                                   # the principal pseudonym,
+        #                                   # LoginFailureEvent and
+        #                                   # observable CheckPassport
+        #                                   # errors report
+        #                                   # authenticationFailure on
+        #                                   # the target pseudonym (the
+        #                                   # scope's target_field) or
+        #                                   # the session pseudonym.
+        #                                   # Reports are idempotent
+        #                                   # per request id and never
+        #                                   # break authentication
+        #         scope: ~                  # the risk scope the auth
+        #                                   # events book under (e.g.
+        #                                   # "login"); null (default)
+        #                                   # leaves the bridge
+        #                                   # unregistered
+        #     metrics:
+        #         secret: ~                 # the metrics exporter
+        #                                   # secret (min 32 bytes;
+        #                                   # %env(KIWI_METRICS_SECRET)%
+        #                                   # recommended). Accepted as
+        #                                   # an Authorization Bearer
+        #                                   # credential or the secret
+        #                                   # query parameter. Null
+        #                                   # (default) leaves
+        #                                   # {prefix}/metrics absent
         #     weights: { ... }              # 13 risk-v1 weights (defaults = contract)
         #     global_floors:                # minimum action per global level
         #         1: sha16
@@ -1391,6 +1525,21 @@ kiwi_captcha:
         #             #                       # kiwi.post_solve_rejected,
         #             #                       # step_up -> 422
         #             #                       # kiwi.post_solve_step_up_required)
+        #             # target_field: username  # OPTIONAL form field
+        #             #                       # carrying this scope's
+        #             #                       # TARGET IDENTIFIER (the
+        #             #                       # pre-auth claimed id,
+        #             #                       # e.g. the username or
+        #             #                       # email field of a login
+        #             #                       # form). When set, the
+        #             #                       # engine's target
+        #             #                       # resolver stores only
+        #             #                       # the HMAC pseudonym of
+        #             #                       # the submitted value
+        #             #                       # and the outcome
+        #             #                       # bridge's failure lane
+        #             #                       # addresses the report
+        #             #                       # by that pseudonym
         #         signup:
         #             base_risk: 200
         #     unknown_scope:                 # scopes NOT configured above

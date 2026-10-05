@@ -85,4 +85,111 @@ test.describe('driver reuse under Turbo/htmx navigation', () => {
     expect(token.length).toBeGreaterThan(0);
     expect(await page.evaluate(() => window.__kiwiDriverReused)).toBe(1);
   });
+
+  // A navigation that lands while a solve is still in flight is the
+  // dangerous half of the reuse path: the removed widget's registry
+  // record outlives its element, so without the scan's dead-record
+  // pre-pass the cancelled generation would keep running against the
+  // detached node (its late fetch response could paint a token no form
+  // would ever read) and the record would keep counting as a live
+  // widget forever. The first widget's challenge fetch is held on a
+  // route gate, so the mid-flight moment is deterministic, not
+  // sleep-based.
+  test('a mid-flight Turbo navigation cancels the removed widget and its dead record never lingers', async ({ page }) => {
+    const pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(String(e)));
+
+    let calls = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    // The files-mode fixture page carries the difficulty knob on the
+    // endpoint itself (/challenge?bits=4), so the route matches on the
+    // path-plus-query form (a bare **/challenge glob would miss it and
+    // the fast bits=4 solve would finish before the navigation).
+    await page.route(/\/challenge\?/, async (route) => {
+      calls++;
+      if (calls === 1) {
+        // Hold the first widget's challenge until the navigation has
+        // happened; fulfilling into an already-aborted request is a
+        // no-op wrapped in the same try/catch shape the BFCache spec
+        // uses.
+        await gate;
+        try {
+          await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"late"}' });
+        } catch (e) {}
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto('/?assets=files&bits=4');
+    await page.waitForFunction(
+      () => document.querySelector('[data-kiwi-widget]').getAttribute('data-state') === 'connecting',
+      null,
+      { timeout: 30_000 },
+    );
+
+    // The removed widget's spies, installed while it is still in the
+    // document: a listener on its own container catches every kiwi:*
+    // event the driver dispatches on the widget (the events bubble
+    // through the detached subtree too), and the kept element reference
+    // observes state/token writes after the removal.
+    await page.evaluate(() => {
+      const container = document.querySelector('.kiwi-container');
+      window.__kiwiDeadSpy = {
+        verified: 0,
+        error: 0,
+        widget: container.querySelector('[data-kiwi-widget]'),
+        token: container.querySelector('[data-kiwi-token]'),
+      };
+      container.addEventListener('kiwi:verified', () => { window.__kiwiDeadSpy.verified++; });
+      container.addEventListener('kiwi:error', () => { window.__kiwiDeadSpy.error++; });
+    });
+
+    // The Turbo navigation proper: the replacement container is
+    // rendered, the first page's DOM is swapped OUT (the removal is the
+    // point — a body swap never calls destroy()), and the re-executed
+    // driver copy rescans.
+    await freshContainerMarkup(page, 'kiwicaptcha-turbo');
+    await page.evaluate(() => {
+      document.querySelectorAll('.kiwi-container').forEach((c) => {
+        if (c.id !== 'kiwicaptcha-turbo') c.remove();
+      });
+    });
+    const src = await driverSrc(page);
+    expect(src, 'the files-mode page must emit a driver script src').toBeTruthy();
+    await page.addScriptTag({ url: src });
+    await page.waitForFunction(() => window.__kiwiDriverReused === 1, null, { timeout: 30_000 });
+
+    // The scan's pre-pass cancelled and deleted the dead record before
+    // initializing the new widget, so the registry count equals the
+    // live widget count exactly — never one dead record more.
+    const liveCount = await page.evaluate(() => document.querySelectorAll('[data-kiwi-widget]').length);
+    const countsAfterScan = await page.evaluate(() => window.__kiwiCaptchaCore.core.counts().widgets);
+    expect(countsAfterScan, 'the dead record must be deleted by the scan, not lingering').toBe(liveCount);
+    expect(liveCount).toBe(1);
+
+    // Release the held fetch: the cancelled generation must settle
+    // silently while the navigated widget solves normally.
+    release();
+    await expect(page.locator('#kiwicaptcha-turbo [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const token = await page.locator('#kiwicaptcha-turbo [data-kiwi-token]').inputValue();
+    expect(token.length, 'the navigated widget must write a real token').toBeGreaterThan(0);
+
+    const after = await page.evaluate(() => ({
+      verified: window.__kiwiDeadSpy.verified,
+      error: window.__kiwiDeadSpy.error,
+      state: window.__kiwiDeadSpy.widget.getAttribute('data-state'),
+      token: window.__kiwiDeadSpy.token.value,
+      widgets: window.__kiwiCaptchaCore.core.counts().widgets,
+      connected: window.__kiwiDeadSpy.widget.isConnected,
+    }));
+    expect(after.connected, 'the spy target is the removed widget').toBe(false);
+    expect(after.verified, 'no token callback event may fire for the removed widget').toBe(0);
+    expect(after.error).toBe(0);
+    expect(after.state, 'the removed widget must never reach done').not.toBe('done');
+    expect(after.token, 'the removed widget must never receive a token').toBe('');
+    expect(after.widgets, 'the dead record stays deleted after the settle').toBe(1);
+    expect(pageErrors).toEqual([]);
+  });
 });

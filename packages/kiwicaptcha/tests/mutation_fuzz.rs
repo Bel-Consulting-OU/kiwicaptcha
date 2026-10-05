@@ -113,6 +113,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 expected_region: None,
                 expected_issuer: None,
                 expected_policy_version: None,
+                policy_version_floor: None,
                 client_ip: Some(IP),
                 execution_digest: None,
                 execution_trace: None,

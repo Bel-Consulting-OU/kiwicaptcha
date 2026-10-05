@@ -11,18 +11,21 @@ use PHPUnit\Framework\TestCase;
 /**
  * The browserless execution forgery regression oracle.
  *
- * The shadow solver must succeed on every live grammar the generator
- * emits, versions 1 through
- * ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, the causal
- * object-graph rung included. For every generated program the forged
- * trace verifies and digests at several chosen observed heights. The
- * sweep therefore runs to the generator maximum and pins the
- * forgeability boundary there on purpose: the trace is supplementary
- * evidence, reproducible by any implementation of the public
- * semantics, never a browser attestation. A grammar beyond the
- * generator maximum must make this oracle fail until the solver
- * implements those real Web Platform semantics. The sweep is extended
- * only together with them.
+ * The shadow solver must succeed on every pure-semantics grammar the
+ * generator emits, versions 1 through 5, the causal object-graph rung
+ * included. For every generated program the forged trace verifies and
+ * digests at several chosen observed heights. The sweep pins the
+ * forgeability boundary at the synthesis ceiling on purpose: the trace
+ * of versions 1-5 is supplementary evidence, reproducible by any
+ * implementation of the public semantics, never a browser attestation.
+ *
+ * Version 6, the real-platform rung, sits above that boundary by
+ * design. Its five probes read computed style over real layout,
+ * MutationObserver delivery order, the full event phases, Range line
+ * boxes and Selection state, and IntersectionObserver thresholds. The
+ * browserless solver cannot reproduce a verifiable trace, and every
+ * forged attempt fails closed: the second test sweeps a deterministic
+ * v6 corpus and requires a 100 percent rejection rate.
  */
 final class BrowserlessExecutionForgeryTest extends TestCase
 {
@@ -31,11 +34,17 @@ final class BrowserlessExecutionForgeryTest extends TestCase
     private const ACTION = 'login-action';
     /** The observed heights the oracle forges with: 1, 10, 17 and 255. */
     private const OBSERVED_HEIGHTS = [1, 10, 17, 255];
+    /**
+     * The highest rung the pure public semantics can reproduce: the
+     * causal object-graph grammar. The real-platform rung (version 6)
+     * sits above it and must make the oracle fail.
+     */
+    private const SOLVER_MAX_VERSION = 5;
 
-    public function testBrowserlessShadowSolverForgesEveryLiveVersionTrace(): void
+    public function testBrowserlessShadowSolverForgesEveryPureSemanticsVersionTrace(): void
     {
         $solved = 0;
-        for ($version = 1; $version <= ExecutionChallengeGenerator::MAX_EXECUTION_VERSION; $version++) {
+        for ($version = 1; $version <= self::SOLVER_MAX_VERSION; $version++) {
             for ($i = 0; $i < 100; $i++) {
                 $label = sprintf('browserless-solver-v%d-%03d', $version, $i);
                 $nonce = $this->nonceFor($label);
@@ -67,9 +76,41 @@ final class BrowserlessExecutionForgeryTest extends TestCase
             }
         }
         self::assertSame(
-            100 * \count(self::OBSERVED_HEIGHTS) * ExecutionChallengeGenerator::MAX_EXECUTION_VERSION,
+            100 * \count(self::OBSERVED_HEIGHTS) * self::SOLVER_MAX_VERSION,
             $solved,
-            'the oracle solves 100 programs of every live version at each observed height',
+            'the oracle solves 100 programs of every pure-semantics version at each observed height',
+        );
+    }
+
+    public function testBrowserlessShadowSolverFailsOnTheRealPlatformRung(): void
+    {
+        // The version-6 envelope gate: 100 deterministic v6 programs,
+        // each forged at every observed height, must be rejected
+        // without exception. The solver has no real layout engine, no
+        // real observer delivery and no real event path, so its
+        // entries violate the operand-derived envelopes.
+        $rejected = 0;
+        $attempted = 0;
+        for ($i = 0; $i < 100; $i++) {
+            $label = sprintf('browserless-solver-v6-%03d', $i);
+            $nonce = $this->nonceFor($label);
+            $programB64 = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, 6);
+            $decoded = ExecutionChallengeGenerator::decode($programB64);
+            self::assertNotNull($decoded, 'every generated program must parse');
+            self::assertSame(6, $decoded['op_version'], 'the corpus stays on the real-platform rung');
+            foreach (self::OBSERVED_HEIGHTS as $height) {
+                $trace = BrowserlessForgerySolver::solve($decoded, $height);
+                $attempted++;
+                if (ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $trace) === null) {
+                    ++$rejected;
+                }
+            }
+        }
+        self::assertSame(400, $attempted, 'the sweep attempted every program at every height');
+        self::assertSame(
+            $attempted,
+            $rejected,
+            'the browserless oracle must fail on every version-6 program (a 100 percent rejection rate)',
         );
     }
 

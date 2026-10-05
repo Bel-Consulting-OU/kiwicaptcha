@@ -217,7 +217,7 @@ pub enum SamplingMode {
 
 impl SamplingMode {
     /// The argv[1] wire int shared with `resources/confirm.lua`.
-    fn as_int(self) -> u8 {
+    pub(crate) fn as_int(self) -> u8 {
         match self {
             SamplingMode::Complete => 0,
             SamplingMode::RandomSample => 1,
@@ -384,15 +384,17 @@ pub struct RedisCalibrationStore {
 }
 
 /// Bounded in-process per-scope bias cache: a hit serves the last computed
-/// bias (including 0) without any Redis call.
-struct BiasCache {
-    entries: HashMap<u32, (i32, Instant)>,
+/// bias (including 0) without any Redis call. Shared with the v2
+/// calibration store (`calibration_v2.rs`), which runs its own estimator
+/// over the same key layout.
+pub(crate) struct BiasCache {
+    pub(crate) entries: HashMap<u32, (i32, Instant)>,
     cap: usize,
     ttl: Duration,
 }
 
 impl BiasCache {
-    fn new(cap: usize, ttl: Duration) -> BiasCache {
+    pub(crate) fn new(cap: usize, ttl: Duration) -> BiasCache {
         BiasCache {
             entries: HashMap::new(),
             cap,
@@ -402,7 +404,7 @@ impl BiasCache {
 
     /// The cached bias when it is still younger than the TTL; a stale entry
     /// is dropped on the way out.
-    fn get(&mut self, scope: u32, now: Instant) -> Option<i32> {
+    pub(crate) fn get(&mut self, scope: u32, now: Instant) -> Option<i32> {
         match self.entries.get(&scope) {
             Some((bias, at)) if now.saturating_duration_since(*at) <= self.ttl => Some(*bias),
             Some(_) => {
@@ -415,7 +417,7 @@ impl BiasCache {
 
     /// Inserts (or refreshes) the scope's entry; when the cache is full the
     /// oldest entry is evicted first.
-    fn insert(&mut self, scope: u32, bias: i32, now: Instant) {
+    pub(crate) fn insert(&mut self, scope: u32, bias: i32, now: Instant) {
         if !self.entries.contains_key(&scope) && self.entries.len() >= self.cap {
             let oldest = self
                 .entries
@@ -749,6 +751,33 @@ impl RedisCalibrationStore {
         self.script_calls.load(Ordering::Relaxed)
     }
 
+    /// The canonical registration script (register_decision.lua), shared
+    /// with the v2 store: a v2 receipt is the same JSON with the extra
+    /// generation field, stored by the same atomic script.
+    pub(crate) fn register_script(&self) -> &redis::Script {
+        &self.register_script
+    }
+
+    /// The receipt TTL knob shared with the v2 store's registration path.
+    pub(crate) fn receipt_ttl_secs(&self) -> u64 {
+        self.receipt_ttl_secs
+    }
+
+    /// The outcome-ledger TTL knob shared with the v2 store.
+    pub(crate) fn outcome_ttl_secs(&self) -> u64 {
+        self.outcome_ttl_secs
+    }
+
+    /// Drops the scope's cached bias so the next aggregation re-reads the
+    /// buckets (the v2 store calls this after its own confirm/correct).
+    pub(crate) fn invalidate_bias_cache(&self, scope: u32) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .remove(&scope);
+    }
+
     fn cache_insert(&self, scope: u32, bias: i32, now: Instant) {
         self.cache
             .lock()
@@ -817,7 +846,7 @@ impl RedisCalibrationStore {
         Ok(())
     }
 
-    fn scope_component(&self, scope: u32) -> String {
+    pub(crate) fn scope_component(&self, scope: u32) -> String {
         if self.scope_hmac_key == [0u8; 32] {
             return scope.to_string();
         }
@@ -827,7 +856,7 @@ impl RedisCalibrationStore {
         out.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn bucket_key(&self, scope: u32, hour: i64) -> String {
+    pub(crate) fn bucket_key(&self, scope: u32, hour: i64) -> String {
         format!(
             "{{kiwi:{}}}:cal:{}:{hour}",
             self.namespace,
@@ -835,7 +864,7 @@ impl RedisCalibrationStore {
         )
     }
 
-    fn state_key(&self, scope: u32) -> String {
+    pub(crate) fn state_key(&self, scope: u32) -> String {
         format!(
             "{{kiwi:{}}}:cal:state:{}",
             self.namespace,
@@ -843,7 +872,7 @@ impl RedisCalibrationStore {
         )
     }
 
-    fn receipt_key(&self, decision_id: &str) -> String {
+    pub(crate) fn receipt_key(&self, decision_id: &str) -> String {
         format!("{{kiwi:{}}}:cal:receipt:{decision_id}", self.namespace)
     }
 
@@ -883,7 +912,7 @@ impl RedisCalibrationStore {
     /// failed reply may still be in flight on the socket, and reusing the
     /// connection could desync the Redis reply stream (the same eviction
     /// policy the risk state store's pool applies).
-    fn with_connection<T>(
+    pub(crate) fn with_connection<T>(
         &self,
         f: impl FnOnce(&mut redis::Connection) -> Result<T, CalibrationError>,
     ) -> Result<T, CalibrationError> {
@@ -901,7 +930,7 @@ impl RedisCalibrationStore {
     }
 }
 
-fn backend(e: redis::RedisError) -> CalibrationError {
+pub(crate) fn backend(e: redis::RedisError) -> CalibrationError {
     CalibrationError::Backend(e.to_string())
 }
 

@@ -1,0 +1,15 @@
+{
+  "schema": "kiwicaptcha.redteam.finding/1",
+  "id": "F-0bcc5ea5",
+  "attackClass": "D3.10 infrastructure attacker: store-write rollback replay",
+  "disposition": "bound",
+  "summary": "A raw store-write attacker can restore a pending record after consumption and replay the token. No MAC-only scheme can distinguish a restored record from a never-consumed one, so the capability is bounded by storage-plane access control: the adapters document the single-host single-operator model, the sentinel HA authority proves a stale authority never serves, and the retained consumed marker refuses every replay it can see. This finding pins that boundary as an executable repro; a red run here gates the release.",
+  "transcriptSha256": "deterministic-repro: the driver emits one stable json summary per green run",
+  "repro": "tools/redteam/findings/F-0bcc5ea5.sh",
+  "evidence": [
+    "tools/redteam/campaigns/d3.10-infrastructure.sh (the full matrix and the sentinel failover schedule)",
+    "packages/kiwicaptcha-php/src/Storage/RedisStorage.php (the consumed marker, retained until ttl)"
+  ],
+  "filedBy": "engine/triage.mjs",
+  "gate": "asserts-bound"
+}

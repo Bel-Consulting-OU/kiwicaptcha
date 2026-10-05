@@ -1051,38 +1051,29 @@ LUA;
             throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
         }
         $requestBinding = $requestBinding !== '' ? $requestBinding : null;
-        $now = $this->serverTime();
         $ttl = max(1, $ttlSecs);
-        $this->setWithTtl(
-            $this->key($chainId),
-            (string) json_encode([
-                'v' => 2,
-                'stage1Nonce' => $stage1Nonce,
-                'scope' => $scope,
-                'obligationId' => $obligationId,
-                'requiredAction' => $requiredAction,
-                'requiredRank' => RiskAction::from($requiredAction)->rank(),
-                'policyVersion' => $policyVersion,
-                'chainDepth' => 2,
-                'state' => 'available',
-                'owner' => null,
-                'leaseUntil' => null,
-                'stage2Nonce' => null,
-                'requestBinding' => $requestBinding,
-                'expiresAt' => $now + $ttl,
-                'requirementGeneration' => 1,
-                'reservedRequirementGeneration' => null,
-            ], JSON_THROW_ON_ERROR),
+        // The chain + obligation writes ride the atomic create-or-get Lua:
+        // one script, both keys in the same hash tag, executed by Redis as
+        // a single unit. The old two-write seam (the chain SET, then the
+        // obligation SET) could orphan the chain between the writes —
+        // present, yet unreachable through its obligation and uncleanable.
+        // An interruption before the script leaves neither key; a lost
+        // reply after it leaves both, mutually consistent. The WAIT
+        // barrier and the TTL behavior are the create-or-get ones: the
+        // fresh creation always mutates (so the barrier always runs on
+        // it) and writes both keys with the same EX lifetime.
+        $this->createOrGetObligation(
+            $obligationId,
+            $chainId,
+            $stage1Nonce,
+            $scope,
+            $requestBinding ?? '',
+            $requiredAction,
+            RiskAction::from($requiredAction)->rank(),
+            $policyVersion,
+            $this->serverTime() + $ttl,
             $ttl,
         );
-        $this->setWithTtl($this->obligationKey($obligationId), $chainId, $ttl);
-        // Durability barrier: the fresh chain + obligation write must
-        // reach the configured replica count before the caller hands out
-        // a ticket — a lost obligation would let the transaction restart
-        // at stage 1 after a promotion.
-        if ($this->waitReplicas > 0) {
-            $this->waitAndVerify('the chain creation with its obligation');
-        }
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
@@ -1132,7 +1123,12 @@ LUA;
         // loop re-reads and retries (bounded, then fail-closed — a
         // silently wrong chain must never be returned).
         for ($attempt = 0; $attempt < 3; ++$attempt) {
-            $existing = $this->obligationChainId($obligationId);
+            // The lenient mapping read (not the validating
+            // obligationChainId): the repair below must see a stale
+            // mapping's pointed-at chain id so the script can compare it
+            // against its own read and heal the missing/expired corner.
+            $read = $this->obligationLookup($obligationId);
+            $existing = $read['chainId'] ?? null;
             $reply = $this->lua->executeSecurityFinal(self::CREATE_OR_GET_OBLIGATION_LUA, [
                 $chainKey,
                 $obligationKey,
@@ -1191,17 +1187,29 @@ LUA;
     public function obligationChainId(string $obligationId): ?string
     {
         $lookup = $this->obligationLookup($obligationId);
-
-        return $lookup['chainId'] ?? null;
+        if ($lookup === null) {
+            return null;
+        }
+        // The validating mirror of the Array store's obligationChainId():
+        // the pointed-at chain record must strictly decode and be live —
+        // a corrupt record (a stripped key lifetime included) fails
+        // closed with MalformedChainedChallengeStateException and the
+        // mapping is never silently followed to corrupt state, while a
+        // missing or signed-expired record is the stale mapping answered
+        // null (the create-or-get repairs it; this read never mutates it).
+        return $this->read($lookup['chainId']) === null ? null : $lookup['chainId'];
     }
 
     /**
-     * The obligation mapping with its provenance: the chain id plus the
-     * namespace it was read from ('primary' or 'legacy'), or null when no
-     * mapping exists. Callers that only read may use
-     * {@see obligationChainId()}; callers that write must consult the
-     * provenance, so a live legacy obligation can never be shadowed by a
-     * fresh primary one.
+     * The obligation mapping with its provenance — the lenient read: the
+     * chain id plus the namespace it was read from ('primary' or
+     * 'legacy'), or null when no mapping exists, without validating the
+     * pointed-at chain record. Readers that want the validated answer
+     * (null on a stale mapping, fail-closed on a corrupt one) use
+     * {@see obligationChainId()}. The writers (the create-or-get retry
+     * loop and the migration branch) and the provenance probes consult
+     * this read, so a stale mapping can be repaired and a live legacy
+     * obligation can never be shadowed by a fresh primary one.
      *
      * @return array{chainId: string, namespace: 'primary'|'legacy'}|null
      */

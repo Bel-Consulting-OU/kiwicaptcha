@@ -671,12 +671,11 @@ final class ConfigurationTest extends TestCase
 
     /**
      * The compile-time secret floors must never judge an env-managed
-     * value. `%env(...)%` unresolved, its resolved `env_...` placeholder
-     * form, and the empty-string type fixture Symfony's
-     * ValidateEnvPlaceholdersPass substitutes are all accepted and
-     * preserved. The same floor is enforced when the runtime
-     * service/Config is constructed. Literal short values stay refused,
-     * as pinned above.
+     * value. `%env(...)%` unresolved and its resolved `env_...`
+     * placeholder form are accepted and preserved; the same floor is
+     * enforced when the runtime service/Config is constructed. Literal
+     * short values stay refused, as pinned above, and a literal empty
+     * string is refused too (see the dedicated test below).
      */
     public function testEnvPlaceholdersAreExemptFromTheCompileTimeSecretFloors(): void
     {
@@ -686,17 +685,14 @@ final class ConfigurationTest extends TestCase
             'execution_key' => [
                 ['execution_key' => '%env(KIWI_EXECUTION_KEY)%', 'risk' => ['execution_challenge' => 'on']],
                 ['execution_key' => $resolvedPlaceholder, 'risk' => ['execution_challenge' => 'on']],
-                ['execution_key' => '', 'risk' => ['execution_challenge' => 'on']],
             ],
             'hmac_secret' => [
                 ['risk' => ['chaining' => ['hmac_secret' => '%env(KIWI_RISK_SECRET)%']]],
                 ['risk' => ['chaining' => ['hmac_secret' => $resolvedPlaceholder]]],
-                ['risk' => ['chaining' => ['hmac_secret' => '']]],
             ],
             'secrets_by_kid' => [
                 ['kid' => 2, 'secrets_by_kid' => [1 => '%env(OLD_SECRET)%']],
                 ['kid' => 2, 'secrets_by_kid' => [1 => $resolvedPlaceholder]],
-                ['kid' => 2, 'secrets_by_kid' => [1 => '']],
             ],
         ] as $label => $cases) {
             foreach ($cases as $case) {
@@ -712,12 +708,86 @@ final class ConfigurationTest extends TestCase
         self::assertSame('%env(KIWI_EXECUTION_KEY)%', $processed['execution_key'], 'the env placeholder is preserved for runtime resolution');
     }
 
+    /**
+     * A literal empty string is an explicitly invalid secret value, not
+     * a deferred %env()% placeholder: it fails the build-time floors of
+     * every secret position instead of being exempted to runtime.
+     */
+    public function testAnEmptyStringSecretFailsTheCompileTimeFloorsInEverySecretPosition(): void
+    {
+        foreach ([
+            'execution_key' => ['execution_key' => '', 'risk' => ['execution_challenge' => 'on']],
+            'hmac_secret' => ['risk' => ['chaining' => ['hmac_secret' => '']]],
+            // The done-when shape: secrets_by_kid {1: ''} fires a
+            // build-time InvalidConfiguration.
+            'secrets_by_kid' => ['kid' => 2, 'secrets_by_kid' => [1 => '']],
+        ] as $label => $case) {
+            try {
+                $this->process($case);
+                self::fail(sprintf('an empty-string %s must be refused at build time', $label));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage(), sprintf('the %s refusal names the floor', $label));
+            }
+        }
+    }
+
+    public function testAnEmptyStringSiteverifySecretFailsTheCompileTimeFloor(): void
+    {
+        // The siteverify secrets are the map keys of their node: an
+        // empty-string secret (and an integer-coerced numeric one) is
+        // refused by the node's own key validation at build time.
+        foreach ([
+            ['' => 'login'],
+            ['1' => 'login'],
+        ] as $secrets) {
+            try {
+                $this->process(['risk' => ['siteverify_secrets' => $secrets]]);
+                self::fail('an empty-string (or integer-coerced) siteverify secret must be refused at build time');
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage(), 'the refusal names the siteverify secret floor');
+            }
+        }
+    }
+
     public function testPolicyVersionInfoDocumentsTheEffectiveEpochAndCutover(): void
     {
         $info = $this->treeInfoText('risk.policy_version');
         self::assertStringContainsString('max(configured, central min_policy_epoch)', $info);
         self::assertStringContainsString('coordinated cutover', $info);
         self::assertStringContainsString('WrongPolicyVersion', $info);
+        self::assertStringContainsString('risk.policy_rollout_min_epoch', $info, 'the epoch info points at the declared rollout-window escape hatch');
+    }
+
+    public function testPolicyRolloutWindowDefaultsToNullAndMustStayBelowTheExpectedEpoch(): void
+    {
+        // No window by default: the strict-equality contract stands
+        // unless an operator explicitly declares the drain floor.
+        self::assertNull($this->process()['risk']['policy_rollout_min_epoch']);
+
+        $processed = $this->process(['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 1]])['risk'];
+        self::assertSame(1, $processed['policy_rollout_min_epoch'], 'a declared window floor is processed');
+        self::assertSame(2, $processed['policy_version']);
+
+        foreach ([
+            ['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 2]],
+            ['risk' => ['policy_version' => 2, 'policy_rollout_min_epoch' => 3]],
+            ['risk' => ['policy_rollout_min_epoch' => 2]], // at/above the policy_version default of 1
+        ] as $case) {
+            try {
+                $this->process($case);
+                self::fail('a rollout floor at or above risk.policy_version must be refused: '.json_encode($case));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('strictly lower than risk.policy_version', $e->getMessage());
+            }
+        }
+    }
+
+    public function testPolicyRolloutWindowInfoDocumentsTheWindowContract(): void
+    {
+        $info = $this->treeInfoText('risk.policy_rollout_min_epoch');
+        self::assertStringContainsString('[floor, expected]', $info);
+        self::assertStringContainsString('strict equality', $info);
+        self::assertStringContainsString('central min_policy_epoch', $info, 'the floor is never derived from the central state');
     }
 
     public function testProtocolCeilingInfoTextUsesTheSolverCapAndCurrentExhaustionFigures(): void
@@ -831,13 +901,22 @@ final class ConfigurationTest extends TestCase
 
         // The siteverify secrets are the entire server-to-server
         // authentication boundary — configuration rejects weak keys.
-        $processed = $this->process(['risk' => ['siteverify_secrets' => ['0123456789abcdef' => 'login']]])['risk']['siteverify_secrets'];
-        self::assertSame(['0123456789abcdef' => 'login'], $processed);
+        // The floor is 32 bytes, the same contract as the signing keys:
+        // a 32-byte siteverify secret is accepted...
+        $strong = '0123456789abcdef0123456789abcdef';
+        $processed = $this->process(['risk' => ['siteverify_secrets' => [$strong => 'login']]])['risk']['siteverify_secrets'];
+        self::assertSame([$strong => 'login'], $processed);
 
-        foreach ([['short' => 'login'], ['0123456789abcde' => 'login']] as $weak) {
+        // ...and a 16-byte secret (the old floor) is now rejected, as is
+        // everything below 32 bytes.
+        foreach ([
+            ['short' => 'login'],
+            ['0123456789abcdef' => 'login'],
+            ['0123456789abcdef0123456789abcde' => 'login'],
+        ] as $weak) {
             try {
                 $this->process(['risk' => ['siteverify_secrets' => $weak]]);
-                self::fail('a siteverify secret under 16 bytes must be rejected at config load');
+                self::fail('a siteverify secret under 32 bytes must be rejected at config load');
             } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException) {
                 // expected
             }
@@ -846,11 +925,11 @@ final class ConfigurationTest extends TestCase
 
     public function testSiteverifyNumericStringSecretStaysAStringKey(): void
     {
-        // A >=16-byte numeric secret that PHP preserves as a string key
+        // A >=32-byte numeric secret that PHP preserves as a string key
         // (beyond PHP_INT_MAX, so no integer coercion happens) survives
         // processing as the exact string key, and key normalization is
         // off: a dash-bearing secret is never rewritten to underscores.
-        $numeric = '9999999999999999999'; // 19 digits > PHP_INT_MAX: stays a string key
+        $numeric = '99999999999999999999999999999999'; // 32 digits > PHP_INT_MAX: stays a string key
         self::assertIsString((string) $numeric);
         $secrets = [$numeric => 'login'];
         self::assertIsString(array_key_first($secrets), 'precondition: a >PHP_INT_MAX decimal key stays a string');
@@ -858,7 +937,7 @@ final class ConfigurationTest extends TestCase
         $processed = $this->process(['risk' => ['siteverify_secrets' => $secrets]])['risk']['siteverify_secrets'];
         self::assertSame([$numeric => 'login'], $processed, 'the numeric-string secret key is preserved verbatim');
 
-        $dashBearing = 'ab-cd-ef-01-23-45';
+        $dashBearing = 'ab-cd-ef-01-23-45-67-89-ab-cd-ef';
         $processed = $this->process(['risk' => ['siteverify_secrets' => [$dashBearing => 'login']]])['risk']['siteverify_secrets'];
         self::assertSame([$dashBearing => 'login'], $processed, 'normalizeKeys(false): a dash-bearing secret key is never rewritten to underscores');
     }
@@ -879,6 +958,75 @@ final class ConfigurationTest extends TestCase
         } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
             self::assertStringContainsString('must be a string', $e->getMessage(), 'the refusal explains the string-key contract');
             self::assertStringContainsString('numeric', $e->getMessage(), 'the refusal explains the numeric-key coercion remedy');
+        }
+    }
+
+    public function testMetricsSecretDefaultsToNullAndEnforcesTheThirtyTwoByteFloor(): void
+    {
+        // Null disables the endpoint (the route stays unregistered), and
+        // a configured secret is the entire authentication boundary of
+        // the exporter: the same floor as the siteverify secrets.
+        self::assertNull($this->process()['risk']['metrics']['secret']);
+
+        $strong = 'metrics-exporter-secret-0123456789abcdef';
+        self::assertSame(
+            $strong,
+            $this->process(['risk' => ['metrics' => ['secret' => $strong]]])['risk']['metrics']['secret'],
+            'a 32-byte secret is accepted and preserved verbatim',
+        );
+
+        foreach (['short', '0123456789abcdef0123456789abcde', ''] as $weak) {
+            try {
+                $this->process(['risk' => ['metrics' => ['secret' => $weak]]]);
+                self::fail(sprintf('a metrics secret under 32 bytes (%s) must be refused at config load', var_export($weak, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 32 bytes', $e->getMessage());
+            }
+        }
+
+        // An env placeholder is length-checked at runtime instead, so it
+        // is preserved for the controller construction.
+        self::assertSame(
+            '%env(KIWI_METRICS_SECRET)%',
+            $this->process(['risk' => ['metrics' => ['secret' => '%env(KIWI_METRICS_SECRET)%']]])['risk']['metrics']['secret'],
+        );
+    }
+
+    public function testOutcomesKnobsDefaultAndValidateTheScopeShape(): void
+    {
+        $outcomes = $this->process()['risk']['outcomes'];
+        self::assertTrue($outcomes['auto_bridge'], 'the security auto-bridge defaults to armed (it self-gates on the surface preconditions)');
+        self::assertNull($outcomes['scope'], 'no outcomes scope by default: the bridge stays unregistered until one is named');
+
+        $processed = $this->process(['risk' => ['outcomes' => ['scope' => 'login']]])['risk']['outcomes'];
+        self::assertSame('login', $processed['scope']);
+
+        foreach (['bad scope', 'login/x', str_repeat('s', 129)] as $bad) {
+            try {
+                $this->process(['risk' => ['outcomes' => ['scope' => $bad]]]);
+                self::fail(sprintf('an outcomes scope of %s must be refused', var_export($bad, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('risk.outcomes.scope', $e->getMessage());
+            }
+        }
+    }
+
+    public function testScopeTargetFieldIsValidatedAsAFormFieldName(): void
+    {
+        // The per-scope target field feeds the engine's target resolver
+        // and the bridge's failure lane; a bounded field-name shape is
+        // the whole validation surface (the field itself may be absent
+        // from any given request).
+        $processed = $this->process(['risk' => ['scopes' => ['login' => ['id' => 10, 'target_field' => 'username']]]])['risk']['scopes']['login'];
+        self::assertSame('username', $processed['target_field']);
+
+        foreach (['bad field', 'username[x]', str_repeat('f', 129)] as $bad) {
+            try {
+                $this->process(['risk' => ['scopes' => ['login' => ['id' => 10, 'target_field' => $bad]]]]);
+                self::fail(sprintf('a target field of %s must be refused', var_export($bad, true)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('target_field', $e->getMessage());
+            }
         }
     }
 

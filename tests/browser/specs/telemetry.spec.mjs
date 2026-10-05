@@ -56,7 +56,7 @@ test.describe('Lazy telemetry module acquisition', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
-    expect(tokenTelemetry(token).mode, 'the token must carry the real session, never the empty stub').toBe('full');
+    expect(tokenTelemetry(token).v, 'the token must carry the real v1 session, never the empty stub').toBe(1);
   });
 
   test('a hung or missing telemetry module degrades to the empty stub: three bounded attempts, no page error, the solve is unaffected', async ({ page }) => {
@@ -94,7 +94,7 @@ test.describe('Lazy telemetry module acquisition', () => {
     // The session attaches before the request, so the token carries the
     // real telemetry record (never the empty stub) while the module
     // still loads exactly once.
-    expect(tokenTelemetry(token).mode).toBe('full');
+    expect(tokenTelemetry(token).v).toBe(1);
   });
 });
 
@@ -120,7 +120,7 @@ test.describe('Challenge fetch timeout vs telemetry initialization', () => {
     expect(token.length, 'the solve must complete despite the slow telemetry module').toBeGreaterThan(0);
     // The module still arrived inside its own budget, so the token
     // carries the real session rather than the empty stub.
-    expect(tokenTelemetry(token).mode).toBe('minimal');
+    expect(tokenTelemetry(token).v).toBe(1);
     expect(pageErrors, 'the slow telemetry module must raise no page error').toEqual([]);
   });
 

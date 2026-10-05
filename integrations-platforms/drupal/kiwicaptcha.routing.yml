@@ -1,0 +1,7 @@
+kiwicaptcha.settings:
+  path: '/admin/config/people/kiwicaptcha'
+  defaults:
+    _form: 'Drupal\kiwicaptcha\Form\SettingsForm'
+    _title: 'KiwiCaptcha'
+  requirements:
+    _permission: 'administer site configuration'

@@ -1,0 +1,37 @@
+15455:C 05 Oct 2026 13:42:55.014 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+15455:C 05 Oct 2026 13:42:55.014 * Redis version=8.10.1, bits=64, commit=00000000, modified=1, pid=15455, just started
+15455:C 05 Oct 2026 13:42:55.014 * Configuration loaded
+15455:S 05 Oct 2026 13:42:55.014 * monotonic clock: ARM CNTVCT @ 1000 ticks/us
+15455:S 05 Oct 2026 13:42:55.015 * Running mode=standalone, port=6482.
+15455:S 05 Oct 2026 13:42:55.015 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
+15455:S 05 Oct 2026 13:42:55.015 * Server initialized
+15455:S 05 Oct 2026 13:42:55.015 * Loading RDB produced by version 8.10.1
+15455:S 05 Oct 2026 13:42:55.015 * RDB age 2164 seconds
+15455:S 05 Oct 2026 13:42:55.015 * RDB memory usage when created 1.21 Mb
+15455:S 05 Oct 2026 13:42:55.015 * Done loading RDB, keys loaded: 0, keys expired: 0.
+15455:S 05 Oct 2026 13:42:55.015 * DB loaded from disk: 0.000 seconds
+15455:S 05 Oct 2026 13:42:55.015 * Before turning into a replica, using my own master parameters to synthesize a cached master: I may be able to synchronize with the new master with just a partial transfer.
+15455:S 05 Oct 2026 13:42:55.015 * Ready to accept connections tcp
+15455:S 05 Oct 2026 13:42:55.015 # WARNING: Redis does not require authentication. Redis will accept connections from any local client.
+15455:S 05 Oct 2026 13:42:55.015 * Connecting to MASTER 127.0.0.1:6481
+15455:S 05 Oct 2026 13:42:55.016 * MASTER <-> REPLICA sync started
+15455:S 05 Oct 2026 13:42:55.016 * Non blocking connect for SYNC fired the event.
+15455:S 05 Oct 2026 13:42:55.016 * Master replied to PING, replication can continue...
+15455:S 05 Oct 2026 13:42:55.016 * Trying a partial resynchronization (request 38967c08a96e629926d51ed6c664e2b6c0032017:1722).
+15455:S 05 Oct 2026 13:42:55.016 * Successful partial resynchronization with master.
+15455:S 05 Oct 2026 13:42:55.016 * Master replication ID changed to f713fbff533859d935a58f5f605d7a75b9836bbc
+15455:S 05 Oct 2026 13:42:55.016 * MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.
+15455:S 05 Oct 2026 13:42:57.031 * Connection with master lost.
+15455:S 05 Oct 2026 13:42:57.031 * Caching the disconnected master state.
+15455:S 05 Oct 2026 13:42:57.031 * Reconnecting to MASTER 127.0.0.1:6481
+15455:S 05 Oct 2026 13:42:57.031 * MASTER <-> REPLICA sync started
+15455:S 05 Oct 2026 13:42:57.031 # Error condition on socket for SYNC: Connection refused
+15455:S 05 Oct 2026 13:42:58.040 * Connecting to MASTER 127.0.0.1:6481
+15455:S 05 Oct 2026 13:42:58.040 * MASTER <-> REPLICA sync started
+15455:S 05 Oct 2026 13:42:58.040 # Error condition on socket for SYNC: Connection refused
+15455:M 05 Oct 2026 13:42:58.711 * Discarding previously cached master state.
+15455:M 05 Oct 2026 13:42:58.711 * Setting secondary replication ID to f713fbff533859d935a58f5f605d7a75b9836bbc, valid up to offset: 44653. New replication ID is ce2c4b26d30070e64eee9049ee45094248cc31ef
+15455:M 05 Oct 2026 13:42:58.711 * MASTER MODE enabled (user request from 'id=5 addr=127.0.0.1:58408 laddr=127.0.0.1:6482 fd=10 name=sentinel-d3dbd63d-cmd age=3 idle=0 flags=x db=0 sub=0 psub=0 ssub=0 multi=4 watch=0 qbuf=188 qbuf-free=20286 argv-mem=65 multi-mem=65 rbs=2048 rbp=1024 obl=45 oll=0 omem=0 omem-shared=0 omem-unshared=0 tot-mem=24570 events=r cmd=exec user=default redir=-1 resp=2 lib-name= lib-ver= io-thread=0 tot-net-in=464 tot-net-out=13951 tot-cmds=9 read-events=7 avg-pipeline-len-sum=14 avg-pipeline-len-cnt=7')
+15455:signal-handler (1791207780) Received SIGTERM scheduling shutdown...
+15455:M 05 Oct 2026 13:43:00.181 * User requested shutdown...
+15455:M 05 Oct 2026 13:43:00.181 # Redis is now ready to exit, bye bye...

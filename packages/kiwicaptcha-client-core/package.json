@@ -1,0 +1,39 @@
+{
+  "name": "@kiwicaptcha/client-core",
+  "version": "0.1.0",
+  "description": "Framework-free KiwiCaptcha widget client core: script loader, explicit render, promise API, event mapping, imperative lifecycle. Consumed by the React, Vue, Svelte, Solid and Angular packages.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "pow",
+    "widget",
+    "browser"
+  ],
+  "devDependencies": {
+    "happy-dom": "^17.4.4",
+    "typescript": "^5.7.2",
+    "vitest": "^3.1.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

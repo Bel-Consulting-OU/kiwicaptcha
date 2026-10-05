@@ -1,0 +1,83 @@
+{
+  "name": "@kiwicaptcha/node",
+  "version": "0.1.0",
+  "description": "Server SDK for KiwiCaptcha token verification on Node.js and TypeScript: local verify, store adapters, framework middleware, outcomes client, doctor.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./verify": {
+      "types": "./dist/src/verify.d.ts",
+      "default": "./dist/src/verify.js"
+    },
+    "./middleware/express": {
+      "types": "./dist/src/middleware/express.d.ts",
+      "default": "./dist/src/middleware/express.js"
+    },
+    "./middleware/fastify": {
+      "types": "./dist/src/middleware/fastify.d.ts",
+      "default": "./dist/src/middleware/fastify.js"
+    },
+    "./outcomes": {
+      "types": "./dist/src/outcomes.d.ts",
+      "default": "./dist/src/outcomes.js"
+    },
+    "./stores": {
+      "types": "./dist/src/stores/index.d.ts",
+      "default": "./dist/src/stores/index.js"
+    },
+    "./doctor": {
+      "types": "./dist/src/doctor.d.ts",
+      "default": "./dist/src/doctor.js"
+    }
+  },
+  "bin": {
+    "kiwicaptcha-doctor": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test --test-reporter=spec dist/test/",
+    "doctor": "node dist/cli.js"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "verification",
+    "pow",
+    "middleware"
+  ],
+  "peerDependencies": {
+    "better-sqlite3": ">=11.0.0",
+    "ioredis": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.0",
+    "better-sqlite3": "^12.4.1",
+    "express": "^4.21.2",
+    "fastify": "^4.29.1",
+    "ioredis": "^5.6.1",
+    "typescript": "^5.7.2"
+  }
+}

@@ -286,7 +286,18 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 Issuance stamps the effective epoch max(configured, central
 `min_policy_epoch`), so a central bump revokes older challenges while
 new ones verify immediately. An explicit `risk.policy_version` bump is
-only needed for a coordinated policy cutover. The max-stale fail-closed
+only needed for a coordinated policy cutover.
+
+A mixed-epoch cutover needs a declared rollout window: with nodes
+split across epochs N and N+1, strict equality would spuriously reject
+every N-stamped record on the N+1 nodes. Setting
+`risk.policy_rollout_min_epoch: N` declares the window — the verifier
+then accepts records stamped with any epoch from N through the
+effective one, so an N/N+1 fleet redeems cross-node with zero spurious
+rejections. The window is explicit, never derived from observed
+traffic: unset (the default) keeps strict equality, and a wrong epoch
+is still rejected. Remove the knob once every node runs the new
+epoch. The max-stale fail-closed
 window (`risk.security_epoch_max_stale_secs`) bounds how long a node
 serves from a cached read: past it, the node stops issuing and verifying
 rather than trusting a potentially-revoked cache.

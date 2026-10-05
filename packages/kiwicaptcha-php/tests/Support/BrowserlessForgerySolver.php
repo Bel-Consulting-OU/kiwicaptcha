@@ -7,9 +7,11 @@ namespace KiwiCaptcha\Tests\Support;
 /**
  * The browserless shadow solver of the execution grammars: a dev-only
  * oracle that forges verifier-accepted executed traces without a
- * browser for every live grammar rung, versions 1 through the
- * generator maximum (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
- * the causal object-graph rung included.
+ * browser for the pure-semantics rungs, versions 1 through 5, the
+ * causal object-graph rung included. The real-platform rung (version
+ * 6) sits above the solver's reach by design. Its five probes need a
+ * real layout engine, and the envelope walker rejects every forged
+ * attempt (see the fail harness under tests/browser/execution-v6).
  *
  * The solver replays the interpreter's own semantics over a decoded
  * program, which the caller obtains from
@@ -29,13 +31,14 @@ namespace KiwiCaptcha\Tests\Support;
  * parameter, never an implicit constant.
  *
  * The oracle is the forgeability regression benchmark, preserved on
- * purpose: the test sweeps 100 generated programs of every live
- * version through the generator maximum and asserts every forged
- * trace verifies and digests. The trace is supplementary evidence,
- * reproducible by a pure implementation of the public semantics. A
- * grammar beyond the generator maximum must make this solver fail
- * until it implements those real Web Platform semantics; the oracle
- * extends only together with them.
+ * purpose: the test sweeps 100 generated programs of every
+ * pure-semantics version and asserts every forged trace verifies and
+ * digests, then sweeps version 6 and asserts a 100 percent rejection
+ * rate. The trace of versions 1-5 is supplementary evidence,
+ * reproducible by a pure implementation of the public semantics. The
+ * version-6 envelope is the environment boundary the oracle cannot
+ * cross until it implements the real Web Platform semantics, and the
+ * oracle extends only together with them.
  */
 final class BrowserlessForgerySolver
 {

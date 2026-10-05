@@ -128,8 +128,6 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
     /** The short fixed computation lease — a contention bound, never the record TTL. */
     private const LEASE_SECS = 15;
 
-    /** The chain id shape (base64url of 16 random bytes — the ticket service's alphabet). */
-
     /**
      * Single-Lua claim: one atomic transition per nonce.
      *   keys[1] = {kiwi:<ns>}:postsolve:<nonce>.
@@ -172,7 +170,6 @@ final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
      * PERSISTed key is corrupt state with zero writes, never a live
      * record.
      */
-
     private const CLAIM_LUA = PostSolveDispositionLuaPredicate::LUA . PersistedJsonLuaPredicate::LUA . ChainV2LuaPredicate::LUA . <<<'LUA'
 -- Post-solve disposition claim: single-writer per nonce.
 -- The existing state answers FIRST — complete/busy/takeover NEVER touch
@@ -953,8 +950,11 @@ LUA;
                 throw new MalformedPostSolveDispositionException('post-solve disposition record disposition is required in the complete state');
             }
             // The exact nested disposition key set, the same rule as the
-            // record itself.
-            $allowedDispositionKeys = ['kind', 'decision_id', 'chain_id', 'chain_expires_at'];
+            // record itself. quarantined is additive and optional: a
+            // v1/v2 record without it is the shape of the earlier store
+            // generation (quarantine false); a record carrying it must
+            // use the exact Pass-kind rule below.
+            $allowedDispositionKeys = ['kind', 'decision_id', 'chain_id', 'chain_expires_at', 'quarantined'];
             $unknownNested = array_diff(array_keys($disposition), $allowedDispositionKeys);
             if ($unknownNested !== []) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition carries unsupported keys: '.implode(',', $unknownNested));
@@ -996,6 +996,21 @@ LUA;
             } elseif ($chainExpiresAt !== null) {
                 throw new MalformedPostSolveDispositionException('post-solve disposition record chain_expires_at must be null outside the ChainRequired kind');
             }
+            // The quarantine disposition rides the Pass kind only (the
+            // severity-monotonic precedence: quarantine never overrides
+            // deny, step-up or a chain demand) and must be exactly the
+            // boolean true when present. It is written only when true,
+            // so the v1/v2 record shapes stay byte-identical for every
+            // non-quarantined decision.
+            $quarantined = $disposition['quarantined'] ?? null;
+            if ($quarantined !== null) {
+                if ($quarantined !== true) {
+                    throw new MalformedPostSolveDispositionException('post-solve disposition record quarantined must be boolean true when present');
+                }
+                if ($kind !== PostSolveDispositionKind::Pass->value) {
+                    throw new MalformedPostSolveDispositionException('post-solve disposition record quarantined must be null outside the Pass kind');
+                }
+            }
         }
         $recordDecisionId = $rec['decision_id'] ?? null;
         if ($recordDecisionId !== null && (!\is_string($recordDecisionId) || $recordDecisionId === '')) {
@@ -1029,6 +1044,7 @@ LUA;
                 $disposition['decision_id'] ?? null,
                 $disposition['chain_id'] ?? null,
                 $disposition['chain_expires_at'] ?? null,
+                $disposition['quarantined'] ?? false,
             ),
             $decisionId,
         );
@@ -1036,18 +1052,25 @@ LUA;
 
     /**
      * The persisted disposition shape — kind / decision_id / chain_id /
-     * chain_expires_at only. Raw risk vectors, fingerprints and
-     * descriptors are never stored.
+     * chain_expires_at only, plus the additive quarantined flag written
+     * only when true (a non-quarantined record keeps the exact earlier
+     * byte shape). Raw risk vectors, fingerprints and descriptors are
+     * never stored.
      *
-     * @return array{kind: string, decision_id: ?string, chain_id: ?string, chain_expires_at: ?int}
+     * @return array{kind: string, decision_id: ?string, chain_id: ?string, chain_expires_at: ?int, quarantined?: true}
      */
     private static function wire(PostSolveDisposition $disposition): array
     {
-        return [
+        $wire = [
             'kind' => $disposition->kind->value,
             'decision_id' => $disposition->decisionId,
             'chain_id' => $disposition->chainId,
             'chain_expires_at' => $disposition->chainExpiresAt,
         ];
+        if ($disposition->quarantined) {
+            $wire['quarantined'] = true;
+        }
+
+        return $wire;
     }
 }

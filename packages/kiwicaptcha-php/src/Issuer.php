@@ -245,6 +245,20 @@ final class Issuer
     }
 
     /**
+     * An issuer with the given Config, every constructor field of
+     * this one carried over directly: storage, the clock override,
+     * region, the rsw trapdoor rotation keyring and the legacy-identity
+     * migration mode.
+     *
+     * No reflection: the constructor is the one authoritative copy of
+     * the issuer's deployment state.
+     */
+    public function withConfig(Config $config): self
+    {
+        return new self($config, $this->storage, $this->now, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity);
+    }
+
+    /**
      * Return an issuer with the same secret, storage, clock and region
      * but the given challenge lifetime. The Config is cloned with only
      * ttlSecs replaced; storage and the clock override are carried over
@@ -252,33 +266,10 @@ final class Issuer
      */
     public function withTtl(int $ttlSecs): self
     {
-        $c = $this->config;
-        $clone = new Config(
-            secretKey: $c->secretKey,
-            algorithm: $c->algorithm,
-            mKib: $c->mKib,
-            t: $c->t,
-            p: $c->p,
-            targetBits: $c->targetBits,
-            argon2TargetBits: $c->argon2TargetBits,
-            ttlSecs: $ttlSecs,
-            minDurationMs: $c->minDurationMs,
-            solverMaxHashes: $c->solverMaxHashes,
-            bindingMode: $c->bindingMode,
-            policyVersion: $c->policyVersion,
-            issuer: $c->issuer,
-            kid: $c->kid,
-            executionKey: $c->executionKey,
-            rswModulusN: $c->rswModulusN,
-            rswLambda: $c->rswLambda,
-            rswT: $c->rswT,
-            tenantId: $c->tenantId,
-        );
-
         // Every constructor field is carried over, including the rsw
         // trapdoor rotation keyring: a TTL-variant issuer must resolve
         // the same outstanding records as its source.
-        return new self($clone, $this->storage, $this->now, $this->region, $this->rswVerificationKeys, $this->allowLegacyRswIdentity);
+        return $this->withConfig($this->config->withOverrides(ttlSecs: $ttlSecs));
     }
 
     /**

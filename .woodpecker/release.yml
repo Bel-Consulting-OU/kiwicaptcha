@@ -86,6 +86,7 @@ steps:
           assets/widget-telemetry.js \
           assets/widget-locales.js \
           assets/widget-compat.js \
+          assets/widget-shims.js \
           assets/widget.css
         echo "strict rebuild == committed/browser-tested assets"
 
@@ -97,7 +98,7 @@ steps:
         apt-get update -qq
         apt-get install -y -qq git nodejs npm
         cd packages/kiwicaptcha-wasm
-        ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+        ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
 
   - name: release-asset-contract
     image: alpine:3.20

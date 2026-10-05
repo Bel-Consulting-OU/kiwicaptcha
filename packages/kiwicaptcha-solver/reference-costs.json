@@ -1,0 +1,70 @@
+{
+  "format_version": 1,
+  "provenance": {
+    "statement": "Every figure below is a conservative class value compiled from free, public sources, rounded in the defender's disfavor (the attacker is assumed fast and cheap). No measurement precision is claimed: these are order-of-magnitude anchors for the bench's dollar comparison, refreshed by hand, and the bench prints this file's as_of beside every derived dollar figure.",
+    "source_classes": [
+      "public mining-hashrate tables (sha256 hardware classes)",
+      "public GPU cracking benchmark indices (hashcat-class raw sha256 figures)",
+      "public cloud spot pricing indices (consumer GPU and one CPU core rental)"
+    ],
+    "as_of": "2026-10",
+    "refresh_note": "Refresh by re-checking the source classes above and bumping as_of; stale entries must be replaced, never silently kept. The bench flags any as_of older than a year in its output.",
+    "honesty": "argon2id and rsw deliberately carry no attacker-rate entries. Published GPU argon2id figures swing with the memory cost and vendor, so one number would fabricate precision; rsw squaring is inherently sequential and no hardware class buys a parallel speedup. For those rungs the bench reports the native measurement and prints insufficient-reference-data verdicts instead of guessing."
+  },
+  "attacker_rates": [
+    {
+      "id": "gpu-mid-2026",
+      "hardware_class": "mid-range consumer GPU",
+      "algorithm": "sha256",
+      "hashes_per_second": 2000000000,
+      "usd_per_hour": 0.4,
+      "provenance": "public GPU cracking benchmark indices and public cloud spot pricing indices; rounded conservatively"
+    },
+    {
+      "id": "gpu-highend-2026",
+      "hardware_class": "high-end consumer GPU",
+      "algorithm": "sha256",
+      "hashes_per_second": 15000000000,
+      "usd_per_hour": 1.2,
+      "provenance": "public GPU cracking benchmark indices and public cloud spot pricing indices; rounded conservatively"
+    },
+    {
+      "id": "mining-silicon-2026",
+      "hardware_class": "dedicated mining silicon",
+      "algorithm": "sha256",
+      "hashes_per_second": 1000000000000,
+      "usd_per_hour": null,
+      "provenance": "public mining-hashrate tables; no credible public rate card exists for captcha-scale abuse, so no dollar verdict is derived from this class"
+    }
+  ],
+  "economics": {
+    "cpu_usd_per_core_hour": 0.01,
+    "provenance": "public cloud spot pricing indices, one core-hour, rounded down in the defender's disfavor"
+  },
+  "value_classes": [
+    {
+      "class": "low",
+      "rung": "sha16",
+      "declared_abuse_value_usd_per_1000": 0.01,
+      "provenance": "declared policy default of this table, not a measurement; adopters override it per scope in their doctor configuration"
+    },
+    {
+      "class": "standard",
+      "rung": "sha18",
+      "declared_abuse_value_usd_per_1000": 0.1,
+      "provenance": "declared policy default of this table, not a measurement; adopters override it per scope in their doctor configuration"
+    },
+    {
+      "class": "high",
+      "rung": "argon16",
+      "declared_abuse_value_usd_per_1000": 1.0,
+      "provenance": "declared policy default of this table, not a measurement; adopters override it per scope in their doctor configuration"
+    },
+    {
+      "class": "critical",
+      "rung": "argon64",
+      "declared_abuse_value_usd_per_1000": 10.0,
+      "provenance": "declared policy default of this table, not a measurement; adopters override it per scope in their doctor configuration"
+    }
+  ]
+}

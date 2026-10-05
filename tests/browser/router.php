@@ -744,7 +744,14 @@ function inspectIssuedStage2(string $chainId, string $stage2Nonce, \BelConsultin
     return [200, rebuildChallengeResponse($record)];
 }
 
-/** The persisted record of a nonce (the record file), or null. */
+/**
+ * The persisted record of a nonce (the record file), or null. A record
+ * past its own expires_at counts as missing: the challenge TTL lapsed,
+ * so no live store would hand it out and the verifier would refuse its
+ * solve as expired. Reporting it missing lets the caller rearm the
+ * chain with a fresh stage-2 mint, and a leftover chain from an earlier
+ * fixture run can never serve a challenge the verifier must refuse.
+ */
 function challengeRecordOf(string $nonce): ?array
 {
     $file = recordFile($nonce);
@@ -753,6 +760,9 @@ function challengeRecordOf(string $nonce): ?array
     }
     $raw = json_decode((string) file_get_contents($file), true);
     if (!is_array($raw)) {
+        return null;
+    }
+    if (isset($raw['expires_at']) && (int) $raw['expires_at'] <= time()) {
         return null;
     }
 
@@ -1132,9 +1142,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // execution-version cap and the central fleet floor are confirmed
     // at 3: ?execution=1 stands in for the whole execution rollout
     // state, and no SecurityEpochMonitor or {kiwi:<ns>}:security-policy
-    // hash is wired in the fixture. The additive ?exec_cap=<1..5> knob
+    // hash is wired in the fixture. The additive ?exec_cap=<1..6> knob
     // raises that simulated cap (the version-5 browser cases exercise
-    // the causal object-graph grammar through it); absent, garbage or
+    // the causal object-graph grammar and the version-6 cases the
+    // real-platform probes through it); absent, garbage or
     // an out-of-range value keeps the historical v3-capable fixture.
     // The effective grammar version therefore equals the client's
     // advertised maximum (capped at the simulated deployment cap) when
@@ -1150,7 +1161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $executionMaxVersion = 1;
     $headerCapability = (string) ($_SERVER['HTTP_KIWI_EXECUTION_MAX_VERSION'] ?? '');
     $executionFixtureCap = 3;
-    if (preg_match('/^[1-5]$/D', (string) ($_GET['exec_cap'] ?? '')) === 1) {
+    if (preg_match('/^[1-6]$/D', (string) ($_GET['exec_cap'] ?? '')) === 1) {
         $executionFixtureCap = (int) $_GET['exec_cap'];
     }
     if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $headerCapability) === 1) {
@@ -1686,7 +1697,28 @@ if (($path === '/kiwi-captcha/api.js' || $path === '/kiwi-captcha/widget.css') &
 
     return true;
 }
-if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|recaptcha-button|recaptcha-input|recaptcha-v3|hcaptcha|turnstile|turnstile-meta)\.html$~', $path, $m) === 1) {
+if ($path === '/kiwi-captcha/widget-shims.js') {
+    // The standalone incumbent API shims asset: the provider globals
+    // (grecaptcha / hcaptcha / turnstile) over a plain driver bootstrap,
+    // plus the Altcha and Friendly Captcha element conventions. Served
+    // beside the loader route so the shim derives the same asset base
+    // (widget.css) and challenge endpoint (/kiwi-captcha/challenge)
+    // from its own URL exactly like the compat loader does.
+    $file = $repo.'/packages/kiwicaptcha-wasm/assets/widget-shims.js';
+    if (!is_file($file)) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    header('Content-Type: application/javascript; charset=UTF-8');
+    header('Cache-Control: no-store');
+    echo file_get_contents($file);
+
+    return true;
+}
+
+if (preg_match('~^/migration/(recaptcha-v2|recaptcha-v2-ttl|recaptcha-v2-argon|recaptcha-v2-explicit|recaptcha-invisible|recaptcha-button|recaptcha-input|recaptcha-v3|hcaptcha|turnstile|turnstile-meta|shims-recaptcha|shims-hcaptcha|shims-turnstile|shims-altcha|shims-friendly)\.html$~', $path, $m) === 1) {
     header('Content-Type: text/html');
     header('Cache-Control: no-store');
     $html = file_get_contents(__DIR__.'/migration/'.$m[1].'.html');
@@ -1812,9 +1844,9 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
     if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
-    // ?exec_cap=<1..5> raises the fixture's simulated execution-version
+    // ?exec_cap=<1..6> raises the fixture's simulated execution-version
     // cap for the version-5 browser cases (see the challenge route).
-    if (($_GET['exec_cap'] ?? '') !== '' && preg_match('/^[1-5]$/D', (string) $_GET['exec_cap']) === 1) {
+    if (($_GET['exec_cap'] ?? '') !== '' && preg_match('/^[1-6]$/D', (string) $_GET['exec_cap']) === 1) {
         $endpointQuery[] = 'exec_cap='.rawurlencode((string) $_GET['exec_cap']);
     }
     // The rsw fixture knob: ?rsw_t=<T> forwards the sequential cost to
@@ -1990,6 +2022,17 @@ if ($path === '/' || $path === '/index.html') {
 </div>
 ";
     }
+    // ?form=1 hosts the widget containers inside a real <form> with two
+    // autocomplete-semantic fields, so the form-level telemetry specs
+    // can drive interaction outside the widget subtree. The default page
+    // (no knob) stays byte-identical: the containers stay bare.
+    $bodyChildren = $containers;
+    if (($_GET['form'] ?? '') === '1') {
+        $bodyChildren = '<form id="host-form" method="post" action="#">'
+            . '<p><label for="form-email">Email</label><input type="email" id="form-email" name="email" autocomplete="email"></p>'
+            . '<p><label for="form-name">Name</label><input type="text" id="form-name" name="name" autocomplete="name"></p>'
+            . $containers . '</form>';
+    }
     $riskEmbed = '';
     if (!$filesMode) {
         $riskBody = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/widget-risk.js');
@@ -1997,7 +2040,7 @@ if ($path === '/' || $path === '/index.html') {
     }
     $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>'.$riskEmbed;
     echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$assetTags}</head><body>
-{$containers}{$inlineScripts}</body></html>";
+{$bodyChildren}{$inlineScripts}</body></html>";
 
     return true;
 }

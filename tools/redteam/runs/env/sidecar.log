@@ -1,0 +1,1 @@
+kiwicaptcha-verifier listening on http://127.0.0.1:8484 (verify: POST /verify; metrics: GET /metrics; health: GET /healthz; doctor: GET /doctor)

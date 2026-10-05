@@ -928,8 +928,11 @@ final class RealRedisChainedChallengeTest extends TestCase
         self::assertSame($requirement->chainId, (string) $this->client->get(sprintf('{kiwi:%s}:chain-obligation:%s', self::NAMESPACE, $obligationId)), 'the obligation maps the chain');
 
         // The obligation moves to a fresh chain (a re-created chain of
-        // the same transaction) while the stale chain record survives.
+        // the same transaction) while the stale chain record survives:
+        // the compare-delete clears the old mapping, then the atomic
+        // create installs the fresh chain + mapping together.
         $fresh = $service->requireStage2($this->nonce(), 'login', 'txn-stale-2', 1, RiskAction::Sha18, $expiry);
+        $store->deleteObligation($requirement->chainId, $obligationId);
         $store->createWithObligation($fresh->chainId, $obligationId, $this->nonce(), 'login', 'txn-stale', 'sha18', 1, 300);
 
         // The stale-chainId terminalization is refused atomically:

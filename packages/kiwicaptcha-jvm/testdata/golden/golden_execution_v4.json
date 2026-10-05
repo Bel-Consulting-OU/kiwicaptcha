@@ -1,0 +1,39 @@
+{
+    "meta": {
+        "provenance": "PHP-issued with packages/kiwicaptcha-php Issuer, pinned clock 1900000000",
+        "secret": "0123456789abcdef0123456789abcdef",
+        "client_ip": "198.51.100.7",
+        "scope": "login",
+        "issued_at": 1900000000,
+        "algorithm": "sha256"
+    },
+    "record": {
+        "nonce": "+9Ib7b2DBqemiCOM4+nNvNuYM3cJC30MwRRpArYLQQQ=",
+        "scope": "login",
+        "binding_tag": "1a5648ce693b2d6a74b964d44909db6f6793217c51dd33588455e2a9b62f73b1",
+        "issued_at": 1900000000,
+        "expires_at": 1900000120,
+        "algorithm": "sha256",
+        "m_kib": 0,
+        "t": 3,
+        "p": 1,
+        "target_bits": 8,
+        "salt": "iSp4R28DFx9nxbAg7/q3Qg==",
+        "prefix": "djR8NHwrOUliN2IyREJxZW1pQ09NNCtuTnZOdVlNM2NKQzMwTXdSUnBBcllMUVFRPXxsb2dpbnwxYTU2NDhjZTY5M2IyZDZhNzRiOTY0ZDQ0OTA5ZGI2ZjY3OTMyMTdjNTFkZDMzNTg4NDU1ZTJhOWI2MmY3M2IxfDE5MDAwMDAwMDB8MTkwMDAwMDEyMHxzaGEyNTZ8MHwzfDF8OHxpU3A0UjI4REZ4OW54YkFnNy9xM1FnPT18MHx8MXx8fDF8ZT0xLDc5NzA4MjZhNmNmYjhhY2FjZmNhNjc5ZTJhYTcwMTE4ZmYzM2UzY2RiZDhlZDQwZjk4MTk3NzhjY2M4ZDZlZjF8bT0x.ad0affc79e093526139c0b5354405de85e34d2b5d04b9ac2bfcd0e358766d1e9|iSp4R28DFx9nxbAg7/q3Qg==|",
+        "challenge": "djR8NHwrOUliN2IyREJxZW1pQ09NNCtuTnZOdVlNM2NKQzMwTXdSUnBBcllMUVFRPXxsb2dpbnwxYTU2NDhjZTY5M2IyZDZhNzRiOTY0ZDQ0OTA5ZGI2ZjY3OTMyMTdjNTFkZDMzNTg4NDU1ZTJhOWI2MmY3M2IxfDE5MDAwMDAwMDB8MTkwMDAwMDEyMHxzaGEyNTZ8MHwzfDF8OHxpU3A0UjI4REZ4OW54YkFnNy9xM1FnPT18MHx8MXx8fDF8ZT0xLDc5NzA4MjZhNmNmYjhhY2FjZmNhNjc5ZTJhYTcwMTE4ZmYzM2UzY2RiZDhlZDQwZjk4MTk3NzhjY2M4ZDZlZjF8bT0x.ad0affc79e093526139c0b5354405de85e34d2b5d04b9ac2bfcd0e358766d1e9",
+        "min_duration_ms": 0,
+        "issued_at_ns": 1791176126956160,
+        "protocol_version": 4,
+        "attempts_used": 0,
+        "region": null,
+        "policy_version": 1,
+        "request_binding": null,
+        "issuer": null,
+        "kid": 1,
+        "hostname": null,
+        "execution_program": "AQVsb2dpbgdkZWZhdWx0ARYQ7wgzZ2hSZVIwQxGIGEItN1tNY1s3JTIyLDtSVntZJ2RVYGE8QxIdCDNnaFJlUjBDHQgzZ2hSZVIwQw4PYW9LT1RuLFNOWjUjRjNGyhRcDwd6Zks4U1Jad7wYB0ExU05KUGkXB3V2T1dZM00ArK58rhNfSscHkldoY/Z8v1UZDgspKXd6Ilp0SmZoL9ERGSBFMF5aaXBFPlNAYUZmNUdaYm8zL1AqJlVjMS9CfColMgZU5SZTa+l+LBMGbnVadkVBFwJ0QhCnC09ZQmJNN1ZrUWNXAWCX/7rKByhsEgAdcj0+SlP3Vg==",
+        "execution_version": 1,
+        "execution_commitment": "7970826a6cfb8acacfca679e2aa70118ff33e3cdbd8ed40f9819778ccc8d6ef1",
+        "server_mac": "6534dc50b5cb86186be4f56444885d84ef8b9343389352ee8d3f7c837893c578"
+    }
+}

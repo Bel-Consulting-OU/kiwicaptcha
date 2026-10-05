@@ -80,6 +80,49 @@
     }
   }
 
+  /* ── Theme override: data-theme pins the palette regardless of OS ──
+     A host page sets data-theme="dark" (or "light") on any ancestor
+     of the widget to force a palette instead of following
+     prefers-color-scheme. The attribute selector (0,2,0) outranks the
+     media block's (0,1,0), so both source orders behave the same: a
+     dark-mode OS visitor on a forced-light page gets light, and vice
+     versa. The token values duplicate the blocks above verbatim (no
+     preprocessor). */
+  [data-theme="dark"] .kiwi-container {
+    --kiwi-bg: #1c1c1f;
+    --kiwi-text: #f4f4f5;
+    --kiwi-text-muted: #a1a1aa;
+    --kiwi-badge-neutral-text: #a1a1aa;
+    --kiwi-badge-solving-text: #bfdbfe;
+    --kiwi-badge-success-text: #a7f3d0;
+    --kiwi-badge-error-text: #fecaca;
+    --kiwi-primary: #60a5fa;
+    --kiwi-primary-rgb: 96, 165, 250;
+    --kiwi-success: #34d399;
+    --kiwi-success-rgb: 52, 211, 153;
+    --kiwi-error: #f87171;
+    --kiwi-error-rgb: 248, 113, 113;
+    --kiwi-border: #333333;
+    --kiwi-track: #2e2e32;
+  }
+  [data-theme="light"] .kiwi-container {
+    --kiwi-bg: #fafafa;
+    --kiwi-text: #333333;
+    --kiwi-text-muted: #737373;
+    --kiwi-badge-neutral-text: #5c5c5c;
+    --kiwi-badge-solving-text: #1055ad;
+    --kiwi-badge-success-text: #00603e;
+    --kiwi-badge-error-text: #b91c1c;
+    --kiwi-primary: #146de2;
+    --kiwi-primary-rgb: 20, 109, 226;
+    --kiwi-success: #008457;
+    --kiwi-success-rgb: 0, 132, 87;
+    --kiwi-error: #dc2626;
+    --kiwi-error-rgb: 220, 38, 38;
+    --kiwi-border: #e0e0e0;
+    --kiwi-track: #e4e4e4;
+  }
+
   /* ── Card: 1px border, no shadow, no hover lift — quiet chrome ── */
   .kiwi-widget {
     display: flex;
@@ -224,6 +267,13 @@
   .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(7) { animation-delay: 0.72s; }
   .kiwi-widget[data-state="done"] .kiwi-slots i { background: rgb(var(--kiwi-success-rgb)); }
   .kiwi-widget[data-state="failed"] .kiwi-slots i { background: rgb(var(--kiwi-error-rgb)); }
+  /* Expired keeps the error family its badge/icon already use; the
+     version-error state (a solver/protocol mismatch) reads as the same
+     failure language — the forced-colors block groups all three under
+     Mark. Slots are decorative (non-text), so badge contrast is
+     unaffected. */
+  .kiwi-widget[data-state="expired"] .kiwi-slots i { background: rgb(var(--kiwi-error-rgb)); }
+  .kiwi-widget[data-state="kiwi:solver-mismatch"] .kiwi-slots i { background: rgb(var(--kiwi-error-rgb)); }
   @keyframes kiwi-slot-cycle {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.3; }

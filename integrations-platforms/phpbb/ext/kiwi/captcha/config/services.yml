@@ -1,0 +1,18 @@
+services:
+    # The captcha plugin service. phpBB's captcha factory resolves the
+    # configured captcha plugin by the service name
+    # "captcha.plugins.<name>", so once the board's Captcha module
+    # setting (ACP, Spambot countermeasures / registration form) is
+    # switched to "kiwi", this service serves every captcha surface.
+    captcha.plugins.kiwi:
+        class: kiwi\captcha\captcha\kiwi
+        arguments:
+            - '@config'
+            - '@kiwi.captcha.client'
+
+    # The verify client: the pure kiwi call (token, scope, remoteip)
+    # through phpBB's http client service (Guzzle).
+    kiwi.captcha.client:
+        class: kiwi\captcha\captcha\client
+        arguments:
+            - '@http_client'

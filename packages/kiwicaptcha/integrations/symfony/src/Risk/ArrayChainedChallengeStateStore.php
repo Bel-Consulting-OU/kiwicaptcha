@@ -109,25 +109,24 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
             throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
         }
         $requestBinding = $requestBinding !== '' ? $requestBinding : null;
-        $this->records[$chainId] = [
-            'v' => 2,
-            'stage1Nonce' => $stage1Nonce,
-            'scope' => $scope,
-            'obligationId' => $obligationId,
-            'requiredAction' => $requiredAction,
-            'requiredRank' => RiskAction::from($requiredAction)->rank(),
-            'policyVersion' => $policyVersion,
-            'chainDepth' => 2,
-            'state' => 'available',
-            'owner' => null,
-            'leaseUntil' => null,
-            'stage2Nonce' => null,
-            'requestBinding' => $requestBinding,
-            'expiresAt' => (int) ($this->clock() + max(1, $ttlSecs)),
-            'requirementGeneration' => 1,
-            'reservedRequirementGeneration' => null,
-        ];
-        $this->obligations[$obligationId] = $chainId;
+        $ttl = max(1, $ttlSecs);
+        // The single-process mirror of the Redis delegation: the creation
+        // rides createOrGetObligation() so both stores observe one machine
+        // (an existing obligation is never blindly overwritten, corrupt
+        // state never heals) and the record + mapping always land together
+        // — the in-process atomicity the Redis side gets from the Lua.
+        $this->createOrGetObligation(
+            $obligationId,
+            $chainId,
+            $stage1Nonce,
+            $scope,
+            $requestBinding ?? '',
+            $requiredAction,
+            RiskAction::from($requiredAction)->rank(),
+            $policyVersion,
+            (int) ($this->clock() + $ttl),
+            $ttl,
+        );
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string

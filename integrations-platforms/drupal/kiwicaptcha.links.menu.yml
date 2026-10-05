@@ -1,0 +1,5 @@
+kiwicaptcha.settings:
+  title: 'KiwiCaptcha'
+  description: 'Proof-of-work CAPTCHA against your self-hosted KiwiCaptcha deployment.'
+  route_name: kiwicaptcha.settings
+  parent: system.admin_config_people

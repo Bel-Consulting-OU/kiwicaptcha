@@ -125,9 +125,38 @@ final class KiwiHealthController
     /** In-process probe/state cache window in ms. */
     private const CACHE_MS = 1000;
 
+    /** The readiness-result cache TTL in s (the ~1 s burst-saving window). */
+    private const CACHE_TTL_SECS = 1;
+
+    /**
+     * The probe-debounce state TTL in s: the consecutive-failure
+     * counter must survive the 1 s readiness-result cache expiry. A
+     * per-second cache rotation must never reset the debounce — a first
+     * failure debounced in one request must still be the first failure
+     * for the next one, so the state outlives the cache window by a
+     * full minute.
+     */
+    private const PROBE_STATE_TTL_SECS = 60;
+
+    /**
+     * The epoch-lag warning de-dup TTL in s: the last logged lag
+     * detail is stored on first log and re-logged only when it
+     * changes — once per change, not once per request — and the bound
+     * keeps the APCu entry finite.
+     */
+    private const EPOCH_LAG_DEDUP_TTL_SECS = 3600;
+
     private ?bool $lastPolicyOk = null;
     private ?string $policyReason = null;
     private ?string $policyEpochLag = null;
+
+    /**
+     * The in-process fallback used when the APCu extension is absent or
+     * disabled: the last logged epoch-lag detail. With APCu available
+     * the de-dup marker lives in APCu keyed per deployment (namespace
+     * and secret), so separate workers of one deployment never re-log
+     * an unchanged lag; see {@see self::logEpochLagOnce()}.
+     */
     private ?string $lastLoggedEpochLag = null;
     private float $policyAtMs = -PHP_FLOAT_MAX;
 
@@ -215,6 +244,26 @@ final class KiwiHealthController
      *                                                   server-owned
      *                                                   execution_required_
      *                                                   version tier.
+     * @param \Psr\Log\LoggerInterface|null $logger    where the private
+     *                                                   readiness detail
+     *                                                   and the warnings
+     *                                                   go (error_log
+     *                                                   otherwise).
+     * @param \Closure|null              $apcu         APCu override
+     *                                                   (tests): a
+     *                                                   two-operation
+     *                                                   seam over the
+     *                                                   shared segment,
+     *                                                   ('fetch', key)
+     *                                                   and ('store',
+     *                                                   key, value, ttl),
+     *                                                   so separate
+     *                                                   instances can
+     *                                                   simulate separate
+     *                                                   workers of one
+     *                                                   deployment. Null
+     *                                                   uses the real
+     *                                                   APCu when loaded.
      */
     public function __construct(
         private readonly string $secretKey,
@@ -233,6 +282,7 @@ final class KiwiHealthController
         private readonly int $namespaceKeyVersion = RedisNamespace::VERSION_LEGACY,
         private readonly bool $readLegacyFallback = true,
         private readonly ?\Psr\Log\LoggerInterface $logger = null,
+        private readonly ?\Closure $apcu = null,
     ) {
     }
 
@@ -266,11 +316,10 @@ final class KiwiHealthController
         if ($detail !== null) {
             $this->logReadinessDetail($detail);
         }
-        if ($lag !== null && $lag !== $this->lastLoggedEpochLag) {
+        if ($lag !== null) {
             // The readiness endpoint is polled: log the lag when it
             // appears or changes, not on every ~1 s evaluation.
-            $this->logReadinessWarning($lag);
-            $this->lastLoggedEpochLag = $lag;
+            $this->logEpochLagOnce($lag);
         }
         $this->readinessCachePut(['body' => $body, 'status' => $status]);
 
@@ -349,7 +398,7 @@ final class KiwiHealthController
             'body' => $result['body'],
             'status' => $result['status'],
             'atMs' => (int) $this->nowMs(),
-        ]);
+        ], self::CACHE_TTL_SECS);
     }
 
     /**
@@ -381,12 +430,15 @@ final class KiwiHealthController
      */
     private function readinessStatePut(array $state): void
     {
-        $this->apcuPut(self::readinessCacheKey($this->namespace, $this->secretKey).'.state', $state);
+        $this->apcuPut(self::readinessCacheKey($this->namespace, $this->secretKey).'.state', $state, self::PROBE_STATE_TTL_SECS);
         $this->localReadinessState = $state;
     }
 
     private function apcuGet(string $key): mixed
     {
+        if ($this->apcu !== null) {
+            return ($this->apcu)('fetch', $key);
+        }
         if (!\function_exists('apcu_fetch')) {
             return null;
         }
@@ -400,16 +452,24 @@ final class KiwiHealthController
     }
 
     /**
-     * Store with the 1 s window; a disabled or failing APCu (for
-     * example a CLI process without apc.enable_cli) degrades to the
-     * instance fallback, so the probe debounce stays correct.
+     * Store with the caller's window ($ttl seconds): the 1 s TTL
+     * belongs to the readiness-result cache only, while the debounce
+     * state and the log de-dup markers outlive it. A disabled or
+     * failing APCu (for example a CLI process without apc.enable_cli)
+     * degrades to the instance fallback, so the probe debounce stays
+     * correct.
      */
-    private function apcuPut(string $key, mixed $value): void
+    private function apcuPut(string $key, mixed $value, int $ttl): void
     {
+        if ($this->apcu !== null) {
+            ($this->apcu)('store', $key, $value, $ttl);
+
+            return;
+        }
         if (!\function_exists('apcu_store')) {
             return;
         }
-        @apcu_store($key, $value, 1);
+        @apcu_store($key, $value, $ttl);
     }
 
     private function logReadinessDetail(string $detail): void
@@ -434,6 +494,30 @@ final class KiwiHealthController
             return;
         }
         error_log('KiwiCaptcha readiness warning: '.$detail);
+    }
+
+    /**
+     * Log the epoch-lag warning once per change: the last logged lag
+     * detail is an APCu-backed marker (TTL
+     * {@see self::EPOCH_LAG_DEDUP_TTL_SECS}) so separate workers of one
+     * deployment de-duplicate each other under PHP-FPM. The lag logs
+     * once per change, not once per request; the instance-property
+     * fallback keeps the de-dup for the APCu-absent CLI case, the same
+     * degradation style as {@see self::readinessStateGet()}.
+     */
+    private function logEpochLagOnce(string $lag): void
+    {
+        $key = self::readinessCacheKey($this->namespace, $this->secretKey).'.epochLagLogged';
+        $last = $this->apcuGet($key);
+        if (!\is_string($last)) {
+            $last = $this->lastLoggedEpochLag;
+        }
+        if ($last === $lag) {
+            return;
+        }
+        $this->logReadinessWarning($lag);
+        $this->lastLoggedEpochLag = $lag;
+        $this->apcuPut($key, $lag, self::EPOCH_LAG_DEDUP_TTL_SECS);
     }
 
     /**

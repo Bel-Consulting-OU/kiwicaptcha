@@ -27,20 +27,17 @@ final class Configuration implements ConfigurationInterface
     /**
      * True when the configured value is an unresolved Symfony env
      * placeholder such as `%env(NAME)%`, or its resolved placeholder
-     * form, or the
-     * empty-string type fixture Symfony's ValidateEnvPlaceholdersPass
-     * substitutes when it re-processes this tree. Such a value is resolved
-     * at runtime, so a compile-time length floor cannot judge it; the same
-     * floor is enforced when the core Config/service is constructed,
-     * exactly like secret_key.
+     * form. Such a value is resolved at runtime, so a compile-time
+     * length floor cannot judge it; the same floor is enforced when
+     * the core Config/service is constructed, exactly like
+     * secret_key. A literal empty string is NOT a placeholder: it is
+     * an explicitly invalid secret value and fails the build-time
+     * floor instead of being deferred to runtime.
      */
     private static function isEnvPlaceholder(mixed $v): bool
     {
         if (!\is_string($v)) {
             return false;
-        }
-        if ($v === '') {
-            return true;
         }
 
         return preg_match('/^%env\([^%]+\)%$/D', $v) === 1
@@ -74,11 +71,11 @@ final class Configuration implements ConfigurationInterface
             ->end()
             ->children()
                 ->scalarNode('protection_profile')
-                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission); "ha_safe" = the replay-safe HA posture (replay_durability operator_managed + ha_authority pinned_primary, the other defaults mirror balanced) — the mechanical pinned-primary authority guard makes the operator contract a real guarantee; the guard refuses on any authority change and the doctor reports its state. See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
+                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "abuse_first" = the high_abuse posture under its specification name (change.md Part 5 names the abuse profile abuse_first; the two names select the identical matrix, so a deployment may use either spelling); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission); "ha_safe" = the replay-safe HA posture (replay_durability operator_managed + ha_authority pinned_primary, the other defaults mirror balanced) — the mechanical pinned-primary authority guard makes the operator contract a real guarantee; the guard refuses on any authority change and the doctor reports its state. Every profile except compatibility also derives the risk engine stage composition (marks reader, continuous pricing, bucket trust; the explanation surface only under the abuse profiles), see the "Risk engine stage composition" section in docs/configuration.md. See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
                     ->defaultNull()
                     ->validate()
-                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'compatibility', 'ha_safe'], true))
-                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "compatibility", "ha_safe" (or null = no profile)')
+                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'abuse_first', 'compatibility', 'ha_safe'], true))
+                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "abuse_first", "compatibility", "ha_safe" (or null = no profile)')
                     ->end()
                 ->end()
                 ->scalarNode('secret_key')
@@ -182,7 +179,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue('strict')
                 ->end()
                 ->enumNode('telemetry')
-                    ->info("Widget behavioral telemetry collection: 'off' (default) sends no signal fields, 'minimal' and 'full' opt the widget into reporting bot-heuristic fields (client-controlled and forgeable — a supplement, never the security boundary). Forced to 'off' when privacy_mode is 'strict'.")
+                    ->info("Widget behavioral telemetry collection: 'off' (default) sends no signal fields, 'minimal' and 'full' opt the widget into reporting bot-heuristic fields (client-controlled and forgeable — a supplement, never the security boundary). Forced to 'off' when privacy_mode is 'strict'. This is the legacy scorer surface the enforce_telemetry gate reads; the adaptive risk engine's evidence stage is armed separately through risk.evidence.telemetry (the data-kiwi-telemetry value the widget container renders).")
                     ->values(['off', 'minimal', 'full'])
                     ->defaultValue('off')
                 ->end()
@@ -602,8 +599,13 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->integerNode('policy_version')
-                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification. A node stamps and enforces max(configured, central min_policy_epoch), so raising the central {kiwi:<ns>}:security-policy min_policy_epoch above this configured value revokes only older challenges: every node follows the central epoch, the readiness probe stays ready for a node whose configured value is behind, and new issuances verify immediately. The strict-equality contract stays: a record stamped under a different effective epoch is rejected with WrongPolicyVersion. Changing this configured value is therefore a coordinated cutover, not a local restart, because challenges the node issued earlier (stamped under the earlier value) are invalidated across every node that follows the central state. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
+                            ->info("SECURITY-POLICY EPOCH stamped (signed) into every issued challenge record and enforced at verification. A node stamps and enforces max(configured, central min_policy_epoch), so raising the central {kiwi:<ns>}:security-policy min_policy_epoch above this configured value revokes only older challenges: every node follows the central epoch, the readiness probe stays ready for a node whose configured value is behind, and new issuances verify immediately. Outside a declared rollout window (risk.policy_rollout_min_epoch) the strict-equality contract stays: a record stamped under a different effective epoch is rejected with WrongPolicyVersion. Changing this configured value is therefore a coordinated cutover, not a local restart, because challenges the node issued earlier (stamped under the earlier value) are invalidated across every node that follows the central state — unless a rollout window is declared for the drain. Cosmetic configuration changes must NOT bump it. The risk-v1 policy CONTRACT version is internal to the risk package (RiskPolicy::CONTRACT_VERSION) and independent of this knob.")
                             ->defaultValue(1)
+                            ->min(1)
+                        ->end()
+                        ->integerNode('policy_rollout_min_epoch')
+                            ->info('DECLARED POLICY-ROLLOUT WINDOW FLOOR of the security-policy epoch (default null = no window, strict equality). While set, the verifier accepts a record whose policy_version sits within [floor, expected] (the expected epoch being max(risk.policy_version, central min_policy_epoch)), so a mixed N/N+1 fleet redeems challenges cross-node with zero spurious rejections while the old epoch drains. The floor is an EXPLICIT deployment declaration only: nothing derives it from the central min_policy_epoch, and it must be strictly lower than risk.policy_version — declare the OLD epoch here while bumping policy_version to the new one, then remove the window (strict equality returns) once every node serves the new epoch. A window is a bounded revocation delay, exactly as deliberate as the fleet drain it covers.')
+                            ->defaultNull()
                             ->min(1)
                         ->end()
                         ->arrayNode('global_floors')
@@ -649,15 +651,28 @@ final class Configuration implements ConfigurationInterface
                                         ->info('When true, a VALID solve triggers a fresh POST-SOLVE assessment (SolveSuccess) with the same context; a Deny there fails the validation with the "kiwi.post_solve_rejected" error and a StepUp fails it with "kiwi.post_solve_step_up_required" (the application routes the user to MFA/passkey/email confirmation). The gateway does NOT confirm its own post-solve decision — ConfirmedLegitimate / ConfirmedAbuse are application-only signals that require a decision id.')
                                         ->defaultValue(false)
                                     ->end()
+                                    ->scalarNode('target_field')
+                                        ->info('OPTIONAL form field name carrying this scope\'s TARGET IDENTIFIER (the pre-auth claimed id, e.g. the username or email field of a login form). When configured, the risk engine\'s target resolver reads the submitted value through the versioned normalization pipeline (NFKC, case fold, trim, provider email canonicalization) and stores only its HMAC pseudonym; the outcome bridge\'s LoginFailure/CheckPassport lanes likewise address the failure report by the target pseudonym. Null (default) = the scope carries no target dimension and the bridge reports failures without a target handle.')
+                                        ->defaultNull()
+                                        ->validate()
+                                            ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                            ->thenInvalid('risk.scopes.*.target_field must be a form field name of 1-128 characters of [A-Za-z0-9._:-]')
+                                        ->end()
+                                    ->end()
+                                    ->enumNode('value_class')
+                                        ->info('The value class of this scope\'s protected action (low, standard, high, critical; default standard): what a solved request on this scope is worth to the deployment. The continuous pricing stage multiplies the risk score by the class weight (800, 1000, 1200, 1400 per mille) before quantizing onto the challenge ladder, so the same score prices a critical action (admin login, money movement) onto a stronger rung than a low one. The class only ever raises the composed action; the plain policy floors keep applying underneath.')
+                                        ->defaultValue('standard')
+                                        ->values(['low', 'standard', 'high', 'critical'])
+                                    ->end()
                                 ->end()
                             ->end()
                             ->defaultValue([
-                                'contact' => ['id' => null, 'base_risk' => 60, 'minimum' => 'sha16', 'degraded' => 'sha18', 'post_solve_check' => false],
-                                'signup' => ['id' => null, 'base_risk' => 100, 'minimum' => 'sha16', 'degraded' => 'sha20', 'post_solve_check' => true],
-                                'login' => ['id' => null, 'base_risk' => 120, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true],
-                                'password_reset' => ['id' => null, 'base_risk' => 180, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true],
-                                'admin_login' => ['id' => null, 'base_risk' => 300, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true],
-                                'financial_action' => ['id' => null, 'base_risk' => 400, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true],
+                                'contact' => ['id' => null, 'base_risk' => 60, 'minimum' => 'sha16', 'degraded' => 'sha18', 'post_solve_check' => false, 'value_class' => 'standard'],
+                                'signup' => ['id' => null, 'base_risk' => 100, 'minimum' => 'sha16', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
+                                'login' => ['id' => null, 'base_risk' => 120, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
+                                'password_reset' => ['id' => null, 'base_risk' => 180, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
+                                'admin_login' => ['id' => null, 'base_risk' => 300, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
+                                'financial_action' => ['id' => null, 'base_risk' => 400, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
                             ])
                         ->end()
                         ->arrayNode('unknown_scope')
@@ -719,7 +734,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultNull()
                         ->end()
                         ->integerNode('max_challenges_per_scope_per_minute')
-                            ->info('PER-SCOPE issuance cap : when > 0, a Redis fixed-window counter (INCR + EXPIRE 60 in one atomic Lua script) bounds how many challenges a scope may issue per minute — a public site key + claimed origin can no longer create unlimited billed verification work per scope. The quota keys on the SERVER-OWNED scope identity: the configured risk.scopes.<name>.id (stable u32), or the shared synthetic unknown-scope id — the raw scope string is NEVER a Redis key component , and the quota namespace is bounded by the server-owned set when risk.allowed_scopes is configured. The cap is only enforceable with a Redis client (fail-fast at compile time otherwise); each scope gets its own independent window.')
+                            ->info('PER-SCOPE issuance cap : when > 0, a Redis sliding-window log (a sorted set of admissions pruned to the last 60 s in one atomic Lua script) bounds how many challenges a scope may issue per minute — a public site key + claimed origin can no longer create unlimited billed verification work per scope. Any 60 s sliding window admits at most the cap, so a burst straddling a minute boundary yields exactly the cap, never twice. The quota keys on the SERVER-OWNED scope identity: the configured risk.scopes.<name>.id (stable u32), or the shared synthetic unknown-scope id — the raw scope string is NEVER a Redis key component , and the quota namespace is bounded by the server-owned set when risk.allowed_scopes is configured. The cap is only enforceable with a Redis client (fail-fast at compile time otherwise); each scope gets its own independent window; a warning is logged as the cap is approached (80%).')
                             ->defaultValue(0)
                             ->min(0)
                         ->end()
@@ -834,9 +849,9 @@ final class Configuration implements ConfigurationInterface
                             ->validate()
                                 ->ifTrue(static fn (array $v): bool => \array_filter(
                                     \array_keys($v),
-                                    static fn ($k): bool => !\is_string($k) || \strlen((string) $k) < 16,
+                                    static fn ($k): bool => !\is_string($k) || \strlen((string) $k) < 32,
                                 ) !== [])
-                                ->thenInvalid('Siteverify secrets are the entire server-to-server authentication boundary — each key must be a string of at least 16 bytes (32 random bytes recommended). A purely numeric secret is coerced to an integer array key by PHP itself; choose a secret outside the canonical decimal shape (e.g. base64 with letters, or any 32 random bytes) so it stays a string key.')
+                                ->thenInvalid('Siteverify secrets are the entire server-to-server authentication boundary — each key must be a string of at least 32 bytes. A purely numeric secret is coerced to an integer array key by PHP itself; choose a secret outside the canonical decimal shape (e.g. base64 with letters, or any 32 random bytes) so it stays a string key.')
                             ->end()
                             ->scalarPrototype()
                                 ->validate()
@@ -1051,17 +1066,381 @@ final class Configuration implements ConfigurationInterface
                             ->defaultNull()
                         ->end()
                         ->arrayNode('health')
-                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 5 (this binary\'s max protocol: the identity-bearing rsw v5 canonical) and min_execution_version <= the binary execution max. A central min_policy_epoch above the configured risk.policy_version no longer takes the node out of the pool: issuance stamps the effective epoch max(configured, central), so the node follows a central bump, and the lag is logged as a warning instead of failing readiness. When the key is absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
+                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 5 (this binary\'s max protocol: the identity-bearing rsw v5 canonical) and min_execution_version <= the binary execution max. A central min_policy_epoch above the risk.policy_version no longer takes the node out of the pool: issuance stamps the effective epoch max(configured, central), so the node follows a central bump, and the lag is logged as a warning instead of failing readiness. When the key is absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->booleanNode('enabled')->defaultTrue()->end()
                             ->end()
+                        ->end()
+                        ->arrayNode('outcomes')
+                            ->info('The typed outcomes plane (application-reported outcomes onto risk events, the outcome ledger and long-memory marks). auto_bridge (default true) enables the Symfony security auto-bridge: a subscriber that translates LoginSuccessEvent into an authenticationSuccess report on the principal pseudonym, and LoginFailureEvent plus observable CheckPassportEvent errors into authenticationFailure reports on the target pseudonym (when the scope\'s target_field is configured) or the session pseudonym. The bridge never breaks authentication (every report is log-and-continue) and never carries a raw identifier into a handle. scope names the risk scope the auth events book under; the bridge arms only when the risk engine is on, the outcomes surface and the security event classes exist, and this scope is configured, so leaving it null keeps the bridge absent and an advisory names the missing knob.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->booleanNode('auto_bridge')->defaultTrue()->end()
+                                ->scalarNode('scope')
+                                    ->info('The risk scope name (a key of risk.scopes) whose policy the framework auth events book under, e.g. "login". Required for the auto-bridge to arm; null (default) leaves the bridge unregistered.')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                        ->thenInvalid('risk.outcomes.scope must be a scope name of 1-128 characters of [A-Za-z0-9._:-]')
+                                    ->end()
+                                ->end()
+                        ->end()
+                    ->end()
+                        ->arrayNode('marks')
+                            ->info('THE MARKS STAGE of the adaptive engine (long-memory attacker handling, change.md 3.3.3): when the engine is wired with a marks reader, every decision consults the deployment\'s long-memory marks on the requesting identity\'s own dimensions (session, principal, the ASN bucket) and on the presented login target. A live mark escalates the action to at least the maximum challenge rung (Argon64, capacity-aware); a mark combined with corroborating attacker evidence (bad proof, replay, malformed traffic or decoy evidence at the policy floor) denies for the remaining mark TTL; a target mark tops out at the interactive step-up so a victim can always finish logging in. The reader rides the risk state store (the canonical marks.lua surface), so this stage engages whenever the engine and its Redis client are on. Abuse_first and high_abuse wire it by default; compatibility keeps the plain pipeline. Null = the protection profile decides.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('enabled')
+                                    ->info('True wires the marks reader into the engine, false keeps the plain pipeline, null (default) derives from the protection profile (on everywhere except compatibility).')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => $v !== null && !\is_bool($v))
+                                        ->thenInvalid('risk.marks.enabled must be a boolean or null (null = the protection profile decides)')
+                                    ->end()
+                                ->end()
+                            ->end()
+                        ->end()
+                        ->arrayNode('pricing')
+                            ->info('THE CONTINUOUS PRICING STAGE of the adaptive engine (change.md 3.3.1/3.3.2): when the engine is wired with a price context, every decision is additionally priced as work = price of (risk score, per-scope value class, bucket trust, global pressure) and the continuous price is quantized onto the challenge ladder. The price may only RAISE the composed action; the plain policy floors keep applying underneath. The pressure term is gated by the session\'s bucket trust (trust.lua), so a trusted identity stays within one rung under a full-pressure storm while an unproven one takes the whole ramp. Abuse_first and high_abuse wire it by default; compatibility keeps the plain pipeline. Null = the protection profile decides.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('enabled')
+                                    ->info('True wires the price context into the engine, false keeps the plain pipeline, null (default) derives from the protection profile (on everywhere except compatibility).')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => $v !== null && !\is_bool($v))
+                                        ->thenInvalid('risk.pricing.enabled must be a boolean or null (null = the protection profile decides)')
+                                    ->end()
+                                ->end()
+                            ->end()
+                        ->end()
+                        ->arrayNode('asn')
+                            ->info('THE ASN DATASET of the trust and marks planes: a local, versioned IP-to-ASN dataset file (the free IPtoASN tsv shapes, "first_ip TAB last_ip TAB asn" per line, comments with #). No network call ever happens: the file is read once at boot into sorted interval tables (a rejected file fails the container build, never a silent empty table). The dataset resolves each request\'s ASN bucket: the bucket-local trust record (trust.lua) prices the request and the marks reader reads the bucket dimension. Null (default) = no dataset: the pricing stage reads zero bucket credit (fail closed, the price may only raise) and the marks reader drops the asn dimension; every other stage is unaffected.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('dataset_path')
+                                    ->info('Absolute path of the ASN dataset file. A literal path must exist and parse at container build (fail closed); an %%env()%% placeholder is opened when the service is constructed.')
+                                    ->defaultNull()
+                                ->end()
+                            ->end()
+                        ->end()
+                        ->arrayNode('evidence')
+                            ->info('THE PLANE-2 EVIDENCE STAGE of the adaptive engine (interaction_anomaly and solve_anomaly over the telemetry-v1 payload, plus the decoy escalation). The engine composes the stage automatically whenever an assessment carries evidence inputs (the token\'s telemetry payload, the measured solve facts); an absent or rejected payload is the neutral-unknown state and the stage may only raise the composed action. The telemetry knob is the BROWSER ARM SWITCH: it renders data-kiwi-telemetry on the widget container, and the driver\'s collector then attaches to the widget\'s host form and the solved token carries the coarse aggregate payload (event-class counts, one 4-bit entropy value, a focus-transition count, a paste ratio, the sample count; no raw coordinates, no key values, no timing series ever leave the page). Default: "minimal" under every protection profile, "full" under abuse_first and high_abuse. The payload is client-controlled and forgeable: probabilistic evidence for the engine, never the security boundary.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->enumNode('telemetry')
+                                    ->info('The telemetry mode rendered into data-kiwi-telemetry on the widget container: "minimal" and "full" arm the form-level collection (the driver-side mechanics are identical, the mode travels with the payload), "off" emits the neutral attribute and the token carries no payload. Null (default) derives from the protection profile: minimal under every profile, full under abuse_first and high_abuse; an explicit value in any config layer wins.')
+                                    ->values(['minimal', 'full', 'off', null])
+                                    ->defaultNull()
+                                ->end()
+                            ->end()
+                        ->end()
+                        ->scalarNode('explain')
+                            ->info('THE NAMES-ONLY EXPLANATION SURFACE of the risk gateway (change.md 3.8.3): when true, every pre-issue assessment carries a DecisionExplanation (top reasons, identity dimension NAMES, chosen action, priced rung when pricing is composed) exposed through the gateway\'s currentDecisionExplanation() accessor, request-scoped beside the decision id. The explanation type has no path for pseudonym values: dimension names only, so a serialized explanation can never leak a hex digest. True by default under abuse_first / high_abuse (operator-visible decisions are part of the abuse posture); null (default) derives from the protection profile.')
+                            ->defaultNull()
+                            ->validate()
+                                ->ifTrue(static fn ($v): bool => $v !== null && !\is_bool($v))
+                                ->thenInvalid('kiwi_captcha.risk.explain must be a boolean or null (null = the protection profile decides)')
+                            ->end()
+                        ->end()
+                        ->arrayNode('metrics')
+                            ->info('The metrics exporter of the observability plane: GET {prefix}/metrics renders the deployment\'s aggregated counters as Prometheus text (decision counters by canonical scope id, action and band; outcome reports by kind; exporter scrapes). The endpoint carries its OWN secret, entirely separate from every other credential of the bundle: null (default) leaves the route unregistered (a direct call to a registered route answers 404 once an env-resolved secret resolves empty), a wrong or missing presented secret answers 401. Labels stay redacted: canonical scope ids, action names, score bands and outcome wire names only, never a raw scope string, IP, username or pseudonym.')
+                            ->addDefaultsIfNotSet()
+                            ->children()
+                                ->scalarNode('secret')
+                                    ->info('The exporter authentication secret (min 32 bytes, %env(KIWI_METRICS_SECRET)% recommended): accepted as an Authorization: Bearer credential or the secret query parameter, compared in constant time. Null (default) disables the endpoint (the route is not registered).')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
+                                        ->thenInvalid('risk.metrics.secret must be a string of at least 32 bytes when configured (the same floor as the siteverify secrets): the exporter secret is the entire authentication boundary of the metrics endpoint. An %%env()%% placeholder is length-checked when the controller is constructed')
+                                    ->end()
+                                ->end()
+                            ->end()
+                        ->end()
+                        ->arrayNode('step_up')
+                            ->info('THE STEP-UP PLANE (default off, nothing is registered when disabled): reference handlers for the application-level step-up the adaptive engine demands (the typed kiwi.post_solve_step_up_required violation). begin/complete run through the StepUpHandlerInterface contract: the begun challenge is a server-side state record in the risk Redis (single-use consumption, bounded TTL, attempt cap) plus a signed expiry-bounded ticket the client carries; a succeeded completion reports the stepUpCompleted outcome for the principal and the target pseudonyms through the outcomes plane, so a legitimate user is not stepped up twice. handlers.email_otp (a one-time passcode delivered through the application-bound sender service) and handlers.totp (RFC 6238, 30 s step, one-step window, per-principal replay guard, enrollment through the handler service) are the full reference handlers; handlers.webauthn is the phishing-resistant registration point and deliberately throws until a CBOR/attestation dependency decision is made. handlers.custom maps application handler names to service ids implementing the interface. The StepUpController is exposed as a service; the application registers its own routes for begin_path/complete_path (the handlers render forms posting to the configured complete path).')
+                            ->canBeEnabled()
+                            ->children()
+                                ->scalarNode('scope')
+                                    ->info('The risk scope name (a key of risk.scopes) the step-up flow books under, e.g. "login". Required when the plane is enabled; the controller derives the challenge context under this scope.')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                        ->thenInvalid('risk.step_up.scope must be a scope name of 1-128 characters of [A-Za-z0-9._:-]')
+                                    ->end()
+                                ->end()
+                                ->scalarNode('default_handler')
+                                    ->info('The handler name the controller resolves when a request names none: one of email_otp, totp, webauthn or a handlers.custom key (the named handler must be enabled or registered).')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[a-z0-9_]{1,64}$/D', $v) !== 1)
+                                        ->thenInvalid('risk.step_up.default_handler must be a handler name of 1-64 characters of [a-z0-9_]')
+                                    ->end()
+                                ->end()
+                                ->integerNode('challenge_ttl_secs')
+                                    ->info('Lifetime of a begun step-up challenge record (and its signed ticket) in seconds (default 300, bounded 30..1800).')
+                                    ->defaultValue(300)
+                                    ->min(30)
+                                    ->max(1800)
+                                ->end()
+                                ->integerNode('max_attempts')
+                                    ->info('Verification attempts one challenge allows before it is dead (default 5, bounded 1..10; each wrong code counts once, atomically in the store).')
+                                    ->defaultValue(5)
+                                    ->min(1)
+                                    ->max(10)
+                                ->end()
+                                ->scalarNode('hmac_secret')
+                                    ->info('HMAC master of the step-up plane: the ticket signing key, the stored-code hash key and the completion-credit idempotency key all derive from it through purpose-separated HKDF derivations. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal is refused at compile time and an env-resolved secret is floor-checked when the services are constructed. When null (default) it derives from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated secret is recommended so a compromise of one never leaks the other.')
+                                    ->defaultNull()
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
+                                        ->thenInvalid('risk.step_up.hmac_secret must be a string of at least 32 bytes when configured (the same floor as secret_key): a shorter step-up master weakens the ticket signatures, the code hashes and the credit idempotency at once. An %%env()%% placeholder is length-checked when the step-up services are constructed')
+                                    ->end()
+                                ->end()
+                                ->scalarNode('begin_path')
+                                    ->info('The application-facing path the begin endpoint is registered at (default /kiwi/step-up/begin). The bundle registers no route; the application wires its own route to StepUpController::begin at this path (or sets this knob to its own path).')
+                                    ->defaultValue('/kiwi/step-up/begin')
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && !self::isSafeStepUpPath($v))
+                                        ->thenInvalid('risk.step_up.begin_path must be an absolute path: beginning with "/", no "//", no "." or ".." segments, no query, no fragment, no backslashes, no control characters')
+                                    ->end()
+                                ->end()
+                                ->scalarNode('complete_path')
+                                    ->info('The application-facing path the complete endpoint is registered at (default /kiwi/step-up/complete). The rendered forms post to this path; the application wires its own route to StepUpController::complete here (or sets this knob to its own path).')
+                                    ->defaultValue('/kiwi/step-up/complete')
+                                    ->validate()
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && !self::isSafeStepUpPath($v))
+                                        ->thenInvalid('risk.step_up.complete_path must be an absolute path: beginning with "/", no "//", no "." or ".." segments, no query, no fragment, no backslashes, no control characters')
+                                    ->end()
+                                ->end()
+                                ->arrayNode('rate_limit')
+                                    ->info('The begin bound: a store-backed fixed-window admission counter per principal pseudonym.')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->integerNode('max_begins')
+                                            ->info('Maximum challenges one principal may begin per window (default 3, bounded 1..20). A begin beyond the bound answers the 429 refusal with the window as the retry hint, fail-closed.')
+                                            ->defaultValue(3)
+                                            ->min(1)
+                                            ->max(20)
+                                        ->end()
+                                        ->integerNode('window_secs')
+                                            ->info('The admission window in seconds (default 900, bounded 60..3600).')
+                                            ->defaultValue(900)
+                                            ->min(60)
+                                            ->max(3600)
+                                        ->end()
+                                    ->end()
+                                ->end()
+                                ->arrayNode('handlers')
+                                    ->info('The handler registry inputs: the built-in reference handlers under their fixed names, plus the application\'s own handlers as name -> service id pairs (each service implements StepUpHandlerInterface; the registry refuses an unknown or non-implementing service at compile time).')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->arrayNode('email_otp')
+                                            ->info('The email one-time-passcode reference handler.')
+                                            ->canBeEnabled()
+                                            ->children()
+                                                ->integerNode('digits')
+                                                    ->info('The passcode length: 6 (default) or 8 digits.')
+                                                    ->defaultValue(6)
+                                                    ->validate()
+                                                        ->ifTrue(static fn ($v): bool => !\in_array($v, [6, 8], true))
+                                                        ->thenInvalid('risk.step_up.handlers.email_otp.digits must be 6 or 8')
+                                                    ->end()
+                                                ->end()
+                                                ->scalarNode('sender')
+                                                    ->info('Service id of the StepUpCodeSenderInterface the application binds (the code delivery: its mailer mapping the principal pseudonym to the address). Null (default) wires the logging dev sender — production must bind a real sender, the codes are the entire secret of this handler.')
+                                                    ->defaultNull()
+                                                ->end()
+                                            ->end()
+                                        ->end()
+                                        ->arrayNode('totp')
+                                            ->info('The RFC 6238 time-based one-time passcode reference handler (30 s step, in-bundle algorithm, no new composer dependency).')
+                                            ->canBeEnabled()
+                                            ->children()
+                                                ->enumNode('algorithm')
+                                                    ->info('The RFC 6238 hash: sha1 (the interoperable default every authenticator app speaks) or sha256 (longer secrets; check the app support first).')
+                                                    ->values(['sha1', 'sha256'])
+                                                    ->defaultValue('sha1')
+                                                ->end()
+                                                ->integerNode('digits')
+                                                    ->info('The code length: 6 (default) or 8 digits.')
+                                                    ->defaultValue(6)
+                                                    ->validate()
+                                                        ->ifTrue(static fn ($v): bool => !\in_array($v, [6, 8], true))
+                                                        ->thenInvalid('risk.step_up.handlers.totp.digits must be 6 or 8')
+                                                    ->end()
+                                                ->end()
+                                                ->integerNode('window')
+                                                    ->info('Acceptance window in time-steps around the current one (default 1, bounded 0..2). The replay guard refuses a time-step that already verified, whatever the window.')
+                                                    ->defaultValue(1)
+                                                    ->min(0)
+                                                    ->max(2)
+                                                ->end()
+                                            ->end()
+                                        ->end()
+                                        ->arrayNode('webauthn')
+                                            ->info('The phishing-resistant WebAuthn registration point. Deliberately a throwing placeholder: constructing the handler fails with a LogicException naming the missing CBOR/attestation dependency decision, because no dependency of this bundle offers that parsing and a new composer dependency may not be added unilaterally. The knob exists so the registry position and the deployment contract are already in place.')
+                                            ->canBeEnabled()
+                                        ->end()
+                                        ->arrayNode('custom')
+                                            ->info('Application handler services: map of handler name -> service id implementing StepUpHandlerInterface. The names join the registry next to the built-ins and are valid default_handler values.')
+                                            ->normalizeKeys(false)
+                                            ->scalarPrototype()
+                                                ->cannotBeEmpty()
+                                            ->end()
+                                            ->defaultValue([])
+                                            ->validate()
+                                                ->ifTrue(static fn (array $v): bool => \array_filter(
+                                                    \array_keys($v),
+                                                    static fn ($k): bool => !\is_string($k) || preg_match('/^[a-z0-9_]{1,64}$/D', $k) !== 1,
+                                                ) !== [])
+                                                ->thenInvalid('risk.step_up.handlers.custom keys must be handler names of 1-64 characters of [a-z0-9_]')
+                                            ->end()
+                                        ->end()
+                                    ->end()
+                                ->end()
+                            ->end()
+                            ->validate()
+                                ->ifTrue(static fn (array $v): bool => $v['enabled'] && $v['scope'] === null)
+                                ->thenInvalid('risk.step_up.scope is required when the step-up plane is enabled — the controller derives every challenge context under a configured risk scope (add the scope to risk.scopes and name it here)')
+                            ->end()
+                            ->validate()
+                                ->ifTrue(static function (array $v): bool {
+                                    if (!$v['enabled'] || $v['default_handler'] === null) {
+                                        return false;
+                                    }
+                                    $name = (string) $v['default_handler'];
+                                    $available = [];
+                                    foreach (['email_otp', 'totp', 'webauthn'] as $builtin) {
+                                        if ($v['handlers'][$builtin]['enabled']) {
+                                            $available[$builtin] = true;
+                                        }
+                                    }
+                                    foreach (\array_keys($v['handlers']['custom']) as $custom) {
+                                        $available[(string) $custom] = true;
+                                    }
+
+                                    return !isset($available[$name]);
+                                })
+                                ->thenInvalid('risk.step_up.default_handler must name an enabled handler: one of the enabled built-ins (email_otp, totp, webauthn) or a handlers.custom key')
+                            ->end()
+                        ->end()
+                        ->arrayNode('agents')
+                            ->info('VERIFIED AGENTS (RFC 9421 HTTP Message Signatures, plane 6): machine clients that authenticate a challenge request with an Ed25519 signature over the RFC 9421 signature base covering @method, @target-uri and the RFC 9530 content-digest (plus content-length whenever a body is present). A verified request skips the widget entirely for its allowed scopes (direct issue, no widget eligibility, no origin or risk-widget gates) and is priced at its price tier; its outcomes and marks attribute to the agent identity. Every agent names its key id, a rotation-capable list of Ed25519 public keys (base64 of the raw 32 bytes; every key verifies during the rotation window, and removing a key fails the agent within one container rebuild), the scopes it may request, per-minute and per-day quotas (sliding windows in the security Redis; an overrun answers 429 with Retry-After and escalates an abuse mark on the agent identity), its price tier and a contact. The signature parameters are enforced: alg must be exactly ed25519, the tag must be this plane\'s tag, created must sit inside the ±skew window (risk.agents_clock_skew_secs), expires is honored, and the nonce is single-use through a Redis ledger (fail-closed: an unverifiable nonce never verifies).')
+                            // The agent names ARE the map keys, so key
+                            // normalization must stay off: a
+                            // dash-bearing agent name ("acme-bot")
+                            // would otherwise be rewritten to
+                            // underscores and the entry would be
+                            // processed empty, silently disarming the
+                            // agent.
+                            ->normalizeKeys(false)
+                            ->useAttributeAsKey('name')
+                            ->arrayPrototype()
+                                ->children()
+                                    ->scalarNode('key_id')
+                                        ->info('The RFC 9421 keyid parameter this agent signs with (1-128 characters of [A-Za-z0-9._-]). Two agents must never share a key id; the nonce ledger is keyed under it.')
+                                        ->cannotBeEmpty()
+                                        ->validate()
+                                            ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._-]{1,128}$/D', $v) !== 1)
+                                            ->thenInvalid('risk.agents.<name>.key_id must be 1-128 characters of [A-Za-z0-9._-]')
+                                        ->end()
+                                    ->end()
+                                    ->arrayNode('public_keys')
+                                        ->info('The Ed25519 public keys of the agent, base64 of the raw 32 key bytes. More than one entry is the rotation window: every key verifies, and revocation is removing the entry (effective within one container rebuild).')
+                                        ->requiresAtLeastOneElement()
+                                        ->scalarPrototype()
+                                            ->cannotBeEmpty()
+                                        ->end()
+                                        ->validate()
+                                            ->ifTrue(static fn (array $v): bool => \count($v) !== \count(array_unique($v)))
+                                            ->thenInvalid('risk.agents.<name>.public_keys must not repeat a key')
+                                        ->end()
+                                    ->end()
+                                    ->arrayNode('allowed_scopes')
+                                        ->info('The scopes this agent may request challenges for; anything else is refused with 403 and the typed agent scope code.')
+                                        ->scalarPrototype()
+                                            ->validate()
+                                                ->ifTrue(static fn (string $v): bool => preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                                ->thenInvalid('risk.agents.<name>.allowed_scopes entries must match [A-Za-z0-9._:-]{1,128}.')
+                                            ->end()
+                                        ->end()
+                                        ->defaultValue([])
+                                    ->end()
+                                    ->integerNode('per_minute')
+                                        ->info('The per-minute challenge quota of the agent (a sliding 60 s window in the security Redis, bounded 1..100000).')
+                                        ->defaultValue(60)
+                                        ->min(1)
+                                        ->max(100000)
+                                    ->end()
+                                    ->integerNode('per_day')
+                                        ->info('The per-day challenge quota of the agent (a sliding 24 h window in the security Redis, bounded 1..10000000 and at least per_minute — a day cap below the minute cap is a contradiction).')
+                                        ->defaultValue(10000)
+                                        ->min(1)
+                                        ->max(10000000)
+                                    ->end()
+                                    ->enumNode('price_tier')
+                                        ->info('The pricing tier of the agent: low, standard, high or critical. The tier selects the challenge rung a verified request is issued and billed at (the interim tier pricing of the bundle, superseded by the core pricing stage when it lands).')
+                                        ->values(['low', 'standard', 'high', 'critical'])
+                                        ->defaultValue('standard')
+                                    ->end()
+                                    ->scalarNode('contact')
+                                        ->info('The operator contact behind the agent (an email or a team handle, 1-320 bytes); it exists for quota-abuse outreach and never reaches a response.')
+                                        ->cannotBeEmpty()
+                                        ->validate()
+                                            ->ifTrue(static fn ($v): bool => \is_string($v) && (\strlen($v) < 1 || \strlen($v) > 320))
+                                            ->thenInvalid('risk.agents.<name>.contact must be 1-320 bytes')
+                                        ->end()
+                                    ->end()
+                                ->end()
+                                ->validate()
+                                    ->ifTrue(static fn (array $v): bool => $v['per_day'] < $v['per_minute'])
+                                    ->thenInvalid('risk.agents.<name>.per_day must be at least per_minute — a day quota below the minute quota is a contradiction')
+                                ->end()
+                            ->end()
+                            ->validate()
+                                ->ifTrue(static function (array $v): bool {
+                                    $seen = [];
+                                    foreach ($v as $agent) {
+                                        $keyId = (string) ($agent['key_id'] ?? '');
+                                        if (isset($seen[$keyId])) {
+                                            return true;
+                                        }
+                                        $seen[$keyId] = true;
+                                    }
+
+                                    return false;
+                                })
+                                ->thenInvalid('risk.agents: two agents must never share one key_id — the key id is the lookup and the nonce-ledger identity; give each agent (or each rotation window) its own key_id')
+                            ->end()
+                            ->defaultValue([])
+                        ->end()
+                        ->integerNode('agents_clock_skew_secs')
+                            ->info('The ± window in seconds the RFC 9421 created parameter of a verified-agent signature must sit inside (default 300, bounded 1..3600). Clock-skew tolerance and replay exposure move together: a wider window accepts signatures minted further in the past or future, while the single-use nonce ledger stays the replay bound.')
+                            ->defaultValue(300)
+                            ->min(1)
+                            ->max(3600)
                         ->end()
                     ->end()
                     ->validate()
                         ->ifTrue(static fn (array $v): bool => ($v['chaining']['enabled'] ?? false)
                             && (!($v['enabled'] ?? false) || ($v['request_binding_authority'] ?? null) === null))
                         ->thenInvalid('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority — the chain is a server-side transaction obligation anchored on the AUTHORITATIVE binding, never on an unexamined client string')
+                    ->end()
+                    ->validate()
+                        ->ifTrue(static fn (array $v): bool => ($v['step_up']['enabled'] ?? false)
+                            && !($v['enabled'] ?? false))
+                        ->thenInvalid('risk.step_up.enabled requires risk.enabled=true — the step-up plane stores its challenge records in the risk Redis and credits completions through the outcomes plane of the risk engine')
+                    ->end()
+                    ->validate()
+                        ->ifTrue(static fn (array $v): bool => ($v['policy_rollout_min_epoch'] ?? null) !== null
+                            && $v['policy_rollout_min_epoch'] >= $v['policy_version'])
+                        ->thenInvalid('risk.policy_rollout_min_epoch must be strictly lower than risk.policy_version — the rollout window is [floor, expected] with the floor at the OLD epoch: a floor reaching the expected epoch is the strict contract itself (declare no window instead), and a floor above it would accept nothing (the window fails closed)')
+                    ->end()
+                    ->validate()
+                        ->ifTrue(static fn (array $v): bool => ($v['agents'] ?? []) !== [] && !($v['enabled'] ?? false))
+                        ->thenInvalid('risk.agents requires risk.enabled=true — the verified-agents plane keeps its nonce ledger and quota windows in the risk Redis and escalates overrun marks through the outcomes surface of the risk engine')
                     ->end()
                 ->end()
                 ->scalarNode('replay_durability')
@@ -1247,7 +1626,7 @@ final class Configuration implements ConfigurationInterface
             // required-tier at-or-below-cap rule above is their only
             // bound).
             ->validate()
-                ->ifTrue(static fn (array $v): bool => ($v['protection_profile'] ?? null) === 'high_abuse'
+                ->ifTrue(static fn (array $v): bool => \in_array($v['protection_profile'] ?? null, ['high_abuse', 'abuse_first'], true)
                     && ($v['risk']['execution_challenge'] ?? 'off') === 'on'
                     && $v['execution_required_version'] < $v['execution_version']
                     && !($v['execution_allow_downgrade'] ?? false))
@@ -1327,6 +1706,32 @@ final class Configuration implements ConfigurationInterface
         }
 
         return $config;
+    }
+
+    /**
+     * The absolute-path grammar of the step-up endpoint knobs: begins
+     * with "/", at least one segment, no empty ("//") or dot segments,
+     * no backslashes, no query string, no fragment, no control bytes.
+     */
+    private static function isSafeStepUpPath(mixed $v): bool
+    {
+        if (!\is_string($v) || $v === '' || $v[0] !== '/' || \strlen($v) > 512) {
+            return false;
+        }
+        if (str_contains($v, '\\') || str_contains($v, '?') || str_contains($v, '#') || str_contains($v, '%')) {
+            return false;
+        }
+        if (preg_match('/[\x00-\x1F\x7F]/', $v) === 1) {
+            return false;
+        }
+        $segments = explode('/', $v);
+        for ($i = 1, $count = \count($segments); $i < $count; $i++) {
+            if ($segments[$i] === '' || $segments[$i] === '.' || $segments[$i] === '..') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

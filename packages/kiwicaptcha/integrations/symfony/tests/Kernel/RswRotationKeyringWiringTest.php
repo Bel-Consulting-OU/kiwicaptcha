@@ -53,6 +53,11 @@ final class RswRotationKeyringWiringTest extends TestCase
     {
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
+        // The bundle's validator-side wiring (the quarantine marker, the
+        // validator) references the framework's request_stack service;
+        // this bare wiring container registers the service itself, the
+        // same object FrameworkBundle would provide.
+        $container->setDefinition('request_stack', new Definition(\Symfony\Component\HttpFoundation\RequestStack::class, []));
         $container->setParameter('kernel.project_dir', __DIR__);
         $definition = new Definition(ArrayStorage::class, []);
         $definition->setSynthetic(true);

@@ -67,11 +67,25 @@ impl<'a> RiskContext<'a> {
 ///   compares the current request's tag against it; values over 64 chars
 ///   are treated as absent by the consuming engine (bounded). The PHP
 ///   mirror names the field `tlsTag`.
+/// - `telemetry_payload`: the raw telemetry-v1 payload text from the
+///   solution token (the published schema lives at
+///   protocol/telemetry-v1/payload.json). The engine parses it per the
+///   schema; a rejected or over-bound payload is the neutral-unknown
+///   state, never a negative signal. The PHP mirror names the field
+///   `telemetryPayload`.
+/// - `solve_ms` and `solve_rung`: the solved challenge's client-reported
+///   duration and issued rung key (the client-performance difficulty
+///   key). They ride together or not at all; a half-present pair rejects
+///   the assessment input. The PHP mirror names them `solveMs` and
+///   `solveRung`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RiskV2Context {
     pub honeypot_hit: bool,
     pub client_context_tag: Option<String>,
     pub tls_tag: Option<String>,
+    pub telemetry_payload: Option<String>,
+    pub solve_ms: Option<u64>,
+    pub solve_rung: Option<String>,
 }
 
 /// The contract bound on the risk-v2 session tag strings (bytes), shared
@@ -79,9 +93,29 @@ pub struct RiskV2Context {
 /// defense, and the engines reject the assessment input up front.
 pub const MAX_CONTEXT_TAG_BYTES: usize = 64;
 
+/// The contract bound on the telemetry payload string (bytes), shared
+/// with PHP: an over-bound payload rejects the assessment input up
+/// front, mirroring the tag bound.
+pub const MAX_TELEMETRY_PAYLOAD_BYTES: usize = crate::evidence::MAX_PAYLOAD_BYTES;
+
 impl RiskV2Context {
     /// True when the context carries NO risk-v2 evidence at all.
     pub fn is_empty(&self) -> bool {
-        !self.honeypot_hit && self.client_context_tag.is_none() && self.tls_tag.is_none()
+        !self.honeypot_hit
+            && self.client_context_tag.is_none()
+            && self.tls_tag.is_none()
+            && self.telemetry_payload.is_none()
+            && self.solve_ms.is_none()
+            && self.solve_rung.is_none()
+    }
+
+    /// The solve facts as the tuple the evidence stage consumes, or
+    /// `None` when absent. A half-present pair never reaches this
+    /// method on the engine paths (the validation rejects it first).
+    pub fn solve_facts(&self) -> Option<(u64, &str)> {
+        match (self.solve_ms, self.solve_rung.as_deref()) {
+            (Some(ms), Some(rung)) => Some((ms, rung)),
+            _ => None,
+        }
     }
 }

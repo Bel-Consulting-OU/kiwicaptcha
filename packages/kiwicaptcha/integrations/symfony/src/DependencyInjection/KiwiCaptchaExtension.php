@@ -11,14 +11,31 @@ use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use BelConsulting\KiwiCaptchaBundle\RedisNamespace;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Controller\KiwiMetricsController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Controller\StepUpController;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaMigrateCommand;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\BucketTrustPriceContext;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
+use BelConsulting\KiwiCaptchaBundle\Risk\DecoyEscalationScriptRunner;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnCredentialRegistry;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore;
@@ -28,8 +45,15 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageI
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\FailClosedOutcomeTrustGate;
+use BelConsulting\KiwiCaptchaBundle\Risk\KiwiOutcomeReporter;
+use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
+use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeTrustGateInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisRiskHealthProvider;
+use BelConsulting\KiwiCaptchaBundle\Risk\QuarantineMarkerInterface;
+use BelConsulting\KiwiCaptchaBundle\Risk\RequestQuarantineMarker;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
@@ -39,6 +63,11 @@ use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisCli
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityTransitionGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\RuntimeAuthorityClassifier;
+use BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentNonceStore;
+use BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentQuota;
+use BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentRegistry;
+use BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentSignatureVerifier;
+use BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentsVerifier;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -56,12 +85,20 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Asn\AsnDataset;
+use KiwiCaptcha\Risk\Evidence\AutofillQualificationGate;
+use KiwiCaptcha\Risk\Evidence\DecoyEscalationStore;
+use KiwiCaptcha\Risk\FormFieldTargetResolver;
+use KiwiCaptcha\Risk\Marks\StoreMarksReader;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\Outcomes\KiwiOutcomes;
+use KiwiCaptcha\Risk\Pricing\ValueClass;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskV2Weights;
+use KiwiCaptcha\Risk\Trust\ContextBoundTrust;
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\AggregateCalibrator;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
@@ -1006,8 +1043,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The verifier's expected security-policy epoch: a record
             // issued under any other epoch is rejected (WrongPolicyVersion),
             // so bumping risk.policy_version invalidates outstanding
-            // challenges immediately.
+            // challenges immediately. The declared rollout window floor
+            // (risk.policy_rollout_min_epoch) rides along: while set, a
+            // record within [floor, expected] verifies too, so a mixed
+            // N/N+1 fleet redeems cross-node during the drain. The floor
+            // is wired once here — the SecurityEpochMonitor bumps only
+            // the expected epoch and never touches it.
             ->setArgument('$expectedPolicyVersion', $config['risk']['policy_version'])
+            ->setArgument('$policyVersionFloor', $config['risk']['policy_rollout_min_epoch'])
             // HMAC-key rotation (secretsByKid), emergency revocation
             // (revokedKids) and the expected issuer are first-class bundle
             // options. secretsByKid receives the effective keyring from
@@ -1102,12 +1145,25 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ? new Reference('logger')
             : null;
         $riskConfig = $config['risk'];
+        // The profile-driven stage composition (change.md Part 5),
+        // resolved once for the whole load: the protection profile
+        // decides which decision stages ride the engine, an explicit
+        // stage knob always wins, and the ASN dataset adds its
+        // dimension wherever a file is configured. abuse_first and
+        // high_abuse compose everything Part 3 defines (marks, pricing,
+        // bucket trust, the explanation surface); the neutral postures
+        // compose the server-side memory stages; compatibility keeps
+        // the plain pipeline. The evidence plane's browser arm
+        // (telemetry) resolves here too, because the widget renders
+        // under every posture, risk engine on or off.
+        $composition = RiskStageComposition::resolve(ProtectionProfileDefaults::selectedProfile($configs), $riskConfig);
         $riskGatewayRef = null;
         $riskCookieRef = null;
         $issuanceCounterRef = null;
         $outstandingRef = null;
         $chainServiceRef = null;
         $chainStoreRef = null;
+        $agentsVerifierRef = null;
         $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
             ? new Reference($riskConfig['request_binding_authority'])
             : null;
@@ -1260,6 +1316,114 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // last-operation result.
             $container->setDefinition('kiwi_captcha.risk.breaker', new Definition(CircuitBreaker::class));
 
+            // The composition above (hoisted) decides the stage plan; the
+            // risk block consumes it here.
+
+            // The profile-driven stage composition (change.md Part 5): the
+            // protection profile decides which decision stages ride the
+            // engine, an explicit stage knob always wins, and the ASN
+            // dataset adds its dimension wherever a file is configured.
+            // Resolved once before the risk block, see the hoisted
+            // computation above.
+
+            // The ASN dataset (data, not a flag): opened once at boot into
+            // sorted interval tables. A literal path that cannot be read
+            // or parsed fails the container build here, never a silent
+            // empty table at request time; an env-resolved path is opened
+            // when the service is constructed (the same fail-closed
+            // refusal, one boot later).
+            $asnRef = null;
+            if ($composition['asn']) {
+                $asnPath = (string) $riskConfig['asn']['dataset_path'];
+                if (!self::isEnvPlaceholder($asnPath)) {
+                    AsnDataset::open($asnPath);
+                }
+                $container->setDefinition('kiwi_captcha.risk.asn', (new Definition(AsnDataset::class))
+                    ->setFactory([AsnDataset::class, 'open'])
+                    ->setArguments([$asnPath])
+                    ->setPublic(true));
+                $asnRef = new Reference('kiwi_captcha.risk.asn');
+            }
+
+            // The bucket-trust facade over the state store's trust.lua
+            // surface: trust earned per ASN bucket, read by the price
+            // context. It exists only when the dataset resolves buckets;
+            // without one the price context prices zero credit (fail
+            // closed) and no stage demands the dataset.
+            $trustRef = null;
+            if ($composition['trust'] && $asnRef !== null) {
+                $container->setDefinition('kiwi_captcha.risk.trust', new Definition(ContextBoundTrust::class, [
+                    $asnRef,
+                    new Reference('kiwi_captcha.risk.store'),
+                ]));
+                $trustRef = new Reference('kiwi_captcha.risk.trust');
+            }
+
+            // The marks reader: the store-backed default over the
+            // engine-derived session and principal pseudonyms plus the
+            // ASN bucket dimension when the dataset is present. The
+            // engine composes its escalation stage only through this
+            // reader, so an unwired reader keeps the byte-identical plain
+            // decision path.
+            $marksReaderRef = null;
+            if ($composition['marks']) {
+                $container->setDefinition('kiwi_captcha.risk.marks_reader', new Definition(StoreMarksReader::class, [
+                    new Reference('kiwi_captcha.risk.store'),
+                    null,
+                    $asnRef,
+                ]));
+                $marksReaderRef = new Reference('kiwi_captcha.risk.marks_reader');
+            }
+
+            // The price context: the bundle-side composition of the two
+            // pricing inputs the deployment owns, the per-scope value
+            // class map and the bucket-trust read. The engine's price
+            // stage applies the core PriceModel on top.
+            $priceContextRef = null;
+            if ($composition['pricing']) {
+                $scopeValueClasses = [];
+                foreach ($riskConfig['scopes'] as $name => $spec) {
+                    if (\is_array($spec) && ($spec['value_class'] ?? null) !== null) {
+                        $scopeValueClasses[$scopeIds[$name]] = ValueClass::from($spec['value_class']);
+                    }
+                }
+                $container->setDefinition('kiwi_captcha.risk.price_context', new Definition(BucketTrustPriceContext::class, [
+                    $scopeValueClasses,
+                    $trustRef,
+                ]));
+                $priceContextRef = new Reference('kiwi_captcha.risk.price_context');
+            }
+
+            // The decoy-escalation store (change.md 3.2.2): the write and
+            // read surface of the one-rung session escalation after a
+            // server-confirmed decoy hit. The store rides the bundle's
+            // Redis script runner over the risk client, the runtime
+            // autofill-qualification gate stays the canonical committed
+            // matrix (fail closed: the write path writes nothing until
+            // every required surface qualifies), and the namespace keys
+            // the escalation records per deployment. Wired with the
+            // server-side memory stages (the composition's decoy entry,
+            // never under compatibility) and only when the risk Redis
+            // client exists; the engine's escalation read degrades to
+            // not-live without a store, so an absent surface is inert.
+            $decoyEscalationRef = null;
+            if ($composition['decoy'] && $riskRedis !== null) {
+                $container->setDefinition('kiwi_captcha.risk.autofill_gate', (new Definition(AutofillQualificationGate::class))
+                    ->setFactory([AutofillQualificationGate::class, 'committed']));
+                $container->setDefinition('kiwi_captcha.risk.decoy_script_runner', new Definition(DecoyEscalationScriptRunner::class, [
+                    $riskRedis,
+                ]));
+                $container->setDefinition('kiwi_captcha.risk.decoy_escalation', new Definition(DecoyEscalationStore::class, [
+                    new Reference('kiwi_captcha.risk.decoy_script_runner'),
+                    new Reference('kiwi_captcha.risk.autofill_gate'),
+                    // The derived deployment namespace: every key family
+                    // shares it, and the store's own safe-key guard
+                    // accepts exactly the derivation's alphabet.
+                    $namespace,
+                ]));
+                $decoyEscalationRef = new Reference('kiwi_captcha.risk.decoy_escalation');
+            }
+
             // The engine is public so applications can read risk metrics
             // (RiskGateway::metricsSnapshot) or record their own
             // confirmed-legitimate/abuse signals. The trailing parameters
@@ -1287,6 +1451,29 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$metrics', new Reference('kiwi_captcha.risk.metrics'))
                 ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$enableGlobalPressure', $riskConfig['global_pressure']['enabled'])
+                // The per-scope target-identifier resolver (risk.scopes.*.
+                // target_field): the engine resolves the submitted form
+                // field through the versioned normalization pipeline and
+                // stores only the HMAC pseudonym. Wired with the
+                // explicit map only when at least one scope configures a
+                // target field, so a deployment without the dimension is
+                // untouched.
+                ->setArgument('$targetResolver', self::wireTargetFieldResolver($riskConfig, $scopeIds, $container))
+                // The composed decision stages (change.md Part 3) of the
+                // profile-driven factory: the marks reader with attacker
+                // denial and the price context with the continuous work
+                // pricing. Null keeps the exact plain pipeline of the
+                // compatibility posture; the composition above decides
+                // per protection profile.
+                ->setArgument('$marksReader', $marksReaderRef)
+                ->setArgument('$priceContext', $priceContextRef)
+                // The decoy-escalation reader (change.md 3.2.2): the
+                // engine's post-marks escalation stage consults the
+                // session's live record through this reader; the stage
+                // raises one rung, capped at the interactive step-up.
+                // Null keeps the exact plain pipeline (compatibility, or
+                // a deployment without a risk Redis client).
+                ->setArgument('$decoyEscalationReader', $decoyEscalationRef)
                 ->setPublic(true));
             // The resolver receives the complete configured baseline
             // (algorithm plus the SHA/Argon work parameters) and the
@@ -1404,6 +1591,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // (risk.v2.*; the values default to the contract
                 // defaults, so an unset config scores identically).
                 ->setArgument('$v2Weights', new Reference('kiwi_captcha.risk.v2_weights'))
+                // The names-only explanation surface (risk.explain): on
+                // by default under the abuse profiles, where operator-
+                // visible decisions are part of the posture.
+                ->setArgument('$explain', $composition['explain'])
+                // The decoy-escalation write side: the gateway exposes
+                // the server-confirmed-hit record call, and the engine's
+                // identity factory derives the same keyed session
+                // pseudonym the engine's escalation read consults.
+                ->setArgument('$decoyEscalation', $decoyEscalationRef)
+                ->setArgument('$identityFactory', new Reference('kiwi_captcha.risk.identity_factory'))
                 ->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.v2_weights', (new Definition(RiskV2Weights::class))
                 ->setArgument('$honeypot', $riskConfig['v2']['honeypot_weight'])
@@ -1500,6 +1697,256 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$bindingAuthority', $bindingAuthorityRef)
                     ->setPublic(true));
                 $chainServiceRef = new Reference(ChainedChallengeTicketService::class);
+            }
+
+            // The typed outcomes plane and the Symfony security
+            // auto-bridge (risk.outcomes.*): the facade over the
+            // engine + the marks store, and the subscriber translating
+            // LoginSuccess / LoginFailure / CheckPassport into the
+            // typed outcome vocabulary. The bridge arms only when the
+            // outcomes surface exists (the vendored risk core carries
+            // it), the security bundle's event classes exist (the
+            // security bundle is optional for this bundle) and the
+            // outcomes scope names a configured risk scope; an
+            // auto_bridge deployment missing one of the surface
+            // preconditions gets an advisory naming the gap, never a
+            // broken boot. The success-trust gate binding is the
+            // fail-closed default until the store grows a public
+            // windowed-failure-ratio accessor (see the gate interface).
+            $outcomesConfig = $riskConfig['outcomes'];
+            $outcomesSurfaceExists = self::outcomesSurfaceAvailable();
+            $outcomesScopeName = $outcomesConfig['scope'];
+            $stepUpConfig = $riskConfig['step_up'];
+            $bridgeArms = $outcomesConfig['auto_bridge'] && $outcomesSurfaceExists && \is_string($outcomesScopeName);
+            if ($outcomesConfig['auto_bridge'] && $outcomesSurfaceExists && $outcomesScopeName === null && !$stepUpConfig['enabled']) {
+                $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.risk.outcomes.auto_bridge is true and the risk engine is on, but risk.outcomes.scope is not configured, so the security auto-bridge stays unregistered. Set risk.outcomes.scope to the risk scope the framework auth events book under (e.g. "login") to arm the bridge.');
+            }
+            // The outcomes facade + the reporter seam serve three
+            // consumers: the Symfony security auto-bridge, the
+            // step-up plane's completion credit, and the
+            // verified-agents plane's quota-overrun escalation mark.
+            // All live on the same facade definition, so a deployment
+            // with several of the surfaces books through one engine
+            // seam. The marks stage joins the arming condition: long-
+            // memory marks are written through this facade, so a
+            // deployment whose profile composes them always carries a
+            // reporter for the application's own abuse confirmations.
+            // The hasDefinition guard below keeps a single arming, so
+            // the surfaces never double-register the facade.
+            $agentsConfigured = $riskConfig['agents'] !== [];
+            if ($bridgeArms || $stepUpConfig['enabled'] || $agentsConfigured || $composition['marks']) {
+                if ($bridgeArms && !\array_key_exists($outcomesScopeName, $scopeIds)) {
+                    throw new \InvalidArgumentException(sprintf(
+                        'kiwi_captcha.risk.outcomes.scope "%s" is not a configured risk scope — the outcomes bridge books its reports under a configured scope policy (add the scope to risk.scopes or fix the name)',
+                        $outcomesScopeName,
+                    ));
+                }
+                if (!$container->hasDefinition('kiwi_captcha.risk.outcomes')) {
+                    $container->setDefinition('kiwi_captcha.risk.outcomes', (new Definition(KiwiOutcomes::class, [
+                        new Reference('kiwi_captcha.risk.engine'),
+                        new Reference('kiwi_captcha.risk.store'),
+                    ]))->setPublic(true));
+                    $container->setDefinition(OutcomeReporterInterface::class, new Definition(KiwiOutcomeReporter::class, [
+                        new Reference('kiwi_captcha.risk.outcomes'),
+                    ]));
+                }
+            }
+            if ($bridgeArms) {
+                $container->setDefinition(OutcomeTrustGateInterface::class, new Definition(FailClosedOutcomeTrustGate::class));
+                $container->setDefinition(KiwiOutcomeBridgeSubscriber::class, (new Definition(KiwiOutcomeBridgeSubscriber::class, [
+                    new Reference(OutcomeReporterInterface::class),
+                    new Reference('kiwi_captcha.risk.identity_factory'),
+                    $scopeIds[$outcomesScopeName],
+                    // The idempotency master: the dedicated risk master
+                    // secret when configured, the captcha secret
+                    // otherwise, exactly the derivation fallback order
+                    // of every other risk secret.
+                    $riskConfig['master_secret'] ?? $config['secret_key'],
+                ]))
+                    ->setArgument('$classifier', new Reference('kiwi_captcha.risk.classifier'))
+                    ->setArgument('$continuityCookie', $riskCookieRef)
+                    ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
+                    ->setArgument('$targetFieldConfigured', $riskConfig['scopes'][$outcomesScopeName]['target_field'] !== null)
+                    ->setArgument('$trustGate', new Reference(OutcomeTrustGateInterface::class))
+                    ->setArgument('$counters', new Reference('kiwi_captcha.metrics_counters'))
+                    ->setArgument('$logger', $loggerRef)
+                    ->addTag('kernel.event_subscriber')
+                    ->setPublic(true));
+            }
+
+            // The step-up plane (risk.step_up.*): reference handlers
+            // behind the StepUpHandlerInterface contract, one registry,
+            // and the completion credit over the outcomes seam. The
+            // state backend is the risk Redis (a Predis client is a
+            // precondition of risk.enabled), keyed under the same
+            // deployment namespace family as every other risk-side key
+            // family; the ticket HMAC, the stored-code hash and the
+            // credit idempotency all derive from one step-up master
+            // (the dedicated hmac_secret when configured, the risk
+            // master / captcha secret fallback otherwise, the same
+            // fallback order as every other risk secret).
+            if ($stepUpConfig['enabled']) {
+                $stepUpScope = (string) $stepUpConfig['scope'];
+                if (!\array_key_exists($stepUpScope, $scopeIds)) {
+                    throw new \InvalidArgumentException(sprintf(
+                        'kiwi_captcha.risk.step_up.scope "%s" is not a configured risk scope — the step-up flow derives every challenge context under a configured scope policy (add the scope to risk.scopes or fix the name)',
+                        $stepUpScope,
+                    ));
+                }
+                $stepUpMaster = $stepUpConfig['hmac_secret'] ?? $riskConfig['master_secret'] ?? $config['secret_key'];
+                $container->setDefinition('kiwi_captcha.step_up.store', (new Definition(RedisStepUpChallengeStore::class, [
+                    $riskRedis,
+                    sprintf('{kiwi:%s}:stepup:', $namespace),
+                ]))->setPublic(true));
+                $container->setDefinition(StepUpTicket::class, (new Definition(StepUpTicket::class, [
+                    $stepUpMaster,
+                ]))->setPublic(true));
+                $container->setDefinition(StepUpCompletionCredit::class, (new Definition(StepUpCompletionCredit::class, [
+                    new Reference(OutcomeReporterInterface::class),
+                    $stepUpMaster,
+                ]))->setPublic(true));
+
+                $stepUpHandlers = [];
+                $stepUpHandlerConfig = $stepUpConfig['handlers'];
+                if ($stepUpHandlerConfig['email_otp']['enabled']) {
+                    $senderId = $stepUpHandlerConfig['email_otp']['sender'];
+                    $senderRef = \is_string($senderId) && $senderId !== ''
+                        ? new Reference($senderId)
+                        : new Definition(LoggingStepUpCodeSender::class, [$loggerRef]);
+                    $container->setDefinition(EmailOtpStepUpHandler::class, (new Definition(EmailOtpStepUpHandler::class, [
+                        new Reference('kiwi_captcha.step_up.store'),
+                        new Reference(StepUpTicket::class),
+                        new Reference(StepUpCompletionCredit::class),
+                        $senderRef,
+                        $stepUpMaster,
+                        $stepUpConfig['challenge_ttl_secs'],
+                        $stepUpConfig['max_attempts'],
+                        $stepUpHandlerConfig['email_otp']['digits'],
+                        $stepUpConfig['rate_limit']['max_begins'],
+                        $stepUpConfig['rate_limit']['window_secs'],
+                        $stepUpConfig['complete_path'],
+                    ]))->setPublic(true));
+                    $stepUpHandlers['email_otp'] = new Reference(EmailOtpStepUpHandler::class);
+                }
+                if ($stepUpHandlerConfig['totp']['enabled']) {
+                    $container->setDefinition(TotpStepUpHandler::class, (new Definition(TotpStepUpHandler::class, [
+                        new Reference('kiwi_captcha.step_up.store'),
+                        new Reference(StepUpTicket::class),
+                        new Reference(StepUpCompletionCredit::class),
+                        $stepUpHandlerConfig['totp']['algorithm'],
+                        $stepUpHandlerConfig['totp']['digits'],
+                        $stepUpHandlerConfig['totp']['window'],
+                        $stepUpConfig['challenge_ttl_secs'],
+                        $stepUpConfig['max_attempts'],
+                        $stepUpConfig['rate_limit']['max_begins'],
+                        $stepUpConfig['rate_limit']['window_secs'],
+                        $stepUpConfig['complete_path'],
+                    ]))->setPublic(true));
+                    $stepUpHandlers['totp'] = new Reference(TotpStepUpHandler::class);
+                }
+                if ($stepUpHandlerConfig['webauthn']['enabled']) {
+                    // The WebAuthn handler is real and sits behind one
+                    // installation check: the lib-backed handler (and
+                    // its credential registry, a class of the lib's
+                    // interface family) are wired only when
+                    // web-auth/webauthn-lib is installed, and the
+                    // handler's constructor refuses with the documented
+                    // message when it is not, so activating the feature
+                    // is exactly one composer require and a deployment
+                    // without the library keeps the actionable refusal.
+                    $registryDefinition = null;
+                    if (\class_exists(\Webauthn\PublicKeyCredentialLoader::class)) {
+                        $registryDefinition = (new Definition(WebAuthnCredentialRegistry::class, [
+                            $riskRedis,
+                            sprintf('{kiwi:%s}:stepup:', $namespace),
+                        ]))->setPublic(true);
+                        $container->setDefinition(WebAuthnCredentialRegistry::class, $registryDefinition);
+                    }
+                    $container->setDefinition(WebAuthnStepUpHandler::class, (new Definition(WebAuthnStepUpHandler::class, [
+                        new Reference('kiwi_captcha.step_up.store'),
+                        new Reference(StepUpTicket::class),
+                        new Reference(StepUpCompletionCredit::class),
+                        $registryDefinition === null ? null : new Reference(WebAuthnCredentialRegistry::class),
+                        $stepUpMaster,
+                        $stepUpConfig['challenge_ttl_secs'],
+                        $stepUpConfig['max_attempts'],
+                        $stepUpConfig['rate_limit']['max_begins'],
+                        $stepUpConfig['rate_limit']['window_secs'],
+                        $stepUpConfig['complete_path'],
+                    ]))->setPublic(true));
+                    $stepUpHandlers['webauthn'] = new Reference(WebAuthnStepUpHandler::class);
+                }
+                foreach ($stepUpHandlerConfig['custom'] as $customName => $customServiceId) {
+                    $stepUpHandlers[(string) $customName] = new Reference((string) $customServiceId);
+                }
+                if ($stepUpHandlers === []) {
+                    throw new \InvalidArgumentException(
+                        'kiwi_captcha.risk.step_up is enabled but names no handler: enable at least one of risk.step_up.handlers.email_otp / totp / webauthn or register a handlers.custom service, and set default_handler'
+                    );
+                }
+                $stepUpDefault = \is_string($stepUpConfig['default_handler']) && $stepUpConfig['default_handler'] !== ''
+                    ? $stepUpConfig['default_handler']
+                    : (string) array_key_first($stepUpHandlers);
+                $container->setDefinition(KiwiStepUpHandlerRegistry::class, (new Definition(KiwiStepUpHandlerRegistry::class, [
+                    $stepUpHandlers,
+                    $stepUpDefault,
+                ]))->setPublic(true));
+                $container->setDefinition(StepUpController::class, (new Definition(StepUpController::class, [
+                    new Reference(KiwiStepUpHandlerRegistry::class),
+                    new Reference('kiwi_captcha.risk.identity_factory'),
+                    $stepUpScope,
+                ]))
+                    ->setArgument('$principalResolver', $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null)
+                    ->addTag('controller.service_arguments')
+                    ->setPublic(true));
+            }
+
+            // The verified-agents plane (risk.agents.*, RFC 9421
+            // signatures): the registry (the config map keyed by name
+            // and key id), the Redis nonce ledger and quota windows
+            // under the same deployment hash-tag family as every other
+            // risk-side key family, the signature verifier with the
+            // configured skew window, and the gate the challenge
+            // controller consults. A quota overrun escalates through
+            // the outcomes reporter armed above, so the agents
+            // configuration forces that facade on exactly like the
+            // bridge and the step-up plane do.
+            if ($agentsConfigured) {
+                // Eager literal validation: an entry whose values
+                // carry no env placeholder is decoded and checked now,
+                // so a malformed base64 key or quota shape fails the
+                // container build with the agent named. Entries that
+                // reference env values are validated when the registry
+                // service is constructed (the resolved bytes are
+                // invisible at build time).
+                $carriesEnvPlaceholder = static fn (array $entry): bool => str_contains((string) json_encode($entry), '%');
+                if (!array_filter($riskConfig['agents'], $carriesEnvPlaceholder)) {
+                    AgentRegistry::fromConfig($riskConfig['agents']);
+                }
+                $container->setDefinition('kiwi_captcha.agents.registry', (new Definition(AgentRegistry::class))
+                    ->setFactory([AgentRegistry::class, 'fromConfig'])
+                    ->setArguments([$riskConfig['agents']])
+                    ->setPublic(true));
+                $container->setDefinition('kiwi_captcha.agents.nonce_store', (new Definition(AgentNonceStore::class, [
+                    $riskRedis,
+                    sprintf('{kiwi:%s}:', $namespace),
+                ]))->setPublic(true));
+                $container->setDefinition('kiwi_captcha.agents.signature_verifier', (new Definition(AgentSignatureVerifier::class, [
+                    new Reference('kiwi_captcha.agents.registry'),
+                    new Reference('kiwi_captcha.agents.nonce_store'),
+                    $riskConfig['agents_clock_skew_secs'],
+                ]))->setPublic(true));
+                $container->setDefinition('kiwi_captcha.agents.quota', (new Definition(AgentQuota::class, [
+                    $riskRedis,
+                    sprintf('{kiwi:%s}:', $namespace),
+                ]))->setPublic(true));
+                $container->setDefinition(AgentsVerifier::class, (new Definition(AgentsVerifier::class, [
+                    new Reference('kiwi_captcha.agents.signature_verifier'),
+                    new Reference('kiwi_captcha.agents.quota'),
+                    new Reference(OutcomeReporterInterface::class),
+                    $loggerRef,
+                ]))->setPublic(true));
+                $agentsVerifierRef = new Reference(AgentsVerifier::class);
             }
         }
         // The replay_durability posture is the explicit authority-change
@@ -1610,7 +2057,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]));
 
         // Per-scope issuance cap: risk.max_challenges_per_scope_per_minute
-        // > 0 requires a Redis client for the atomic fixed-window counter,
+        // > 0 requires a Redis client for the atomic sliding-window counter,
         // refused at compile time instead of silently minting unbilled
         // challenges. The window key carries the hex form of
         // hmac_sha256(scope, K_scope), so the raw scope string is never
@@ -1624,17 +2071,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             if ($scopeCapRedis === null) {
                 throw new \LogicException(
                     'kiwi_captcha.risk.max_challenges_per_scope_per_minute requires a Redis client for the atomic '.
-                    'fixed-window counter ({kiwi:<ns>}:issuance:<scopeIdentity>:<minute>). Configure '.
+                    'sliding-window counter ({kiwi:<ns>}:issuance:<scopeIdentity>:sw). Configure '.
                     'redis_service / risk.redis_service (or a RedisStorage client) or set the cap to 0 (unlimited).'
                 );
             }
             $scopeHmacKey = ScopeIssuanceCap::deriveScopeHmacKey($riskConfig['master_secret'] ?? $config['secret_key']);
-            $container->setDefinition('kiwi_captcha.risk.scope_issuance_cap', new Definition(ScopeIssuanceCap::class, [
+            $container->setDefinition('kiwi_captcha.risk.scope_issuance_cap', (new Definition(ScopeIssuanceCap::class, [
                 $scopeCapRedis,
                 sprintf('{kiwi:%s}:issuance:', $namespace),
                 $riskConfig['max_challenges_per_scope_per_minute'],
                 $scopeHmacKey,
-            ]));
+            ]))
+                // The cap-approaching alert logger (the warning once the
+                // window reaches 80% of the cap), resolved exactly like
+                // every other bundle service: the app's logger when one
+                // is present, null otherwise.
+                ->setArgument('$logger', $loggerRef));
             $scopeCapRef = new Reference('kiwi_captcha.risk.scope_issuance_cap');
         }
 
@@ -1764,9 +2216,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // validated ExpectedOrigin object (or null when
             // public_base_url is not configured).
             ->setArgument('$expectedOrigin', $expectedOriginRef)
-            // The per-scope issuance cap (fixed-window Redis
-            // counter; null when disabled).
+            // The per-scope issuance cap (sliding-window Redis
+            // log; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
+            // The verified-agents gate (risk.agents, RFC 9421
+            // signatures; null when no agent is configured, so a
+            // Signature-Input header then rides the ordinary widget
+            // flow ignored).
+            ->setArgument('$agentsVerifier', $agentsVerifierRef)
             // The server-owned scope allowlist: when non-empty, issuance
             // outside it is refused (422 `SCOPE_NOT_ALLOWED`) before
             // risk/quota, making the per-scope quota namespace
@@ -1855,13 +2312,43 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$logger', $loggerRef)
             ->addTag('controller.service_arguments')->setPublic(true));
 
+        // The exporter's cross-worker counter aggregation (APCu when
+        // loaded, per-process otherwise), per-deployment namespaced
+        // exactly like the health controller's APCu keys so two apps
+        // sharing one APCu segment never mix counters. The outcome
+        // bridge and the metrics exporter both push their exportable
+        // increments through this one store.
+        $container->setDefinition('kiwi_captcha.metrics_counters', new Definition(MetricsCounterStore::class, [
+            'kiwicaptcha.metrics.'.hash('sha256', $rawNamespace."\0".$config['secret_key']),
+        ]));
+
         // Challenge route (configured prefix; see KiwiCaptchaRouteLoader).
         $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [
             '%kiwi_captcha.route_prefix%',
             // The /health/live + /health/ready routes follow
             // risk.health.enabled (default true).
             $config['risk']['health']['enabled'],
+            // The /metrics route follows its own secret: registered
+            // only when risk.metrics.secret is configured (an env
+            // placeholder counts; the controller 404s on an empty
+            // resolved secret).
+            $config['risk']['metrics']['secret'] !== null,
         ]))->addTag('routing.loader'));
+
+        // The metrics exporter (Plane 8): GET {prefix}/metrics renders
+        // the deployment's aggregated counters as Prometheus text
+        // behind the exporter's own secret (risk.metrics.secret).
+        // Registered unconditionally so the controller exists for an
+        // env-resolved secret; a null secret leaves the route absent
+        // and the controller itself answers 404 on an empty resolved
+        // secret. The engine snapshot source is the risk gateway of
+        // the deployment; without the risk engine the exporter serves
+        // its own series only.
+        $container->setDefinition(KiwiMetricsController::class, (new Definition(KiwiMetricsController::class, [
+            $config['risk']['metrics']['secret'],
+            $riskConfig['enabled'] ? $riskGatewayRef : null,
+            new Reference('kiwi_captcha.metrics_counters'),
+        ]))->addTag('controller.service_arguments')->setPublic(true));
 
         // Provider-compatible Siteverify, disabled unless siteverify_secret
         // is configured; calls the same atomic verifier service
@@ -2041,12 +2528,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // route prefix is injected so the default 'endpoint' option
         // follows the actual registered route (the standalone Twig widget
         // derives its endpoint from the same prefix); the telemetry mode
-        // follows the (strict-enforced) config; the request_binding option
-        // follows the static risk.request_binding default.
+        // follows the stage composition's evidence arm (the profile
+        // matrix plus the risk.evidence.telemetry knob); the
+        // request_binding option follows the static risk.request_binding
+        // default.
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
             '%kiwi_captcha.route_prefix%',
-            $config['telemetry'],
+            $composition['telemetry'],
             $config['risk']['request_binding'],
         ]))->addTag('form.type'));
 
@@ -2116,6 +2605,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // public violation code is collapsed (invalid_or_expired /
         // rate_limited / temporary_unavailable), and the precise core
         // reason stays in the logs.
+        // The app-facing quarantine hold (change.md 1.3 and 3.3.4): the
+        // request-scoped flag the validator writes on a quarantined pass
+        // and the application's persistence layer queries before the
+        // publication write. The interface is the extension point: a
+        // deployment with a durable hold (a review queue) replaces or
+        // decorates the alias; the default carries request-scoped state
+        // only, never a browser-visible surface.
+        $container->setDefinition(RequestQuarantineMarker::class, new Definition(RequestQuarantineMarker::class, [
+            new Reference('request_stack'),
+        ]));
+        $container->setAlias(QuarantineMarkerInterface::class, RequestQuarantineMarker::class)->setPublic(true);
+        $container->getAlias(QuarantineMarkerInterface::class)->setPublic(true);
+
         $container->setDefinition(KiwiCaptchaValidator::class, (new Definition(KiwiCaptchaValidator::class, [
             new Reference('kiwi_captcha.verifier'),
             new Reference('request_stack'),
@@ -2169,15 +2671,26 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$bindingAuthority', $bindingAuthorityRef)
             ->setArgument('$postSolveDispositionTtlMarginSecs', $riskConfig['redis']['ttl_margin_secs'])
             ->setArgument('$chainTtlSecs', $riskConfig['chaining']['ttl_secs'])
+            // The quarantine hold surface (nullable: the attribute plane
+            // always works, the marker is the injectable query point).
+            ->setArgument('$quarantineMarker', new Reference(QuarantineMarkerInterface::class))
             ->addTag('validator.constraint_validator'));
 
         // Twig widget runtime + twig function (embeds the shared widget
-        // assets, or emits the versioned files-mode asset tags).
+        // assets, or emits the versioned files-mode asset tags). The
+        // data-kiwi-telemetry arm value follows the stage composition's
+        // evidence arm: minimal under every profile by default, full
+        // under the abuse postures, and the risk.evidence.telemetry
+        // knob overrides in any config layer. When the telemetry mode
+        // arms collection and the deployment serves the files tier, the
+        // versioned widget-telemetry asset URL and its SRI digest ride
+        // the container (data-kiwi-telemetry-src /
+        // data-kiwi-telemetry-integrity) for the driver's lazy fetch.
         $container->setDefinition(KiwiCaptchaRuntime::class, (new Definition(KiwiCaptchaRuntime::class, [
             $config['route_prefix'],
             null,
             KiwiCaptchaRuntime::DEFAULT_TEMPLATE,
-            $config['telemetry'],
+            $composition['telemetry'],
             // The static transaction binding is the standalone
             // widget's data-kiwi-request-binding default.
             $config['risk']['request_binding'],
@@ -2239,6 +2752,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setDefinition(KiwiCaptchaHaInitializeCommand::class, (new Definition(KiwiCaptchaHaInitializeCommand::class, [
             $config,
             $authorityGuardRefs,
+        ]))
+            ->addTag('console.command')
+            ->setPublic(true));
+
+        // The incumbent migration scanner (kiwicaptcha:migrate): reads
+        // a target codebase path, reports every incumbent captcha
+        // integration it finds, and emits the shim config (the client
+        // script block, the sitekey-to-scope table and the siteverify
+        // swap instructions). No kiwi service participates: the scan
+        // is read-only and bounded, so the command is stateless.
+        $container->setDefinition(KiwiCaptchaMigrateCommand::class, (new Definition(KiwiCaptchaMigrateCommand::class, [
+            null,
+            $config['route_prefix'] ?? '/kiwi-captcha',
         ]))
             ->addTag('console.command')
             ->setPublic(true));
@@ -3538,5 +4064,48 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return $id;
+    }
+
+    /**
+     * The per-scope target-identifier resolver wiring: a
+     * FormFieldTargetResolver service over the scope-id => field-name
+     * map when at least one scope configures a target field, null
+     * otherwise (the engine's target dimension stays off).
+     *
+     * @param array<string, mixed> $riskConfig the processed risk config
+     * @param array<string, int>   $scopeIds   scope name => canonical id
+     */
+    private static function wireTargetFieldResolver(array $riskConfig, array $scopeIds, ContainerBuilder $container): ?Reference
+    {
+        $fieldNames = [];
+        foreach ($riskConfig['scopes'] as $name => $spec) {
+            if (\is_array($spec) && ($spec['target_field'] ?? null) !== null) {
+                $fieldNames[$scopeIds[$name]] = $spec['target_field'];
+            }
+        }
+        if ($fieldNames === []) {
+            return null;
+        }
+        $container->setDefinition('kiwi_captcha.risk.target_resolver', (new Definition(FormFieldTargetResolver::class, [
+            $fieldNames,
+        ]))->setPublic(true));
+
+        return new Reference('kiwi_captcha.risk.target_resolver');
+    }
+
+    /**
+     * True when the typed outcomes surface of the risk core and the
+     * security bundle's event classes are all present: the outcomes
+     * facade exists and the three Symfony security events the bridge
+     * listens to exist. The security bundle is optional for this
+     * bundle, so the check keeps a security-less deployment booting
+     * with the bridge simply absent.
+     */
+    private static function outcomesSurfaceAvailable(): bool
+    {
+        return class_exists(KiwiOutcomes::class)
+            && class_exists(KiwiOutcomeBridgeSubscriber::LOGIN_SUCCESS_EVENT)
+            && class_exists(KiwiOutcomeBridgeSubscriber::LOGIN_FAILURE_EVENT)
+            && class_exists(KiwiOutcomeBridgeSubscriber::CHECK_PASSPORT_EVENT);
     }
 }

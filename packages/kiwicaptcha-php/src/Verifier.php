@@ -287,11 +287,16 @@ final class Verifier
          */
         private ?string $region = null,
         /**
-         * The current security-policy epoch. When non-null, a record
-         * whose policy_version differs is rejected with
-         * WrongPolicyVersion: outstanding challenges die immediately on
-         * policy revocation (origin/action-policy changes, emergency
-         * revocation, compromised tenant). Null (default) disables the check.
+         * The current security-policy epoch. When non-null and no
+         * rollout floor is declared, a record whose policy_version
+         * differs is rejected with WrongPolicyVersion: outstanding
+         * challenges die immediately on policy revocation
+         * (origin/action-policy changes, emergency revocation,
+         * compromised tenant). During a declared rollout window
+         * ($policyVersionFloor) a record within
+         * [floor, expected] verifies instead, so a mixed N/N+1 fleet
+         * redeems cross-node with zero spurious rejections while the
+         * old epoch drains. Null (default) disables the check.
          */
         private ?int $expectedPolicyVersion = null,
         /**
@@ -403,6 +408,18 @@ final class Verifier
          * grammar fail-closed.
          */
         private readonly bool $allowLegacyRswIdentity = false,
+        /**
+         * The declared rollout-window floor of the security-policy
+         * epoch. Null (the default) keeps the strict-equality contract:
+         * a record verifies only under exactly the expected epoch. When
+         * non-null (and an expected epoch is configured), a record
+         * whose policy_version sits within [floor, expected] verifies
+         * too, so a mixed N/N+1 fleet redeems cross-node while the old
+         * epoch drains. The floor is an explicit deployment declaration
+         * only — nothing derives it from central state, and a floor
+         * above the expected epoch accepts nothing (fail closed).
+         */
+        private ?int $policyVersionFloor = null,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -1040,7 +1057,7 @@ final class Verifier
             // racing swap that replaced the record between peek and consume
             // must fail closed here too, so the instance that actually
             // proves the PoW is from the current policy epoch.
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
 
@@ -1084,7 +1101,7 @@ final class Verifier
             if ($now >= $record->expiresAt) {
                 return VerifyOutcome::invalid(VerifyError::Expired);
             }
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
             if ($this->region !== null && $record->region !== $this->region) {
@@ -1687,7 +1704,7 @@ final class Verifier
             if ($now >= $record->expiresAt) {
                 return VerifyOutcome::invalid(VerifyError::Expired);
             }
-            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+            if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
                 return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
             }
             if ($this->region !== null && $record->region !== $this->region) {
@@ -2469,6 +2486,27 @@ final class Verifier
     }
 
     /**
+     * Whether the record's security-policy epoch satisfies the
+     * configured expectations: no expected epoch disables the check
+     * entirely; no declared floor keeps the strict-equality contract;
+     * a declared rollout window accepts floor <= epoch <= expected. A
+     * floor above the expected epoch accepts nothing — the window is
+     * fail-closed, never a licence to verify below the newest declared
+     * epoch.
+     */
+    private function policyVersionAccepted(?int $recordVersion): bool
+    {
+        if ($this->expectedPolicyVersion === null) {
+            return true;
+        }
+        if ($this->policyVersionFloor === null) {
+            return $recordVersion === $this->expectedPolicyVersion;
+        }
+
+        return $this->policyVersionFloor <= $recordVersion && $recordVersion <= $this->expectedPolicyVersion;
+    }
+
+    /**
      * The deployment expectations — region, security-policy epoch and
      * issuer — hard invariants in cheap-phase order. Shared by the
      * cheap phase and the compositional replay gate.
@@ -2485,9 +2523,11 @@ final class Verifier
         }
 
         // 5c. Security-policy epoch: the policy that authorized
-        //     this challenge must still be in force; the verifier rejects
-        //     records issued under a different epoch (WrongPolicyVersion).
-        if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+        //     this challenge must still be in force; outside a declared
+        //     rollout window the verifier rejects records issued under a
+        //     different epoch (WrongPolicyVersion), and during a window
+        //     only epochs within [floor, expected] verify.
+        if (!$this->policyVersionAccepted($record->policyVersion ?? 1)) {
             return VerifyError::WrongPolicyVersion;
         }
 
@@ -2783,6 +2823,19 @@ final class Verifier
     public function setExpectedPolicyVersion(int $policyVersion): void
     {
         $this->expectedPolicyVersion = $policyVersion;
+    }
+
+    /**
+     * Config wiring seam for the declared rollout-window floor: the
+     * bundle's risk.policy_rollout_min_epoch is applied once here at
+     * verifier construction. Deliberately not touched by the
+     * security-epoch monitor — the floor is an explicit deployment
+     * declaration, never derived from central state, and a monitor
+     * bump of the expected epoch must not narrow (or drop) it.
+     */
+    public function setPolicyVersionFloor(?int $policyVersionFloor): void
+    {
+        $this->policyVersionFloor = $policyVersionFloor;
     }
 
     /**

@@ -1,0 +1,5 @@
+.build/
+.deps/
+_erl_crash.dump
+deps/
+mix.lock

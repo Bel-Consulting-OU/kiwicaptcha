@@ -411,14 +411,24 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
+     * Aggregate every secret finding instead of returning on the first
+     * one: a deployment can have a short main secret, short
+     * historical secrets and a placeholder shape at once, and the
+     * operator must see all of them in one run. The status is the
+     * strongest finding: fail when any finding fails, else warn when
+     * any finding warns, else pass.
+     *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkSecret(): array
     {
         $secret = $this->config['secret_key'];
         $length = \strlen($secret);
+        $status = 'PASS';
+        $findings = [];
         if ($length < Config::MIN_SECRET_BYTES) {
-            return ['FAIL', sprintf('secret_key is %d bytes; the core refuses secrets under %d bytes', $length, Config::MIN_SECRET_BYTES)];
+            $status = 'FAIL';
+            $findings[] = sprintf('secret_key is %d bytes; the core refuses secrets under %d bytes', $length, Config::MIN_SECRET_BYTES);
         }
         $historicalShort = [];
         foreach (($this->config['secrets_by_kid'] ?? []) as $kid => $historicalSecret) {
@@ -427,22 +437,28 @@ final class KiwiCaptchaDoctorCommand extends Command
             }
         }
         if ($historicalShort !== []) {
-            return ['WARN', sprintf(
+            $status = $status === 'FAIL' ? 'FAIL' : 'WARN';
+            $findings[] = sprintf(
                 'secrets_by_kid entries for kid %s are under the %d-byte floor: the historical secrets cannot verify once their kid becomes live again. Move to randomly generated %d-byte-or-longer secrets before the next rotation',
                 implode(', ', $historicalShort),
                 Config::MIN_SECRET_BYTES,
                 Config::MIN_SECRET_BYTES,
-            )];
+            );
         }
         $normalized = strtolower($secret);
         if (preg_match('/^(change|replace|your|example|sample|test)[-_]?/', $normalized) === 1
             || \in_array($normalized, ['secret', 'kiwi-secret', 'kiwi_secret', 'kiwicaptcha', 'changeme', 'changeme123', 'replace-with-32-random-bytes', 'replace-with-a-random-32-byte-secret-value'], true)
             || preg_match('/^(.)\1+$/', $secret) === 1
         ) {
-            return ['WARN', sprintf('%d-byte secret looks like a placeholder or has no entropy; use a fresh random value', $length)];
+            $status = $status === 'FAIL' ? 'FAIL' : 'WARN';
+            $findings[] = sprintf('%d-byte secret looks like a placeholder or has no entropy; use a fresh random value', $length);
         }
 
-        return ['PASS', sprintf('%d-byte secret, no obvious placeholder shape', $length)];
+        if ($findings === []) {
+            return ['PASS', sprintf('%d-byte secret, no obvious placeholder shape', $length)];
+        }
+
+        return [$status, implode('; ', $findings)];
     }
 
     /**
@@ -708,7 +724,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $decoyEnabled = (bool) ($this->config['risk']['decoy_v3_enabled'] ?? false);
         $executionOn = ($this->config['risk']['execution_challenge'] ?? 'off') === 'on';
         $rolloutMode = $this->rolloutStatus();
-        if ($profile === 'high_abuse' && !$decoyEnabled) {
+        if (self::isAbuseFirstProfile($profile) && !$decoyEnabled) {
             // Under high_abuse the profile-derived default is true, so
             // an effective false can only be an explicit deferral. The
             // deferral is deliberate only when the deployment declares
@@ -721,10 +737,10 @@ final class KiwiCaptchaDoctorCommand extends Command
             // is the documented two-phase rollout and the check warns
             // (exit 0).
             if ($rolloutMode !== 'migration') {
-                return ['FAIL', 'high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established.'];
+                return ['FAIL', sprintf('%s requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established.', self::abuseFirstProfileName($profile))];
             }
 
-            return ['WARN', 'high_abuse promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)'];
+            return ['WARN', sprintf('%s promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)', self::abuseFirstProfileName($profile))];
         }
         if (!$decoyEnabled) {
             // The execution surface alone never emits v4 either: the
@@ -749,8 +765,8 @@ final class KiwiCaptchaDoctorCommand extends Command
 
             return ['PASS', 'decoy surface armed and the central floor confirms protocol v3 emission'];
         }
-        if ($profile === 'high_abuse') {
-            return ['FAIL', 'high_abuse requires authenticated decoy emission, but the fleet protocol floor has not been confirmed at v3. Confirm every serving binary supports protocol v3 and raise the central security-policy min_protocol_version to 3 (the two-phase rollout, see operations.md), or explicitly set risk.decoy_v3_enabled: false to defer v3 emission while the profile stays active.'];
+        if (self::isAbuseFirstProfile($profile)) {
+            return ['FAIL', sprintf('%s requires authenticated decoy emission, but the fleet protocol floor has not been confirmed at v3. Confirm every serving binary supports protocol v3 and raise the central security-policy min_protocol_version to 3 (the two-phase rollout, see operations.md), or explicitly set risk.decoy_v3_enabled: false to defer v3 emission while the profile stays active.', self::abuseFirstProfileName($profile))];
         }
 
         return ['WARN', 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];
@@ -789,8 +805,8 @@ final class KiwiCaptchaDoctorCommand extends Command
         if ($floor !== null && $floor >= 4) {
             return ['PASS', sprintf('execution surface armed (risk.execution_challenge on) and the central floor confirms protocol v4 emission%s', $decoyConfirmed ? ' with the decoy surface' : '')];
         }
-        if ($profile === 'high_abuse') {
-            return ['FAIL', 'high_abuse requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4. Confirm every serving binary supports protocol v4 and raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md), or declare protocol_rollout.mode: migration while the v4 floor is being established.'];
+        if (self::isAbuseFirstProfile($profile)) {
+            return ['FAIL', sprintf('%s requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4. Confirm every serving binary supports protocol v4 and raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md), or declare protocol_rollout.mode: migration while the v4 floor is being established.', self::abuseFirstProfileName($profile))];
         }
         if ($this->rolloutStatus() === 'migration') {
             return ['WARN', 'execution surface armed but the central floor is below 4 or unconfirmed with protocol_rollout.mode "migration" declared: issuance stays execution-unarmed while the v4 fleet floor is being established (the two-phase rollout, see operations.md)'];
@@ -856,8 +872,8 @@ final class KiwiCaptchaDoctorCommand extends Command
             if ($this->rolloutStatus() === 'migration') {
                 return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the downgrade window is accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout. Raise execution_required_version to %d when the migration completes', $required, $available, $cap, $floorLabel, $available)];
             }
-            if ($profile === 'high_abuse') {
-                return ['FAIL', sprintf('high_abuse normal mode must require the strongest confirmed tier: execution_required_version %d is below the effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s). Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
+            if (self::isAbuseFirstProfile($profile)) {
+                return ['FAIL', sprintf('%s normal mode must require the strongest confirmed tier: execution_required_version %d is below the effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s). Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', self::abuseFirstProfileName($profile), $required, $available, $cap, $floorLabel, $available)];
             }
 
             return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar stays client-downgradeable. Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
@@ -953,6 +969,19 @@ final class KiwiCaptchaDoctorCommand extends Command
      * A verifier-side trapdoor is required wherever an rsw record may
      * be redeemed, and the algorithm stays off by default.
      *
+     * The abuse-first posture adds a requirement: change.md Part 3
+     * (3.4.1) promotes RSW to first-class under the abuse-first
+     * profile, so the profile promises a time-lock rung the deployment
+     * must be able to serve. The profile carries two spellings: the
+     * specification name abuse_first and the integration name
+     * high_abuse share one matrix (see
+     * {@see \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults}).
+     * Under either spelling, a deployment with no trapdoor pair
+     * configured fails the gate with the exact remediation. Balanced,
+     * compatibility and the other profiles keep today's semantics (an
+     * unconfigured rsw rung passes, a pre-staged pair warns that it is
+     * inert until the algorithm flips).
+     *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkRsw(): array
@@ -967,11 +996,41 @@ final class KiwiCaptchaDoctorCommand extends Command
 
             return ['PASS', sprintf('rsw armed: sequential time-lock challenges (T=%d squarings, see the operations.md "RSW time-lock" section for the sequential-cost rationale) are issued; every verifier that may redeem them must configure the same modulus and lambda', $this->config['rsw_t'])];
         }
+        $profile = $this->config['protection_profile'] ?? null;
+        if (self::isAbuseFirstProfile($profile) && !\is_string($modulus) && !\is_string($lambda)) {
+            return ['FAIL', sprintf('protection_profile "%s" requires the RSW time-lock trapdoor (the abuse-first ladder runs on a first-class time-lock rung), but neither rsw_modulus_n nor rsw_lambda is configured: every verifier that may redeem an rsw record needs the same modulus and lambda, and issuance cannot arm the rung without the pair. Generate the trapdoor (tools/rsw-keygen), configure rsw_modulus_n and rsw_lambda (and flip algorithm to rsw to arm issuance), or drop the profile explicitly if the deployment means to run without the time-lock rung.', $profile)];
+        }
         if (\is_string($modulus) || \is_string($lambda)) {
             return ['WARN', sprintf('rsw_modulus_n/rsw_lambda are configured but algorithm %s is selected: the fields are inert until the algorithm flips to rsw (the operator may pre-stage them)', $algorithm)];
         }
 
         return ['PASS', 'rsw not configured (the default deployment keeps the sha256 issuance path unchanged; the rsw rung stays optional)'];
+    }
+
+    /**
+     * Whether the effective profile is the abuse-first posture. The
+     * profile enum carries two first-class spellings of the same
+     * posture: the specification name `abuse_first` and the integration
+     * name `high_abuse` share one derived matrix
+     * ({@see \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults}).
+     * Every profile-keyed doctor check keys on both names through this
+     * one helper — a profile check can never honor one spelling and
+     * silently skip the other. A null profile (or balanced,
+     * compatibility, privacy_strict, ha_safe) is not abuse-first.
+     */
+    private static function isAbuseFirstProfile(?string $profile): bool
+    {
+        return $profile === 'high_abuse' || $profile === 'abuse_first';
+    }
+
+    /**
+     * The profile name the abuse-first check messages should carry: the
+     * effective spelling, so an abuse_first deployment never reads a
+     * high_abuse-named remediation (and the other way around).
+     */
+    private static function abuseFirstProfileName(?string $profile): string
+    {
+        return $profile === 'abuse_first' ? 'abuse_first' : 'high_abuse';
     }
 
     /**

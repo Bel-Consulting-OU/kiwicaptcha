@@ -61,6 +61,14 @@ pub enum RiskReason {
     CapacityPressure,
     HardRateLimit,
     Cooldown,
+    MarkedIdentity,
+    CorroboratedAbuse,
+    TargetUnderAttack,
+    PricedEscalation,
+    InteractionAnomaly,
+    SolveAnomaly,
+    DecoyEscalation,
+    SpamMarkQuarantine,
 }
 
 impl RiskReason {
@@ -81,6 +89,14 @@ impl RiskReason {
             RiskReason::CapacityPressure => "capacity_pressure",
             RiskReason::HardRateLimit => "hard_rate_limit",
             RiskReason::Cooldown => "cooldown",
+            RiskReason::MarkedIdentity => "marked_identity",
+            RiskReason::CorroboratedAbuse => "corroborated_abuse",
+            RiskReason::TargetUnderAttack => "target_under_attack",
+            RiskReason::PricedEscalation => "priced_escalation",
+            RiskReason::InteractionAnomaly => "interaction_anomaly",
+            RiskReason::SolveAnomaly => "solve_anomaly",
+            RiskReason::DecoyEscalation => "decoy_escalation",
+            RiskReason::SpamMarkQuarantine => "spam_mark_quarantine",
         }
     }
 }
@@ -487,6 +503,7 @@ impl RiskPolicy {
             retry_after_ms,
             band: (score.clamp(0, 1000) / 100) as u8,
             decision_id: String::new(),
+            quarantined: false,
         }
     }
 
@@ -512,6 +529,7 @@ impl RiskPolicy {
             retry_after_ms: None,
             band: 0,
             decision_id: String::new(),
+            quarantined: false,
         }
     }
 }

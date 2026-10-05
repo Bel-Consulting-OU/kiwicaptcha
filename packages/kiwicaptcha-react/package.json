@@ -1,0 +1,46 @@
+{
+  "name": "@kiwicaptcha/react",
+  "version": "0.1.0",
+  "description": "React 18 KiwiCaptcha widget: the KiwiCaptcha component and the useKiwiCaptcha hook on the shared client core.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "react",
+    "pow",
+    "widget"
+  ],
+  "peerDependencies": {
+    "@kiwicaptcha/client-core": "^0.1.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@kiwicaptcha/client-core": "file:../kiwicaptcha-client-core",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "happy-dom": "^17.4.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vitest": "^3.1.1"
+  }
+}

@@ -1,0 +1,83 @@
+<?php
+
+/**
+ * @file
+ * The KiwiCaptcha module hooks: form protection and script attach.
+ *
+ * The protection is a form_alter over the core form ids, adding one
+ * validate handler. The handler delegates to the kiwicaptcha.verifier
+ * service, which wraps the framework-free logic in
+ * Drupal\kiwicaptcha\KiwiVerifyLogic.
+ */
+
+declare(strict_types=1);
+
+use Drupal\Core\Form\FormStateInterface;
+
+/**
+ * Implements hook_form_alter().
+ */
+function kiwicaptcha_form_alter(&$form, FormStateInterface $form_state, $form_id): void
+{
+    $config = \Drupal::config('kiwicaptcha.settings');
+    $scope = (string) (Drupal\kiwicaptcha\KiwiVerifyLogic::scopeForForm($form_id, $config->getRawData() ?: [])
+        ?? '');
+    if ($scope === '') {
+        return;
+    }
+    // The display scope: the configured scope name for the matched
+    // form (scopeForForm already resolved it).
+    $form['kiwicaptcha_widget'] = Drupal\kiwicaptcha\KiwiMarkup::renderElement($scope);
+    $form['kiwicaptcha_widget']['#weight'] = 100;
+    $form['#validate'][] = 'kiwicaptcha_validate_captcha';
+    $shimUrl = (string) ($config->get('shim_url') ?? '');
+    if ($shimUrl !== '') {
+        $form['#attached']['html_head'][] = [
+            [
+                '#type' => 'html_tag',
+                '#tag' => 'script',
+                '#attributes' => ['src' => $shimUrl, 'defer' => true],
+            ],
+            'kiwicaptcha_shim',
+        ];
+    }
+}
+
+/**
+ * The shared validate handler: verify the token, fail the form with a
+ * translated message when the challenge did not pass.
+ */
+function kiwicaptcha_validate_captcha(array &$form, FormStateInterface $form_state): void
+{
+    $token = Drupal\kiwicaptcha\KiwiVerifyLogic::extractToken(
+        (array) ($_SERVER ?? []),
+        (array) $form_state->getUserInput(),
+        (array) ($_COOKIE ?? [])
+    );
+    if ($token === null) {
+        $form_state->setErrorByName('kiwicaptcha_widget', t('The security check did not run. Enable JavaScript and solve the challenge.'));
+        \Drupal::logger('kiwicaptcha')->warning('KiwiCaptcha token missing on scope @scope.', ['@scope' => $form['kiwicaptcha_widget']['#kiwi_scope']]);
+
+        return;
+    }
+    $scope = (string) ($form['kiwicaptcha_widget']['#kiwi_scope'] ?? 'login');
+    $result = \Drupal::service('kiwicaptcha.verifier')->verify($token, $scope, (array) ($_SERVER ?? []));
+    if ($result['ok'] !== true) {
+        $form_state->setErrorByName('kiwicaptcha_widget', t('The security check did not pass. Solve the challenge and try again.'));
+    }
+}
+
+/**
+ * Implements hook_theme().
+ *
+ * The widget element renders through the kiwicaptcha_widget theme
+ * entry, so a theme may override the markup.
+ */
+function kiwicaptcha_theme($existing, $type, $theme, $path)
+{
+    return [
+        'kiwicaptcha_widget' => [
+            'variables' => ['scope' => 'login', 'shim_url' => ''],
+        ],
+    ];
+}

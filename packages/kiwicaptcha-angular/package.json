@@ -1,0 +1,48 @@
+{
+  "name": "@kiwicaptcha/angular",
+  "version": "0.1.0",
+  "description": "Angular KiwiCaptcha widget: a standalone component (Ivy, signals) and an injectable driver service on the shared client core.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "ng-packagr -p ng-package.json",
+    "test": "npm run typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "angular",
+    "pow",
+    "widget"
+  ],
+  "peerDependencies": {
+    "@angular/common": ">=17.3.0",
+    "@angular/core": ">=17.3.0",
+    "@kiwicaptcha/client-core": "^0.1.0",
+    "rxjs": "^7.0.0",
+    "zone.js": "~0.15.0"
+  },
+  "devDependencies": {
+    "@angular/common": "^20.0.0",
+    "@angular/core": "^20.0.0",
+    "@angular/platform-browser": "^20.0.0",
+    "@kiwicaptcha/client-core": "file:../kiwicaptcha-client-core",
+    "@types/jasmine": "^5.1.5",
+    "jasmine": "^5.5.0",
+    "rxjs": "^7.8.1",
+    "typescript": "~5.8.2",
+    "zone.js": "~0.15.0"
+  }
+}

@@ -235,6 +235,10 @@ budget_asset widget_risk widget-risk.js
 budget_asset widget_telemetry widget-telemetry.js
 budget_asset widget_locales widget-locales.js
 budget_asset widget_compat widget-compat.js
+# The standalone incumbent API shims (widget-shims.js): fetched only by
+# a page that presents the provider globals over a plain driver
+# bootstrap, with its own recorded caps.
+budget_asset widget_shims widget-shims.js
 # The execution interpreter (execution-interpreter.js) gets the same
 # three-copy raw/gzip/brotli treatment as the driver: the asset is
 # lazy in the files tier (a SHA-only page pays zero bytes for it), but
@@ -316,6 +320,7 @@ verify_recorded_raw_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget
 verify_recorded_gzip_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget-locales.js
 verify_recorded_brotli_bytes widget_locales packages/kiwicaptcha-wasm/assets/widget-locales.js
 verify_recorded_raw_bytes widget_compat packages/kiwicaptcha-wasm/assets/widget-compat.js
+verify_recorded_raw_bytes widget_shims packages/kiwicaptcha-wasm/assets/widget-shims.js
 verify_recorded_raw_bytes widget_worker packages/kiwicaptcha-wasm/assets/kiwi-worker.js
 verify_recorded_raw_bytes widget_runtime packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js
 verify_recorded_raw_bytes widget_css packages/kiwicaptcha-wasm/assets/widget.css
@@ -326,6 +331,7 @@ verify_recorded_raw_bytes widget_execution packages/kiwicaptcha-wasm/assets/exec
 # core, the three lazy widget modules and the execution interpreter).
 for pair in widget_driver/widget-driver.js widget_risk/widget-risk.js \
             widget_telemetry/widget-telemetry.js widget_compat/widget-compat.js \
+            widget_shims/widget-shims.js \
             widget_execution/execution-interpreter.js; do
   key="${pair%/*}"
   label="${pair#*/}"
@@ -370,16 +376,17 @@ challenge_size() {
 # by name, never the positional grammar-v1 default — over the max-valid
 # wire context the bundle endpoint accepts (a 128-byte scope, a 32-byte
 # execution action, the 64-byte decoy-name ceiling, decoy armed), with
-# issuances iterated until the stamped op count draws the version-5
-# 21 + byte % 4 count formula to its 24-op grammar cap (bounded at 64
-# attempts; an iteration that never draws 24 fails the probe, because a
-# below-cap sample would under-gate the budget). The reported size is
-# the largest wire shape measured across the attempts. The rsw row
-# reuses the committed PHP test fixture pair (the autoloaded
-# KiwiCaptcha\Tests\Support\RswFixture of the same php-core vendor) and
-# is a measure-if-cheap variant: when the gmp extension or the fixture
-# class is unavailable the row prints "unavailable" and the
-# sha256/argon2id execution rows still gate.
+# issuances iterated until the stamped op count draws the live rung's
+# count formula to its op-count ceiling (24 for the version-5
+# 21 + byte % 4 formula, 23 for the version-6 20 + byte % 4 formula;
+# bounded at 64 attempts; an iteration that never draws the ceiling
+# fails the probe, because a below-cap sample would under-gate the
+# budget). The reported size is the largest wire shape measured across
+# the attempts. The rsw row reuses the committed PHP test fixture pair
+# (the autoloaded KiwiCaptcha\Tests\Support\RswFixture of the same
+# php-core vendor) and is a measure-if-cheap variant: when the gmp
+# extension or the fixture class is unavailable the row prints
+# "unavailable" and the sha256/argon2id execution rows still gate.
 challenge_size_execution() {
   "$PHP_BIN" -r '
     require $argv[1]."/vendor/autoload.php";
@@ -411,6 +418,14 @@ challenge_size_execution() {
         rswT: 10000,
     );
     $issuer = new Issuer($config, new ArrayStorage());
+    // The op-count ceiling of the live count formula: the largest
+    // stamped count the generator can draw at the manifest maximum
+    // (the version-6 formula tops at 23, the version-5 formula at the
+    // 24-op grammar cap).
+    $opCeiling = match (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) {
+        6 => 23,
+        default => ExecutionChallengeGenerator::MAX_OPS,
+    };
     $largest = 0;
     $largestOps = 0;
     for ($attempt = 0; $attempt < 64; $attempt++) {
@@ -432,12 +447,12 @@ challenge_size_execution() {
         if ($size > $largest) {
             $largest = $size;
         }
-        if ($opCount === ExecutionChallengeGenerator::MAX_OPS) {
+        if ($opCount === $opCeiling) {
             break;
         }
     }
-    if ($largestOps !== ExecutionChallengeGenerator::MAX_OPS) {
-        fwrite(STDERR, "perf-budget: the execution probe never drew the ".ExecutionChallengeGenerator::MAX_OPS."-op grammar cap in 64 issuances (largest draw was $largestOps)\n");
+    if ($largestOps !== $opCeiling) {
+        fwrite(STDERR, "perf-budget: the execution probe never drew the $opCeiling-op rung ceiling in 64 issuances (largest draw was $largestOps)\n");
         exit(2);
     }
     echo $largest;

@@ -1,0 +1,46 @@
+{
+  "name": "@kiwicaptcha/vue",
+  "version": "0.1.0",
+  "description": "Vue 3 KiwiCaptcha widget: the KiwiCaptcha SFC and the useKiwiCaptcha composable on the shared client core.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vue-tsc -p tsconfig.build.json --declaration --emitDeclarationOnly && vite build",
+    "test": "vitest run",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "vue",
+    "pow",
+    "widget"
+  ],
+  "peerDependencies": {
+    "@kiwicaptcha/client-core": "^0.1.0",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@kiwicaptcha/client-core": "file:../kiwicaptcha-client-core",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.6",
+    "happy-dom": "^17.4.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^3.1.1",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.2.0"
+  }
+}

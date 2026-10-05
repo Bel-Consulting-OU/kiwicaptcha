@@ -1,0 +1,28 @@
+[package]
+name = "kiwicaptcha-solver"
+version = "0.1.0"
+edition = "2021"
+description = "KiwiCaptcha native solver library and CLI: the supported automation path at the browser's price (same caps, same wire format)"
+license = "MIT"
+repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+keywords = ["captcha", "proof-of-work", "automation", "cli", "kiwicaptcha"]
+categories = ["command-line-utilities", "cryptography", "web-programming"]
+
+[dependencies]
+# The sharing spine: the token encoder, the protocol caps and the rsw
+# public-path derivation come from the core crate, so this solver can
+# never drift from the verifier it must satisfy.
+kiwicaptcha = { version = "1.7.0", path = "../kiwicaptcha" }
+# The same hash crates the core verifier and the wasm solver use.
+sha2 = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+num-bigint = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+# The TEST-ONLY fixtures feature (the shared rsw trapdoor pair and the
+# browser-equivalent sequential solver) for the golden cross-checks.
+kiwicaptcha = { path = "../kiwicaptcha", features = ["test-fixtures"] }

@@ -1,0 +1,317 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
+
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+
+/**
+ * The RFC 6238 time-based one-time passcode reference handler: a 30 s
+ * step, a plus-or-minus one step acceptance window, and a replay guard
+ * that refuses the same time-step twice per principal. The algorithm
+ * is in-bundle ({@see TotpCode}, hash_hmac based, SHA-1 or SHA-256,
+ * with the base32 codec of RFC 4648), so this handler adds no composer
+ * dependency.
+ *
+ * Enrollment surface: enroll() generates a fresh 160-bit secret,
+ * persists it server-side keyed by the principal pseudonym and answers
+ * its base32 form for the application to render. A QR label is the
+ * application's own surface. The secret is stored in the step-up store
+ * in the clear on the server side; encryption at rest is out of scope
+ * for this plane. It belongs to the deployment's Redis protection, the
+ * same boundary as every other risk-side state.
+ *
+ * The completion credit runs through {@see StepUpCompletionCredit} on
+ * the one consumed record, exactly once per challenge.
+ */
+final class TotpStepUpHandler implements StepUpHandlerInterface
+{
+    public const TICKET_FIELD = 'kiwi_step_up_ticket';
+    public const CODE_FIELD = 'kiwi_step_up_code';
+
+    private const SECRET_BYTES = 20;
+
+    public function __construct(
+        private readonly StepUpChallengeStore $store,
+        private readonly StepUpTicket $ticket,
+        private readonly StepUpCompletionCredit $credit,
+        private readonly string $algo = 'sha1',
+        private readonly int $digits = 6,
+        private readonly int $window = 1,
+        private readonly int $challengeTtlSecs = 300,
+        private readonly int $maxAttempts = 5,
+        private readonly int $maxBegins = 3,
+        private readonly int $beginWindowSecs = 900,
+        private readonly string $completePath = '/kiwi/step-up/complete',
+        private readonly ?\Closure $now = null,
+    ) {
+        if (!\in_array($this->algo, ['sha1', 'sha256'], true)) {
+            throw new \InvalidArgumentException('The RFC 6238 algorithm must be sha1 or sha256');
+        }
+        if ($digits !== 6 && $digits !== 8) {
+            throw new \InvalidArgumentException('The code length must be 6 or 8 digits');
+        }
+        if ($window < 0 || $window > 2) {
+            throw new \InvalidArgumentException('The acceptance window must be 0..2 steps');
+        }
+    }
+
+    /**
+     * Enroll (or re-enroll) the principal: a fresh 160-bit secret is
+     * generated, stored keyed by the principal pseudonym and answered
+     * in base32 for the application's provisioning surface (a QR code,
+     * a manual-entry block). Re-enrollment overwrites the stored
+     * secret; the replay guard is left untouched.
+     */
+    public function enroll(string $principalPseudonym): string
+    {
+        self::assertPseudonym($principalPseudonym);
+        $secret = random_bytes(self::SECRET_BYTES);
+        $this->store->saveTotpSecret($principalPseudonym, $secret);
+
+        return TotpCode::base32Encode($secret);
+    }
+
+    /** Whether the principal carries an enrollment secret. */
+    public function isEnrolled(string $principalPseudonym): bool
+    {
+        self::assertPseudonym($principalPseudonym);
+
+        return $this->store->findTotpSecret($principalPseudonym) !== null;
+    }
+
+    public function begin(Request $request, StepUpContext $context): Response
+    {
+        $now = $this->now();
+        if (!$this->isEnrolled($context->principalPseudonym)) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_not_enrolled',
+                'This account has no enrolled authenticator; enroll one before step-up.',
+            );
+        }
+        $admissions = $this->store->countBegin($context->principalPseudonym, $this->beginWindowSecs);
+        if ($admissions > $this->maxBegins) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_rate_limited',
+                'Too many step-up challenges were begun for this account; retry after the window.',
+                ['Retry-After' => (string) $this->beginWindowSecs],
+            );
+        }
+
+        $challenge = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::Totp,
+            $context->principalPseudonym,
+            $context->targetPseudonym,
+            $context->scope,
+            $context->returnPath,
+            $context->reason,
+            $now,
+            $this->challengeTtlSecs,
+            $this->maxAttempts,
+            null,
+        );
+        $this->store->create($challenge, $this->challengeTtlSecs);
+
+        return $this->presentation($context, $challenge, $now);
+    }
+
+    public function complete(Request $request): StepUpResult
+    {
+        $now = $this->now();
+        $resolved = $this->challengeOfRequest($request, $now);
+        if ($resolved instanceof StepUpChallengeExpired) {
+            return StepUpResult::failed(StepUpResult::FAIL_EXPIRED);
+        }
+        if ($resolved === null) {
+            return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE);
+        }
+        $challenge = $resolved;
+        if ($challenge->kind !== StepUpChallengeKind::Totp) {
+            return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
+        }
+        if ($challenge->expired($now)) {
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
+        }
+        $secret = $this->store->findTotpSecret($challenge->principalPseudonym);
+        if ($secret === null) {
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed(StepUpResult::FAIL_NOT_ENROLLED, $challenge->id);
+        }
+        $code = (string) $request->request->get(self::CODE_FIELD, $request->query->get(self::CODE_FIELD, ''));
+        $step = $this->matchingStep($secret, $code, TotpCode::stepOf($now));
+        if ($step === null) {
+            return $this->failedAttempt($challenge);
+        }
+        // The replay guard: the first presentation of a time-step wins;
+        // the same step can never verify twice.
+        if (!$this->store->markTotpStep($challenge->principalPseudonym, $step, ($this->window + 2) * TotpCode::STEP_SECS)) {
+            return StepUpResult::failed(StepUpResult::FAIL_REPLAYED_STEP, $challenge->id);
+        }
+
+        // The single-use boundary: exactly one completer consumes the
+        // record; a replayed completion answers unknown_challenge and
+        // never reaches the credit.
+        $consumed = $this->store->consume($challenge->id);
+        if ($consumed === null) {
+            return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
+        }
+
+        return $this->credit($challenge);
+    }
+
+    /**
+     * The accepted step of a presented code: the RFC 6238 value at the
+     * current step, then each step of the acceptance window (past
+     * before future, so the earliest valid spelling wins), or null when
+     * no step of the window matches.
+     */
+    private function matchingStep(string $secret, string $code, int $currentStep): ?int
+    {
+        if (!preg_match('/^[0-9]{6,8}$/D', $code) || \strlen($code) !== $this->digits) {
+            return null;
+        }
+        if (hash_equals(TotpCode::at($secret, $currentStep, $this->algo, $this->digits), $code)) {
+            return $currentStep;
+        }
+        for ($i = 1; $i <= $this->window; $i++) {
+            foreach ([$currentStep - $i, $currentStep + $i] as $candidate) {
+                if ($candidate < 0) {
+                    continue;
+                }
+                if (hash_equals(TotpCode::at($secret, $candidate, $this->algo, $this->digits), $code)) {
+                    return $candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function failedAttempt(StepUpChallenge $challenge): StepUpResult
+    {
+        $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
+        if ($answer === 0) {
+            return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);
+        }
+        if ($answer < 0) {
+            return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
+        }
+
+        return StepUpResult::pending($challenge->id);
+    }
+
+    /**
+     * The challenge of the request, the StepUpChallengeExpired marker
+     * when the presented ticket is well-signed but past its own expiry,
+     * or null when no live one resolves.
+     */
+    private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
+    {
+        $ticket = (string) $request->request->get(self::TICKET_FIELD, $request->query->get(self::TICKET_FIELD, ''));
+        if ($ticket === '') {
+            return null;
+        }
+        $payload = $this->ticket->verify($ticket, $now);
+        if ($payload === null) {
+            $looked = $this->ticket->look($ticket);
+            if ($looked !== null && $looked['expiresAt'] <= $now) {
+                return StepUpChallengeExpired::marker();
+            }
+
+            return null;
+        }
+
+        return $this->store->read($payload['challengeId']);
+    }
+
+    private function credit(StepUpChallenge $challenge): StepUpResult
+    {
+        try {
+            return $this->credit->credit($challenge->id, $challenge);
+        } catch (\Throwable) {
+            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $challenge->id);
+        }
+    }
+
+    /**
+     * The begin presentation: the code-entry form for the html mode,
+     * the challenge document for the json mode.
+     */
+    private function presentation(StepUpContext $context, StepUpChallenge $challenge, int $now): Response
+    {
+        $ticket = $this->ticket->issue($challenge->id, $challenge->expiresAt);
+        $expiresIn = max(0, $challenge->expiresAt - $now);
+        if ($context->mode === StepUpContext::MODE_JSON) {
+            $body = (string) json_encode([
+                'handler' => 'totp',
+                'challenge' => $ticket,
+                'expires_in' => $expiresIn,
+                'digits' => $this->digits,
+                'complete_path' => $this->completePath,
+            ], JSON_UNESCAPED_SLASHES);
+
+            return new Response($body, Response::HTTP_OK, ['Content-Type' => 'application/json', 'Cache-Control' => 'no-store']);
+        }
+        $action = htmlspecialchars($this->completePath, ENT_QUOTES);
+        $ticketField = htmlspecialchars(self::TICKET_FIELD, ENT_QUOTES);
+        $codeField = htmlspecialchars(self::CODE_FIELD, ENT_QUOTES);
+        $ticketValue = htmlspecialchars($ticket, ENT_QUOTES);
+        $html = <<<HTML
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Authenticator code</title></head>
+            <body>
+            <main style="max-width:28rem;margin:4rem auto;font-family:system-ui,sans-serif">
+            <h1>Authenticator code</h1>
+            <p>Enter the current {$this->digits}-digit code from your authenticator app.</p>
+            <form method="post" action="{$action}">
+            <input type="hidden" name="{$ticketField}" value="{$ticketValue}">
+            <label for="kiwi-step-up-code">Code</label>
+            <input id="kiwi-step-up-code" name="{$codeField}" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="8">
+            <button type="submit">Verify</button>
+            </form>
+            </main>
+            </body>
+            </html>
+            HTML;
+
+        return new Response($html, Response::HTTP_OK, ['Content-Type' => 'text/html; charset=utf-8', 'Cache-Control' => 'no-store']);
+    }
+
+    /**
+     * @param array<string, string> $headers
+     */
+    private function refusal(StepUpContext $context, int $status, string $code, string $message, array $headers = []): Response
+    {
+        if ($context->mode === StepUpContext::MODE_JSON) {
+            $body = (string) json_encode(['error' => $code, 'message' => $message], JSON_UNESCAPED_SLASHES);
+
+            return new Response($body, $status, $headers + ['Content-Type' => 'application/json', 'Cache-Control' => 'no-store']);
+        }
+
+        return new Response($message, $status, $headers + ['Content-Type' => 'text/plain; charset=utf-8', 'Cache-Control' => 'no-store']);
+    }
+
+    private static function assertPseudonym(string $pseudonym): void
+    {
+        if (preg_match('/^[0-9a-f]{32}$/D', $pseudonym) !== 1) {
+            throw new \InvalidArgumentException('The enrollment principal must be the 32 lowercase hex pseudonym, never a raw identifier');
+        }
+    }
+
+    private function now(): int
+    {
+        return ($this->now) ? ($this->now)() : time();
+    }
+}

@@ -1194,7 +1194,7 @@ final class NamespaceKeyVersionRolloutTest extends TestCase
                 // The provider-compatible surface requires a scope whose
                 // post-solve check is disabled.
                 'scopes' => ['siteverify' => ['post_solve_check' => false]],
-                'siteverify_secrets' => ['siteverify-secret' => 'siteverify'],
+                'siteverify_secrets' => ['siteverify-secret-0123456789abcdef' => 'siteverify'],
                 'redis' => ['ttl_margin_secs' => 2],
             ],
         ];

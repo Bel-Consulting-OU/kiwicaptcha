@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Storage;
 
+use KiwiCaptcha\Risk\Asn\AsnBucket;
 use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
@@ -34,7 +35,7 @@ use Predis\Response\ServerException;
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
-final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface
+final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -54,6 +55,23 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public const DEFAULT_OUTCOME_TTL_SECS = 86400;
 
     /**
+     * The mark dimensions of the long-memory outcomes surface: the four
+     * identity dimensions the typed handles carry plus the asn dimension
+     * the network-aware callers address. Shared verbatim with the Rust
+     * mirror and the cross-language vectors.
+     */
+    public const MARK_DIMENSIONS = ['principal', 'target', 'session', 'agent', 'asn'];
+
+    /** Default lifetime of a long-memory mark (90 days, 7776000 s). */
+    public const DEFAULT_MARK_TTL_SECS = 7_776_000;
+
+    /** The largest accepted mark kind length in bytes (the outcome name). */
+    public const MAX_MARK_KIND_BYTES = 64;
+
+    /** The largest accepted trust delta (fixed-point units) per write. */
+    public const MAX_BUCKET_TRUST_DELTA = 100_000;
+
+    /**
      * The largest accepted TTL in seconds (10 years). Values above it are
      * refused at construction: Redis rejects an expire value beyond its
      * ceiling at request time, and a script that had already written the
@@ -70,6 +88,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     private string $outcomeRegisterScript;
     private string $outcomeConfirmScript;
     private string $outcomeCorrectScript;
+    private string $marksScript;
+    private string $trustScript;
     private int $lastGlobalLevel = 0;
     private int $lastCooldownUntilMs = 0;
     private bool $lastIsDuplicate = false;
@@ -119,6 +139,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         private readonly array $saturations = self::DEFAULT_SATURATIONS,
         private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
         int $namespaceKeyVersion = DeploymentNamespace::VERSION_LEGACY,
+        private readonly int $markTtlSecs = self::DEFAULT_MARK_TTL_SECS,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
@@ -136,6 +157,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             'principalTtlSecs' => $principalTtlSecs,
             'dedupeTtlSecs' => $dedupeTtlSecs,
             'outcomeTtlSecs' => $outcomeTtlSecs,
+            'markTtlSecs' => $markTtlSecs,
             'sourceEpochSecs' => $sourceEpochSecs,
             'subnetEpochSecs' => $subnetEpochSecs,
             'hysteresisMs' => $hysteresisMs,
@@ -157,6 +179,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             'principalTtlSecs' => $principalTtlSecs,
             'dedupeTtlSecs' => $dedupeTtlSecs,
             'outcomeTtlSecs' => $outcomeTtlSecs,
+            'markTtlSecs' => $markTtlSecs,
         ] as $knob => $value) {
             if ($value > self::MAX_TTL_SECS) {
                 throw new \InvalidArgumentException(sprintf(
@@ -207,6 +230,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         $this->outcomeRegisterScript = self::loadOutcomeScript('outcome_register.lua');
         $this->outcomeConfirmScript = self::loadOutcomeScript('outcome_confirm.lua');
         $this->outcomeCorrectScript = self::loadOutcomeScript('outcome_correct.lua');
+        $this->marksScript = self::loadOutcomeScript('marks.lua');
+        $this->trustScript = self::loadOutcomeScript('trust.lua');
     }
 
     /**
@@ -299,6 +324,202 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             $this->outcomeCorrectScript,
         );
         return ((int) $result) === 1;
+    }
+
+    /**
+     * The long-memory mark key of one dimension and identifier:
+     * mark:{kiwi:<ns>}:<dim>:<id>. The hash tag keeps every mark in the
+     * risk keyspace's cluster slot; the dimension is one of the five
+     * contract dimensions and the identifier follows the shared
+     * key-safety rule.
+     */
+    public function markKey(string $dimension, string $id): string
+    {
+        self::assertMarkDimension($dimension);
+        self::assertKeySafeIdentifier('id', $id);
+
+        return "mark:{kiwi:{$this->namespace}}:{$dimension}:{$id}";
+    }
+
+    /**
+     * Writes one long-memory mark atomically through the canonical
+     * marks.lua: the kind (the outcome name), the count increment, the
+     * first/last timestamps and the refreshed whole-key TTL land in one
+     * script call. Returns the mark's new total count.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function writeMark(string $dimension, string $id, string $kind, int $nowMs): int
+    {
+        $key = $this->markKey($dimension, $id);
+        if ($kind === '' || strlen($kind) > self::MAX_MARK_KIND_BYTES) {
+            throw new \InvalidArgumentException(sprintf(
+                'kind must be a non-empty value of at most %d bytes',
+                self::MAX_MARK_KIND_BYTES,
+            ));
+        }
+        if ($nowMs < 0) {
+            throw new \InvalidArgumentException('nowMs must be >= 0');
+        }
+        $result = $this->runScript(
+            [$key],
+            [$kind, $nowMs, $this->markTtlSecs * 1000],
+            $this->marksScript,
+        );
+
+        return self::scriptInteger($result, 'mark count');
+    }
+
+    /**
+     * The current mark of one dimension and identifier: the hash fields
+     * kind, count, first_ms and last_ms, or null when no mark exists.
+     *
+     * @return null|array{kind: string, count: int, first_ms: int, last_ms: int}
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function readMark(string $dimension, string $id): ?array
+    {
+        $key = $this->markKey($dimension, $id);
+        try {
+            $raw = $this->client->hgetall($key);
+        } catch (\Predis\Exception\Exception $e) {
+            throw new RiskStoreException('Risk mark read failed: ' . $e->getMessage(), 0, $e);
+        }
+        if (!\is_array($raw) || $raw === []) {
+            return null;
+        }
+        // Every field of a written mark decodes with the same fail-closed
+        // contract as the observation reply: a corrupt or truncated hash
+        // raises instead of coercing to a zeroed mark.
+        $kind = $raw['kind'] ?? null;
+        if (!\is_string($kind) || $kind === '') {
+            throw new RiskStoreException('Risk mark hash is missing its kind field');
+        }
+
+        return [
+            'kind' => $kind,
+            'count' => self::scriptInteger($raw['count'] ?? null, 'mark count'),
+            'first_ms' => self::scriptInteger($raw['first_ms'] ?? null, 'mark first_ms'),
+            'last_ms' => self::scriptInteger($raw['last_ms'] ?? null, 'mark last_ms'),
+        ];
+    }
+
+    /**
+     * Removes the mark of one dimension and identifier and returns the
+     * number of keys removed (0 or 1): the erasure path of the outcomes
+     * plane, built from the exact key with no scan.
+     *
+     * @throws RiskStoreException when the underlying state backend fails
+     */
+    public function forgetMarks(string $dimension, string $id): int
+    {
+        $key = $this->markKey($dimension, $id);
+        try {
+            $removed = $this->client->del($key);
+        } catch (\Predis\Exception\Exception $e) {
+            throw new RiskStoreException('Risk mark erasure failed: ' . $e->getMessage(), 0, $e);
+        }
+
+        return (int) $removed;
+    }
+
+    /**
+     * The context-bound trust record key of one session and ASN bucket:
+     * trust:{kiwi:<ns>}:<session>:<bucket>. The hash tag keeps every
+     * bucket record in the risk keyspace's cluster slot; the session is
+     * the 32-char lowercase hex pseudonym and the bucket follows the
+     * shared bucket-id grammar (AsnBucket::isValid).
+     */
+    public function bucketTrustKey(string $sessionId, string $bucket): string
+    {
+        if (preg_match('/^[0-9a-f]{32}$/', $sessionId) !== 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'sessionId must be a 16-byte hex pseudonym (got 0x%s)',
+                bin2hex($sessionId),
+            ));
+        }
+        if (!AsnBucket::isValid($bucket)) {
+            throw new \InvalidArgumentException(sprintf(
+                'bucket must be a canonical bucket id (a<asn>, u4/<prefix> or u6/<8hex>; got %s)',
+                $bucket,
+            ));
+        }
+
+        return "trust:{kiwi:{$this->namespace}}:{$sessionId}:{$bucket}";
+    }
+
+    /**
+     * Runs one trust.lua op (read, credit or decay) on the session's
+     * bucket record and returns the record's post-op raw trust. The
+     * record TTL is the store's session TTL (the trust dimension stays
+     * aligned with the session dimension).
+     *
+     * @throws \InvalidArgumentException on an invalid session id, bucket
+     *                                   id or delta
+     * @throws RiskStoreException when the state backend fails
+     */
+    private function applyBucketTrust(string $sessionId, string $bucket, string $op, int $delta): int
+    {
+        if ($delta < 0 || $delta > self::MAX_BUCKET_TRUST_DELTA) {
+            throw new \InvalidArgumentException(sprintf(
+                'delta must be within 0..%d (got %d)',
+                self::MAX_BUCKET_TRUST_DELTA,
+                $delta,
+            ));
+        }
+        $result = $this->runScript(
+            [$this->bucketTrustKey($sessionId, $bucket)],
+            [$op, $delta, $this->sessionTtlSecs * 1000],
+            $this->trustScript,
+        );
+
+        return max(0, self::scriptInteger($result, 'bucket trust'));
+    }
+
+    /**
+     * The decayed bucket-local trust of one session and bucket (0 when
+     * no record): a pure read through the canonical trust.lua, never
+     * mutating the record, so a foreign presentation cannot reduce home
+     * credit.
+     */
+    public function readBucketTrust(string $sessionId, string $bucket): int
+    {
+        return $this->applyBucketTrust($sessionId, $bucket, 'read', 0);
+    }
+
+    /**
+     * Credits the session's bucket record atomically (clamped at the
+     * fixed-point ceiling, whole-key TTL refreshed) and returns the
+     * record's new raw trust.
+     */
+    public function creditBucketTrust(string $sessionId, string $bucket, int $delta): int
+    {
+        return $this->applyBucketTrust($sessionId, $bucket, 'credit', $delta);
+    }
+
+    /**
+     * Decays the session's bucket record atomically and returns the
+     * record's new raw trust.
+     */
+    public function decayBucketTrust(string $sessionId, string $bucket, int $delta): int
+    {
+        return $this->applyBucketTrust($sessionId, $bucket, 'decay', $delta);
+    }
+
+    /**
+     * Refuses a mark dimension outside the five contract dimensions: an
+     * unknown dimension would silently address a key family nothing ever
+     * reads.
+     */
+    private static function assertMarkDimension(string $dimension): void
+    {
+        if (!\in_array($dimension, self::MARK_DIMENSIONS, true)) {
+            throw new \InvalidArgumentException(sprintf(
+                'mark dimension must be one of %s (got %s)',
+                implode('|', self::MARK_DIMENSIONS),
+                $dimension,
+            ));
+        }
     }
 
     /**

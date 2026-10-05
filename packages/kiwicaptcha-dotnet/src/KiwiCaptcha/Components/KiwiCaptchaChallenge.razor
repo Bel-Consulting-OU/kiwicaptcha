@@ -1,0 +1,29 @@
+@* The Blazor component of the KiwiCaptcha widget: the same anchor
+markup the Razor tag helper renders, as a component for Blazor
+Server and WebAssembly pages. The widget script mounts into the
+element by id after the circuit or the wasm runtime has rendered it. *@
+<div id="@ElementId" class="kiwi-captcha @(Theme == "dark" ? "kiwi-captcha-dark" : "")"
+     data-sitekey="@SiteKey" data-scope="@Scope"></div>
+<script src="@(ScriptSrc ?? "/kiwicaptcha/kiwi-widget.js")" async defer></script>
+
+@code {
+    /// <summary>The element id the widget mounts into; derive one per page.</summary>
+    [Parameter]
+    public string ElementId { get; set; } = "kiwi-captcha";
+
+    /// <summary>The widget site key the issuance endpoint publishes.</summary>
+    [Parameter]
+    public string SiteKey { get; set; } = "";
+
+    /// <summary>The challenge scope the widget requests, empty for the default.</summary>
+    [Parameter]
+    public string? Scope { get; set; }
+
+    /// <summary>The theme: light or dark.</summary>
+    [Parameter]
+    public string? Theme { get; set; }
+
+    /// <summary>The script source; defaults to the bundled widget path.</summary>
+    [Parameter]
+    public string? ScriptSrc { get; set; }
+}

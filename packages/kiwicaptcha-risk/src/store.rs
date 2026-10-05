@@ -23,6 +23,22 @@ pub enum RiskStoreError {
     /// `RedisRiskStateStore::assertKeySafeIdentifier` rule.
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
+    /// The namespace's recorded keyspace mode does not match the mode
+    /// this store was built in (Plane 7): a namespace carries exactly
+    /// one layout, recorded in its `{kiwi:<ns>}:mode` marker, and a store
+    /// built for the other layout is refused instead of silently
+    /// addressing the wrong key families.
+    #[error(
+        "keyspace mode mismatch for namespace {namespace}: the marker says {stored} but this store is built for {expected}"
+    )]
+    KeyspaceModeMismatch {
+        /// The encoded namespace whose marker refused the store.
+        namespace: String,
+        /// The marker's recorded mode.
+        stored: String,
+        /// The mode the refused store was built for.
+        expected: String,
+    },
 }
 
 /// The full reply of one store application: the signal vector plus the

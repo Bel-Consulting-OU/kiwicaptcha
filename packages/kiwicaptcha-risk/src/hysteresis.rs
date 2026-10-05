@@ -11,17 +11,26 @@
 //!   - a request whose own score clears the target band margin selects the
 //!     plain action directly: escalation when `score >= lower[plain] + 10`,
 //!     drop when `score <= upper[plain] − 10`;
-//!   - otherwise a previous ladder action at band `i` escalates to band
-//!     `i+1` only when `score >= enter[i]`, de-escalates to band `i−1`
-//!     only when `score < exit[i]`, and otherwise stays in band `i`;
+//!   - otherwise a previous ladder action at band `i` escalates when
+//!     `score >= enter[i]` and de-escalates when `score < exit[i]`; the
+//!     edge fallback targets the plain band of the score just inside the
+//!     margin — `action_for_score(score − 10)` when escalating,
+//!     `action_for_score(score + 10)` when dropping — so a sustained edge
+//!     crossing can clear several ladder bands at once instead of the
+//!     previous ± 1 band step;
 //!   - a fresh key (no previous action, or an expired entry) uses the
 //!     plain band mapping;
 //!   - the hard actions (StepUp/Deny) are not hysteresis-affected: when
 //!     the previous or the plain action is StepUp/Deny the plain mapping
 //!     wins;
 //!   - entries expire after [`TTL_MS`] (300 s); the map is bounded at
-//!     1024 entries, the least-recently-used entry evicted when a new
-//!     key arrives at capacity (expired entries are purged first).
+//!     1024 entries (64 shards × 16), the least-recently-used entry of a
+//!     full shard evicted when a new key arrives at capacity (expired
+//!     entries are purged first);
+//!   - the map is sharded (64 independently locked shards) so concurrent
+//!     selections contend only within one shard, and the client key is a
+//!     fixed 16-byte truncation of the pseudonym so a selection performs
+//!     no allocation.
 //!
 //! The map is intentionally per-process: worker-mode deployments and the
 //! Rust engine keep it across requests. PHP-FPM workers are long-lived,
@@ -30,21 +39,86 @@
 //! singleton setups that keep the engine keep the map. The authoritative
 //! global state stays in Redis.
 
-use std::collections::HashMap;
+use std::array;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::action::RiskAction;
+
+/// The by-value map key: the scope and the fixed-cardinality 16-byte
+/// client key (see [`ScopeActionHysteresis::client_key`]) — no per-call
+/// allocation.
+type Key = (u32, [u8; 16]);
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     action: RiskAction,
     updated_ms: u64,
+    /// The shard-local LRU stamp of the entry's last insert or touch; a
+    /// ticket is live only while it carries this same stamp.
+    stamp: u64,
+}
+
+/// One shard's state: the live entries plus the LRU ticket queue. Every
+/// insert or touch of a key pushes a `(key, stamp)` ticket carrying a
+/// fresh monotonically increasing stamp; a ticket is live only while the
+/// map's entry holds the same stamp, so every live entry has exactly one
+/// live ticket and eviction pops stale tickets from the front until the
+/// first live one — amortized O(1) true LRU order.
+#[derive(Debug, Default)]
+struct Shard {
+    map: HashMap<Key, Entry>,
+    tickets: VecDeque<(Key, u64)>,
+    clock: u64,
+}
+
+impl Shard {
+    /// Drops entries past TTL (bounded to the shard's size).
+    fn purge_expired(&mut self, now_ms: u64) {
+        self.map
+            .retain(|_, e| now_ms.saturating_sub(e.updated_ms) <= ScopeActionHysteresis::TTL_MS);
+    }
+
+    /// Evicts the least-recently-used live entry; stale tickets (superseded
+    /// by a later touch of the same key, or orphaned by a purge) are
+    /// discarded on the way.
+    fn evict_lru(&mut self) {
+        while let Some((key, stamp)) = self.tickets.pop_front() {
+            if self.map.get(&key).is_some_and(|e| e.stamp == stamp) {
+                self.map.remove(&key);
+                return;
+            }
+        }
+    }
+
+    /// Rebuilds the ticket queue from the live stamps once it has drifted
+    /// past the bounded multiple of the shard capacity, keeping its memory
+    /// bounded and the insert cost amortized O(1).
+    fn rebuild_tickets(&mut self) {
+        let mut live: Vec<(Key, u64)> = self.map.iter().map(|(key, e)| (*key, e.stamp)).collect();
+        live.sort_unstable_by_key(|&(_, stamp)| stamp);
+        self.tickets = live.into();
+    }
 }
 
 /// See the module docs for the exact hysteresis rules.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ScopeActionHysteresis {
-    inner: Mutex<HashMap<(u32, Vec<u8>), Entry>>,
+    /// The independently locked shards: one `select` touches exactly one
+    /// shard mutex, so concurrent clients contend only within a shard.
+    shards: [Mutex<Shard>; Self::SHARDS],
+    /// The most recent clock observed by any `select` (relaxed): the
+    /// watermark [`ScopeActionHysteresis::len`] filters expired entries
+    /// against, so the reported count matches the on-access purge
+    /// semantics without a global lock.
+    watermark_ms: AtomicU64,
+}
+
+impl Default for ScopeActionHysteresis {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScopeActionHysteresis {
@@ -53,6 +127,18 @@ impl ScopeActionHysteresis {
 
     /// Bounded map: at most 1024 entries; the least-recently-used entry is evicted.
     pub const MAX_ENTRIES: usize = 1024;
+
+    /// Shard count (a power of two): 64 shards at 16 entries each keep the
+    /// global bound at [`ScopeActionHysteresis::MAX_ENTRIES`] while
+    /// spreading concurrent selections across 64 independent locks.
+    pub const SHARDS: usize = 64;
+
+    /// Per-shard bound: `MAX_ENTRIES / SHARDS`.
+    const SHARD_CAPACITY: usize = Self::MAX_ENTRIES / Self::SHARDS;
+
+    /// The ticket queue is rebuilt once stale tickets have drifted it past
+    /// this multiple of the shard capacity, bounding its memory.
+    const TICKET_LIMIT: usize = Self::SHARD_CAPACITY * 4;
 
     /// The hysteresis ladder (ranks 0..6): StepUp and Deny are hard actions
     /// and never participate in the hold logic.
@@ -80,8 +166,35 @@ impl ScopeActionHysteresis {
 
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            shards: array::from_fn(|_| Mutex::new(Shard::default())),
+            watermark_ms: AtomicU64::new(0),
         }
+    }
+
+    /// The fixed-cardinality client key: the first 16 bytes of the client
+    /// pseudonym, zero-padded when shorter — a by-value key with no
+    /// allocation. The pseudonyms are HMAC outputs, so 16 bytes keep the
+    /// truncation collision probability negligible.
+    fn client_key(client: &[u8]) -> [u8; 16] {
+        let mut key = [0u8; 16];
+        for (slot, byte) in key.iter_mut().zip(client) {
+            *slot = *byte;
+        }
+        key
+    }
+
+    /// The shard index: a cheap multiply-xor mix over the key bytes, all
+    /// in-crate. The scope is mixed last through an odd multiplier so that,
+    /// for any fixed client, consecutive scopes map to distinct shards (a
+    /// bijection on the low bits) — a fleet of sequential scope ids fills
+    /// every shard evenly; the client mix spreads concurrent clients
+    /// across all shards.
+    fn shard_for(key: &Key) -> usize {
+        let mut mix = 0u32;
+        for &byte in &key.1 {
+            mix = (mix.rotate_left(5) ^ byte as u32).wrapping_mul(0x9E37_79B1);
+        }
+        ((key.0.wrapping_mul(0x9E37_79B1) ^ mix) as usize) & (Self::SHARDS - 1)
     }
 
     /// Selects the action for one client in one scope with enter/exit
@@ -96,9 +209,13 @@ impl ScopeActionHysteresis {
         plain: RiskAction,
         now_ms: u64,
     ) -> RiskAction {
-        let key = (scope, client.to_vec());
-        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = map
+        let key = (scope, Self::client_key(client));
+        self.watermark_ms.store(now_ms, Ordering::Relaxed);
+        let mut shard = self.shards[Self::shard_for(&key)]
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous = shard
+            .map
             .get(&key)
             .copied()
             .filter(|e| now_ms.saturating_sub(e.updated_ms) <= Self::TTL_MS);
@@ -118,9 +235,17 @@ impl ScopeActionHysteresis {
                 } else {
                     let (lower, upper) = Self::BANDS[prev_rank];
                     if prev_rank < Self::LADDER.len() - 1 && score >= upper + 10 {
-                        Self::LADDER[prev_rank + 1]
+                        // Edge escalation: the plain band of the score just
+                        // below the margin (score − 10), which can clear
+                        // several ladder bands at once — never a fixed
+                        // ± 1 band step. score >= upper + 10 >= 160, so
+                        // the subtraction cannot underflow.
+                        RiskAction::action_for_score(score - 10)
                     } else if prev_rank > 0 && score < lower - 10 {
-                        Self::LADDER[prev_rank - 1]
+                        // Edge drop: the plain band of the score just above
+                        // the margin (score + 10). score < lower − 10 <= 140,
+                        // so the addition cannot overflow.
+                        RiskAction::action_for_score(score + 10)
                     } else {
                         prev.action
                     }
@@ -128,46 +253,57 @@ impl ScopeActionHysteresis {
             }
             _ => plain,
         };
-        if !map.contains_key(&key) && map.len() >= Self::MAX_ENTRIES {
-            Self::evict(&mut map, now_ms);
-        }
-        map.insert(
+        // Single-lookup store: the insert itself detects the capacity
+        // breach. A shard transiently over [`SHARD_CAPACITY`] purges
+        // expired entries first (bounded to the shard's size) and only a
+        // shard still over capacity evicts its least-recently-used live
+        // entry — never the just-inserted one, which carries the newest
+        // stamp.
+        let stamp = shard.clock;
+        shard.clock += 1;
+        shard.map.insert(
             key,
             Entry {
                 action,
                 updated_ms: now_ms,
+                stamp,
             },
         );
+        if shard.map.len() > Self::SHARD_CAPACITY {
+            shard.purge_expired(now_ms);
+            if shard.map.len() > Self::SHARD_CAPACITY {
+                shard.evict_lru();
+            }
+        }
+        shard.tickets.push_back((key, stamp));
+        if shard.tickets.len() > Self::TICKET_LIMIT {
+            shard.rebuild_tickets();
+        }
         action
     }
 
-    /// Current number of tracked entries (tests/metrics).
+    /// Current number of tracked entries (tests/metrics): the sum across
+    /// the shards, with entries past TTL against the most recently observed
+    /// clock no longer tracked — exactly the on-access purge semantics.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
+        let watermark = self.watermark_ms.load(Ordering::Relaxed);
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .map
+                    .values()
+                    .filter(|e| watermark.saturating_sub(e.updated_ms) <= Self::TTL_MS)
+                    .count()
+            })
+            .sum()
     }
 
     /// Whether the map is empty.
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_empty()
-    }
-
-    /// Purges expired entries; when still at capacity, evicts the single
-    /// oldest entry.
-    fn evict(map: &mut HashMap<(u32, Vec<u8>), Entry>, now_ms: u64) {
-        map.retain(|_, e| now_ms.saturating_sub(e.updated_ms) <= Self::TTL_MS);
-        if map.len() < Self::MAX_ENTRIES {
-            return;
-        }
-        let oldest = map
-            .iter()
-            .min_by_key(|(_, e)| e.updated_ms)
-            .map(|(key, _)| key.clone());
-        if let Some(key) = oldest {
-            map.remove(&key);
-        }
+        self.len() == 0
     }
 }
 
@@ -408,6 +544,18 @@ mod tests {
             h.select(1, CLIENT_A, 900, RiskAction::Argon64, T0 + 2),
             RiskAction::Argon64
         );
+        // The escalation edge fallback (previous Allow, score 605): the
+        // plain band of 605 − 10 = 595 is Sha20 — three ladder bands up in
+        // one request, not the adjacent Sha16.
+        let h = ScopeActionHysteresis::new();
+        assert_eq!(
+            h.select(1, CLIENT_A, 100, RiskAction::Allow, T0),
+            RiskAction::Allow
+        );
+        assert_eq!(
+            h.select(1, CLIENT_A, 605, RiskAction::Argon16, T0 + 1),
+            RiskAction::Sha20
+        );
     }
 
     #[test]
@@ -442,7 +590,9 @@ mod tests {
             RiskAction::Allow,
             "the score clears the target band exit margin"
         );
-        // Just above the drop margin the client steps down one band only.
+        // Just above the drop margin the edge fallback lands on the plain
+        // band of score + 10 (151 -> Sha16), several ladder bands below the
+        // previous Argon64, not the adjacent Argon32.
         let h = ScopeActionHysteresis::new();
         assert_eq!(
             h.select(1, CLIENT_A, 900, RiskAction::Argon64, T0),
@@ -450,7 +600,7 @@ mod tests {
         );
         assert_eq!(
             h.select(1, CLIENT_A, 141, RiskAction::Allow, T0 + 1),
-            RiskAction::Argon32
+            RiskAction::Sha16
         );
     }
 

@@ -71,6 +71,31 @@ pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct
 /// registration status.
 pub const ASSESS_V2_LUA: &str = include_str!("../resources/assess_v2.lua");
 
+/// The canonical long-memory outcome-mark script (shared verbatim with
+/// PHP `protocol/risk-v1/marks.lua`): one atomic mark write — the kind,
+/// the count increment, the first/last timestamps and the refreshed
+/// whole-key TTL land in a single invocation.
+pub const MARKS_LUA: &str = include_str!("../resources/marks.lua");
+
+/// The canonical context-bound session-trust script (shared verbatim
+/// with PHP `protocol/risk-v1/trust.lua`): one atomic bucket-record
+/// read, credit or decay — the decay anchor, the clamped fixed-point
+/// trust, the first/last timestamps and the refreshed whole-key TTL
+/// (the session dimension TTL) land in a single invocation.
+pub const TRUST_LUA: &str = include_str!("../resources/trust.lua");
+
+/// The mark dimensions of the long-memory outcomes surface: the four
+/// identity dimensions the typed handles carry plus the asn dimension
+/// the network-aware callers address. Shared verbatim with the PHP
+/// mirror and the cross-language vectors.
+pub const MARK_DIMENSIONS: [&str; 5] = ["principal", "target", "session", "agent", "asn"];
+
+/// Default lifetime of a long-memory mark: 90 days (7776000 s).
+pub const DEFAULT_MARK_TTL_SECS: u64 = 7_776_000;
+
+/// The largest accepted mark kind length in bytes (the outcome name).
+pub const MAX_MARK_KIND_BYTES: usize = 64;
+
 /// Default raw saturations in Lua argv order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal.
@@ -118,6 +143,7 @@ pub struct RedisRiskStateStore {
     session_ttl_secs: u64,
     principal_ttl_secs: u64,
     outcome_ttl_secs: u64,
+    mark_ttl_secs: u64,
     saturations: [u32; 11],
     /// Shared, immutable script handles: the Lua sources are ~18-25 KB, so
     /// the per-assessment hot path borrows them through the `Arc` instead
@@ -129,6 +155,8 @@ pub struct RedisRiskStateStore {
     outcome_register_script: Arc<redis_crate::Script>,
     outcome_confirm_script: Arc<redis_crate::Script>,
     outcome_correct_script: Arc<redis_crate::Script>,
+    marks_script: Arc<redis_crate::Script>,
+    trust_script: Arc<redis_crate::Script>,
     pool: ConnectionPool,
     connection_timeout_ms: u64,
     command_timeout_ms: u64,
@@ -136,8 +164,10 @@ pub struct RedisRiskStateStore {
     last_cooldown_until_ms: AtomicU64,
 }
 
-/// Lazy round-robin pool of sync connections.
-struct ConnectionPool {
+/// Lazy round-robin pool of sync connections. Crate-internal so the
+/// sharded keyspace store (Plane 7) can run one pool per slot-group
+/// endpoint with the same eviction semantics.
+pub(crate) struct ConnectionPool {
     slots: Vec<Mutex<Option<redis_crate::Connection>>>,
     next: AtomicUsize,
     connection_timeout_ms: u64,
@@ -145,7 +175,7 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn new(
+    pub(crate) fn new(
         pool_size: usize,
         connection_timeout_ms: u64,
         command_timeout_ms: u64,
@@ -165,12 +195,29 @@ impl ConnectionPool {
     /// `is_open` socket check, no round trip) is evicted here and replaced
     /// by a fresh connection, so a backend restart heals per slot on the
     /// next use instead of leaving the pool broken until process restart.
-    fn acquire(
+    pub(crate) fn acquire(
         &self,
         client: &redis_crate::Client,
     ) -> Result<MutexGuard<'_, Option<redis_crate::Connection>>, RiskStoreError> {
-        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        let mut guard = self.slots[idx].lock().unwrap_or_else(|p| p.into_inner());
+        // Round-robin start position, then prefer the first slot that is
+        // not currently checked out: a batch holds its slot for the whole
+        // pipelined exchange, so strict round-robin would serialize
+        // concurrent callers behind one slot while others sit idle. When
+        // every slot is checked out, block on the start slot (fair
+        // queuing, identical semantics to the plain round-robin).
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        let mut guard: Option<MutexGuard<'_, Option<redis_crate::Connection>>> = None;
+        for offset in 0..self.slots.len() {
+            let idx = (start + offset) % self.slots.len();
+            if let Ok(checked_out) = self.slots[idx].try_lock() {
+                guard = Some(checked_out);
+                break;
+            }
+        }
+        let mut guard = match guard {
+            Some(guard) => guard,
+            None => self.slots[start].lock().unwrap_or_else(|p| p.into_inner()),
+        };
         if guard.as_ref().is_some_and(|conn| !conn.is_open()) {
             *guard = None;
         }
@@ -208,7 +255,7 @@ impl ConnectionPool {
     /// no-retry/poison rule the sister crate's `redis_verify` pool
     /// documents; there it is r2d2's `has_broken`, here it is eviction on
     /// error because this pool owns its slots directly).
-    fn with_connection<T>(
+    pub(crate) fn with_connection<T>(
         &self,
         client: &redis_crate::Client,
         f: impl FnOnce(&mut redis_crate::Connection) -> redis_crate::RedisResult<T>,
@@ -291,12 +338,15 @@ impl RedisRiskStateStore {
             session_ttl_secs: 1800,
             principal_ttl_secs: 86_400,
             outcome_ttl_secs: DEFAULT_OUTCOME_TTL_SECS,
+            mark_ttl_secs: DEFAULT_MARK_TTL_SECS,
             saturations: DEFAULT_SATURATIONS,
             script: Arc::new(redis_crate::Script::new(SCRIPT)),
             assess_v2_script: Arc::new(redis_crate::Script::new(ASSESS_V2_LUA)),
             outcome_register_script: Arc::new(redis_crate::Script::new(OUTCOME_REGISTER_LUA)),
             outcome_confirm_script: Arc::new(redis_crate::Script::new(OUTCOME_CONFIRM_LUA)),
             outcome_correct_script: Arc::new(redis_crate::Script::new(OUTCOME_CORRECT_LUA)),
+            marks_script: Arc::new(redis_crate::Script::new(MARKS_LUA)),
+            trust_script: Arc::new(redis_crate::Script::new(TRUST_LUA)),
             pool: ConnectionPool::new(
                 DEFAULT_POOL_SIZE,
                 Self::CONNECTION_TIMEOUT_MS,
@@ -383,6 +433,24 @@ impl RedisRiskStateStore {
             connection_timeout_ms,
             command_timeout_ms,
         );
+        self
+    }
+
+    /// Overrides the long-memory mark TTL (default
+    /// [`DEFAULT_MARK_TTL_SECS`], 90 days): every mark write re-arms the
+    /// whole-key TTL to this window.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the TTL falls outside `1..=MAX_TTL_SECS` — the same
+    /// bound every other store TTL carries (a persistent or
+    /// immediately-expired mark is never admissible).
+    pub fn with_mark_ttl_secs(mut self, mark_ttl_secs: u64) -> Self {
+        assert!(
+            (1..=MAX_TTL_SECS).contains(&mark_ttl_secs),
+            "mark_ttl_secs must be within 1..={MAX_TTL_SECS} (got {mark_ttl_secs})"
+        );
+        self.mark_ttl_secs = mark_ttl_secs;
         self
     }
 
@@ -529,7 +597,7 @@ impl RedisRiskStateStore {
     /// hex (the canonical fresh/HMAC ids the engines produce), and the
     /// network risk stays within the 0..1000 contract band. Malformed
     /// input fails closed before any Redis call.
-    fn validate_observation(o: &RiskObservation) -> Result<(), RiskStoreError> {
+    pub(crate) fn validate_observation(o: &RiskObservation) -> Result<(), RiskStoreError> {
         for id in [
             &o.source_id_prev,
             &o.source_id,
@@ -903,6 +971,252 @@ impl RedisRiskStateStore {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
+    /// The long-memory mark key of one dimension and identifier:
+    /// `mark:{kiwi:<ns>}:<dim>:<id>`. The hash tag keeps every mark in
+    /// the risk keyspace's cluster slot; the dimension is one of the
+    /// five contract dimensions and the identifier follows the shared
+    /// key-safety rule.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] when the dimension is
+    /// unknown or the identifier is not a safe key component.
+    pub fn mark_key(&self, dimension: &str, id: &str) -> Result<String, RiskStoreError> {
+        if !MARK_DIMENSIONS.contains(&dimension) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "mark dimension must be one of {} (got {dimension})",
+                MARK_DIMENSIONS.join("|")
+            )));
+        }
+        if !Self::valid_key_component(id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "id is not a safe Redis key component (got 0x{})",
+                hex::encode(id)
+            )));
+        }
+        Ok(format!("mark:{{kiwi:{}}}:{dimension}:{id}", self.namespace))
+    }
+
+    /// Writes one long-memory mark atomically through the canonical
+    /// marks.lua: the kind (the outcome name), the count increment, the
+    /// first/last timestamps and the refreshed whole-key TTL land in one
+    /// script call. Returns the mark's new total count.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid dimension,
+    /// identifier or kind; backend errors on Redis failures.
+    pub fn write_mark(
+        &self,
+        dimension: &str,
+        id: &str,
+        kind: &str,
+        now_ms: u64,
+    ) -> Result<i64, RiskStoreError> {
+        let key = self.mark_key(dimension, id)?;
+        if kind.is_empty() || kind.len() > MAX_MARK_KIND_BYTES {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "kind must be a non-empty value of at most {MAX_MARK_KIND_BYTES} bytes"
+            )));
+        }
+        let ttl_ms: i64 = (self.mark_ttl_secs * 1000).try_into().unwrap_or(i64::MAX);
+        let mut invocation = self.marks_script.prepare_invoke();
+        invocation.key(key.as_str());
+        invocation.arg(kind);
+        invocation.arg(now_ms);
+        invocation.arg(ttl_ms);
+        let count: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
+        Ok(count)
+    }
+
+    /// The current mark of one dimension and identifier: the hash fields
+    /// kind, count, first_ms and last_ms, or `None` when no mark exists.
+    /// A corrupt or truncated hash fails closed instead of decoding as a
+    /// zeroed mark.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid dimension or
+    /// identifier; backend errors on Redis failures.
+    pub fn read_mark(
+        &self,
+        dimension: &str,
+        id: &str,
+    ) -> Result<Option<crate::outcomes::MarkRecord>, RiskStoreError> {
+        let key = self.mark_key(dimension, id)?;
+        let fields: Vec<(String, String)> = self.pool.with_connection(&self.client, |conn| {
+            use ::redis::Commands;
+            conn.hgetall(&key)
+        })?;
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        let mut kind: Option<String> = None;
+        let mut count: Option<i64> = None;
+        let mut first_ms: Option<i64> = None;
+        let mut last_ms: Option<i64> = None;
+        for (field, value) in fields {
+            match field.as_str() {
+                "kind" => kind = Some(value),
+                "count" => count = value.parse().ok(),
+                "first_ms" => first_ms = value.parse().ok(),
+                "last_ms" => last_ms = value.parse().ok(),
+                _ => {}
+            }
+        }
+        let mark = crate::outcomes::MarkRecord {
+            kind: kind.ok_or_else(|| {
+                RiskStoreError::ScriptError("risk mark hash is missing its kind field".to_string())
+            })?,
+            count: count.ok_or_else(|| {
+                RiskStoreError::ScriptError("risk mark hash is missing its count field".to_string())
+            })?,
+            first_ms: first_ms.ok_or_else(|| {
+                RiskStoreError::ScriptError(
+                    "risk mark hash is missing its first_ms field".to_string(),
+                )
+            })?,
+            last_ms: last_ms.ok_or_else(|| {
+                RiskStoreError::ScriptError(
+                    "risk mark hash is missing its last_ms field".to_string(),
+                )
+            })?,
+        };
+        Ok(Some(mark))
+    }
+
+    /// Removes the mark of one dimension and identifier and returns the
+    /// number of keys removed (0 or 1): the erasure path of the outcomes
+    /// plane, built from the exact key with no scan.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid dimension or
+    /// identifier; backend errors on Redis failures.
+    pub fn forget_marks(&self, dimension: &str, id: &str) -> Result<u32, RiskStoreError> {
+        let key = self.mark_key(dimension, id)?;
+        let removed: i64 = self.pool.with_connection(&self.client, |conn| {
+            use ::redis::Commands;
+            conn.del(&key)
+        })?;
+        Ok(removed.max(0) as u32)
+    }
+
+    /// The context-bound trust record key of one session and ASN bucket:
+    /// `trust:{kiwi:<ns>}:<session>:<bucket>`. The hash tag keeps every
+    /// bucket record in the risk keyspace's cluster slot; the session is
+    /// the 32-char lowercase hex pseudonym and the bucket follows the
+    /// shared bucket-id grammar (`crate::asn::is_valid_bucket_id`).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] when the session id is not
+    /// 32-char lowercase hex or the bucket id is not canonical.
+    pub fn bucket_trust_key(
+        &self,
+        session_id: &str,
+        bucket: &str,
+    ) -> Result<String, RiskStoreError> {
+        if !is_lower_hex(session_id, 32) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "session_id must be a 16-byte hex pseudonym".to_string(),
+            ));
+        }
+        if !crate::asn::is_valid_bucket_id(bucket) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "bucket must be a canonical bucket id (a<asn>, u4/<prefix> or u6/<8hex>; got {bucket})"
+            )));
+        }
+        Ok(format!(
+            "trust:{{kiwi:{}}}:{session_id}:{bucket}",
+            self.namespace
+        ))
+    }
+
+    /// Runs one trust.lua op (`read`, `credit` or `decay`) on the
+    /// session's bucket record and returns the record's post-op raw
+    /// trust. The record TTL is the store's session TTL (the trust
+    /// dimension stays aligned with the session dimension).
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid session id,
+    /// bucket id or delta; backend errors on Redis failures.
+    fn apply_bucket_trust(
+        &self,
+        session_id: &str,
+        bucket: &str,
+        op: &str,
+        delta: u32,
+    ) -> Result<u32, RiskStoreError> {
+        let key = self.bucket_trust_key(session_id, bucket)?;
+        if delta > 100_000 {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "delta must be within 0..=100000 (got {delta})"
+            )));
+        }
+        let ttl_ms: i64 = (self.session_ttl_secs * 1000)
+            .try_into()
+            .unwrap_or(i64::MAX);
+        let mut invocation = self.trust_script.prepare_invoke();
+        invocation.key(key.as_str());
+        invocation.arg(op);
+        invocation.arg(delta);
+        invocation.arg(ttl_ms);
+        let raw: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
+        Ok(raw.max(0) as u32)
+    }
+
+    /// The decayed bucket-local trust of one session and bucket (0 when
+    /// no record): a pure read through the canonical `trust.lua`, never
+    /// mutating the record, so a foreign presentation cannot reduce home
+    /// credit.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid session or
+    /// bucket id; backend errors on Redis failures.
+    pub fn read_bucket_trust(&self, session_id: &str, bucket: &str) -> Result<u32, RiskStoreError> {
+        self.apply_bucket_trust(session_id, bucket, "read", 0)
+    }
+
+    /// Credits the session's bucket record atomically (clamped at the
+    /// fixed-point ceiling, whole-key TTL refreshed) and returns the
+    /// record's new raw trust.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid session id,
+    /// bucket id or delta; backend errors on Redis failures.
+    pub fn credit_bucket_trust(
+        &self,
+        session_id: &str,
+        bucket: &str,
+        delta: u32,
+    ) -> Result<u32, RiskStoreError> {
+        self.apply_bucket_trust(session_id, bucket, "credit", delta)
+    }
+
+    /// Decays the session's bucket record atomically and returns the
+    /// record's new raw trust.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskStoreError::InvalidIdentifier`] on an invalid session id,
+    /// bucket id or delta; backend errors on Redis failures.
+    pub fn decay_bucket_trust(
+        &self,
+        session_id: &str,
+        bucket: &str,
+        delta: u32,
+    ) -> Result<u32, RiskStoreError> {
+        self.apply_bucket_trust(session_id, bucket, "decay", delta)
+    }
+
     /// CRC-16/xmodem (poly 0x1021, init 0): `"123456789"` -> `0x31C3`,
     /// and `slot("foo") = crc16("foo") & 0x3FFF = 12182` per the Redis
     /// Cluster docs.
@@ -965,7 +1279,7 @@ fn is_lower_hex(s: &str, len: usize) -> bool {
 /// accepted, matching the typed `Vec<i64>` reply decoder
 /// [`RedisRiskStateStore::observe_full`] uses; every other reply type
 /// (Nil, an array, a map, a boolean, a non-numeric string) is refused.
-fn value_i64(v: &redis_crate::Value) -> Result<i64, RiskStoreError> {
+pub(crate) fn value_i64(v: &redis_crate::Value) -> Result<i64, RiskStoreError> {
     match v {
         redis_crate::Value::Int(i) => Ok(*i),
         redis_crate::Value::BulkString(b) => std::str::from_utf8(b)
@@ -1004,7 +1318,7 @@ fn clamp_cooldown(v: i64) -> u64 {
     v.max(0) as u64
 }
 
-fn map_redis_error(e: redis_crate::RedisError) -> RiskStoreError {
+pub(crate) fn map_redis_error(e: redis_crate::RedisError) -> RiskStoreError {
     match e.kind() {
         redis_crate::ErrorKind::IoError => {
             let message = e.to_string();

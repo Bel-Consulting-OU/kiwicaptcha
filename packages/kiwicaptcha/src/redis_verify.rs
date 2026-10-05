@@ -184,9 +184,9 @@ use crate::rsw::{RswKeyring, RswKeyringError, RswTrapdoor};
 use crate::token::SolutionToken;
 use crate::verify::{
     check_execution_binding_cached, check_request_binding, check_rsw_params, ct_eq,
-    final_revalidate, measurable_solve_duration_ms, proof_is_valid, signature_from_challenge,
-    validate_record, ExecutionEvidenceCache, RequestBindingExpectation, VerifyError, VerifyOutcome,
-    SKEW_TOLERANCE_US,
+    final_revalidate, measurable_solve_duration_ms, policy_version_accepted, proof_is_valid,
+    signature_from_challenge, validate_record, ExecutionEvidenceCache, RequestBindingExpectation,
+    VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
 
@@ -3108,6 +3108,14 @@ pub struct ProductionVerifier {
     accept_legacy_v1: bool,
     expected_region: Option<String>,
     expected_policy_version: Option<u32>,
+    /// The rollout-window floor for [`ProductionVerifier::expected_policy_version`]:
+    /// during a declared N → N+1 policy rollout a mixed fleet legitimately
+    /// redeems challenges issued under either epoch, so a floor of N with an
+    /// expected version of N+1 accepts `floor <= policy_version <= expected`
+    /// — strict equality otherwise (the default, `None`). A floor greater
+    /// than the expected version accepts nothing (fail closed). Ignored when
+    /// no expected version is set.
+    policy_version_floor: Option<u32>,
     expected_issuer: Option<String>,
     /// The tenant id every purpose key derives under (see
     /// [`crate::challenge::ChallengeConfig::tenant`]): `None` keeps the
@@ -3197,6 +3205,7 @@ impl ProductionVerifier {
             accept_legacy_v1: false,
             expected_region: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             expected_issuer: None,
             tenant: None,
             derived_keys: Mutex::new(HashMap::new()),
@@ -3414,6 +3423,34 @@ impl ProductionVerifier {
     /// The configured expected policy epoch, if any.
     pub fn expected_policy_version(&self) -> Option<u32> {
         self.expected_policy_version
+    }
+
+    /// Declare a policy-epoch rollout window: together with
+    /// [`ProductionVerifier::with_expected_policy_version`] set to N+1, a
+    /// floor of N accepts challenges issued under either epoch
+    /// (`floor <= policy_version <= expected`) so a mixed N/N+1 fleet
+    /// redeems cross-node with zero spurious rejections while the rollout
+    /// settles. Without a floor the check stays the strict equality (a
+    /// wrong epoch outside a window is still rejected with
+    /// [`VerifyError::WrongPolicyVersion`]). A floor greater than the
+    /// expected version accepts nothing (fail closed). Use
+    /// [`ProductionVerifier::without_policy_version_floor`] to close the
+    /// window.
+    pub fn with_policy_version_floor(mut self, floor: u32) -> Self {
+        self.policy_version_floor = Some(floor);
+        self
+    }
+
+    /// Close the policy-epoch rollout window (the default): the epoch check
+    /// reverts to strict equality with the expected version.
+    pub fn without_policy_version_floor(mut self) -> Self {
+        self.policy_version_floor = None;
+        self
+    }
+
+    /// The configured policy-epoch rollout floor, if any.
+    pub fn policy_version_floor(&self) -> Option<u32> {
+        self.policy_version_floor
     }
 
     /// Require every verified challenge to have been issued by this issuer
@@ -3906,6 +3943,7 @@ impl ProductionVerifier {
             (self.now_unix)(),
             self.expected_region.as_deref(),
             self.expected_policy_version,
+            self.policy_version_floor,
             self.expected_issuer.as_deref(),
         ) {
             return VerifyOutcome::Invalid(e);
@@ -4677,11 +4715,15 @@ impl ProductionVerifier {
         }
 
         // Security-policy epoch: the policy that authorized
-        // this challenge must still be in force.
-        if let Some(expected) = self.expected_policy_version {
-            if record.policy_version != expected {
-                return Err(VerifyError::WrongPolicyVersion);
-            }
+        // this challenge must still be in force (or, during a declared
+        // rollout window, be one of the two in-flight epochs — see
+        // `policy_version_accepted`).
+        if !policy_version_accepted(
+            record.policy_version,
+            self.expected_policy_version,
+            self.policy_version_floor,
+        ) {
+            return Err(VerifyError::WrongPolicyVersion);
         }
 
         // Issuer identity: an issuer-expecting deployment
@@ -4918,6 +4960,96 @@ mod tests {
         assert!(
             Arc::ptr_eq(&keys_1, &keys_1_after),
             "the cached Arc is stable across repeated cheap phases"
+        );
+    }
+
+    /// The policy-epoch rollout window on the production verifier's
+    /// deployment check: inside a declared window a mixed N/N+1 fleet
+    /// redeems cross-node (floor <= policy_version <= expected), outside a
+    /// window a wrong epoch is still rejected (strict equality), and an
+    /// inverted window accepts nothing. The store's client never needs to
+    /// be reachable: `check_deployment_expectations` is pure.
+    #[test]
+    fn policy_rollout_window_gates_the_deployment_expectations() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
+        let verifier = || {
+            ProductionVerifier::new(
+                RedisChallengeStore::new(client.clone(), "policy-window:"),
+                SECRET,
+            )
+        };
+        let issue = |policy_version: u32| {
+            let mut config = sha_config(4);
+            config.policy_version = policy_version;
+            issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None)
+                .expect("issuance")
+                .record
+        };
+        let floor_epoch = issue(1);
+        let next_epoch = issue(2);
+        let stale_epoch = issue(0);
+        let future_epoch = issue(3);
+
+        // Outside a window: strict equality with the expected epoch.
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(1)
+                .check_deployment_expectations(&floor_epoch),
+            Ok(())
+        );
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(2)
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion)
+        );
+
+        // Declared rollout window [1, 2]: both fleet epochs redeem.
+        let window = || {
+            verifier()
+                .with_expected_policy_version(2)
+                .with_policy_version_floor(1)
+        };
+        assert_eq!(window().check_deployment_expectations(&floor_epoch), Ok(()));
+        assert_eq!(window().check_deployment_expectations(&next_epoch), Ok(()));
+        assert_eq!(
+            window().check_deployment_expectations(&stale_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "an epoch below the window floor is rejected"
+        );
+        assert_eq!(
+            window().check_deployment_expectations(&future_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "an epoch above the expectation is rejected"
+        );
+
+        // Closing the window reverts to strict equality.
+        assert_eq!(
+            window()
+                .without_policy_version_floor()
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion),
+            "outside a window a wrong epoch is still rejected"
+        );
+
+        // An inverted window (floor above the expectation) accepts nothing.
+        assert_eq!(
+            verifier()
+                .with_expected_policy_version(1)
+                .with_policy_version_floor(2)
+                .check_deployment_expectations(&floor_epoch),
+            Err(VerifyError::WrongPolicyVersion)
+        );
+
+        // The builders round-trip their values.
+        let configured = window();
+        assert_eq!(configured.expected_policy_version(), Some(2));
+        assert_eq!(configured.policy_version_floor(), Some(1));
+
+        // No expectation disables the epoch check entirely.
+        assert_eq!(
+            verifier().check_deployment_expectations(&future_epoch),
+            Ok(())
         );
     }
 

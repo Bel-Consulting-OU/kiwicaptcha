@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extension type="plugin" group="captcha" method="upgrade">
+    <name>plg_captcha_kiwicaptcha</name>
+    <title>Plugin - KiwiCaptcha</title>
+    <author>KiwiCaptcha contributors</author>
+    <version>1.0.0</version>
+    <description>Proof-of-work CAPTCHA verified against a self-hosted KiwiCaptcha deployment (the verifier sidecar or a siteverify route). The client side loads the deployment's shim script, so incumbent reCAPTCHA, hCaptcha, Turnstile, ALTCHA and Friendly Captcha markup keeps working.</description>
+    <files>
+        <filename plugin="kiwicaptcha">kiwicaptcha.php</filename>
+        <folder>src</folder>
+    </files>
+    <config>
+        <fields name="params">
+            <fieldset name="basic">
+                <field name="verify_url" type="url" label="PLG_CAPTCHA_KIWICAPTCHA_VERIFY_URL"
+                       default="http://127.0.0.1:7371/verify" filter="string"/>
+                <field name="shim_url" type="url" label="PLG_CAPTCHA_KIWICAPTCHA_SHIM_URL"
+                       default="" filter="string"/>
+                <field name="bearer" type="password" label="PLG_CAPTCHA_KIWICAPTCHA_BEARER"
+                       default="" filter="raw"/>
+                <field name="mode" type="list" label="PLG_CAPTCHA_KIWICAPTCHA_MODE" default="json">
+                    <option value="json">PLG_CAPTCHA_KIWICAPTCHA_MODE_JSON</option>
+                    <option value="compat">PLG_CAPTCHA_KIWICAPTCHA_MODE_COMPAT</option>
+                </field>
+                <field name="scope" type="text" label="PLG_CAPTCHA_KIWICAPTCHA_SCOPE"
+                       default="login" filter="string"/>
+                <field name="trust_proxy" type="radio" label="PLG_CAPTCHA_KIWICAPTCHA_TRUST_PROXY" default="0">
+                    <option value="0">JNO</option>
+                    <option value="1">JYES</option>
+                </field>
+            </fieldset>
+        </fields>
+    </config>
+</extension>

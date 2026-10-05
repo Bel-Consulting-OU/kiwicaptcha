@@ -552,7 +552,11 @@ final class SecurityEpochMonitor
         // this monitor owns). Region and issuer are static deployment
         // expectations established at verifier construction; rewriting
         // them here — in particular with a null issuer — would silently
-        // disable the issuer security boundary after an epoch bump.
+        // disable the issuer security boundary after an epoch bump. The
+        // rollout-window floor (risk.policy_rollout_min_epoch) is
+        // likewise untouched: it is an explicit config declaration, never
+        // derived from the central min this monitor reads, and a bump of
+        // the expected epoch must not narrow it.
         $this->verifier->setExpectedPolicyVersion($epoch);
     }
 

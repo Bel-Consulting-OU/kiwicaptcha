@@ -1,0 +1,49 @@
+<script>
+  // Example: the Angular standalone component in a login form.
+  // (Full project wiring: angular.json, main.ts, etc.)
+  import { Component, viewChild, signal } from "@angular/core";
+  import { KiwiCaptcha } from "@kiwicaptcha/angular";
+
+  @Component({
+    standalone: true,
+    imports: [KiwiCaptcha],
+    selector: "app-login",
+    template: `
+      <form (submit)="submit($event)">
+        <kiwi-captcha
+          endpoint="/api/kcaptcha/challenge"
+          sitekey="pk-live-1"
+          scope="login"
+          lang="en"
+          (verified)="onVerified($event)"
+          (failed)="onFailed($event)"
+          (expired)="captcha().reset()"
+        />
+        @if (error()) {
+          <p role="alert">{{ error() }}</p>
+        }
+        <input type="hidden" name="kiwi__token" [value]="token()" />
+        <button [disabled]="!token()">Sign in</button>
+      </form>
+    `,
+  })
+  export class LoginComponent {
+    private readonly captcha = viewChild.required(KiwiCaptcha);
+    readonly token = signal("");
+    readonly error = signal<string | null>(null);
+
+    onVerified(detail: { token: string }): void {
+      this.token.set(detail.token);
+      this.error.set(null);
+    }
+
+    onFailed(message: string): void {
+      this.error.set(message);
+    }
+
+    submit(event: Event): void {
+      event.preventDefault();
+      // POST the form with the kiwi__token field; the backend verifies.
+    }
+  }
+</script>

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>KiwiCaptcha</RootNamespace>
+    <Description>KiwiCaptcha server SDK for .NET: pure-local verification, stores, outcomes, ASP.NET Core middleware</Description>
+    <PackageId>KiwiCaptcha</PackageId>
+    <Version>1.0.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The canonical ADO.NET driver of the sqlite store adapter: the
+         one deliberate external dependency of the library, carried so
+         sqlite:// deployments work exactly like redis:// ones. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
+  </ItemGroup>
+
+</Project>

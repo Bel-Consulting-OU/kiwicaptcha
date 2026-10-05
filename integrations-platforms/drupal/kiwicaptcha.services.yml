@@ -1,0 +1,6 @@
+services:
+  kiwicaptcha.verifier:
+    class: Drupal\kiwicaptcha\Service\KiwiVerifier
+    arguments:
+      - '@http_client'
+      - '@config.factory'

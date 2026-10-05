@@ -57,7 +57,8 @@ local function validPostSolveRecord(rec)
   if lease ~= nil and lease ~= cjson.null then return false end
   if type(disp) ~= 'table' then return false end
   for k in pairs(disp) do
-    if k ~= 'kind' and k ~= 'decision_id' and k ~= 'chain_id' and k ~= 'chain_expires_at' then
+    if k ~= 'kind' and k ~= 'decision_id' and k ~= 'chain_id' and k ~= 'chain_expires_at'
+      and k ~= 'quarantined' then
       return false
     end
   end
@@ -84,6 +85,14 @@ local function validPostSolveRecord(rec)
     if type(chainExpiresAt) ~= 'number' or chainExpiresAt % 1 ~= 0 or chainExpiresAt <= 0 then
       return false
     end
+  end
+  -- The additive quarantine flag: written only when true, valid only
+  -- on the pass kind (quarantine never overrides deny, step-up or a
+  -- chain demand). A record without the field is the earlier shape.
+  local quarantined = disp['quarantined']
+  if quarantined ~= nil and quarantined ~= cjson.null then
+    if quarantined ~= true then return false end
+    if kind ~= 'pass' then return false end
   end
   -- The exact kind <-> chain_id <-> chain_expires_at matrix.
   if kind == 'chain_required' then

@@ -54,6 +54,7 @@ jobs:
             packages/kiwicaptcha-wasm/assets/widget-telemetry.js
             packages/kiwicaptcha-wasm/assets/widget-locales.js
             packages/kiwicaptcha-wasm/assets/widget-compat.js
+            packages/kiwicaptcha-wasm/assets/widget-shims.js
             packages/kiwicaptcha-wasm/assets/widget.css
           if-no-files-found: error
           retention-days: 30

@@ -144,6 +144,21 @@ identical in:
 
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
+- `hysteresis-vectors.json`: shared scope-action hysteresis edge-fallback
+  vectors (authoritative). Both implementations iterate the identical
+  steps and must select identical actions.
+- `target-vectors.json`: shared target-identifier vectors (authoritative).
+    Both implementations run every input through the identical versioned
+    normalization pipeline and must derive the identical HMAC pseudonym.
+- `asn-vectors.json`: shared ASN-resolution vectors (authoritative).
+    Both implementations load the versioned sample dataset
+    (`protocol/asn/sample-asn.tsv`, digest pinned in the corpus) and must
+    resolve every query IP to the identical bucket id, with the identical
+    valid/malformed row accounting.
+- `trust-vectors.json`: shared context-bound-trust vectors
+    (authoritative). Both implementations must derive the identical
+    bucket id and credit decision (applied credit, home verdict) for
+    every recorded raw trust value.
 - `risk-v1.lua` — canonical Redis state script (authoritative, embedded).
 - `assess_v2.lua`: canonical consolidated assessment script (the full
   risk-v1 observation plus the risk-v2 first-seen session tag records and
@@ -154,6 +169,40 @@ Files:
   `outcome_register.lua`, `outcome_confirm.lua`, `outcome_correct.lua`:
   canonical calibration / outcome-ledger scripts (authoritative, embedded
   verbatim by both packages).
+- `marks.lua`: the canonical long-memory outcome-mark write (one atomic
+  hash update under a refreshed whole-key TTL; authoritative, embedded
+  verbatim by both packages).
+- `trust.lua`: the canonical context-bound session-trust record (one
+  atomic read, credit or decay of `trust[session][asn_bucket]` under a
+  refreshed whole-key TTL aligned with the session dimension;
+  authoritative, embedded verbatim by both packages).
+- `outcomes-vectors.json`: shared typed-outcome mapping vectors
+  (authoritative). Both implementations resolve every vector to the
+  identical event channel, ledger action, mark behavior and polarity
+  decision.
+- `pricing-vectors.json`: shared continuous-pricing vectors
+  (authoritative). The header records the price model's consts table,
+  which both implementations must equal byte for byte, and every vector
+  carries the risk, value class, bucket trust and scope pressure inputs
+  plus the expected work score and ladder rung. Both implementations
+  (`RISK_PRICING_VECTORS_PATH` overrides the location) must resolve
+  every vector identically. The corpus ships 10000 vectors (grid
+  corners, a band-edge sweep and seeded interior draws): a 100000-vector
+  corpus at this encoding is about 20 MiB, far over the 3 MiB budget.
+- `quarantine-vectors.json`: shared quarantine-selection vectors
+  (authoritative). Quarantine is a decision disposition of the marks
+  stage, never a ladder rung: a server-confirmed spam identity (every
+  in-TTL own mark of the spamReported kind) with a clean request and a
+  plain Allow decision quarantines, wire-identical to allow. Every
+  vector carries the plain decision inputs plus the marks view and must
+  resolve to the identical action, quarantine flag, retry hint and
+  ordered reason list. The severity-monotonic precedence (deny, the
+  non-spam rung floor, the target step-up ceiling and any plain action
+  above Allow all outrank quarantine; an expired mark is inert) is part
+  of the pinned surface. Both implementations read the corpus with the
+  selection armed (the engine posture); the legacy
+  `attacker-denial-vectors.json` corpus keeps pinning the deny and rung
+  rules of the same stage with the selection off.
 
 12. Request vs feedback: only `PreIssue` (1) counts as a request. It
    increments `rf`/`rs` and the scope-switch channel. Feedback events
@@ -232,7 +281,8 @@ Files:
     denominator is booked. When calibration is disabled the store still
     registers the ledger (outcome_register.lua). Confirmation performs a pending -> L/A
     CAS exactly once (confirm.lua / outcome_confirm.lua) and returns the
-    shared status 0/1/2. Reputation mutation is gated on 1|2, so
+    shared status 0/1/2; the confirm preserves the ledger's stored TTL
+    (`SET ... KEEPTTL`) instead of re-arming it. Reputation mutation is gated on 1|2, so
     ConfirmedLegitimate/ConfirmedAbuse work identically with or without
     calibration, and webhook retries can never amplify reputation.
     Corrections flip the ledger (correction.lua / outcome_correct.lua).
@@ -286,3 +336,46 @@ Files:
     (carrier NAT, office, campus) therefore cannot be denied on volume
     alone, and a saturated argon backend re-escalates the floor to
     StepUp.
+
+22. ASN resolution (dataset plane): a free, redistributable dataset (a
+    public routing-table export or the free IPtoASN dataset) ships as a
+    versioned tab-separated file and is loaded from local disk; no
+    network call, no paid feed, ever. The loader accepts the
+    `first_ip last_ip asn` row shape, the extended
+    `first_ip last_ip asn cc registry allocated` shape and the
+    registry-first `registry first_ip last_ip asn cc allocated` shape.
+    Rows are read once into sorted interval tables and resolved by
+    binary search; a malformed row (unparsable IP, mixed family,
+    reversed range, an ASN outside 1..4294967294) is skipped and
+    counted, never fatal. Addresses follow the canonical IP rules of
+    item 8, so a v4-mapped or v4-compatible IPv6 resolves as its IPv4
+    address. Every load exposes the sha256 of the file bytes, the file
+    mtime (the doctor prints digest and age) and the row counts. Hot
+    reload parses the new file fully off to the side, optionally
+    verifies a caller-supplied digest and swaps the table atomically,
+    so a torn or rejected reload never serves a half-swapped table.
+    The reserved unlisted namespace encodes an unknown ASN as its own
+    bucket per prefix: `u4/<decimal /16 prefix>` for IPv4 and
+    `u6/<8 lowercase hex of the /32 prefix>` for IPv6; a listed ASN
+    encodes as `a<decimal asn>` (canonical decimal, no leading zeros).
+    Both cores mirror the identical grammar and the shared
+    `asn-vectors.json` pins it.
+
+23. Context-bound trust: trust earned by a session is stored per ASN
+    bucket, `trust[session][asn_bucket]`, through the canonical
+    `trust.lua` record (`trust:{kiwi:<ns>}:<session>:<bucket>`, the
+    session-dimension TTL, fixed-point trust leaking at 2 units per
+    second and clamped at the 10000 ceiling). A session presenting from
+    a bucket where it earned nothing gets zero credit there, full
+    credit in its home bucket(s): the applied credit is the bucket
+    local record alone (normalized with the identical
+    `floor(value * 1000 / saturation)` rule, saturation 10000). The
+    read op is pure, so a foreign presentation never reduces home
+    credit and a genuine home to mobile commute keeps trust. This
+    defeats shared-cookie botnets: a trusted cookie replayed from a
+    thousand foreign networks earns nothing. The risk-v1 observation
+    argv stays frozen, so the bucket layer rides an additive store
+    surface (like the marks). The assessment plane swaps the aggregate
+    session trust contribution for the bucket local credit when the
+    request context carries the session's ASN bucket, and the shared
+    `trust-vectors.json` pins the decisions both cores must derive.

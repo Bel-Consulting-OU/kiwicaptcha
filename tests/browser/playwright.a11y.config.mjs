@@ -45,11 +45,17 @@ import { defineConfig } from '@playwright/test';
 // then the cancelled generation's chunk loop is allowed to run out and
 // the widget is asserted byte-identical to its destroy-time state — no
 // data-progress write, no state/label/token mutation, no kiwi:* event.
+// The version-6 real-platform suite (execution-v6-portable.spec.mjs)
+// qualifies the real-platform execution rung on every engine: fresh
+// armed v6 solves whose five platform probes (computed-style geometry,
+// mutation delivery order, full event phases, Range/Selection line
+// boxes, intersection thresholds) must verify against the server-side
+// envelope walker through the fixture.
 // The engine-specific
 // torture cases stay on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-csp|locale-csp|destroy-race|compat-controls|compat-observer|responsive-text|pentest|pentest-ai|pentest-stealth|pentest-supply|pentest-descriptors)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable|execution-v6-portable|execution-csp|locale-csp|destroy-race|compat-controls|compat-observer|responsive-text|pentest|pentest-ai|pentest-stealth|pentest-supply|pentest-descriptors)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },

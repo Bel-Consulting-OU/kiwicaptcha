@@ -1,0 +1,309 @@
+{
+    "$schema": "kiwicaptcha.golden-server-sdk-vectors/1",
+    "format_version": 1,
+    "provenance": {
+        "issuer": "kiwicaptcha-php Issuer (the canonical PHP core), run live",
+        "generator": "tools/generate_golden_vectors.php in this package, php 8.5.10, kiwicaptcha-php src at this repository commit",
+        "secret": "0123456789abcdef0123456789abcdef",
+        "notes": [
+            "Every record is minted by the real PHP Issuer with its sealed record-metadata MAC.",
+            "The rsw trapdoor pair is the shared committed fixture; the PHP Rsw gate validates it before issuance.",
+            "sha_execution_v4 pins the Ruby and Elixir fail-closed mapping: no browser-trace walker, so the armed dimension answers execution_mismatch.",
+            "argon2id pins the unsupported_argon2_params mapping: no native Argon2id in the Ruby and Elixir runtimes."
+        ]
+    },
+    "hkdf": {
+        "secret": "0123456789abcdef0123456789abcdef",
+        "challenge_hex": "1d5be54d8682c4a6951c62306dd2f3b910366fddd48c45e5a4cc57222565c7bb",
+        "ip_bind_hex": "48018b185abd85485fe9a6b61820b6da00043ef0ac38d0930abd3f55fbe0384d",
+        "result_hex": "097f7a8e5189ac814299617c976c89a84301e2425bdf2761eb104ede8b8870eb",
+        "server_state_hex": "b837c5484cea742fedcb72eb7f9dfdd9505ae4a5625969a3459c3c5fe700f1e9"
+    },
+    "canonical": {
+        "base": "v4|2|bm9uY2UtcmV2aXNpb24tMy10ZXN0LXZlY3Rvcg==|login|tag456|111|222|sha256|0|1|1|8|c2FsdC1yZXZpc2lvbi0z|5|eu|2|bind-1|prod|3",
+        "signature_hex": "5c7d8aa1713470d789e28d2504236d535fa6a944e9e5947840ba5efd6d263b14",
+        "v3_decoy": "v4|3|bm9uY2UtcmV2aXNpb24tMy10ZXN0LXZlY3Rvcg==|login|tag456|111|222|sha256|0|1|1|8|c2FsdC1yZXZpc2lvbi0z|5||1|||1|d=billing_address_line_a3f9c21d8e5b7401",
+        "v4_execution": "v4|4|bm9uY2UtcmV2aXNpb24tMy10ZXN0LXZlY3Rvcg==|login|tag456|111|222|sha256|0|1|1|8|c2FsdC1yZXZpc2lvbi0z|5||1|||1|e=1,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "v5_identity": "v4|5|bm9uY2UtcmV2aXNpb24tMy10ZXN0LXZlY3Rvcg==|login|tag456|111|222|sha256|0|1|1|8|c2FsdC1yZXZpc2lvbi0z|5||1|||1|r=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "server_state_mac": {
+        "key_hex": "b837c5484cea742fedcb72eb7f9dfdd9505ae4a5625969a3459c3c5fe700f1e9",
+        "record_meta_input": "kiwi/record-meta/v1\n12:bm9uY2Uuc2ln\n1700000000123456\n1:12:example.test",
+        "record_meta_hex": "4d4f1144518f8de5a9bf0b200069d4152377ce44c8f0d2ff1ea64a0dd3446068",
+        "consumed_result_input": "kiwi/consumed-result/v1\n12:bm9uY2Uuc2ln\n1\n1:6:bind-9\n1:4:op-7",
+        "consumed_result_hex": "3ef5caab05a40b524cd765ca9f96f8e29b9e46a8986fb77748c967d49c583881"
+    },
+    "records": [
+        {
+            "name": "sha_plain",
+            "record": {
+                "nonce": "8lM6pxGjVpgGxDRa+tDVKKfeSASPXSAEJLI5T5W1HHw=",
+                "scope": "login",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "sha256",
+                "m_kib": 0,
+                "t": 3,
+                "p": 1,
+                "target_bits": 8,
+                "salt": "300PP5mH7r4TBh4sgce8AQ==",
+                "prefix": "djR8Mnw4bE02cHhHalZwZ0d4RFJhK3REVktLZmVTQVNQWFNBRUpMSTVUNVcxSEh3PXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fDMwMFBQNW1IN3I0VEJoNHNnY2U4QVE9PXw1MDB8ZXV8MXx8fDF8bT0x.6ae03e028664e9ba6831fe7ee44298d8397ce0468a29d8ee139ed22e8bc1cba7|300PP5mH7r4TBh4sgce8AQ==|",
+                "challenge": "djR8Mnw4bE02cHhHalZwZ0d4RFJhK3REVktLZmVTQVNQWFNBRUpMSTVUNVcxSEh3PXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fDMwMFBQNW1IN3I0VEJoNHNnY2U4QVE9PXw1MDB8ZXV8MXx8fDF8bT0x.6ae03e028664e9ba6831fe7ee44298d8397ce0468a29d8ee139ed22e8bc1cba7",
+                "min_duration_ms": 500,
+                "issued_at_ns": 1791178631860045,
+                "protocol_version": 2,
+                "attempts_used": 0,
+                "region": "eu",
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "server_mac": "c69755d1db6fc599c65a034b4614c0c37c70e7687b28d6dc33bb85dad919be4e"
+            },
+            "token_b64": "OGxNNnB4R2pWcGdHeERSYSt0RFZLS2ZlU0FTUFhTQUVKTEk1VDVXMUhIdz0uMjQ4LjE1MDAueyJ2IjoxfQ==",
+            "expected": {
+                "ok": true
+            },
+            "verify_opts": {
+                "expected_scope": "login",
+                "region": "eu"
+            }
+        },
+        {
+            "name": "sha_bound",
+            "record": {
+                "nonce": "ynd12qKG3SttmzDjfL39H7/xlgpvqT567NtdIRYS61A=",
+                "scope": "signup",
+                "binding_tag": "0784da87abc88ca8702fd2686b6495ed70ae242e04c474ad5eef47d6f8c7f65d",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "sha256",
+                "m_kib": 0,
+                "t": 3,
+                "p": 1,
+                "target_bits": 8,
+                "salt": "c1Lhpg43WTWQ+h4aE27Rjg==",
+                "prefix": "djR8Mnx5bmQxMnFLRzNTdHRtekRqZkwzOUg3L3hsZ3B2cVQ1NjdOdGRJUllTNjFBPXxzaWdudXB8MDc4NGRhODdhYmM4OGNhODcwMmZkMjY4NmI2NDk1ZWQ3MGFlMjQyZTA0YzQ3NGFkNWVlZjQ3ZDZmOGM3ZjY1ZHwxNzkxMTc4NjMxfDE3OTExNzg3NTF8c2hhMjU2fDB8M3wxfDh8YzFMaHBnNDNXVFdRK2g0YUUyN1JqZz09fDB8fDJ8dHgtMTIzNHxwcm9kfDJ8bT0x.dc233e98857e845eaf93536ef23bcd62b5b838df47b0a1e6c9efc1866f05e3da|c1Lhpg43WTWQ+h4aE27Rjg==|",
+                "challenge": "djR8Mnx5bmQxMnFLRzNTdHRtekRqZkwzOUg3L3hsZ3B2cVQ1NjdOdGRJUllTNjFBPXxzaWdudXB8MDc4NGRhODdhYmM4OGNhODcwMmZkMjY4NmI2NDk1ZWQ3MGFlMjQyZTA0YzQ3NGFkNWVlZjQ3ZDZmOGM3ZjY1ZHwxNzkxMTc4NjMxfDE3OTExNzg3NTF8c2hhMjU2fDB8M3wxfDh8YzFMaHBnNDNXVFdRK2g0YUUyN1JqZz09fDB8fDJ8dHgtMTIzNHxwcm9kfDJ8bT0x.dc233e98857e845eaf93536ef23bcd62b5b838df47b0a1e6c9efc1866f05e3da",
+                "min_duration_ms": 0,
+                "issued_at_ns": 1791178631860451,
+                "protocol_version": 2,
+                "attempts_used": 0,
+                "region": null,
+                "policy_version": 2,
+                "request_binding": "tx-1234",
+                "issuer": "prod",
+                "kid": 2,
+                "hostname": null,
+                "server_mac": "9503e870220e0d484c9c7b7e360cbe03cb31d82a6d601087e334a010bd46bad7"
+            },
+            "token_b64": "eW5kMTJxS0czU3R0bXpEamZMMzlINy94bGdwdnFUNTY3TnRkSVJZUzYxQT0uNDQuMTUwMC57InYiOjF9",
+            "expected": {
+                "ok": true
+            },
+            "verify_opts": {
+                "expected_scope": "signup",
+                "client_ip": "203.0.113.7",
+                "expected_request_binding": "tx-1234",
+                "expected_issuer": "prod",
+                "expected_policy_version": 2,
+                "secrets_by_kid": {
+                    "2": "0123456789abcdef0123456789abcdef"
+                }
+            }
+        },
+        {
+            "name": "sha_decoy_v3",
+            "record": {
+                "nonce": "lQaL+FD0FR7p7VA1rbmDM3DIVxAkIWMra2FmLDFxFK8=",
+                "scope": "comment",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "sha256",
+                "m_kib": 0,
+                "t": 3,
+                "p": 1,
+                "target_bits": 8,
+                "salt": "u/1GUcMTAm4cV1HDukVVqw==",
+                "prefix": "djR8M3xsUWFMK0ZEMEZSN3A3VkExcmJtRE0zRElWeEFrSVdNcmEyRm1MREZ4Rks4PXxjb21tZW50fHwxNzkxMTc4NjMxfDE3OTExNzg3NTF8c2hhMjU2fDB8M3wxfDh8dS8xR1VjTVRBbTRjVjFIRHVrVlZxdz09fDB8fDF8fHwxfGQ9ZGVjb3lfZmllbGRfYTFiMmMzZDRlNWY2MDcxOHxtPTE=.1d6d8ce84220d65e1eb3695d3932d701a86b04bc59469286e719a0fd8df34c52|u/1GUcMTAm4cV1HDukVVqw==|",
+                "challenge": "djR8M3xsUWFMK0ZEMEZSN3A3VkExcmJtRE0zRElWeEFrSVdNcmEyRm1MREZ4Rks4PXxjb21tZW50fHwxNzkxMTc4NjMxfDE3OTExNzg3NTF8c2hhMjU2fDB8M3wxfDh8dS8xR1VjTVRBbTRjVjFIRHVrVlZxdz09fDB8fDF8fHwxfGQ9ZGVjb3lfZmllbGRfYTFiMmMzZDRlNWY2MDcxOHxtPTE=.1d6d8ce84220d65e1eb3695d3932d701a86b04bc59469286e719a0fd8df34c52",
+                "min_duration_ms": 0,
+                "issued_at_ns": 1791178631860520,
+                "protocol_version": 3,
+                "attempts_used": 0,
+                "region": null,
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "decoy_field": "decoy_field_a1b2c3d4e5f60718",
+                "server_mac": "01e8a9767c6d4fa37169143bbbccb0a161fee1a9b50c52063ab8ad5f1d3f883b"
+            },
+            "token_b64": "bFFhTCtGRDBGUjdwN1ZBMXJibURNM0RJVnhBa0lXTXJhMkZtTERGeEZLOD0uNDg2LjE1MDAueyJ2IjoxfQ==",
+            "expected": {
+                "ok": true,
+                "decoyField": "decoy_field_a1b2c3d4e5f60718"
+            },
+            "verify_opts": {
+                "expected_scope": "comment"
+            }
+        },
+        {
+            "name": "sha_execution_v4",
+            "record": {
+                "nonce": "aPTJfS7TJo2ED/nHvtYOQobrq+CuUkQ7lgEYkLr0vn8=",
+                "scope": "checkout",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "sha256",
+                "m_kib": 0,
+                "t": 3,
+                "p": 1,
+                "target_bits": 8,
+                "salt": "m/p42sAHmwkxZBkPJ6Ebaw==",
+                "prefix": "djR8NHxhUFRKZlM3VEpvMkVEL25IdnRZT1FvYnJxK0N1VWtRN2xnRVlrTHIwdm44PXxjaGVja291dHx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fG0vcDQyc0FIbXdreFpCa1BKNkViYXc9PXwwfHwxfHx8MXxlPTEsNzU3YjE5MzE4ZTJjMWI4MDE3NWJhY2I0ZGY1MjZkZDY5ZjI0YzJmMTgwNTljMTRlYzA3YmU4ZGFlODczMjM5NHxtPTE=.259265603c1e6374ce85768cb8e8dbf18538fe207a09a377a79daf711f213e68|m/p42sAHmwkxZBkPJ6Ebaw==|",
+                "challenge": "djR8NHxhUFRKZlM3VEpvMkVEL25IdnRZT1FvYnJxK0N1VWtRN2xnRVlrTHIwdm44PXxjaGVja291dHx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fG0vcDQyc0FIbXdreFpCa1BKNkViYXc9PXwwfHwxfHx8MXxlPTEsNzU3YjE5MzE4ZTJjMWI4MDE3NWJhY2I0ZGY1MjZkZDY5ZjI0YzJmMTgwNTljMTRlYzA3YmU4ZGFlODczMjM5NHxtPTE=.259265603c1e6374ce85768cb8e8dbf18538fe207a09a377a79daf711f213e68",
+                "min_duration_ms": 0,
+                "issued_at_ns": 1791178631861695,
+                "protocol_version": 4,
+                "attempts_used": 0,
+                "region": null,
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "execution_program": "AQhjaGVja291dAZzdWJtaXQBFRA7CElhMWJ0bEdPFwZ5UWZ1ZU4SHwhJYTFidGxHTx4dmw4CIl2HCXAjB0SScb+CwMK6AD1ZnKS6iyXRBhbQMkYc3ZORFLobFwY2dEJFTVcbBtSh8t3amgMdDQlKJF9HR2FIbU06EwVmclBXbQQLXRw+AzlpGA0FIyNPSFJDB/hJwqVANn7RGg==",
+                "execution_version": 1,
+                "execution_commitment": "757b19318e2c1b80175bacb4df526dd69f24c2f18059c14ec07be8dae8732394",
+                "server_mac": "439e94edf6fb58163618a799bfa104a89b61e9bbdc94119d4c090a76eb5c1180"
+            },
+            "token_b64": "YVBUSmZTN1RKbzJFRC9uSHZ0WU9Rb2JycStDdVVrUTdsZ0VZa0xyMHZuOD0uMjYwLjE1MDAueyJ2IjoxfQ==",
+            "expected": {
+                "ok": false,
+                "code": "execution_mismatch"
+            },
+            "verify_opts": {
+                "expected_scope": "checkout"
+            }
+        },
+        {
+            "name": "argon2id",
+            "record": {
+                "nonce": "ene6J/Fl7Sgk5WAC1VeohphBdOHIZyNhH/JZ1Wgndgo=",
+                "scope": "login",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "argon2id",
+                "m_kib": 64,
+                "t": 3,
+                "p": 1,
+                "target_bits": 4,
+                "salt": "JlO/JHl3gsxVwqpKf3o06Q==",
+                "prefix": "djR8MnxlbmU2Si9GbDdTZ2s1V0FDMVZlb2hwaEJkT0hJWnlOaEgvSloxV2duZGdvPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfGFyZ29uMmlkfDY0fDN8MXw0fEpsTy9KSGwzZ3N4VndxcEtmM28wNlE9PXwwfHwxfHx8MXxtPTE=.6cd2d1a8f732eb371bee7af4d3cfb22cf23f647aff8a476f968bffa47ec90b64|JlO/JHl3gsxVwqpKf3o06Q==|",
+                "challenge": "djR8MnxlbmU2Si9GbDdTZ2s1V0FDMVZlb2hwaEJkT0hJWnlOaEgvSloxV2duZGdvPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfGFyZ29uMmlkfDY0fDN8MXw0fEpsTy9KSGwzZ3N4VndxcEtmM28wNlE9PXwwfHwxfHx8MXxtPTE=.6cd2d1a8f732eb371bee7af4d3cfb22cf23f647aff8a476f968bffa47ec90b64",
+                "min_duration_ms": 0,
+                "issued_at_ns": 1791178631862057,
+                "protocol_version": 2,
+                "attempts_used": 0,
+                "region": null,
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "server_mac": "e9a18e9be1aea93716636ca9d8750d884fc23fbf28b4d3b6c3c628caab00be6c"
+            },
+            "token_b64": "ZW5lNkovRmw3U2drNVdBQzFWZW9ocGhCZE9ISVp5TmhIL0paMVdnbmRnbz0uMjEuMTUwMC57InYiOjF9",
+            "expected": {
+                "ok": false,
+                "code": "unsupported_argon2_params"
+            },
+            "verify_opts": {
+                "expected_scope": "login"
+            }
+        },
+        {
+            "name": "rsw",
+            "record": {
+                "nonce": "x0M38TjVc081DxITi2OcH0useeVTnV4asNX/hE9Aecc=",
+                "scope": "login",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "rsw",
+                "m_kib": 0,
+                "t": 10000,
+                "p": 1,
+                "target_bits": 1,
+                "salt": "gJGGCTH9ZkwMAC0zj6DkEQ==",
+                "prefix": "djR8NXx4ME0zOFRqVmMwODFEeElUaTJPY0gwdXNlZVZUblY0YXNOWC9oRTlBZWNjPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHJzd3wwfDEwMDAwfDF8MXxnSkdHQ1RIOVprd01BQzB6ajZEa0VRPT18MHx8MXx8fDF8cj04YWEwMjM5YTVkMjdiOTNjZWZmMzMxN2ZjZWU4ZWY5YWM1OTUxMDY4NTE3OGU2ZjM0ZDBmMDdkZWNjMDc1ZmMyfG09MQ==.805ebb9604dd4414114c81be1076c97038c5fc32828bc19f03c0dfa0fd80de1c|gJGGCTH9ZkwMAC0zj6DkEQ==|",
+                "challenge": "djR8NXx4ME0zOFRqVmMwODFEeElUaTJPY0gwdXNlZVZUblY0YXNOWC9oRTlBZWNjPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHJzd3wwfDEwMDAwfDF8MXxnSkdHQ1RIOVprd01BQzB6ajZEa0VRPT18MHx8MXx8fDF8cj04YWEwMjM5YTVkMjdiOTNjZWZmMzMxN2ZjZWU4ZWY5YWM1OTUxMDY4NTE3OGU2ZjM0ZDBmMDdkZWNjMDc1ZmMyfG09MQ==.805ebb9604dd4414114c81be1076c97038c5fc32828bc19f03c0dfa0fd80de1c",
+                "min_duration_ms": 0,
+                "issued_at_ns": 1791178631872373,
+                "protocol_version": 5,
+                "attempts_used": 0,
+                "region": null,
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "rsw_modulus_sha256": "8aa0239a5d27b93ceff3317fcee8ef9ac59510685178e6f34d0f07decc075fc2",
+                "server_mac": "53898ac3a64b34c09730cf8fe7007c2987b9c1072190d82da827520269f20fbb"
+            },
+            "token_b64": "eDBNMzhUalZjMDgxRHhJVGkyT2NIMHVzZWVWVG5WNGFzTlgvaEU5QWVjYz0uMC4xNTAwLnsidiI6MX0uNmU1MmViZTRjZTI0MTQ1MDhhOWZiNTM3MjM1N2QwOWFiZTdiY2RkMGI1MTZlYTM1MjVjNzQ5NmJiNDYxYmM1OGE0MGU4OGExYTRkNGVmYzE4YWM3ZDNmMTlkODZiOTcxZTM4ZmM2NjNmYmFhNGU5Y2YxNTZjYWI0NmY2ZjRkODYyZGFmOGFiZjk3NDk5MDc3ODFiYzM3MGMxYWQ2NDI4Y2MzYWJlYzY5MGVmOTNkNTExNDhhMWQ4NWUyYmZhNDM0N2NhMGNkODU4YzdhYjU5OTBkMWYxZGFhN2ZlZWM0NWQyMzdmYjVlNTkyNTI4N2RkMDAwNzQ2YWQyZmQ2OTQwZmNkNjQ4MmY1YmEwY2I3ODM2MWE5ZDNmNWZkYWFmNmMzZmVmMDdhMzBmZDc5OTIyYWVlZWViZTI3N2U0ODQwMWIxZTVlNWQzZDk0OTEyMDIyNTE2Yjc1MmI3NTJkMWUxYmY4M2JhOWY4ZTJlY2JkYmI5ZmViMjY5ODg3MWY3OWZiYWNhZDY3MzFkNTIxY2QwYTE0MzE0ZmY1YTBkZjY3YmM1MzBlODAxYWVjYTNjOGQxM2ZhYjg2NDI3MmEyMjY4ZmVhYzY2MmY4YmYxMmVmZDMyMzFiOTU0MzRhNDdlMmMyOWNjMDlmN2UxZjEyNjlkYmY0MDUxZDUyZmJjMjQzYTc=",
+            "expected": {
+                "ok": true
+            },
+            "verify_opts": {
+                "expected_scope": "login",
+                "rsw": {
+                    "modulus_n": "sL1Mk2YZ4BnznBgWe2YB3uOZ+KFN/VETl1T0H9zuWkP54/nAN8sgPhqozDrRCVQxdJc5IDgkh9EemAGzYjku+zqv2fdryfy5iHbtQEhkHJVt+5f/6yxrZDvHUMhgDRAmLe7rRjEIZC8GqcfcbQyVECgxzNfd3FE+ATeuxc8wKafjUtQ/rvizFBJCo5L0r4U67JDooXVt4yTLtRsoFK3WZBOKIOSZ+E0vZJDt2ddeDSluS/qaqZ5C3dSVeaSyaelX8dGpmovr8xClC+9SKsFnMc+6m9WBo2CsCSpJGk3LZM2847HM5/r2gfmNdN5zRecjEY5MLLEQ/34JinuMtMJpuw==",
+                    "lambda": "WF6mSbMM8Az5zgwLPbMA73HM/FCm/qiJy6p6D+53LSH88fzgG+WQHw1UZh1ohKoYukuckBwSQ+iPTADZsRyXfZ1X7Pu15P5cxDt2oCQyDkq2/cv/9ZY1sh3jqGQwBogTFvd1oxiEMheDVOPuNoZKiBQY5mvu7iifAJvXYueYFNMcEwMJdHQi8lgNFBJMwNN+267oViuNdvXRtCLx0MeOSiIPOvDNnLU0Ba4bJg5mTXLY9llIMPtOuHU5BiN8E7IY8kKCdYlpJTgGqv+uu5aNS/SPQl3sMR8dIo3zn7wZhcsMyzJ1n/dLZHNSwXs3QX6XQU+Bx8OVz5pmJYPTJUdsEA=="
+                }
+            }
+        },
+        {
+            "name": "tampered_signature",
+            "record": {
+                "nonce": "CpjVEuhjQFycpcNkPITy4usd0Uo2bzfN6je7sWV3jXE=",
+                "scope": "login",
+                "binding_tag": "",
+                "issued_at": 1791178631,
+                "expires_at": 1791178751,
+                "algorithm": "sha256",
+                "m_kib": 0,
+                "t": 3,
+                "p": 1,
+                "target_bits": 8,
+                "salt": "eiHaj4Eo4fpuie/jDj7Dig==",
+                "prefix": "djR8MnxDcGpWRXVoalFGeWNwY05rUElUeTR1c2QwVW8yYnpmTjZqZTdzV1YzalhFPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fGVpSGFqNEVvNGZwdWllL2pEajdEaWc9PXw1MDB8ZXV8MXx8fDF8bT0x.a176387906e49377ebda956df1ade6ceb860ae3f334fc9ae767fcd5ab9a188c3|eiHaj4Eo4fpuie/jDj7Dig==|",
+                "challenge": "djR8MnxDcGpWRXVoalFGeWNwY05rUElUeTR1c2QwVW8yYnpmTjZqZTdzV1YzalhFPXxsb2dpbnx8MTc5MTE3ODYzMXwxNzkxMTc4NzUxfHNoYTI1NnwwfDN8MXw4fGVpSGFqNEVvNGZwdWllL2pEajdEaWc9PXw1MDB8ZXV8MXx8fDF8bT0x.a176387906e49377ebda956df1ade6ceb860ae3f334fc9ae767fcd5ab9a188c3",
+                "min_duration_ms": 500,
+                "issued_at_ns": 1791178631873563,
+                "protocol_version": 2,
+                "attempts_used": 0,
+                "region": "eu",
+                "policy_version": 1,
+                "request_binding": null,
+                "issuer": null,
+                "kid": 1,
+                "hostname": null,
+                "server_mac": "065984348c596397a906c1fb59c904c5cad04377164578cda58a5e61e455b51b"
+            },
+            "token_b64": "Q3BqVkV1aGpRRnljcGNOa1BJVHk0dXNkMFVvMmJ6Zk42amU3c1dWM2pYRT0uNDQwLjE1MDAueyJ2IjoxfQ==",
+            "expected": {
+                "ok": false,
+                "code": "bad_signature"
+            },
+            "verify_opts": []
+        }
+    ]
+}

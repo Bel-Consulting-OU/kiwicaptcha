@@ -109,6 +109,7 @@ fn verify(
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("198.51.100.7"),
         execution_digest: None,
         execution_trace: None,

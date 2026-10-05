@@ -67,6 +67,7 @@ final class ExecutionTraceFixture
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
         'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
         'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
+        'dcsgeom', 'dmutord', 'devphf', 'drange', 'dintobs',
     ];
 
     /**
@@ -332,6 +333,18 @@ final class ExecutionTraceFixture
             ExecutionChallengeGenerator::OP_DOM_URL_CANON => 'durlc',
             ExecutionChallengeGenerator::OP_DOM_TEXT_MUTATE => self::opTextMutate($operands, $u8, $cur, $docIds, $ctx),
             ExecutionChallengeGenerator::OP_DOM_SELECT_DEP => self::opSelectDep($operands, $cur, $ctx),
+            // The version-6 real-platform probes are browser-only: the
+            // pure sim emits the placeholder and touches no model state
+            // (the probes run on self-removed anonymous nodes), and the
+            // envelope walker validates every entry against its
+            // operand-derived envelope. The browserless synthesizer can
+            // never satisfy those envelopes, which is exactly the
+            // boundary the forgery oracle pins.
+            ExecutionChallengeGenerator::OP_CSS_GEOM => 'dcsgeom',
+            ExecutionChallengeGenerator::OP_MUT_ORDER => 'dmutord',
+            ExecutionChallengeGenerator::OP_EV_PHASE_FULL => 'devphf',
+            ExecutionChallengeGenerator::OP_RANGE_ORDER => 'drange',
+            ExecutionChallengeGenerator::OP_INT_OBS => 'dintobs',
             default => '0',
         };
     }

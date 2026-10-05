@@ -172,11 +172,12 @@
   // 'self' suffices, never blob:); the legacy explicit data-kiwi-worker-
   // src URL keeps its direct-construction path. The worker never probes
   // an unversioned runtime: the driver always supplies the runtime URL
-  // through the { type: "glue" } handshake below.
-  var kiwiActiveBlobUrl = null; // shared so reset/unavailable paths can revoke
-  function kiwiRevokeActiveBlobUrl() {
-    if (kiwiActiveBlobUrl) { URL.revokeObjectURL(kiwiActiveBlobUrl); kiwiActiveBlobUrl = null; }
-  }
+  // through the { type: "glue" } handshake below. The Blob URL of an
+  // inline-mode worker is owned strictly by its own solve: the per-solve
+  // teardown() revokes it on every terminal path, so two concurrent
+  // solves never touch each other's URL (a page-global revoke here
+  // would kill the FIRST widget's still-pending worker script fetch
+  // when the SECOND widget created its worker).
   // ── Files-mode lazy asset loading (runtime + worker) ────────────────
   // In files mode the runtime glue and worker assets are fetched ONLY
   // when a challenge needs the worker tier (argon2id/rsw — or a
@@ -351,7 +352,6 @@
     function teardown() {
       if (blobUrl) {
         URL.revokeObjectURL(blobUrl);
-        if (kiwiActiveBlobUrl === blobUrl) kiwiActiveBlobUrl = null;
         blobUrl = null;
       }
     }
@@ -464,8 +464,6 @@
           }
         } catch (e) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
         if (!worker) { if (blobUrl) URL.revokeObjectURL(blobUrl); resolve({ unavailable: true, reason: "worker-creation-failed" }); return; }
-        kiwiRevokeActiveBlobUrl();
-        kiwiActiveBlobUrl = blobUrl;
         window.__kiwiWorkerUsed = true;
         var workerStart = performance.now();
         // The progress denominator: an rsw solve reports squarings done,
@@ -823,8 +821,7 @@
       renderDecoy: kiwiRenderDecoy,
       flushDecoy: kiwiFlushDecoy,
       runExecution: kiwiRunExecution,
-      solveWorker: solveWithWorker,
-      revokeWorkerUrl: kiwiRevokeActiveBlobUrl
+      solveWorker: solveWithWorker
     });
   }
 })();

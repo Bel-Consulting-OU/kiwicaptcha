@@ -58,6 +58,23 @@ test.describe('KiwiCaptcha cross-browser critical paths', () => {
     expect(token.length).toBeGreaterThan(10);
   });
 
+  test('two concurrent inline-mode Argon2id widgets both solve (per-solve worker URL ownership)', async ({ page }) => {
+    // The default page is inline mode, so every Argon2id solve builds
+    // its worker from a Blob URL. Two widgets auto-initialize and solve
+    // at once: when a page-global URL owned the revoke, the second
+    // widget's worker creation revoked the first widget's still-pending
+    // blob URL and killed its worker — the URL is owned strictly by
+    // each solve's own teardown now, so both widgets must finish.
+    await page.goto('/?algorithm=argon2id&widgets=2');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveCount(2);
+    const tokens = page.locator('input[name="kiwi__token"]');
+    await expect(tokens.nth(0)).not.toHaveValue('', { timeout: 90_000 });
+    await expect(tokens.nth(1)).not.toHaveValue('', { timeout: 90_000 });
+    const states = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-kiwi-widget]')).map((w) => w.getAttribute('data-state')));
+    expect(states).toEqual(['done', 'done']);
+  });
+
   test('reset while challenge fetch delayed: stale generation cannot complete', async ({ page }) => {
     let calls = 0;
     await page.route('**/challenge', async (route) => {

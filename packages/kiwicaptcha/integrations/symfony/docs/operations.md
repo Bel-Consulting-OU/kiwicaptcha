@@ -303,9 +303,11 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
   The orchestrator only learns "process up" vs "process gone".
 - **`{prefix}/health/ready`**: 200 only when all of the following hold:
   - the issuer/verifier signing keys are configured (the bundle secret);
-  - the security Redis answers a `PING` (probe cached ~1 s in-process).
-    Transient probe timeouts never fail readiness on their own.
-    The first failure is debounced for one cache window; two consecutive failures flip readiness;
+  - the security Redis answers a `PING` (probe result cached ~1 s in
+    process-wide APCu). Transient probe timeouts never fail readiness on
+    their own. The first failure is debounced (the debounce state is
+    shared across the workers for 60 s); two consecutive failures flip
+    readiness;
   - the central security-policy state is compatible.
     The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 5` (this binary's max protocol: the identity-bearing v5 canonical) and `min_execution_version <= 5` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing).
     A central `min_policy_epoch` above the configured `risk.policy_version` is a warning only: the node follows the effective epoch `max(configured, central)` and stays ready — the lag is logged but never drains the node, so issuance and verification immediately honor a central bump.
@@ -361,6 +363,59 @@ A configured `risk.policy_version` below the central `min_policy_epoch` does NOT
 A protocol or execution floor above the binary's maximum still fails readiness (503).
 Remove the key (or lower the fields) only after every node runs a compatible binary.
 When the key is absent, every binary's own configuration is authoritative (the default behavior).
+
+## Metrics exporter
+
+`risk.metrics.secret` (default null) arms `GET {prefix}/metrics`, a
+Prometheus text endpoint that carries its OWN authentication, entirely
+separate from every other credential of the bundle. Null leaves the
+route unregistered; a configured secret of at least 32 bytes is
+compared in constant time against the presented credential, accepted
+either as `Authorization: Bearer <secret>` (preferred: it never lands
+in access logs) or as the `secret` query parameter. A missing or wrong
+credential answers 401; an env-resolved empty secret answers 404.
+
+The exported families:
+
+- `kiwicaptcha_risk_decisions_total{scope,action,band}`: risk
+  decisions keyed by the canonical scope id, the action and the score
+  band (per-process engine snapshot).
+- `kiwicaptcha_risk_denied_limiter_total`,
+  `kiwicaptcha_risk_degraded_breaker_total` and
+  `kiwicaptcha_risk_degraded_store_total`: the fixed engine counters.
+- `kiwicaptcha_risk_store_observe_duration_ms_count` and `_sum`: the
+  state-store observation count and total milliseconds.
+- `kiwicaptcha_risk_global_level` and
+  `kiwicaptcha_risk_resources_argon_capacity`: the gauges.
+- `kiwicaptcha_outcome_reports_total{kind}`,
+  `kiwicaptcha_outcome_skips_total{reason}` and
+  `kiwicaptcha_exporter_scrapes_total`: the exporter's own counters
+  (the framework bridge's reports and skips).
+
+Aggregation scope: the engine snapshot is per-process (each scrape
+describes one worker). The exporter's own counters aggregate through
+APCu across the workers of one deployment when the extension is
+loaded; without it they degrade to per-process counters, and the
+`X-Kiwi-Metrics-Scope` header states which (`process` or `shared`) so
+a scrape is never silently misread.
+
+Redaction is the invariant of every line: metric labels are canonical
+scope ids, action names, score bands and outcome wire names only. Raw
+scope strings, IP addresses, usernames and pseudonym bytes never enter
+a series name or label, and a counter key outside the bounded shapes
+is dropped rather than emitted.
+
+```yaml
+kiwi_captcha:
+    risk:
+        metrics:
+            secret: '%env(KIWI_METRICS_SECRET)%'
+```
+
+```bash
+curl -H "Authorization: Bearer $KIWI_METRICS_SECRET" \
+    https://captcha.example.com/kiwi-captcha/metrics
+```
 
 ## Protocol v3 two-phase rollout
 

@@ -241,6 +241,14 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::WrongPolicyVersion`] — outstanding challenges die
     /// immediately on policy revocation.
     pub expected_policy_version: Option<u32>,
+    /// The rollout-window floor for [`VerifyContext::expected_policy_version`]:
+    /// during a declared N → N+1 policy rollout a mixed fleet legitimately
+    /// redeems challenges issued under either epoch, so a floor of N with an
+    /// expected version of N+1 accepts `floor <= policy_version <= expected`
+    /// — strict equality otherwise (the default, `None`). A floor greater
+    /// than the expected version accepts nothing (fail closed). Ignored when
+    /// no expected version is set.
+    pub policy_version_floor: Option<u32>,
     /// The current client's IP address. In v2 the binding is the
     /// nonce-bound HMAC tag: verification recomputes the tag from the
     /// challenge nonce + canonical client IP under the derived purpose key
@@ -1366,11 +1374,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 
     // 7b. Security-policy epoch: the policy that authorized this challenge
-    //     must still be in force.
-    if let Some(expected) = ctx.expected_policy_version {
-        if ctx.record.policy_version != expected {
-            return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
-        }
+    //     must still be in force (or, during a declared rollout window, be
+    //     one of the two in-flight epochs — see [`policy_version_accepted`]).
+    if !policy_version_accepted(
+        ctx.record.policy_version,
+        ctx.expected_policy_version,
+        ctx.policy_version_floor,
+    ) {
+        return VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion);
     }
 
     // 7c. Issuer identity: a verifier that expects a specific
@@ -1509,6 +1520,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         final_now,
         ctx.expected_region,
         ctx.expected_policy_version,
+        ctx.policy_version_floor,
         ctx.expected_issuer,
     ) {
         return VerifyOutcome::Invalid(e);
@@ -1531,6 +1543,30 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     }
 }
 
+/// The policy-epoch acceptance predicate, shared by the cheap-phase gate,
+/// [`final_revalidate`] and the production verifier's deployment check.
+///
+/// With no expected version every record passes (the check is disabled).
+/// With an expected version `e` and no floor the check is the strict
+/// equality `record == e` — outstanding challenges die immediately on
+/// policy revocation. During a declared rollout window the operator sets a
+/// floor `f < e`: a mixed N/N+1 fleet then redeems challenges issued under
+/// either epoch, `f <= record <= e`. A floor `f > e` is an empty interval
+/// and accepts nothing (fail closed, never fail open on a misconfiguration).
+pub(crate) fn policy_version_accepted(
+    record: u32,
+    expected: Option<u32>,
+    floor: Option<u32>,
+) -> bool {
+    match expected {
+        None => true,
+        Some(e) => match floor {
+            None => record == e,
+            Some(f) => f <= record && record <= e,
+        },
+    }
+}
+
 /// Post-derive final re-validation: re-check the challenge's
 /// validity with the current server time and the current verifier
 /// expectations, after the (potentially long) proof derivation succeeded but
@@ -1546,13 +1582,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 /// Checks, in order:
 /// - `now_unix >= expires_at` → [`VerifyError::Expired`];
 /// - expected region mismatch → [`VerifyError::WrongRegion`];
-/// - expected policy epoch mismatch → [`VerifyError::WrongPolicyVersion`];
+/// - expected policy epoch mismatch (outside a declared rollout window;
+///   see [`policy_version_accepted`]) → [`VerifyError::WrongPolicyVersion`];
 /// - expected issuer mismatch → [`VerifyError::WrongIssuer`].
 pub(crate) fn final_revalidate(
     record: &ChallengeRecord,
     now_unix: u64,
     expected_region: Option<&str>,
     expected_policy_version: Option<u32>,
+    policy_version_floor: Option<u32>,
     expected_issuer: Option<&str>,
 ) -> Result<(), VerifyError> {
     if now_unix >= record.expires_at {
@@ -1563,10 +1601,12 @@ pub(crate) fn final_revalidate(
             return Err(VerifyError::WrongRegion);
         }
     }
-    if let Some(expected) = expected_policy_version {
-        if record.policy_version != expected {
-            return Err(VerifyError::WrongPolicyVersion);
-        }
+    if !policy_version_accepted(
+        record.policy_version,
+        expected_policy_version,
+        policy_version_floor,
+    ) {
+        return Err(VerifyError::WrongPolicyVersion);
     }
     if let Some(expected) = expected_issuer {
         if record.issuer.as_deref() != Some(expected) {
@@ -1905,6 +1945,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: None,
             rsw_modulus_n: None,
@@ -2011,6 +2052,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: None,
             rsw_modulus_n: None,
@@ -2200,6 +2242,7 @@ mod tests {
                 rsw_keyring: None,
                 expected_issuer: Some("prod"),
                 expected_policy_version: Some(2),
+                policy_version_floor: None,
                 client_ip,
                 execution_digest: None,
                 execution_trace: None,
@@ -2865,6 +2908,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2908,6 +2952,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             rsw_proof: None,
             rsw_modulus_n: None,
             rsw_lambda: None,
@@ -2951,6 +2996,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3006,6 +3052,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3047,6 +3094,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3084,6 +3132,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3125,6 +3174,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3195,6 +3245,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3231,6 +3282,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -3264,6 +3316,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 1,
@@ -3305,6 +3358,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -3340,6 +3394,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 3,
@@ -3378,6 +3433,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3418,6 +3474,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3460,6 +3517,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
             rsw_proof: None,
@@ -3498,6 +3556,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!([])),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3534,6 +3593,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!(null)),
             enforce_telemetry: true,
             max_attempts: 0,
@@ -3575,6 +3635,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({
                 "wd": false, "hc": 8, "dm": 8, "me": 5, "ke": 2, "et": []
             })),
@@ -3616,6 +3677,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: Some(&json!({"wd": true})),
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3660,6 +3722,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3700,6 +3763,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3743,6 +3807,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3784,6 +3849,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3963,6 +4029,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4004,6 +4071,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4050,6 +4118,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4177,6 +4246,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4216,6 +4286,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4255,6 +4326,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4363,6 +4435,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4395,6 +4468,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4682,6 +4756,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4720,6 +4795,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4762,6 +4838,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4803,6 +4880,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4844,6 +4922,7 @@ mod tests {
             expected_region: Some("us"),
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4882,6 +4961,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4923,6 +5003,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw-us"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -4965,6 +5046,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5006,6 +5088,7 @@ mod tests {
             expected_region: None,
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5040,6 +5123,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5137,6 +5221,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5174,6 +5259,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5208,6 +5294,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5254,6 +5341,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5288,6 +5376,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5337,6 +5426,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5375,6 +5465,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5413,6 +5504,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5466,6 +5558,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5501,6 +5594,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5550,6 +5644,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5796,6 +5891,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5836,6 +5932,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5883,6 +5980,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5904,15 +6002,15 @@ mod tests {
         // exact expiry boundary (the ProductionVerifier re-reads the real
         // clock at this step — see tests/redis_verify.rs).
         assert_eq!(
-            final_revalidate(&record, cheap_now, None, None, None),
+            final_revalidate(&record, cheap_now, None, None, None, None),
             Ok(())
         );
         assert_eq!(
-            final_revalidate(&record, record.expires_at, None, None, None),
+            final_revalidate(&record, record.expires_at, None, None, None, None),
             Err(VerifyError::Expired)
         );
         assert_eq!(
-            final_revalidate(&record, record.expires_at + 5, None, None, None),
+            final_revalidate(&record, record.expires_at + 5, None, None, None, None),
             Err(VerifyError::Expired)
         );
     }
@@ -5941,6 +6039,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -5961,24 +6060,176 @@ mod tests {
         // Each expectation re-checked at the final step fails closed when it
         // no longer matches the record.
         assert_eq!(
-            final_revalidate(&record, now_unix, None, Some(2), None),
+            final_revalidate(&record, now_unix, None, Some(2), None, None),
             Err(VerifyError::WrongPolicyVersion),
             "policy version changed between cheap and final → rejected"
         );
         assert_eq!(
-            final_revalidate(&record, now_unix, Some("us"), None, None),
+            final_revalidate(&record, now_unix, Some("us"), None, None, None),
             Err(VerifyError::WrongRegion),
             "region expectation changed between cheap and final → rejected"
         );
         assert_eq!(
-            final_revalidate(&record, now_unix, None, None, Some("auth-gw")),
+            final_revalidate(&record, now_unix, None, None, None, Some("auth-gw")),
             Err(VerifyError::WrongIssuer),
             "issuer expectation changed between cheap and final → rejected"
         );
+        // A declared rollout window (floor 1, expected 2) redeems the record's
+        // epoch 1 at the final gate too — the window is not a cheap-phase-only
+        // relaxation.
+        assert_eq!(
+            final_revalidate(&record, now_unix, None, Some(2), Some(1), None),
+            Ok(()),
+            "inside a rollout window the floor epoch redeems at the final gate"
+        );
         // The matching configuration passes.
         assert_eq!(
-            final_revalidate(&record, now_unix, None, None, None),
+            final_revalidate(&record, now_unix, None, None, None, None),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn policy_version_acceptance_window_matrix() {
+        // The rollout-window predicate's truth table: strict equality by
+        // default, floor <= record <= expected inside a declared window,
+        // an inverted window (floor > expected) accepts nothing (fail
+        // closed), and no expectation disables the check entirely.
+        for (record, expected, floor, accepted) in [
+            // Strict equality — no declared rollout window.
+            (2u32, Some(2u32), None, true),
+            (1, Some(2), None, false),
+            (3, Some(2), None, false),
+            // Declared rollout window [1, 2]: a mixed N/N+1 fleet redeems.
+            (1, Some(2), Some(1), true),
+            (2, Some(2), Some(1), true),
+            (0, Some(2), Some(1), false),
+            (3, Some(2), Some(1), false),
+            // A degenerate one-epoch window is strict equality again.
+            (2, Some(2), Some(2), true),
+            (1, Some(2), Some(2), false),
+            // An inverted window accepts nothing — never fail open on a
+            // misconfiguration.
+            (1, Some(1), Some(2), false),
+            (2, Some(1), Some(2), false),
+            // No expectation disables the epoch check (floor is moot).
+            (0, None, None, true),
+            (99, None, Some(1), true),
+        ] {
+            assert_eq!(
+                policy_version_accepted(record, expected, floor),
+                accepted,
+                "record {record}, expected {expected:?}, floor {floor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rollout_window_redeems_a_mixed_fleet_cross_epoch() {
+        // Done-when: inside a declared N/N+1 rollout window an outstanding
+        // challenge issued under the floor epoch redeems on a node already
+        // expecting N+1 — the cheap-phase gate AND the post-derive final
+        // re-validation both use the window predicate; outside a window a
+        // wrong epoch is still rejected (strict equality).
+        let make = |policy_version: u32| {
+            let mut config = ChallengeConfig {
+                secret_key: "test-key-32-bytes-0123456789abcd".into(),
+                kid: 1,
+                execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
+                tenant: None,
+                algorithm: PoWAlgorithm::Sha256,
+                m_kib: 100,
+                t: 1,
+                p: 1,
+                target_bits: 8,
+                argon2_target_bits: 8,
+                ttl_secs: 120,
+                min_duration_ms: None,
+                auto_tune: false,
+                auto_tune_min_bits: 8,
+                auto_tune_max_bits: 24,
+                binding_mode: BindingMode::Bound,
+                region: None,
+                issuer: None,
+                policy_version,
+            };
+            let _ = &mut config;
+            issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
+                .unwrap()
+                .record
+        };
+        for (record_version, expected, floor, should_verify) in [
+            // Rollout window [1, 2]: both fleet epochs redeem.
+            (1u32, Some(2u32), Some(1u32), true),
+            (2, Some(2), Some(1), true),
+            // Outside the window's bounds: rejected.
+            (0, Some(2), Some(1), false),
+            (3, Some(2), Some(1), false),
+            // No declared window: strict equality only.
+            (1, Some(2), None, false),
+            (2, Some(2), None, true),
+            // A degenerate one-epoch window is strict equality again.
+            (2, Some(2), Some(2), true),
+            (1, Some(2), Some(2), false),
+            // An inverted window accepts nothing.
+            (2, Some(1), Some(2), false),
+        ] {
+            let mut record = make(record_version);
+            let counter = solve_for_test(&record).unwrap();
+            let mut ctx = VerifyContext {
+                record: &mut record,
+                secret_key: "test-key-32-bytes-0123456789abcd",
+                tenant: None,
+                secrets_by_kid: None,
+                revoked_kids: None,
+                counter,
+                duration_ms: 5000,
+                now_unix: Some(&mut || NOW_UNIX + 1),
+                now_ns: NOW_NS + 5_000_000,
+                min_duration_ms: 0,
+                expected_scope: None,
+                expected_request_binding: RequestBindingExpectation::Unenforced,
+                expected_region: None,
+                expected_issuer: None,
+                expected_policy_version: expected,
+                policy_version_floor: floor,
+                client_ip: Some("1.2.3.4"),
+                execution_digest: None,
+                execution_trace: None,
+                telemetry: None,
+                enforce_telemetry: false,
+                max_attempts: 0,
+                accept_legacy_v1: false,
+                rsw_proof: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_keyring: None,
+            };
+            let label = format!("record {record_version}, expected {expected:?}, floor {floor:?}");
+            if should_verify {
+                assert!(
+                    matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
+                    "{label}: inside the rollout window the epoch must redeem (cheap + final gates)"
+                );
+            } else {
+                assert_eq!(
+                    verify_solution(&mut ctx),
+                    VerifyOutcome::Invalid(VerifyError::WrongPolicyVersion),
+                    "{label}: outside the acceptance window the epoch must be rejected"
+                );
+            }
+        }
+        // The final gate applies the same window bounds on its own: below
+        // the floor epoch the window rejects there too.
+        let mut record = make(0);
+        let _ = &mut record;
+        assert_eq!(
+            final_revalidate(&record, NOW_UNIX + 1, None, Some(2), Some(1), None),
+            Err(VerifyError::WrongPolicyVersion),
+            "below the floor epoch the final gate rejects inside the window"
         );
     }
 
@@ -6060,6 +6311,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -6105,6 +6357,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -6155,6 +6408,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -6387,6 +6641,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -6560,6 +6815,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -6675,6 +6931,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: proof,
             rsw_modulus_n: trapdoor.then_some(crate::rsw::fixtures::MODULUS_N_B64),
@@ -6881,6 +7138,7 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("1.2.3.4"),
             rsw_proof: proof,
             rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64),

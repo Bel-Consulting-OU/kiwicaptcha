@@ -1,0 +1,43 @@
+kiwicaptcha.settings:
+  type: config_object
+  label: 'KiwiCaptcha settings'
+  mapping:
+    verify_url:
+      type: uri
+      label: 'Verify URL'
+    shim_url:
+      type: uri
+      label: 'Shim script URL'
+    bearer:
+      type: label
+      label: 'Bearer secret'
+    mode:
+      type: string
+      label: 'Wire format'
+    trust_proxy:
+      type: boolean
+      label: 'Honor X-Forwarded-For'
+    enabled_login:
+      type: boolean
+      label: 'Protect login'
+    enabled_signup:
+      type: boolean
+      label: 'Protect registration'
+    enabled_comment:
+      type: boolean
+      label: 'Protect comments'
+    enabled_contact:
+      type: boolean
+      label: 'Protect contact forms'
+    scope_login:
+      type: string
+      label: 'Login scope'
+    scope_signup:
+      type: string
+      label: 'Registration scope'
+    scope_comment:
+      type: string
+      label: 'Comment scope'
+    scope_contact:
+      type: string
+      label: 'Contact scope'

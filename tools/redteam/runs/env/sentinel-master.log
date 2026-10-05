@@ -1,0 +1,20 @@
+15454:C 05 Oct 2026 13:42:55.014 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+15454:C 05 Oct 2026 13:42:55.014 * Redis version=8.10.1, bits=64, commit=00000000, modified=1, pid=15454, just started
+15454:C 05 Oct 2026 13:42:55.014 * Configuration loaded
+15454:M 05 Oct 2026 13:42:55.014 * monotonic clock: ARM CNTVCT @ 1000 ticks/us
+15454:M 05 Oct 2026 13:42:55.015 * Running mode=standalone, port=6481.
+15454:M 05 Oct 2026 13:42:55.015 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
+15454:M 05 Oct 2026 13:42:55.015 * Server initialized
+15454:M 05 Oct 2026 13:42:55.015 * Loading RDB produced by version 8.10.1
+15454:M 05 Oct 2026 13:42:55.015 * RDB age 2164 seconds
+15454:M 05 Oct 2026 13:42:55.015 * RDB memory usage when created 1.21 Mb
+15454:M 05 Oct 2026 13:42:55.015 * Done loading RDB, keys loaded: 0, keys expired: 0.
+15454:M 05 Oct 2026 13:42:55.015 * DB loaded from disk: 0.000 seconds
+15454:M 05 Oct 2026 13:42:55.015 * Ready to accept connections tcp
+15454:M 05 Oct 2026 13:42:55.015 # WARNING: Redis does not require authentication. Redis will accept connections from any local client.
+15454:M 05 Oct 2026 13:42:55.016 * Replica 127.0.0.1:6482 asks for synchronization
+15454:M 05 Oct 2026 13:42:55.016 * Partial resynchronization request from 127.0.0.1:6482 accepted. Sending 0 bytes of backlog starting from offset 1722.
+15454:M 05 Oct 2026 13:42:57.000 * User requested shutdown...
+15454:M 05 Oct 2026 13:42:57.000 * Waiting for replicas before shutting down.
+15454:M 05 Oct 2026 13:42:57.030 * 1 of 1 replicas are in sync when shutting down.
+15454:M 05 Oct 2026 13:42:57.030 # Redis is now ready to exit, bye bye...

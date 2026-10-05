@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionUnavailableException;
+use BelConsulting\KiwiCaptchaBundle\Risk\QuarantineMarkerInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
@@ -252,6 +253,18 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
          * ticket, and a ticket can never outlive its chain state.
          */
         private readonly int $chainTtlSecs = 300,
+        /**
+         * The app-facing quarantine hold (change.md 1.3 and 3.3.4): when
+         * the final disposition is a quarantined pass, the validator
+         * marks it here (and on the request attribute
+         * {@see QuarantineMarkerInterface::ATTRIBUTE}) so the
+         * application's persistence layer withholds the publication
+         * write. The submission itself processes exactly like an allow
+         * (no violation, HTTP-200-class behavior, byte-identical wire);
+         * only the publication decision changes. Null keeps the marker
+         * surface absent (the flag still rides the request attribute).
+         */
+        private readonly ?QuarantineMarkerInterface $quarantineMarker = null,
     ) {
     }
 
@@ -772,6 +785,28 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
         switch ($disposition->kind) {
             case PostSolveDispositionKind::Pass:
+                // The quarantine hold (change.md 1.3 and 3.3.4): the
+                // submission is accepted exactly like an allow (no
+                // violation, the form processes, every browser-visible
+                // byte identical), but a server-confirmed spam identity's
+                // submission is withheld from publication. The flag is
+                // server-side only: the request attribute (the same
+                // plane as the verified jti) plus the wired marker the
+                // persistence layer queries, never a body, header or
+                // cookie difference.
+                if ($disposition->quarantined) {
+                    $request?->attributes->set(QuarantineMarkerInterface::ATTRIBUTE, true);
+                    try {
+                        $this->quarantineMarker?->hold();
+                    } catch (\Throwable) {
+                        // The hold is advisory surface: the attribute is
+                        // already set, a broken marker must never break
+                        // the form.
+                    }
+                    $this->logger?->info('KiwiCaptcha: accepted submission quarantined', [
+                        'scope' => $constraint->scope,
+                    ]);
+                }
                 $this->finishSuccessfulApplicationVerification($value, $outcome, $request);
 
                 return;
@@ -1304,9 +1339,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      * form-submission honeypot evidence under its nonce-derived
      * idempotency key, so a crash-taken-over computation never
      * double-books the signal. It runs a fresh reassessment whenever
-     * the scope opts in (post_solve_check), chaining is relevant, or
-     * the exact decoy was filled; a honeypot hit alone must trigger the
-     * fresh v2 assessment. The assessment always carries the
+     * the scope opts in (post_solve_check), chaining is relevant, the
+     * exact decoy was filled, or the verified token carries risk-v2
+     * evidence (the telemetry segment or the solve facts). A honeypot
+     * hit or an evidence-bearing token must trigger the fresh v2
+     * assessment. The assessment always carries the
      * nonce-derived stable idempotency key
      * 'postsolve:'.hash('sha256', $nonce), so a takeover re-assessment
      * is dedupe-key-identical to the original.
@@ -1401,16 +1438,49 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // a mismatched name is not this challenge's decoy. When the
         // outcome carries no decoy (the surface disabled), no decoy
         // check runs at all. A filled expected field records
-        // DecoyFieldSubmitted evidence and feeds the post-solve
-        // assessment through the risk-v2 path, so the honeypot signal
-        // actually moves the score. Evidence only: never a gate and
-        // never affects the proof validity.
+        // DecoyFieldSubmitted evidence, books the server-confirmed hit
+        // on the decoy-escalation store (the autofill-qualification
+        // gate rides into the canonical script, so a closed gate writes
+        // nothing), and feeds the post-solve assessment through the
+        // risk-v2 path, so the honeypot signal actually moves the
+        // score. Evidence only: never a gate and never affects the
+        // proof validity.
         $honeypotHit = false;
         if ($this->risk !== null && $request !== null) {
             $decoyField = \method_exists($outcome, 'decoyField') ? $outcome->decoyField() : null;
             if ($decoyField !== null && $decoyField !== '') {
                 $honeypotHit = $this->formDecoyEvidence($request, $decoyField);
+                if ($honeypotHit) {
+                    // The server-confirmed decoy hit: the gateway derives
+                    // the keyed session pseudonym the engine's escalation
+                    // read consults and stays a silent no-op without a
+                    // wired store (evidence only, never a form breaker).
+                    $this->risk->recordConfirmedDecoyHit($session);
+                }
             }
+        }
+
+        // The evidence-stage inputs of the verified token (change.md
+        // 3.2.1): the telemetry segment rides the solution token, the
+        // measured duration comes from the unforgeable issuedAtNs
+        // receipt time (never the client-reported figure) and the rung
+        // key maps the verified record's work profile onto the published
+        // client-performance table. The gateway bounds the payload text,
+        // pairs the solve facts and returns null when nothing is
+        // present, so an absent or rejected segment stays the
+        // neutral-unknown state and the assessment stays on the plain
+        // path.
+        $v2 = null;
+        if ($this->risk !== null) {
+            $v2 = $this->risk->clientContextV2(
+                $honeypotHit,
+                $session,
+                null,
+                null,
+                $this->verifiedTelemetryPayload($token),
+                RiskGateway::solveDurationMsOf($outcome),
+                $this->verifiedEvidenceRung($token),
+            );
         }
 
         // The original pre-issue decision id was consumed atomically
@@ -1456,7 +1526,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             }
         }
 
-        $mustReassess = $postSolveScope || $chainEligible || $honeypotHit;
+        $mustReassess = $postSolveScope || $chainEligible || $honeypotHit || $v2 !== null;
         if (!$mustReassess) {
             // Post-solve feedback: feed the valid outcome into the
             // adaptive risk engine as plain SolveSuccess feedback (the
@@ -1488,7 +1558,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // Post-solve check: a fresh SolveSuccess assessment with the
         // same context, always keyed by the nonce-derived stable
         // idempotency key — a takeover re-assessment never double-books
-        // risk signals. An unavailable risk signal (e.g. an unparseable
+        // risk signals. The risk-v2 path runs whenever the context
+        // carries evidence (a honeypot hit, or the verified token's
+        // telemetry and solve facts for the engine's evidence stage);
+        // the plain path is the no-evidence case and scores
+        // identically. An unavailable risk signal (e.g. an unparseable
         // or missing client IP) enforces the scope's degraded friction
         // instead of silently skipping the adaptive re-check — in
         // BindingMode::None deployments a valid PoW must not pass with
@@ -1496,15 +1570,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // on the pre-issue path).
         $postSolveKey = 'postsolve:'.hash('sha256', $nonce);
         try {
-            $postSolve = $honeypotHit
-                ? $this->risk->postSolveDecisionV2(
-                    $constraint->scope,
-                    $ip,
-                    $session,
-                    null,
-                    $postSolveKey,
-                    $this->risk->clientContextV2(true, $session, null, null),
-                )
+            $postSolve = $v2 !== null
+                ? $this->risk->postSolveDecisionV2($constraint->scope, $ip, $session, null, $postSolveKey, $v2)
                 : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey);
         } catch (\InvalidArgumentException) {
             $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
@@ -1755,8 +1822,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         }
         if ($postSolve->action === RiskAction::Allow || $this->recordSatisfiesRequiredAction($token, $postSolve->action)) {
             // The required PoW level is already satisfied by the solved
-            // challenge under the actual configured ladders.
-            return new PostSolveDisposition(PostSolveDispositionKind::Pass, $decisionId);
+            // challenge under the actual configured ladders. The
+            // quarantine disposition (change.md 1.3 and 3.3.4) rides the
+            // Allow action only, so a quarantined assessment persists a
+            // quarantined pass: the replay reproduces the hold.
+            return new PostSolveDisposition(PostSolveDispositionKind::Pass, $decisionId, quarantined: $postSolve->quarantined);
         }
 
         // A strictly stronger PoW requirement.
@@ -2233,6 +2303,39 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         }
 
         return false;
+    }
+
+    /**
+     * The verified token's telemetry segment as the raw payload text for
+     * the engine's evidence stage. Null when the token cannot be decoded
+     * or the segment is absent or over-bound. The gateway's bound keeps
+     * an over-sized segment in the neutral-unknown state instead of
+     * rejecting the whole assessment input. Never throws.
+     */
+    private function verifiedTelemetryPayload(string $token): ?string
+    {
+        try {
+            return RiskGateway::telemetryPayloadOfToken(SolutionToken::decode($token));
+        } catch (DecodeError) {
+            return null;
+        }
+    }
+
+    /**
+     * The verified challenge's client-performance rung key (the
+     * evidence stage's solve-anomaly reference), mapped from the
+     * consumed record's work profile. Null when the storage read fails
+     * or the profile names no published rung: an unmapped rung stays
+     * neutral, never fabricated evidence. Never throws.
+     */
+    private function verifiedEvidenceRung(string $token): ?string
+    {
+        $record = $this->findVerifiedRecord($token);
+        if ($record === null) {
+            return null;
+        }
+
+        return RiskGateway::solveRungOfRecord($record);
     }
 
     /**

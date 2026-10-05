@@ -264,6 +264,12 @@ final class ScopeActionHysteresisTest extends TestCase
             RiskAction::Argon64,
             $h->select(1, 'legit', 900, RiskAction::Argon64, self::T0 + 2)
         );
+        // The escalation edge fallback (previous Allow, score 605): the
+        // plain band of 605 - 10 = 595 is Sha20 — three ladder bands up in
+        // one request, not the adjacent Sha16.
+        $h2 = new ScopeActionHysteresis();
+        self::assertSame(RiskAction::Allow, $h2->select(1, 'client', 100, RiskAction::Allow, self::T0));
+        self::assertSame(RiskAction::Sha20, $h2->select(1, 'client', 605, RiskAction::Argon16, self::T0 + 1));
     }
 
     public function testLegitimateClientScoreAfterBotStaysAllow(): void
@@ -289,10 +295,12 @@ final class ScopeActionHysteresisTest extends TestCase
             $h->select(1, 'client', 100, RiskAction::Allow, self::T0 + 1),
             'the score clears the target band exit margin'
         );
-        // Just above the drop margin the client steps down one band only.
+        // Just above the drop margin the edge fallback lands on the plain
+        // band of score + 10 (151 -> Sha16), several ladder bands below the
+        // previous Argon64, not the adjacent Argon32.
         $h2 = new ScopeActionHysteresis();
         self::assertSame(RiskAction::Argon64, $h2->select(1, 'client', 900, RiskAction::Argon64, self::T0));
-        self::assertSame(RiskAction::Argon32, $h2->select(1, 'client', 141, RiskAction::Allow, self::T0 + 1));
+        self::assertSame(RiskAction::Sha16, $h2->select(1, 'client', 141, RiskAction::Allow, self::T0 + 1));
     }
 
     public function testBoundaryHoverWithinTenHoldsOneBand(): void

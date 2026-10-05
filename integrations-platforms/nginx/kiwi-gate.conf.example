@@ -1,0 +1,80 @@
+# nginx auth_request gate for KiwiCaptcha: a complete, lintable
+# example config. Deploy: copy the server block into your own
+# configuration and keep the three marked pieces together (the auth
+# location, the auth_request + error_page pair on each gated route,
+# and the two named locations).
+#
+# Lint: nginx -t -c /path/to/kiwi-gate.conf.example -p /tmp/kiwi-gate
+# (the paths below are /tmp-based so the file passes nginx -t without
+# touching a real deployment).
+#
+# Requires the http_auth_request module (nginx -V shows
+# --with-http_auth_request_module; every mainstream build ships it).
+#
+# The token travels to kiwi-verify.php in the X-Kiwi-Token header or
+# the cookie jar: the auth_request subrequest carries request headers
+# but never the request body, so form-field tokens do not exist on
+# this layer. The shim markup satisfies that naturally when the page
+# script writes the token into a header (a small fetch wrapper) or
+# the gate reads the kiwi_token cookie.
+
+pid /tmp/kiwi-gate-nginx.pid;
+error_log /tmp/kiwi-gate-nginx-error.log warn;
+
+events {
+    worker_connections 64;
+}
+
+http {
+    access_log off;
+
+    server {
+        listen 8080;
+
+        # ---- piece 1: the auth subrequest target (PHP + kiwi-verify.php)
+        location = /_kiwi_verify {
+            internal;
+            fastcgi_pass unix:/run/php/php-fpm-kiwi.sock;
+            fastcgi_param SCRIPT_FILENAME /srv/kiwi/kiwi-verify.php;
+            fastcgi_param DOCUMENT_ROOT /srv/kiwi;
+            fastcgi_param REQUEST_METHOD $request_method;
+            fastcgi_param CONTENT_TYPE $content_type;
+            fastcgi_param REQUEST_URI $request_uri;
+            # The token sources and the client ip the endpoint binds.
+            fastcgi_param HTTP_X_KIWI_TOKEN $http_x_kiwi_token;
+            fastcgi_param HTTP_COOKIE $http_cookie;
+            fastcgi_param REMOTE_ADDR $remote_addr;
+            fastcgi_param HTTP_X_FORWARDED_FOR $proxy_add_x_forwarded_for;
+            # The gate knobs (kiwi-verify.php reads them from $_SERVER).
+            fastcgi_param KIWI_VERIFY_URL http://127.0.0.1:7371/verify;
+            fastcgi_param KIWI_SCOPE login;
+            fastcgi_param KIWI_TRUST_PROXY 1;
+            fastcgi_param KIWI_DENY 403;
+            # KIWI_BEARER rides the FPM pool env, never the config file.
+        }
+
+        # ---- piece 2: a gated route
+        location /admin/ {
+            auth_request /_kiwi_verify;
+            # The redirect knob: the endpoint answers 403 under nginx
+            # (KIWI_DENY=403) and nginx turns the deny into the
+            # browser redirect itself. The gate-fault page covers the
+            # endpoint's 503 (kiwi unreachable): fail closed.
+            error_page 403 = @kiwi_denied;
+            error_page 500 502 503 504 = @kiwi_gate_fault;
+            proxy_pass http://127.0.0.1:3000;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+
+        # ---- piece 3: the deny and fault outcomes
+        location = /captcha-required.html {
+            root /srv/kiwi/pages;
+        }
+        location @kiwi_denied {
+            return 302 /captcha-required.html;
+        }
+        location @kiwi_gate_fault {
+            return 503;
+        }
+    }
+}

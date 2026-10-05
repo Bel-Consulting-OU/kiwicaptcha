@@ -2,7 +2,7 @@
 //!
 //! `Hkdf::<Sha256>` with salt `kiwicaptcha-risk-v1` and master input,
 //! expanded to 32 bytes per `info` in {source, subnet, session, principal,
-//! event}. The PHP side derives the same keys with
+//! event, target}. The PHP side derives the same keys with
 //! `hash_hkdf('sha256', master, 32, info, 'kiwicaptcha-risk-v1')`.
 
 use hkdf::Hkdf;
@@ -10,7 +10,7 @@ use sha2::Sha256;
 
 use crate::RiskError;
 
-/// The five 32-byte keys derived from a master secret.
+/// The six 32-byte keys derived from a master secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskKeys {
     pub source: [u8; 32],
@@ -20,6 +20,9 @@ pub struct RiskKeys {
     /// Dedupe-domain key: HMACs the idempotency normalization, keeping the
     /// Redis dedupe suffix independent of the identity pseudonyms.
     pub event: [u8; 32],
+    /// Target-dimension key: HMACs the normalized target identifier
+    /// (`crate::target`), independent of every identity pseudonym.
+    pub target: [u8; 32],
 }
 
 impl RiskKeys {
@@ -30,6 +33,7 @@ impl RiskKeys {
     pub const INFO_SESSION: &'static [u8] = b"session";
     pub const INFO_PRINCIPAL: &'static [u8] = b"principal";
     pub const INFO_EVENT: &'static [u8] = b"event";
+    pub const INFO_TARGET: &'static [u8] = b"target";
 
     /// The minimum master-secret length: the same 16-byte core contract
     /// the PHP `RiskKeys::fromMaster` enforces.
@@ -69,6 +73,7 @@ impl RiskKeys {
         let mut session = [0u8; 32];
         let mut principal = [0u8; 32];
         let mut event = [0u8; 32];
+        let mut target = [0u8; 32];
         hk.expand(Self::INFO_SOURCE, &mut source)
             .expect("32 bytes is a valid HKDF output length");
         hk.expand(Self::INFO_SUBNET, &mut subnet)
@@ -79,12 +84,15 @@ impl RiskKeys {
             .expect("32 bytes is a valid HKDF output length");
         hk.expand(Self::INFO_EVENT, &mut event)
             .expect("32 bytes is a valid HKDF output length");
+        hk.expand(Self::INFO_TARGET, &mut target)
+            .expect("32 bytes is a valid HKDF output length");
         RiskKeys {
             source,
             subnet,
             session,
             principal,
             event,
+            target,
         }
     }
 }
@@ -137,15 +145,21 @@ mod tests {
             hex_of(&keys.event),
             "10def12a515d1fcaa2a0ca79916eb916197b99af76b98b8317081accd9fb3e1f"
         );
+        assert_eq!(
+            hex_of(&keys.target),
+            "cb0fcb40d7dc9a976acd653cc5f7a60b561598497e516b9aa419bc1c821ab18a"
+        );
     }
 
     #[test]
     fn hkdf_keys_differ_across_infos() {
-        let keys = RiskKeys::from_master(&[0x42u8; 32]);
+        let keys = RiskKeys::from_master(&[0x42; 32]);
         assert_ne!(keys.source, keys.subnet);
         assert_ne!(keys.subnet, keys.session);
         assert_ne!(keys.session, keys.principal);
         assert_ne!(keys.principal, keys.event);
         assert_ne!(keys.event, keys.source);
+        assert_ne!(keys.event, keys.target);
+        assert_ne!(keys.target, keys.source);
     }
 }

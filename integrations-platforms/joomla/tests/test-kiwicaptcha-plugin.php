@@ -1,0 +1,108 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * The plugin test runner: boots the Joomla shim layer, loads the
+ * captcha plugin, and exercises the plugin contract (onInit, onDisplay,
+ * onCheckAnswer) plus the framework-free client. Run:
+ * php tests/test-kiwicaptcha-plugin.php
+ */
+
+require __DIR__.'/joomla-shim.php';
+
+use Joomla\CMS\Factory;
+use Joomla\CMS\TestApplication;
+use Joomla\CMS\TestDocument;
+use Joomla\CMS\TestParams;
+use Joomla\Plugin\Captcha\Kiwicaptcha\KiwiClient;
+
+require dirname(__DIR__).'/pkg_kiwicaptcha/plg_captcha_kiwicaptcha/src/KiwiClient.php';
+require dirname(__DIR__).'/pkg_kiwicaptcha/plg_captcha_kiwicaptcha/kiwicaptcha.php';
+
+$failures = 0;
+$checks = 0;
+function check(string $name, bool $condition): void
+{
+    global $failures, $checks;
+    ++$checks;
+    if (!$condition) {
+        ++$failures;
+        fwrite(STDERR, "FAIL: {$name}\n");
+    }
+}
+
+// Token extraction.
+check('header token', KiwiClient::extractToken(['HTTP_X_KIWI_TOKEN' => 'h'], [], []) === 'h');
+check('native form token', KiwiClient::extractToken([], ['kiwi__token' => 'n'], []) === 'n');
+check('explicit answer code', KiwiClient::extractToken([], [], [], 'code-token') === 'code-token');
+check('form beats code', KiwiClient::extractToken([], ['kiwi__token' => 'n'], [], 'code-token') === 'n');
+check('cookie token', KiwiClient::extractToken([], [], ['kiwi_token' => 'c']) === 'c');
+check('no token is null', KiwiClient::extractToken([], [], []) === null);
+check('bad scope falls back to login', KiwiClient::sanitizeScope('bad scope') === 'login');
+check('action suffix scopes survive', KiwiClient::sanitizeScope('login:signup') === 'login:signup');
+
+// The wire request in both modes.
+$json = KiwiClient::buildRequest(['verify_url' => 'http://127.0.0.1:7371/verify', 'bearer' => 'b'], 't', 'login', ['REMOTE_ADDR' => '192.0.2.7']);
+$body = json_decode($json['body'], true);
+check('json mode url and body', $json['url'] === 'http://127.0.0.1:7371/verify' && ($body['token'] ?? '') === 't' && ($body['scope'] ?? '') === 'login');
+check('json mode bearer header', ($json['headers']['Authorization'] ?? '') === 'Bearer b');
+$compat = KiwiClient::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 'sec', 'trust_proxy' => true], 't2', 'signup', ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.5, 10.0.0.2']);
+check('compat mode encodes response and secret', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=sec') !== false && strpos($compat['body'], 'remoteip=203.0.113.5') !== false);
+
+// The decision table over the test transport.
+KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_encode(['success' => true])];
+check('success verifies', KiwiClient::verify(['verify_url' => 'x'], 't', 'login') === ['ok' => true, 'code' => 'verified']);
+KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_encode(['success' => false])];
+check('failed challenge denies', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'challenge_failed');
+KiwiClient::$testTransport = fn (): array => ['status' => 502, 'body' => ''];
+check('5xx is a fault', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'verify_unavailable');
+KiwiClient::$testTransport = null;
+
+// The plugin contract.
+$params = new TestParams([
+    'verify_url' => 'http://127.0.0.1:7371/verify',
+    'shim_url' => 'https://kiwi.test/kiwi-captcha/api.js?compat=recaptcha',
+    'scope' => 'signup',
+    'mode' => 'json',
+    'bearer' => '',
+    'trust_proxy' => '1',
+]);
+$plugin = new PlgCaptchaKiwicaptcha(null, $params);
+
+$doc = new TestDocument();
+Factory::$document = $doc;
+check('onInit succeeds', $plugin->onInit('kiwicaptcha_1') === true);
+check('onInit emits the shim script', count($doc->scripts) === 1 && $doc->scripts[0]['url'] === 'https://kiwi.test/kiwi-captcha/api.js?compat=recaptcha');
+
+$markup = $plugin->onDisplay('kiwi', 'kiwicaptcha_1', 'extra-class');
+check('onDisplay carries the scope', strpos($markup, 'data-kiwi-scope="signup"') !== false);
+check('onDisplay carries the token field', strpos($markup, 'name="kiwi__token"') !== false);
+check('onDisplay carries the class', strpos($markup, 'kiwi-container extra-class') !== false);
+
+$app = new TestApplication(
+    ['REMOTE_ADDR' => '192.0.2.7', 'HTTP_X_FORWARDED_FOR' => '203.0.113.9'],
+    ['kiwi__token' => 'good-token']
+);
+$plugin->setTestApp($app);
+KiwiClient::$testTransport = function (array $request) use (&$captured): array {
+    $captured = $request;
+
+    return ['status' => 200, 'body' => json_encode(['success' => true])];
+};
+check('onCheckAnswer verifies a good token', $plugin->onCheckAnswer(null) === true);
+$body = json_decode($captured['body'] ?? '', true);
+check('onCheckAnswer binds the trusted proxy ip', ($body['remoteip'] ?? '') === '203.0.113.9' && ($body['token'] ?? '') === 'good-token' && ($body['scope'] ?? '') === 'signup');
+
+KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_encode(['success' => false])];
+check('onCheckAnswer rejects a failed challenge', $plugin->onCheckAnswer(null) === false);
+
+$app2 = new TestApplication([], []);
+$plugin->setTestApp($app2);
+check('onCheckAnswer rejects a missing token', $plugin->onCheckAnswer(null) === false);
+
+KiwiClient::$testTransport = null;
+Factory::$document = null;
+
+fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));
+exit($failures === 0 ? 0 : 1);

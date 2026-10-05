@@ -1,0 +1,9 @@
+2026/10/05 14:03:00 [warn] 65317#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:05:27 [warn] 69886#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:07:15 [warn] 74551#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:21:17 [warn] 99220#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:23:40 [warn] 3304#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:25:21 [warn] 10081#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:32:51 [warn] 40767#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 14:37:24 [warn] 62336#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7
+2026/10/05 20:29:47 [warn] 98879#0: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/nginx-d312.conf:7

@@ -399,6 +399,7 @@ fn armed_issuance_verifies_with_correct_digest() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("203.0.113.7"),
         execution_digest: Some(&digest),
         execution_trace: Some(&trace_b64),
@@ -454,6 +455,7 @@ fn armed_record_without_digest_is_execution_mismatch() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("203.0.113.7"),
         execution_digest: None,
         execution_trace: None,
@@ -532,6 +534,7 @@ fn wrong_digest_and_digest_from_another_challenge_are_execution_mismatch() {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            policy_version_floor: None,
             client_ip: Some("203.0.113.7"),
             execution_digest: Some(presented),
             execution_trace: None,
@@ -616,6 +619,7 @@ fn unarmed_issuance_rejects_a_stray_digest() {
         expected_region: None,
         expected_issuer: None,
         expected_policy_version: None,
+        policy_version_floor: None,
         client_ip: Some("203.0.113.7"),
         // Stray execution evidence: a digest presented for a record
         // whose signed canonical carries NO commitment is deterministic

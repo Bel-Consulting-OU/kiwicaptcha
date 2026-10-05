@@ -1,0 +1,295 @@
+{
+  "schema": "kiwicaptcha.redteam.surface/1",
+  "endpoints": [
+    {
+      "surface": "reference-deployment",
+      "route": "/challenge",
+      "methods": [
+        "POST"
+      ],
+      "notes": "real core issuer"
+    },
+    {
+      "surface": "reference-deployment",
+      "route": "/healthz",
+      "methods": [
+        "GET"
+      ],
+      "notes": "real core issuer"
+    },
+    {
+      "surface": "reference-deployment",
+      "route": "/verify",
+      "methods": [
+        "POST"
+      ],
+      "notes": "strict framing contract; one-shot consume; independent binding"
+    },
+    {
+      "surface": "storage-matrix-deployment",
+      "route": "/challenge",
+      "methods": [
+        "POST"
+      ],
+      "notes": "sqlite and filesystem adapter paths of the 9.2 matrix"
+    },
+    {
+      "surface": "storage-matrix-deployment",
+      "route": "/healthz",
+      "methods": [
+        "GET"
+      ],
+      "notes": "sqlite and filesystem adapter paths of the 9.2 matrix"
+    },
+    {
+      "surface": "storage-matrix-deployment",
+      "route": "/verify",
+      "methods": [
+        "POST"
+      ],
+      "notes": "sqlite and filesystem adapter paths of the 9.2 matrix"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/healthz",
+      "methods": [
+        "GET"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/metrics",
+      "methods": [
+        "GET"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/doctor",
+      "methods": [
+        "GET"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/verify",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/issue",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/healthz",
+      "methods": [
+        "GET"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/verify",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/verify",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    }
+  ],
+  "stores": {
+    "phpAdapters": [
+      "ApcuBackendInterface.php",
+      "ApcuFetchOutcome.php",
+      "ApcuStorage.php",
+      "ApcuStorageException.php",
+      "ArrayStorage.php",
+      "DuplicateStoredJsonKeyException.php",
+      "FilesystemStorage.php",
+      "FilesystemStorageException.php",
+      "MalformedStoredJsonException.php",
+      "Psr6Storage.php",
+      "RealApcuBackend.php",
+      "RedisStorage.php",
+      "ReplicaWaitException.php",
+      "SqliteStorage.php",
+      "SqliteStorageException.php",
+      "StorageWriteException.php",
+      "StoredJsonException.php",
+      "StrictJson.php"
+    ],
+    "topologies": [
+      "redis-single",
+      "redis-sentinel-trio",
+      "sqlite",
+      "filesystem",
+      "in-process-sidecar"
+    ],
+    "limits": {
+      "$schema": "kiwicaptcha.limits/1",
+      "format_version": 1,
+      "description": "The single authoritative register of shared security and solver limits. Every value is a policy ceiling or floor that PHP, Rust and the browser must enforce identically: a drift in any one implementation is a fleet-visible split (a solve the browser mints but a server refuses, or a key PHP accepts and Rust rejects). tools/ci/limits-parity-check.sh reads each implementation's own constant declarations and fails on ANY pairwise difference with this manifest, exactly like the execution-v1 register gate. Update this file deliberately, then every implementation in the same change.",
+      "sha_max_target_bits": 20,
+      "solver_max_hashes": 20000000,
+      "argon2_max_target_bits": 10,
+      "argon2_max_m_kib": 65536,
+      "argon2_max_t_issuance": 6,
+      "argon2_max_t_verification": 16,
+      "ttl_max_secs": 300,
+      "rsw_t_min": 10000,
+      "rsw_t_max": 300000,
+      "token_max_duration_ms": 3600000,
+      "min_master_bytes": 32,
+      "min_execution_key_bytes": 32,
+      "execution_max_version": 6,
+      "execution_max_program_base64": 4096,
+      "execution_max_ops": 24,
+      "worker_protocol_version": 2,
+      "worker_protocol_id": "2026-09-r1"
+    }
+  },
+  "corpora": [
+    "protocol/execution-v1.json",
+    "protocol/limits.json",
+    "protocol/risk-v1/asn-vectors.json",
+    "protocol/risk-v1/attacker-denial-vectors.json",
+    "protocol/risk-v1/fixtures.json",
+    "protocol/risk-v1/fuzz-corpus.json",
+    "protocol/risk-v1/hysteresis-vectors.json",
+    "protocol/risk-v1/outcomes-vectors.json",
+    "protocol/risk-v1/pricing-vectors.json",
+    "protocol/risk-v1/target-vectors.json",
+    "protocol/risk-v1/trust-vectors.json",
+    "protocol/risk-v2/identity-fixtures.json",
+    "protocol/risk-v2/identity.json",
+    "protocol/rsw-identity-v1/fixtures.json",
+    "protocol/solution-token-v1/fixtures.json",
+    "protocol/telemetry-v1/client-perf-p1.json",
+    "protocol/telemetry-v1/evidence-vectors.json",
+    "protocol/telemetry-v1/payload.json"
+  ],
+  "sdks": [
+    "kiwicaptcha-android",
+    "kiwicaptcha-angular",
+    "kiwicaptcha-client-core",
+    "kiwicaptcha-dotnet",
+    "kiwicaptcha-elixir",
+    "kiwicaptcha-flutter",
+    "kiwicaptcha-go",
+    "kiwicaptcha-ios",
+    "kiwicaptcha-jvm",
+    "kiwicaptcha-node",
+    "kiwicaptcha-php",
+    "kiwicaptcha-python-sdk",
+    "kiwicaptcha-react",
+    "kiwicaptcha-react-native",
+    "kiwicaptcha-risk",
+    "kiwicaptcha-risk-php",
+    "kiwicaptcha-ruby",
+    "kiwicaptcha-solid",
+    "kiwicaptcha-solver",
+    "kiwicaptcha-svelte",
+    "kiwicaptcha-verifier",
+    "kiwicaptcha-vue",
+    "kiwicaptcha-wasm"
+  ],
+  "campaigns": [
+    {
+      "id": "D3.1",
+      "name": "Commodity no-JS bots"
+    },
+    {
+      "id": "D3.2",
+      "name": "Stealth headless"
+    },
+    {
+      "id": "D3.3",
+      "name": "Native PoW farms"
+    },
+    {
+      "id": "D3.4",
+      "name": "Residential/mobile proxy pools"
+    },
+    {
+      "id": "D3.5",
+      "name": "Credential stuffing"
+    },
+    {
+      "id": "D3.6",
+      "name": "Token brokering/relay"
+    },
+    {
+      "id": "D3.7",
+      "name": "Human solver farms vs step-up"
+    },
+    {
+      "id": "D3.8",
+      "name": "AI computer-use agents"
+    },
+    {
+      "id": "D3.9",
+      "name": "Risk-engine gaming"
+    },
+    {
+      "id": "D3.10",
+      "name": "Infrastructure attacker"
+    },
+    {
+      "id": "D3.11",
+      "name": "Denial-of-service"
+    },
+    {
+      "id": "D3.12",
+      "name": "Protocol/parser"
+    },
+    {
+      "id": "D3.13",
+      "name": "Client/supply chain"
+    },
+    {
+      "id": "D3.14",
+      "name": "Privacy adversary"
+    },
+    {
+      "id": "D3.15",
+      "name": "Multi-tenant"
+    },
+    {
+      "id": "D3.16",
+      "name": "Accessibility/compatibility"
+    },
+    {
+      "id": "D3.17",
+      "name": "Cross-SDK parity attack"
+    }
+  ],
+  "hypotheses": [
+    "forged and replayed tokens against the verify one-shot model",
+    "binding re-labeling and the burned-record anti-oracle",
+    "framing ambiguity between two readings of one body",
+    "issuance budget exhaustion and outstanding-record pressure",
+    "confusable scope strings at the identifier pattern boundary",
+    "record tampering, MAC strip and transplant on each store",
+    "epoch and policy manipulation in the persisted record",
+    "clock skew through the persisted timestamps",
+    "failover and stale-primary resurrection on the sentinel trio",
+    "wire differentials across every sdk on the shared corpus"
+  ]
+}

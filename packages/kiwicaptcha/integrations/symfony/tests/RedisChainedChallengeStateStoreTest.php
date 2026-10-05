@@ -208,6 +208,47 @@ final class RedisChainedChallengeStateStoreTest extends TestCase
         $store->read($chainId);
     }
 
+    public function testObligationChainIdFailsClosedOnACorruptPointedChainOnBothStores(): void
+    {
+        // The lockstep obligation-read contract, pinned on both stores:
+        // a corrupt pointed-at chain record must never silently pass —
+        // obligationChainId() follows the mapping only to a
+        // strictly-decodable live chain and throws the strict decode
+        // exception otherwise, and the mapping itself is never dropped.
+        $store = $this->store();
+        [$service, $requirement] = $this->issueRequirement($store, 'tx-corrupt');
+        $obligationId = $service->obligationIdFor('login', 'tx-corrupt', 1);
+        $chainKey = '{kiwi:kiwi-test}:chain:'.$requirement->chainId;
+        $corrupt = json_decode($this->fake->strings[$chainKey], true, 8, JSON_THROW_ON_ERROR);
+        unset($corrupt['requiredAction']);
+        $this->fake->strings[$chainKey] = (string) json_encode($corrupt, JSON_THROW_ON_ERROR);
+
+        try {
+            $store->obligationChainId($obligationId);
+            self::fail('the Redis obligation read must fail closed on the corrupt pointed-at chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected: the mapping is never silently followed to corrupt state
+        }
+        self::assertSame($requirement->chainId, $this->fake->strings['{kiwi:kiwi-test}:chain-obligation:'.$obligationId] ?? null, 'the Redis mapping is preserved by the fail-closed read');
+
+        // The Array mirror throws identically and keeps its mapping.
+        $array = new ArrayChainedChallengeStateStore();
+        $arrayService = new ChainedChallengeTicketService($array, self::SECRET, 300, 15);
+        $arrayRequirement = $arrayService->requireStage2($this->makeNonce(), 'login', 'tx-corrupt', 1, RiskAction::Argon32, time() + 300);
+        $arrayObligationId = $arrayService->obligationIdFor('login', 'tx-corrupt', 1);
+        $records = (new \ReflectionObject($array))->getProperty('records')->getValue($array);
+        unset($records[$arrayRequirement->chainId]['requiredAction']);
+        (new \ReflectionObject($array))->getProperty('records')->setValue($array, $records);
+        try {
+            $array->obligationChainId($arrayObligationId);
+            self::fail('the Array obligation read must fail closed on the corrupt pointed-at chain');
+        } catch (MalformedChainedChallengeStateException) {
+            // expected: the corrupt state is never silently dropped
+        }
+        $obligations = (new \ReflectionObject($array))->getProperty('obligations')->getValue($array);
+        self::assertSame($arrayRequirement->chainId, $obligations[$arrayObligationId] ?? null, 'the Array mapping is preserved by the fail-closed read');
+    }
+
     public function testTerminalTransitionsWaitOnTheFreshMutationOnly(): void
     {
         // THE verified-WAIT gating of the chain terminal transitions: the

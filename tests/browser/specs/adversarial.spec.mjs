@@ -448,7 +448,12 @@ test.describe('KiwiCaptcha adversarial submission validation', () => {
     const legit = Number(decodeToken(token).split('.')[1]);
     const below = failingCounter(challenges[0].prefix, challenges[0].salt, challenges[0].targetBits, legit - 1);
     const cases = [
-      { label: 'counter at the solver maximum', counter: 5000000, code: 'malformed_token' },
+      // The solver counter ceiling is 20,000,000 (protocol/limits.json,
+      // unified across PHP/Rust in the shared-limits change): the decoder
+      // rejects the cap itself outright — the largest counter a real solve
+      // can mint is 19,999,999 — while an in-range but forged counter
+      // (e.g. 5,000,000) merely fails the proof and reads insufficient_work.
+      { label: 'counter at the solver maximum', counter: 20000000, code: 'malformed_token' },
       { label: 'counter far above the solver maximum', counter: 999999999, code: 'malformed_token' },
       { label: 'counter below the target', counter: below, code: 'insufficient_work' },
     ];

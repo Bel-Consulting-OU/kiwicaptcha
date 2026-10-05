@@ -17,6 +17,12 @@ namespace KiwiCaptcha\Risk;
  */
 final class RiskIdentityFactory
 {
+    /**
+     * The ASN dimension's rotation window in seconds (six hours), per
+     * the risk-v2 identity contract file protocol/risk-v2/identity.json.
+     */
+    public const ASN_EPOCH_SECS = 21600;
+
     public function __construct(
         private readonly RiskKeys $keys,
         private readonly int $sourceEpochSecs = 900,
@@ -258,5 +264,57 @@ final class RiskIdentityFactory
     public function principalId(string $principal): string
     {
         return $this->pseudonym($this->keys->principal, 'prin', 0, $principal);
+    }
+
+    /**
+     * ASN pseudonym for the epoch covering $nowSecs: context "asn",
+     * material = the ASN bucket id string, keyed by the subnet HKDF key.
+     * The context string and the six-hour rotation window are declared
+     * by the risk-v2 identity contract file
+     * (protocol/risk-v2/identity.json), which is their source of truth;
+     * the derivation mirrors the source/subnet epoch pattern above
+     * (floor division, epoch big-endian in the HMAC slot). The bucket
+     * id comes from the free ASN dataset and never identifies a single
+     * host.
+     */
+    public function asnId(string $bucketId, int $nowSecs): string
+    {
+        return $this->pseudonym(
+            $this->keys->subnet,
+            'asn',
+            self::floorDiv($nowSecs, self::ASN_EPOCH_SECS),
+            $bucketId,
+        );
+    }
+
+    /**
+     * Agent pseudonym: context "agent", no epoch, keyed by the
+     * principal HKDF key. The material is the configured verified-agent
+     * key id, a deployment identifier with no per-user cardinality. The
+     * context string and the key assignment are declared by the
+     * risk-v2 identity contract file, which is their source of truth.
+     */
+    public function agentId(string $agentKeyId): string
+    {
+        return $this->pseudonym($this->keys->principal, 'agent', 0, $agentKeyId);
+    }
+
+    /**
+     * Target pseudonym: the full 32-byte HMAC-SHA256 (64 lowercase hex
+     * chars) over a normalized target identifier. The message mirrors
+     * the shared pseudonym framing with context "tgt" and the target
+     * pipeline version in the epoch slot ("kiwi-risk-id-v1\0tgt\0" ||
+     * pack('J', version) || normalized), keyed by the master-derived
+     * target key. Unlike the 16-byte identity pseudonyms this digest is
+     * kept whole: the target dimension is keyed by the full digest, and
+     * the version stamp means a pipeline change can never collide with
+     * pseudonyms derived under an earlier pipeline. The caller passes
+     * only the output of TargetIdentifierNormalizer::normalize()
+     * forward; the normalized value itself never leaves this boundary.
+     */
+    public function targetId(string $normalizedIdentifier): string
+    {
+        $message = "kiwi-risk-id-v1\0tgt\0" . pack('J', TargetIdentifierNormalizer::VERSION) . $normalizedIdentifier;
+        return hash_hmac('sha256', $message, $this->keys->target);
     }
 }

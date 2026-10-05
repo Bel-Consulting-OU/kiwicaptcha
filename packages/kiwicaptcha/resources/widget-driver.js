@@ -974,11 +974,10 @@
       writeResponseAlias("");
       kiwiRecordState("idle", "");
       telemetry.stop();
-      // A pending worker object URL is revoked on every reset/re-init
-      // path, not just on worker completion (the worker machinery lives
-      // in the lazy widget-risk.js module, which owns the URL).
-      var riskNow = kiwiModuleApi("risk");
-      if (riskNow && riskNow.revokeWorkerUrl) riskNow.revokeWorkerUrl();
+      // A pending worker object URL is still revoked on every reset path:
+      // reset()/destroy() run through kiwiCancelGeneration() first, whose
+      // terminate handle tears the solve down (the lazy module's per-solve
+      // teardown owns the URL — never a page-global revoke).
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
@@ -1084,8 +1083,9 @@
     function workerUnavailable(reason) {
       clearInterval(countdownTimer);
       telemetry.stop();
-      var riskNow = kiwiModuleApi("risk");
-      if (riskNow && riskNow.revokeWorkerUrl) riskNow.revokeWorkerUrl();
+      // No URL cleanup here: this state is reached only after the solve
+      // handle settled (its teardown revoked the blob URL) or before any
+      // worker was created.
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       if (countdownEl) countdownEl.textContent = "";
@@ -1188,8 +1188,8 @@
       var expiryDeadlineAt = null;
       try {
         kiwiSetView({ statusKey: "statusConnecting", badgeKey: "badgeWait", domState: "connecting" });
-      var riskApi = kiwiModuleApi("risk");
-      var endpoint = kiwiEndpoint(kiwiConfigValue(W, container, "data-kiwi-endpoint") || "/api/kcaptcha/challenge");
+        var riskApi = kiwiModuleApi("risk");
+        var endpoint = kiwiEndpoint(kiwiConfigValue(W, container, "data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection: the client may only choose among the
         // server-offered profiles (sha256 / argon2id / rsw); anything
         // else normalizes to the default, and a solver failure never
@@ -1201,12 +1201,12 @@
         // EXECUTION CAPABILITY ADVERTISEMENT: when the widget carries the
         // configured interpreter asset (data-kiwi-execution-src +
         // integrity), the driver declares the highest program version it
-        // can run via the Kiwi-Execution-Max-Version header (currently 5);
+        // can run via the Kiwi-Execution-Max-Version header (currently 6);
         // the header is ignorable and its absence means version 1.
         var execSrcAttr = kiwiConfigValue(W, container, "data-kiwi-execution-src");
         var execIntegrityAttr = kiwiConfigValue(W, container, "data-kiwi-execution-integrity");
         var reqHeaders = { "Accept": "application/json", "Content-Type": "application/json" };
-        if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "5";
+        if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "6";
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
         // CHAIN TICKET: a server-issued ticket (data-kiwi-chain-ticket or
@@ -1251,7 +1251,7 @@
         if (!(fetchTimeoutMs > 0)) fetchTimeoutMs = KIWI_FETCH_TIMEOUT_MS;
         // Attach telemetry before sending, on its own bounded budget: it
         // must never consume the challenge-fetch timeout (the fetch
-        // deadline starts immediately before fetch(), below).
+        // deadline starts immediately before the fetch call, below).
         if (telemetryMode !== "off" && !kiwiTelemetrySession) {
           try {
             var telemetryFallbackTimer = null;
@@ -1392,7 +1392,7 @@
             }
           }
           if (!result) {
-            result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline, function () { return !kiwiGenerationCurrent(widgetId, gen); });
+            result = await solve(data.prefix, b64decode(data.salt), data.targetBits, "sha256", data.mKib||0, data.t||1, data.p||1, setProgress, deadline, function () { return !kiwiGenerationCurrent(widgetId, gen) || !W.isConnected; });
           }
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
@@ -2018,6 +2018,19 @@
   };
   window.__kiwiCaptchaCore = kiwiBridge;
   function kiwiScan(root) {
+    // Turbo/htmx navigation swaps the DOM without destroy(): a widget
+    // element removed from the document keeps its registry record, so an
+    // in-flight generation would run on against a detached node and the
+    // record would keep counting as live. Cancel and delete every record
+    // whose element is disconnected BEFORE scanning (the same
+    // cancel-then-delete mirror kiwiDestroy() uses).
+    for (var deadId in kiwiWidgets) {
+      var deadRecord = kiwiWidgets[deadId];
+      if (deadRecord && deadRecord.W && !deadRecord.W.isConnected) {
+        kiwiCancelGeneration(deadId);
+        delete kiwiWidgets[deadId];
+      }
+    }
     (root || document).querySelectorAll("[data-kiwi-widget]").forEach(function (W) {
       // No pointerdown-only activation: after a reset or settled
       // failure the widget is idle; the native Retry button is the

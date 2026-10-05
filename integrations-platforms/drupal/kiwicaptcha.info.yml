@@ -1,0 +1,7 @@
+name: KiwiCaptcha
+type: module
+description: 'Proof-of-work CAPTCHA for the login, registration, comment and contact forms, verified against a self-hosted KiwiCaptcha deployment.'
+package: Security
+version: 1.0.0
+core_version_requirement: ^10 || ^11
+configure: kiwicaptcha.settings

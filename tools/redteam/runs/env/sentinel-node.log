@@ -1,0 +1,32 @@
+15457:X 05 Oct 2026 13:42:55.017 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+15457:X 05 Oct 2026 13:42:55.017 * Redis version=8.10.1, bits=64, commit=00000000, modified=1, pid=15457, just started
+15457:X 05 Oct 2026 13:42:55.017 * Configuration loaded
+15457:X 05 Oct 2026 13:42:55.018 * monotonic clock: ARM CNTVCT @ 1000 ticks/us
+15457:X 05 Oct 2026 13:42:55.018 * Running mode=sentinel, port=6483.
+15457:X 05 Oct 2026 13:42:55.018 # WARNING: The TCP backlog setting of 511 cannot be enforced because kern.ipc.somaxconn is set to the lower value of 128.
+15457:X 05 Oct 2026 13:42:55.023 * Sentinel new configuration saved on disk
+15457:X 05 Oct 2026 13:42:55.023 * Sentinel ID is d3dbd63d47d1716f904939f5f98ec1aab90c65ce
+15457:X 05 Oct 2026 13:42:55.023 # +monitor master kiwi-master 127.0.0.1 6481 quorum 1
+15457:X 05 Oct 2026 13:42:55.023 * +slave slave 127.0.0.1:6482 127.0.0.1 6482 @ kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:55.026 * Sentinel new configuration saved on disk
+15457:X 05 Oct 2026 13:42:58.580 # +sdown master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.580 # +odown master kiwi-master 127.0.0.1 6481 #quorum 1/1
+15457:X 05 Oct 2026 13:42:58.580 # +new-epoch 1
+15457:X 05 Oct 2026 13:42:58.580 # +try-failover master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.586 * Sentinel new configuration saved on disk
+15457:X 05 Oct 2026 13:42:58.586 # +vote-for-leader d3dbd63d47d1716f904939f5f98ec1aab90c65ce 1
+15457:X 05 Oct 2026 13:42:58.586 # +elected-leader master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.586 # +failover-state-select-slave master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.639 # +selected-slave slave 127.0.0.1:6482 127.0.0.1 6482 @ kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.639 * +failover-state-send-slaveof-noone slave 127.0.0.1:6482 127.0.0.1 6482 @ kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:58.711 * +failover-state-wait-promotion slave 127.0.0.1:6482 127.0.0.1 6482 @ kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:59.651 * Sentinel new configuration saved on disk
+15457:X 05 Oct 2026 13:42:59.651 # +promoted-slave slave 127.0.0.1:6482 127.0.0.1 6482 @ kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:59.651 # +failover-state-reconf-slaves master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:59.698 # +failover-end master kiwi-master 127.0.0.1 6481
+15457:X 05 Oct 2026 13:42:59.698 # +switch-master kiwi-master 127.0.0.1 6481 127.0.0.1 6482
+15457:X 05 Oct 2026 13:42:59.698 * +slave slave 127.0.0.1:6481 127.0.0.1 6481 @ kiwi-master 127.0.0.1 6482
+15457:X 05 Oct 2026 13:42:59.702 * Sentinel new configuration saved on disk
+15457:signal-handler (1791207780) Received SIGTERM scheduling shutdown...
+15457:X 05 Oct 2026 13:43:00.177 * User requested shutdown...
+15457:X 05 Oct 2026 13:43:00.177 # Sentinel is now ready to exit, bye bye...

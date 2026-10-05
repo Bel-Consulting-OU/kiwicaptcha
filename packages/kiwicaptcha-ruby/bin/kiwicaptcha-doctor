@@ -1,0 +1,45 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The doctor command: validates config, secrets and the store of one
+# deployment, mirroring the shared server SDK contract. Exit status is
+# zero only when every check passes.
+#
+#   KIWI_SECRET=... KIWI_STORE=redis://localhost bin/kiwicaptcha-doctor
+
+require_relative '../lib/kiwicaptcha'
+
+secret = ENV['KIWI_SECRET']
+store_url = ENV['KIWI_STORE'] || 'memory://'
+
+begin
+  store = KiwiCaptcha::Settings.open_store(store_url)
+rescue StandardError, LoadError => e
+  warn "kiwicaptcha-doctor: cannot open store #{store_url.inspect}: #{e.message}"
+  exit 1
+end
+
+rsw = nil
+if ENV['KIWI_RSW_MODULUS'] && ENV['KIWI_RSW_LAMBDA']
+  rsw = KiwiCaptcha::Verify::RswVerifierConfig.new(
+    modulus_n: ENV['KIWI_RSW_MODULUS'],
+    lambda: ENV['KIWI_RSW_LAMBDA'],
+    verification_keys: {},
+    allow_legacy_identity: false
+  )
+end
+
+report = KiwiCaptcha::Doctor.run(
+  secret: secret.to_s,
+  store: store,
+  rsw: rsw,
+  region: ENV['KIWI_REGION'],
+  issuer: ENV['KIWI_ISSUER']
+)
+
+report.checks.each do |check|
+  mark = check.ok ? 'ok  ' : 'FAIL'
+  puts "#{mark} #{check.name}: #{check.detail}"
+end
+puts report.ok ? 'doctor: deployment is sound' : 'doctor: findings above must be resolved'
+exit(report.ok ? 0 : 1)

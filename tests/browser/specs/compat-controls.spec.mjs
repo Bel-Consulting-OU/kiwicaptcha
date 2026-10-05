@@ -205,3 +205,222 @@ test.describe('KiwiCaptcha provider-control compatibility', () => {
     expect(result.pending === null || (Array.isArray(result.pending) && result.pending.length === 0)).toBe(true);
   });
 });
+
+// The standalone provider shims (widget-shims.js over a plain driver
+// bootstrap, no compat loader): the incumbent globals exist for
+// application code, the Altcha and Friendly Captcha element conventions
+// keep working, and every shim token redeems on the real verify
+// endpoint.
+//
+// Runs in Chromium, Firefox and WebKit via playwright.a11y.config.mjs
+// (and in the default Chromium config too).
+
+function collectShimChallenges(page) {
+  const bodies = [];
+  page.on('request', (req) => {
+    if (req.url().includes('/challenge') && req.method() === 'POST') {
+      try { bodies.push(req.postDataJSON() ?? {}); } catch { bodies.push({}); }
+    }
+  });
+  return bodies;
+}
+
+async function shimsReady(page) {
+  await page.waitForFunction(
+    () => window.grecaptcha && window.hcaptcha && window.turnstile
+      && typeof window.grecaptcha.render === 'function',
+    undefined,
+    { timeout: 30_000 },
+  );
+}
+
+test.describe('KiwiCaptcha standalone provider shims', () => {
+  test('grecaptcha: render auto-solves, the response field and the token field agree, getResponse and reset round-trip', async ({ page, request }) => {
+    await page.goto('/migration/shims-recaptcha.html');
+    await shimsReady(page);
+    await page.evaluate(() => {
+      window.shimId = window.grecaptcha.render(document.getElementById('shim-box'), {
+        sitekey: '6Lc_shim_v2',
+        callback: 'onShimToken',
+        'expired-callback': 'onShimExpired',
+      });
+    });
+    const widget = page.locator('#shim-box [data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+
+    const token = await page.locator('textarea#g-recaptcha-response').inputValue();
+    expect(token.length).toBeGreaterThan(10);
+    // The kiwi token field carries the same solution, so a backend
+    // reading either field sees one proof.
+    await expect(page.locator('input[name="kiwi__token"]')).toHaveValue(token);
+    await expect(page.locator('#out')).toHaveText('cb:' + token.slice(0, 8));
+
+    // getResponse by id, by creation-order number and by the omitted
+    // default all answer the same widget.
+    const responses = await page.evaluate((id) => ({
+      byId: window.grecaptcha.getResponse(id),
+      byIndex: window.grecaptcha.getResponse(0),
+      noArg: window.grecaptcha.getResponse(),
+    }), await page.evaluate(() => window.shimId));
+    expect(responses.byId).toBe(token);
+    expect(responses.byIndex).toBe(token);
+    expect(responses.noArg).toBe(token);
+
+    // The challenge carried the mapped scope and the verbatim sitekey.
+    const verified = await request.post('/verify', { data: { token, scope: 'login' } });
+    expect((await verified.json()).ok, 'the shim token must redeem on the real endpoint').toBe(true);
+
+    // reset clears the response, then execute re-solves a fresh token.
+    await page.evaluate((id) => window.grecaptcha.reset(id), await page.evaluate(() => window.shimId));
+    await expect(page.locator('textarea#g-recaptcha-response')).toHaveValue('');
+    const second = await page.evaluate(async (id) => {
+      const next = await window.grecaptcha.execute(id);
+      return { next, after: window.grecaptcha.getResponse(id) };
+    }, await page.evaluate(() => window.shimId));
+    expect(second.next.length).toBeGreaterThan(10);
+    expect(second.next).not.toBe(token);
+    expect(second.after).toBe(second.next);
+    const reverified = await request.post('/verify', { data: { token: second.next, scope: 'login' } });
+    expect((await reverified.json()).ok).toBe(true);
+  });
+
+  test('grecaptcha: the sitekey table knob resolves the scope and an invisible control defers to execute', async ({ page, request }) => {
+    const bodies = collectShimChallenges(page);
+    await page.goto('/migration/shims-recaptcha.html');
+    await shimsReady(page);
+
+    // The page table maps this sitekey to the signup scope; the request
+    // must present that scope, not the verbatim key. The map box carries
+    // no explicit scope knob, so the table decides.
+    await page.evaluate(() => {
+      window.mappedId = window.grecaptcha.render(document.getElementById('map-box'), { sitekey: '6Lc_shim_map' });
+    });
+    await expect(page.locator('#map-box [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const mappedToken = await page.locator('textarea#g-recaptcha-response').inputValue();
+    const mapped = await request.post('/verify', { data: { token: mappedToken, scope: 'signup' } });
+    expect((await mapped.json()).ok, 'the mapped scope must be the minted scope').toBe(true);
+    expect(bodies[0].scope).toBe('signup');
+
+    // A button control renders into an adjacent holder and waits for
+    // execute(), exactly like the incumbent invisible control.
+    const before = bodies.length;
+    await page.evaluate(() => {
+      window.controlId = window.grecaptcha.render(document.getElementById('invisible-go'));
+    });
+    const controlWidget = page.locator('#invisible-go + [data-kiwi-compat-holder] [data-kiwi-widget]');
+    await expect(controlWidget).toHaveAttribute('data-state', 'pending', { timeout: 30_000 });
+    await page.waitForTimeout(1500);
+    expect(bodies.length, 'a control widget defers its challenge until execute').toBe(before);
+    const controlToken = await page.evaluate(async (id) => {
+      const value = await window.grecaptcha.execute(id);
+      return { value, response: window.grecaptcha.getResponse(id) };
+    }, await page.evaluate(() => window.controlId));
+    await expect(controlWidget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    expect(controlToken.value.length).toBeGreaterThan(10);
+    expect(controlToken.response).toBe(controlToken.value);
+    expect(await page.locator('#invisible-go [data-kiwi-widget]').count(), 'no interactive content nests in the control').toBe(0);
+  });
+
+  test('grecaptcha v3: execute(sitekey, action) solves a hidden widget and cleans it up', async ({ page, request }) => {
+    const bodies = collectShimChallenges(page);
+    await page.goto('/migration/shims-recaptcha.html');
+    await shimsReady(page);
+    const token = await page.evaluate(() => window.grecaptcha.execute('6Lc_shim_v3', { action: 'checkout' }));
+    expect(token.length).toBeGreaterThan(10);
+    expect(bodies.length).toBe(1);
+    expect(bodies[0].action).toBe('checkout');
+    expect(bodies[0].sitekey).toBe('6Lc_shim_v3');
+    // The hidden helper leaves no widget behind.
+    expect(await page.locator('[data-kiwi-widget]').count()).toBe(0);
+    const verified = await request.post('/verify', { data: { token, scope: 'login' } });
+    expect((await verified.json()).ok).toBe(true);
+  });
+
+  test('hcaptcha: both provider response fields carry the token and the async form answers the pair', async ({ page, request }) => {
+    await page.goto('/migration/shims-hcaptcha.html');
+    await shimsReady(page);
+    await page.evaluate(() => {
+      window.hId = window.hcaptcha.render(document.getElementById('shim-box'), { sitekey: '10000000-aaaa-bbbb-cccc-000000000002' });
+    });
+    await expect(page.locator('#shim-box [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const hToken = await page.locator('textarea#h-captcha-response').inputValue();
+    const gToken = await page.locator('textarea#g-recaptcha-response').inputValue();
+    expect(hToken.length).toBeGreaterThan(10);
+    expect(gToken, 'an integration reading only the reCAPTCHA field keeps working').toBe(hToken);
+    const result = await page.evaluate(async (id) => {
+      const pair = await window.hcaptcha.execute(id, { async: true });
+      return { pair, key: window.hcaptcha.getRespKey(id), response: window.hcaptcha.getResponse(id) };
+    }, await page.evaluate(() => window.hId));
+    expect(result.pair.response).toBe(hToken);
+    expect(result.pair.key).toBe(result.key);
+    expect(result.key.length).toBeGreaterThan(0);
+    expect(result.response).toBe(hToken);
+    const verified = await request.post('/verify', { data: { token: hToken, scope: 'login' } });
+    expect((await verified.json()).ok).toBe(true);
+  });
+
+  test('turnstile: render starts the implicit challenge, reset re-runs and remove tears down', async ({ page, request }) => {
+    const bodies = collectShimChallenges(page);
+    await page.goto('/migration/shims-turnstile.html');
+    await shimsReady(page);
+    await page.evaluate(() => {
+      window.tId = window.turnstile.render(document.getElementById('shim-box'), { sitekey: '0x4AAAAAASHIM' });
+    });
+    const widget = page.locator('#shim-box [data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    expect(bodies.length, 'the implicit challenge runs without execute').toBe(1);
+    const token = await page.evaluate((id) => ({
+      response: window.turnstile.getResponse(id),
+      expired: window.turnstile.isExpired(id),
+    }), await page.evaluate(() => window.tId));
+    expect(token.response.length).toBeGreaterThan(10);
+    expect(token.expired).toBe(false);
+    const fieldToken = await page.locator('textarea#cf-turnstile-response').inputValue();
+    expect(fieldToken).toBe(token.response);
+    const verified = await request.post('/verify', { data: { token: token.response, scope: 'login' } });
+    expect((await verified.json()).ok).toBe(true);
+
+    // reset re-runs the implicit challenge; remove tears the widget out.
+    await page.evaluate((id) => window.turnstile.reset(id), await page.evaluate(() => window.tId));
+    await expect(widget).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    expect(bodies.length).toBe(2);
+    await page.evaluate((id) => window.turnstile.remove(id), await page.evaluate(() => window.tId));
+    await expect(page.locator('#shim-box .kiwi-container')).toHaveCount(0);
+    await expect(page.locator('#shim-box [data-kiwi-widget]')).toHaveCount(0);
+  });
+
+  test('altcha markup: the altcha-widget element auto-solves into its named field', async ({ page, request }) => {
+    await page.goto('/migration/shims-altcha.html');
+    await expect(page.locator('altcha-widget [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const token = await page.locator('textarea#altcha').inputValue();
+    expect(token.length).toBeGreaterThan(10);
+    const verified = await request.post('/verify', { data: { token, scope: 'login' } });
+    expect((await verified.json()).ok, 'the Altcha convention token must redeem').toBe(true);
+  });
+
+  test('friendly markup: the frc-captcha element auto-solves into its solution field', async ({ page, request }) => {
+    await page.goto('/migration/shims-friendly.html');
+    await expect(page.locator('.frc-captcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const token = await page.locator('textarea[name="frc-captcha-solution"]').inputValue();
+    expect(token.length).toBeGreaterThan(10);
+    const verified = await request.post('/verify', { data: { token, scope: 'login' } });
+    expect((await verified.json()).ok, 'the Friendly Captcha convention token must redeem').toBe(true);
+  });
+
+  test('axe: the shims pages pass the widget-scope rules', async ({ page }) => {
+    for (const path of ['/migration/shims-recaptcha.html', '/migration/shims-altcha.html', '/migration/shims-friendly.html']) {
+      await page.goto(path);
+      if (path.endsWith('shims-recaptcha.html')) {
+        await shimsReady(page);
+        await page.evaluate(() => window.grecaptcha.render(document.getElementById('shim-box'), { sitekey: '6Lc_shim_v2' }));
+      }
+      const scope = path.endsWith('shims-recaptcha.html') ? '#shim-box' : (path.endsWith('shims-altcha.html') ? 'altcha-widget' : '.frc-captcha');
+      await expect(page.locator(`${scope} [data-kiwi-widget]`)).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+      const results = await new AxeBuilder({ page })
+        .include(scope)
+        .withRules(AXE_RULES)
+        .analyze();
+      expect(results.violations, `${path}: ${JSON.stringify(results.violations.map((v) => v.id))}`).toEqual([]);
+    }
+  });
+});

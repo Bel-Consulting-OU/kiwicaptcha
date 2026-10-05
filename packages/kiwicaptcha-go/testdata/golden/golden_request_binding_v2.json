@@ -1,0 +1,37 @@
+{
+    "meta": {
+        "provenance": "PHP-issued with packages/kiwicaptcha-php Issuer, pinned clock 1900000000",
+        "secret": "0123456789abcdef0123456789abcdef",
+        "client_ip": "198.51.100.7",
+        "scope": "login",
+        "issued_at": 1900000000,
+        "algorithm": "sha256",
+        "request_binding": "tx-123"
+    },
+    "record": {
+        "nonce": "PlkRj4jUHImyHP2Zl8VG2Mq4c7W9igFTpEG6Ecjwr6o=",
+        "scope": "login",
+        "binding_tag": "fd6d42dd77606cd9758e9bc37669597227dc0e48553d36509c708bbd5c09edcc",
+        "issued_at": 1900000000,
+        "expires_at": 1900000120,
+        "algorithm": "sha256",
+        "m_kib": 0,
+        "t": 3,
+        "p": 1,
+        "target_bits": 8,
+        "salt": "R9feZzF0/YgtpcT445+7gA==",
+        "prefix": "djR8MnxQbGtSajRqVUhJbXlIUDJabDhWRzJNcTRjN1c5aWdGVHBFRzZFY2p3cjZvPXxsb2dpbnxmZDZkNDJkZDc3NjA2Y2Q5NzU4ZTliYzM3NjY5NTk3MjI3ZGMwZTQ4NTUzZDM2NTA5YzcwOGJiZDVjMDllZGNjfDE5MDAwMDAwMDB8MTkwMDAwMDEyMHxzaGEyNTZ8MHwzfDF8OHxSOWZlWnpGMC9ZZ3RwY1Q0NDUrN2dBPT18MHx8MXx0eC0xMjN8fDF8bT0x.b0299ac0f3e340094ff94926f3cc0820865ffaeede5971b1097d4d31b720e111|R9feZzF0/YgtpcT445+7gA==|",
+        "challenge": "djR8MnxQbGtSajRqVUhJbXlIUDJabDhWRzJNcTRjN1c5aWdGVHBFRzZFY2p3cjZvPXxsb2dpbnxmZDZkNDJkZDc3NjA2Y2Q5NzU4ZTliYzM3NjY5NTk3MjI3ZGMwZTQ4NTUzZDM2NTA5YzcwOGJiZDVjMDllZGNjfDE5MDAwMDAwMDB8MTkwMDAwMDEyMHxzaGEyNTZ8MHwzfDF8OHxSOWZlWnpGMC9ZZ3RwY1Q0NDUrN2dBPT18MHx8MXx0eC0xMjN8fDF8bT0x.b0299ac0f3e340094ff94926f3cc0820865ffaeede5971b1097d4d31b720e111",
+        "min_duration_ms": 0,
+        "issued_at_ns": 1791176126941989,
+        "protocol_version": 2,
+        "attempts_used": 0,
+        "region": null,
+        "policy_version": 1,
+        "request_binding": "tx-123",
+        "issuer": null,
+        "kid": 1,
+        "hostname": null,
+        "server_mac": "ce36784bb4ed683b9745565f6b259ad6b7521a7ecabd7fc025bebe625c96d73d"
+    }
+}

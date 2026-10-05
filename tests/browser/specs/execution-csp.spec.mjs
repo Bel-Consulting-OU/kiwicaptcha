@@ -165,7 +165,7 @@ test.describe('ExecutionChallengeV1 under real CSP headers', () => {
     // response carried the execution_program, so the widget was never
     // downgraded to an unarmed or version-1-only issuance.
     expect(challengeRequests, 'exactly one challenge request, no retry storm').toHaveLength(1);
-    expect(challengeRequests[0].headers()['kiwi-execution-max-version'], 'the driver must advertise its execution capability').toBe('5');
+    expect(challengeRequests[0].headers()['kiwi-execution-max-version'], 'the driver must advertise its execution capability').toBe('6');
     expect(challengeResponses, 'the armed challenge response must have arrived').toHaveLength(1);
     const issuance = await challengeResponses[0].json();
     expect(typeof issuance.execution_program, 'the issuance must be execution-armed').toBe('string');

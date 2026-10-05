@@ -5,8 +5,8 @@
 //! - `solve_argon2_chunk`  — memory-hard Argon2id PoW (chosen to resist specialized hardware).
 //!
 //! Both take the challenge prefix and salt as raw pointer/length pairs (the
-//! widget allocates the buffers with `__wbindgen_malloc`, copies the bytes,
-//! and frees them with `__wbindgen_free`) and search a half-open counter
+//! widget allocates the buffers with [`alloc`], copies the bytes, and
+//! frees them with [`dealloc`]) and search a half-open counter
 //! range `[start_counter, start_counter + chunk_size)`, returning the first
 //! counter whose hash meets `target_bits` leading-zero bits, or -1 if the
 //! chunk is exhausted. Chunking lets the widget yield to the UI between calls.

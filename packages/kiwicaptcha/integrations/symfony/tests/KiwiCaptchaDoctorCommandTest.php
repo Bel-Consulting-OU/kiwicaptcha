@@ -483,7 +483,10 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
             $label = sprintf('high_abuse cap %d floor %s required %d mode %s', $cap, var_export($floor, true), $required, $mode);
             self::assertStringContainsString('['.$status.'] Execution versioning', $tester->getDisplay(), $label);
             self::assertStringContainsString($fragment, $tester->getDisplay(), $label);
-            self::assertSame($status === 'FAIL' ? Command::FAILURE : Command::SUCCESS, $tester->getStatusCode(), $label);
+            // The check-level statuses above are the subject; the exit
+            // code additionally reflects the profile's rsw trapdoor gate:
+            // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+            self::assertSame(Command::FAILURE, $tester->getStatusCode(), $label);
         }
     }
 
@@ -540,7 +543,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('[WARN] Execution versioning', $display);
         self::assertStringContainsString('no execution_key is configured: the armed dimension is INERT', $display);
         self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
     }
 
     public function testDoctorFailsWhenTheRequiredTierExceedsTheConfirmedFloorAndNamesTheRungs(): void
@@ -579,7 +583,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         // required tier must be raised once the migration completes.
         $tester = $this->executionVersioningTester('high_abuse', 3, 3, 2, true, 'migration');
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the deliberate migration downgrade window must warn, never fail');
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode(), 'the deliberate migration downgrade window must warn (never fail the check), but the profile rsw gate fails the run');
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Execution versioning', $display);
         self::assertStringContainsString('accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout', $display);
@@ -610,7 +615,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         // node cap above it.
         $tester = $this->executionVersioningTester('high_abuse', 2, 2, 2, false, 'normal');
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Execution versioning', $display);
         self::assertStringContainsString('execution_required_version 2 equals the strongest effective fleet tier 2', $display);
@@ -627,7 +633,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         // check passes without any downgrade-window warning.
         $tester = $this->executionVersioningTester('high_abuse', 1, 3, 1, false, 'normal');
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Execution versioning', $display);
         self::assertStringContainsString('execution_required_version 1 equals the strongest effective fleet tier 1', $display);
@@ -697,11 +704,14 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $tester = $this->doctor($container);
         $tester->execute([]);
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Protocol-v3 writer', $display);
         self::assertStringContainsString('execution surface armed (risk.execution_challenge on) and the central floor confirms protocol v4 emission with the decoy surface', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
+        self::assertStringNotContainsString('[FAIL] Protocol-v3 writer', $display);
+        self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
+        self::assertStringContainsString('[FAIL] RSW time-lock', $display);
     }
 
     public function testHighAbuseArmedMismatchWithoutTheFlagIsRefusedAtContainerCompile(): void
@@ -736,7 +746,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $tester = $this->doctor($container);
         $tester->execute([]);
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        // the abuse-first rsw trapdoor gate fails this kernel (no trapdoor pair is configured under the profile), so the deploy gate exits non-zero even when the check under test keeps its own status
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Protocol-v3 writer', $display);
         self::assertStringContainsString('protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established', $display);
@@ -799,6 +810,121 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('[FAIL]', $display);
     }
 
+
+    /**
+     * The rsw trapdoor requirement is keyed on the abuse-first posture
+     * through one shared helper. Both first-class spellings of the
+     * profile fail the gate without a trapdoor pair: the specification
+     * name abuse_first and the integration name high_abuse. Every other
+     * profile (balanced, compatibility, privacy_strict, ha_safe, no
+     * profile at all) keeps today's semantics. Rows: profile, expected
+     * status, expected fragment.
+     */
+    public function testDoctorRswTrapdoorProfileMatrix(): void
+    {
+        $rows = [
+            ['high_abuse', 'FAIL', 'requires the RSW time-lock trapdoor'],
+            ['abuse_first', 'FAIL', 'requires the RSW time-lock trapdoor'],
+            ['balanced', 'PASS', 'rsw not configured'],
+            ['compatibility', 'PASS', 'rsw not configured'],
+            ['privacy_strict', 'PASS', 'rsw not configured'],
+            ['ha_safe', 'PASS', 'rsw not configured'],
+            [null, 'PASS', 'rsw not configured'],
+        ];
+        foreach ($rows as [$profile, $status, $fragment]) {
+            $tester = $this->doctorWithConfig(static function (array $config) use ($profile): array {
+                $config['protection_profile'] = $profile;
+
+                return $config;
+            });
+            $tester->execute([]);
+            $display = $tester->getDisplay();
+            $label = 'profile ' . var_export($profile, true);
+            self::assertStringContainsString('[' . $status . '] RSW time-lock', $display, $label);
+            self::assertStringContainsString($fragment, $display, $label);
+            if ($profile === 'ha_safe') {
+                // The rsw rung passes, but this direct-construction
+                // doctor runs with ha_authority none, so the profile's
+                // separate authority-promise check fails (pre-existing
+                // semantics, covered by its own test).
+                self::assertSame(Command::FAILURE, $tester->getStatusCode(), $label);
+                self::assertStringNotContainsString('[FAIL] RSW time-lock', $display, $label);
+            } else {
+                self::assertSame(
+                    $status === 'FAIL' ? Command::FAILURE : Command::SUCCESS,
+                    $tester->getStatusCode(),
+                    $label,
+                );
+            }
+            if (is_string($profile) && in_array($profile, ['high_abuse', 'abuse_first'], true)) {
+                // The actionable message names the effective spelling
+                // and carries the remediation paths.
+                self::assertStringContainsString('protection_profile "' . $profile . '" requires the RSW time-lock trapdoor', $display, $label);
+                self::assertStringContainsString('tools/rsw-keygen', $display, $label);
+                self::assertStringContainsString('or drop the profile explicitly', $display, $label);
+            }
+        }
+    }
+
+    /**
+     * A pre-staged trapdoor pair (configured but the algorithm not
+     * flipped) keeps the inert-field warn under the abuse-first
+     * posture: the profile requires the trapdoor to be configured, and
+     * the operator may pre-stage it before arming issuance.
+     */
+    public function testDoctorAbuseFirstWithAPrestagedTrapdoorWarnsInsteadOfFailing(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['protection_profile'] = 'abuse_first';
+            $config['rsw_modulus_n'] = 'prestaged-modulus';
+            $config['rsw_lambda'] = 'prestaged-lambda';
+
+            return $config;
+        });
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] RSW time-lock', $display);
+        self::assertStringContainsString('the fields are inert until the algorithm flips to rsw', $display);
+        self::assertStringNotContainsString('[FAIL] RSW time-lock', $display);
+    }
+
+    /**
+     * Every doctor check keyed on the abuse-first posture keys on both
+     * profile spellings through the shared helper: the decoy-deferral
+     * gate fails (and the migration deferral warns) under either name,
+     * and each message names the effective spelling.
+     */
+    public function testDoctorProfileChecksKeyOnBothAbuseFirstSpellings(): void
+    {
+        foreach (['high_abuse', 'abuse_first'] as $profile) {
+            $tester = $this->doctorWithConfig(static function (array $config) use ($profile): array {
+                $config['protection_profile'] = $profile;
+                $config['risk']['decoy_v3_enabled'] = false;
+
+                return $config;
+            });
+            $tester->execute([]);
+            $display = $tester->getDisplay();
+            self::assertStringContainsString('[FAIL] Protocol-v3 writer', $display, $profile);
+            self::assertStringContainsString($profile . ' requires authenticated decoy emission', $display, $profile);
+            self::assertSame(Command::FAILURE, $tester->getStatusCode(), $profile);
+        }
+        foreach (['high_abuse', 'abuse_first'] as $profile) {
+            $tester = $this->doctorWithConfig(static function (array $config) use ($profile): array {
+                $config['protection_profile'] = $profile;
+                $config['risk']['decoy_v3_enabled'] = false;
+                $config['protocol_rollout'] = ['mode' => 'migration'];
+
+                return $config;
+            });
+            $tester->execute([]);
+            $display = $tester->getDisplay();
+            self::assertStringContainsString('[WARN] Protocol-v3 writer', $display, $profile);
+            self::assertStringContainsString($profile . ' promises the decoy surface', $display, $profile);
+            self::assertStringNotContainsString('[FAIL] Protocol-v3 writer', $display, $profile);
+        }
+    }
 
     public function testDoctorPassesOnAnArmedRswConfiguration(): void
     {
@@ -1056,6 +1182,32 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $historical->execute([]);
         self::assertStringContainsString('[WARN] Secret key', $historical->getDisplay());
         self::assertStringContainsString('secrets_by_kid entries for kid 1', $historical->getDisplay());
+    }
+
+    public function testDoctorSecretCheckAggregatesAllFindings(): void
+    {
+        // A config with a short main secret, short secrets_by_kid
+        // entries and a placeholder shape reports every finding in one
+        // detail string with the fail status: the
+        // historical-kid finding is no longer masked by the first
+        // return.
+        $aggregated = $this->doctorWithConfig(static function (array $config): array {
+            $config['secret_key'] = 'changeme';
+            $config['secrets_by_kid'] = [1 => str_repeat('b', 31)];
+
+            return $config;
+        });
+        $aggregated->execute([]);
+
+        $display = $aggregated->getDisplay();
+        self::assertStringContainsString('[FAIL] Secret key', $display, 'a short main secret keeps the FAIL status');
+        self::assertStringContainsString(
+            'secret_key is 8 bytes; the core refuses secrets under 32 bytes'
+            .'; secrets_by_kid entries for kid 1 are under the 32-byte floor: the historical secrets cannot verify once their kid becomes live again. Move to randomly generated 32-byte-or-longer secrets before the next rotation'
+            .'; 8-byte secret looks like a placeholder or has no entropy; use a fresh random value',
+            $display,
+            'all three findings are joined into one detail string',
+        );
     }
 
     public function testDoctorWarnsOnAShortExecutionKey(): void

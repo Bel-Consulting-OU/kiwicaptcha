@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+gemspec
+
+group :stores do
+  # The optional store backends. The core runs with none of these.
+  gem 'sqlite3', require: false
+  gem 'redis', require: false
+end
+
+group :integrations do
+  # The optional web integrations under test.
+  gem 'rack', require: false
+  gem 'sinatra', require: false
+end

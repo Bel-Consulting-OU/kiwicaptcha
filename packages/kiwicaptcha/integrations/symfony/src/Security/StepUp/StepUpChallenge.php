@@ -1,0 +1,250 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
+
+/**
+ * The server-side state record of one begun step-up challenge.
+ *
+ * The record is the authority of the challenge: everything the client
+ * holds is the signed ticket naming the record id, so the client can
+ * never alter the principal, the scope, the expiry or the attempt
+ * count. The stored proof material is a keyed hash of the expected
+ * code (never the code itself), so a store snapshot leaks no second
+ * factor. Records carry only pseudonyms: the raw identifier of the
+ * principal or target never reaches this object or its wire form.
+ */
+final class StepUpChallenge
+{
+    private const SCHEMA_VERSION = 1;
+
+    private function __construct(
+        public readonly string $id,
+        public readonly StepUpChallengeKind $kind,
+        public readonly string $principalPseudonym,
+        public readonly ?string $targetPseudonym,
+        public readonly string $scope,
+        public readonly ?string $returnPath,
+        public readonly string $reason,
+        public readonly int $createdAt,
+        public readonly int $expiresAt,
+        public readonly int $maxAttempts,
+        public readonly int $attempts,
+        public readonly ?string $codeHash,
+        public readonly ?string $ceremony = null,
+    ) {
+    }
+
+    /**
+     * A fresh challenge record. The id is minted by the caller (the
+     * store, on create) and must match the ticket's signed challenge id
+     * shape. The optional ceremony names the WebAuthn ceremony the
+     * handler begun (creation or assertion); the other handlers carry
+     * none.
+     */
+    public static function begin(
+        string $id,
+        StepUpChallengeKind $kind,
+        string $principalPseudonym,
+        ?string $targetPseudonym,
+        string $scope,
+        ?string $returnPath,
+        string $reason,
+        int $now,
+        int $ttlSecs,
+        int $maxAttempts,
+        ?string $codeHash,
+        ?string $ceremony = null,
+    ): self {
+        if ($ttlSecs < 1) {
+            throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
+        }
+        if ($maxAttempts < 1) {
+            throw new \InvalidArgumentException('A step-up challenge attempt cap must be positive');
+        }
+        if ($returnPath !== null && !StepUpContext::isSafeReturnPath($returnPath)) {
+            throw new \InvalidArgumentException('A step-up challenge return path must be an absolute same-site path');
+        }
+        if ($ceremony !== null && !\in_array($ceremony, ['creation', 'assertion'], true)) {
+            throw new \InvalidArgumentException('A step-up challenge ceremony must be creation or assertion');
+        }
+
+        return new self(
+            $id,
+            $kind,
+            self::pseudonym('principal', $principalPseudonym),
+            $targetPseudonym === null ? null : self::pseudonym('target', $targetPseudonym),
+            self::token('scope', $scope),
+            $returnPath,
+            self::token('reason', $reason),
+            $now,
+            $now + $ttlSecs,
+            $maxAttempts,
+            0,
+            $codeHash,
+            $ceremony,
+        );
+    }
+
+    /**
+     * Mint an unguessable challenge id: the base64url of 16 random
+     * bytes, the same id alphabet and length family the chain tickets
+     * use.
+     */
+    public static function mintId(): string
+    {
+        return rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
+    }
+
+    public function withAttempts(int $attempts): self
+    {
+        return new self(
+            $this->id,
+            $this->kind,
+            $this->principalPseudonym,
+            $this->targetPseudonym,
+            $this->scope,
+            $this->returnPath,
+            $this->reason,
+            $this->createdAt,
+            $this->expiresAt,
+            $this->maxAttempts,
+            $attempts,
+            $this->codeHash,
+            $this->ceremony,
+        );
+    }
+
+    public function expired(int $now): bool
+    {
+        return $now >= $this->expiresAt;
+    }
+
+    /**
+     * The canonical wire form: the exact JSON the stores persist. Only
+     * pseudonym and bounded-token fields, never a raw identifier.
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'v' => self::SCHEMA_VERSION,
+            'id' => $this->id,
+            'kind' => $this->kind->value,
+            'principal' => $this->principalPseudonym,
+            'target' => $this->targetPseudonym,
+            'scope' => $this->scope,
+            'return_path' => $this->returnPath,
+            'reason' => $this->reason,
+            'created_at' => $this->createdAt,
+            'expires_at' => $this->expiresAt,
+            'attempts' => $this->attempts,
+            'max_attempts' => $this->maxAttempts,
+            'code_hash' => $this->codeHash,
+            'ceremony' => $this->ceremony,
+        ];
+    }
+
+    /**
+     * The strict decode, all-or-nothing: a missing field, a wrong type,
+     * a shape violation or an incoherent state throws
+     * {@see MalformedStepUpChallengeException}, never a defaulted
+     * record. Fail-closed on every lane.
+     *
+     * @param array<string, mixed> $record
+     */
+    public static function fromArray(array $record): self
+    {
+        $fail = static fn (string $what): MalformedStepUpChallengeException => new MalformedStepUpChallengeException(
+            'The step-up challenge record is malformed: '.$what,
+        );
+        if (($record['v'] ?? null) !== self::SCHEMA_VERSION) {
+            throw $fail('schema version must be 1');
+        }
+        foreach (['id', 'kind', 'principal', 'scope', 'reason'] as $field) {
+            if (!\is_string($record[$field] ?? null) || $record[$field] === '') {
+                throw $fail(sprintf('%s must be a non-empty string', $field));
+            }
+        }
+        if (preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $record['id']) !== 1) {
+            throw $fail('id must be the base64url challenge id shape');
+        }
+        try {
+            $kind = StepUpChallengeKind::from((string) $record['kind']);
+        } catch (\ValueError) {
+            throw $fail('kind must name a handler family');
+        }
+        try {
+            $challenge = self::begin(
+                $record['id'],
+                $kind,
+                $record['principal'],
+                \is_string($record['target'] ?? null) ? $record['target'] : null,
+                $record['scope'],
+                \is_string($record['return_path'] ?? null) ? $record['return_path'] : null,
+                $record['reason'],
+                \is_int($record['created_at'] ?? null) ? $record['created_at'] : 0,
+                (\is_int($record['expires_at'] ?? null) ? $record['expires_at'] : 0)
+                    - (\is_int($record['created_at'] ?? null) ? $record['created_at'] : 0),
+                \is_int($record['max_attempts'] ?? null) ? $record['max_attempts'] : 0,
+                \is_string($record['code_hash'] ?? null) && $record['code_hash'] !== '' ? $record['code_hash'] : null,
+                ($record['ceremony'] ?? null) === null ? null : (is_string($record['ceremony']) ? $record['ceremony'] : 'not-a-string'),
+            );
+        } catch (\InvalidArgumentException $e) {
+            throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
+        }
+        $attempts = $record['attempts'] ?? null;
+        if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
+            throw $fail('attempts must be an integer within 0..max_attempts');
+        }
+        if ($challenge->kind === StepUpChallengeKind::EmailOtp && $challenge->codeHash === null) {
+            throw $fail('an email_otp challenge must carry its code hash');
+        }
+        if ($challenge->kind === StepUpChallengeKind::Totp && $challenge->codeHash !== null) {
+            throw $fail('a totp challenge carries no code hash');
+        }
+        if ($challenge->kind === StepUpChallengeKind::WebAuthn) {
+            if ($challenge->codeHash === null || $challenge->ceremony === null) {
+                throw $fail('a webauthn challenge must carry its ceremony challenge hash and its ceremony kind');
+            }
+        }
+        if ($challenge->kind !== StepUpChallengeKind::WebAuthn && $challenge->ceremony !== null) {
+            throw $fail('only a webauthn challenge carries a ceremony');
+        }
+
+        return $challenge->withAttempts($attempts);
+    }
+
+    public static function fromJson(string $json): self
+    {
+        $decoded = json_decode($json, true, 16);
+        if (!\is_array($decoded)) {
+            throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: not a JSON object');
+        }
+
+        return self::fromArray($decoded);
+    }
+
+    private static function pseudonym(string $name, string $value): string
+    {
+        if (preg_match('/^[0-9a-f]{32}$/D', $value) !== 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'The %s pseudonym of a step-up challenge must be 32 lowercase hex chars, never a raw identifier',
+                $name,
+            ));
+        }
+
+        return $value;
+    }
+
+    private static function token(string $name, string $value): string
+    {
+        if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $value) !== 1) {
+            throw new \InvalidArgumentException(sprintf('The %s of a step-up challenge must be 1-128 chars of [A-Za-z0-9._:-]', $name));
+        }
+
+        return $value;
+    }
+}

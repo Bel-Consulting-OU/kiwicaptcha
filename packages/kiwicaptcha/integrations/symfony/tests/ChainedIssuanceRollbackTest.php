@@ -6,11 +6,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ChainRedisFake;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RollbackFakeRedis;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
@@ -420,6 +422,86 @@ final class ChainedIssuanceRollbackTest extends TestCase
         self::assertSame(422, $third->getStatusCode(), 'a claimed client capability must never override the node tier');
         self::assertStringContainsString('CLIENT_EXECUTION_VERSION_UNSUPPORTED', (string) $third->getContent());
     }
+
+    public function testFaultsAtTheChainCreationSeamNeverOrphanTheChain(): void
+    {
+        // The chain + obligation creation used to be two separate writes
+        // (the chain SET, then the obligation SET): a fault between them
+        // orphaned the chain — present, but unreachable through its
+        // obligation and uncleanable. The creation now rides the atomic
+        // create-or-get Lua (one script, both keys in the same hash tag;
+        // Redis executes it as a single unit), so the old between-writes
+        // seam no longer exists: a fault before any write leaves neither
+        // key, and a lost reply after the write leaves both, mutually
+        // consistent.
+        $fake = new ChainRedisFake();
+        $store = new RedisChainedChallengeStateStore($fake, 'rollback-test');
+        $decorated = new RollbackLostReplyChainStore($store);
+
+        // The fault before any write: neither the chain record nor the
+        // obligation mapping may exist.
+        $chainId = 'chain-seam-before';
+        $obligationId = hash('sha256', 'txn-seam-before');
+        $decorated->createThrowsBefore = true;
+        try {
+            $decorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected pre-write fault must surface');
+        } catch (\RuntimeException) {
+            // the injected connection loss
+        }
+        self::assertNull($store->read($chainId), 'a fault before any write creates no chain record');
+        self::assertNull($store->obligationChainId($obligationId), 'a fault before any write creates no obligation mapping');
+        self::assertArrayNotHasKey('{kiwi:rollback-test}:chain:'.$chainId, $fake->strings, 'the raw Redis state holds no chain key');
+        self::assertArrayNotHasKey('{kiwi:rollback-test}:chain-obligation:'.$obligationId, $fake->strings, 'the raw Redis state holds no obligation key');
+
+        // The retry after the pre-write fault converges on the intact
+        // pair: the mapping points at the chain and the chain record
+        // carries its obligation.
+        $decorated->createThrowsBefore = false;
+        $decorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+        self::assertSame($chainId, $store->obligationChainId($obligationId), 'the retried creation installs the obligation mapping');
+        self::assertSame($obligationId, $store->read($chainId)['obligationId'], 'the retried creation writes the chain record bound to the obligation');
+
+        // The lost reply after the atomic create: both halves exist and
+        // map to each other — never an orphaned chain.
+        $lostChainId = 'chain-seam-after';
+        $lostObligationId = hash('sha256', 'txn-seam-after');
+        $decorated->createThrowsAfter = true;
+        try {
+            $decorated->createWithObligation($lostChainId, $lostObligationId, $this->nonce(), 'login', 'txn-seam-after', 'sha18', 1, 300);
+            self::fail('the injected lost reply must surface');
+        } catch (\RuntimeException) {
+            // the injected lost reply
+        }
+        self::assertSame($lostChainId, $fake->strings['{kiwi:rollback-test}:chain-obligation:'.$lostObligationId] ?? null, 'the raw obligation mapping exists after the lost reply');
+        $lostRecord = json_decode((string) ($fake->strings['{kiwi:rollback-test}:chain:'.$lostChainId] ?? ''), true);
+        self::assertSame($lostObligationId, $lostRecord['obligationId'] ?? null, 'the raw chain record exists after the lost reply and carries its obligation');
+        self::assertSame($lostChainId, $store->obligationChainId($lostObligationId), 'the pair is mutually consistent after the lost reply');
+
+        // The Array mirror observes the identical pair consistency
+        // (single-process atomicity: no interruption seam exists).
+        $array = new ArrayChainedChallengeStateStore();
+        $arrayDecorated = new RollbackLostReplyChainStore($array);
+        $arrayDecorated->createThrowsBefore = true;
+        try {
+            $arrayDecorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected pre-write fault must surface on the Array mirror');
+        } catch (\RuntimeException) {
+            // the injected connection loss
+        }
+        self::assertNull($array->read($chainId), 'the Array fault before any write creates no chain record');
+        self::assertNull($array->obligationChainId($obligationId), 'the Array fault before any write creates no obligation mapping');
+        $arrayDecorated->createThrowsBefore = false;
+        $arrayDecorated->createThrowsAfter = true;
+        try {
+            $arrayDecorated->createWithObligation($chainId, $obligationId, $this->nonce(), 'login', 'txn-seam-before', 'sha18', 1, 300);
+            self::fail('the injected lost reply must surface on the Array mirror');
+        } catch (\RuntimeException) {
+            // the injected lost reply
+        }
+        self::assertSame($chainId, $array->obligationChainId($obligationId), 'the Array pair is mutually consistent after the lost reply');
+        self::assertSame($obligationId, $array->read($chainId)['obligationId'], 'the Array chain record carries its obligation after the lost reply');
+    }
 }
 
 /**
@@ -470,12 +552,20 @@ final class ThrowingMintStorage implements StorageInterface
 /**
  * A transactional chain-state decorator that runs the real issuance
  * transition and then throws (a lost reply), and can additionally make
- * the recovery read fail (the indeterminate outcome).
+ * the recovery read fail (the indeterminate outcome). The chain+obligation
+ * creation can be faulted before any write or after the atomic create
+ * (the lost reply), the old two-write seam's fault positions.
  */
 final class RollbackLostReplyChainStore implements TransactionalChainedChallengeStateStore
 {
     /** Whether the recovery read throws (the indeterminate outcome). */
     public bool $readThrows = false;
+
+    /** Whether the chain+obligation creation throws before any write. */
+    public bool $createThrowsBefore = false;
+
+    /** Whether the chain+obligation creation throws after the atomic write (the lost reply). */
+    public bool $createThrowsAfter = false;
 
     public function __construct(
         private readonly TransactionalChainedChallengeStateStore $inner,
@@ -490,7 +580,13 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 
     public function createWithObligation(string $chainId, string $obligationId, string $stage1Nonce, string $scope, ?string $requestBinding, string $requiredAction, int $policyVersion, int $ttlSecs): void
     {
+        if ($this->createThrowsBefore) {
+            throw new \RuntimeException('simulated connection loss before the chain creation');
+        }
         $this->inner->createWithObligation($chainId, $obligationId, $stage1Nonce, $scope, $requestBinding, $requiredAction, $policyVersion, $ttlSecs);
+        if ($this->createThrowsAfter) {
+            throw new \RuntimeException('simulated lost chain-creation reply');
+        }
     }
 
     public function createOrGetObligation(string $obligationId, string $chainId, string $stage1Nonce, string $scope, string $requestBinding, string $requiredAction, int $requiredRank, int $policyVersion, int $expiresAt, int $ttlSecs): string
@@ -577,24 +673,9 @@ final class RollbackLostReplyChainStore implements TransactionalChainedChallenge
 }
 
 /**
- * A minimal in-memory stand-in for Predis\Client covering exactly the
- * outstanding-challenge scripts this test exercises: the atomic issue
- * (per-source cap + live-membership cap -> INCR + EXPIRE the source
- * counter and `ZADD` the nonce at its absolute expiry). Also covered:
- * the best-effort solve and the aborted-before-handoff rollback (decr
- * floored at 0 plus a ZREM of the nonce). The counters and the live
- * membership are observable for the slot assertions.
- */
-/**
  * A risk state store whose feedback observation write throws — the
  * post-stage-2-commit risk feedback failure injection.
  */
-/**
- * A storage whose store() write throws a generic backend failure — the
- * mint can fail before the controller's $challenge variable is assigned.
- */
-
-
 final class ThrowingFeedbackRiskStore implements \KiwiCaptcha\Risk\Storage\RiskStateStoreInterface
 {
     private readonly \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore $inner;

@@ -18,9 +18,13 @@ namespace KiwiCaptcha\Risk;
  *   - A request whose own score clears the target band margin selects the
  *     plain action directly: escalation when score >= lower[plain] + 10,
  *     drop when score <= upper[plain] − 10.
- *   - Otherwise a previous ladder action at band i escalates to band i+1
- *     only when score >= enter[i], de-escalates to band i−1 only when
- *     score < exit[i], and otherwise stays in band i.
+ *   - Otherwise a previous ladder action at band i escalates when
+ *     score >= enter[i] and de-escalates when score < exit[i]. The edge
+ *     fallback targets the plain band of the score just inside the
+ *     margin: actionForScore(score − 10) when escalating and
+ *     actionForScore(score + 10) when dropping. A sustained edge
+ *     crossing can therefore clear several ladder bands at once
+ *     instead of stepping one band at a time.
  *   - A fresh key (no previous action, or an expired entry) uses the
  *     plain band mapping.
  *   - The hard actions (StepUp/Deny) are not hysteresis-affected: when the
@@ -101,9 +105,17 @@ final class ScopeActionHysteresis
             } else {
                 [$lower, $upper] = self::BANDS[$rank];
                 if ($rank < $topRank && $score >= $upper + 10) {
-                    $action = self::LADDER[$rank + 1];
+                    // Edge escalation: the plain band of the score just
+                    // below the margin (score - 10), which can clear
+                    // several ladder bands at once — never a fixed +/- 1
+                    // band step. score >= upper + 10 >= 160, so the
+                    // subtraction cannot underflow.
+                    $action = RiskAction::actionForScore($score - 10);
                 } elseif ($rank > 0 && $score < $lower - 10) {
-                    $action = self::LADDER[$rank - 1];
+                    // Edge drop: the plain band of the score just above
+                    // the margin (score + 10). score < lower - 10 <= 140,
+                    // so the addition cannot overflow.
+                    $action = RiskAction::actionForScore($score + 10);
                 } else {
                     $action = $previous;
                 }

@@ -13,13 +13,16 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *  - time: reads the configurable clock via {@see self::setTimeMs()} so
  *    tests can advance the "Redis server time" to exercise lease/window
  *    expiry.
- *  - zset primitives (zadd, zrem, zremrangebyscore, zcard, pexpire): the
- *    tokenized-lease semaphore and the sliding-window rate limiter.
- *  - hincrbyfloat: one hash field bump (the calibration score-bucket
- *    outcome counters).
- *  - eval/evalsha/script: interprets the bundle's Lua scripts by their
- *    shape — semaphore acquire/release, outstanding-challenge
- *    issue/solve, the rate limiter, calibration confirm/correction and
+     *  - zset primitives (zadd, zrem, zremrangebyscore, zcard, pexpire): the
+     *    tokenized-lease semaphore, the sliding-window rate limiter, the
+     *    scope-issuance sliding-window cap and the verified-agent
+     *    per-minute/per-day quota windows.
+     *  - hincrbyfloat: one hash field bump (the calibration score-bucket
+     *    outcome counters).
+     *  - eval/evalsha/script: interprets the bundle's Lua scripts by their
+     *    shape — semaphore acquire/release, outstanding-challenge
+     *    issue/solve, the rate limiter, the scope-issuance sliding
+     *    window, calibration confirm/correct and
  *    the outcome-ledger confirm/correct, mirroring the scripts'
  *    semantics. It also interprets the kiwicaptcha core's consume,
  *    cancel, delete-if-pending and commit-result scripts, so the same
@@ -573,6 +576,69 @@ final class FakePredisClient extends \Predis\Client
         // so a later `EVALSHA` for the same script succeeds.
         $this->scriptsBySha[sha1($script)] = $script;
 
+        if (str_contains($script, 'Step-up attempt accounting')) {
+            // RedisStepUpChallengeStore::recordFailure: keys[1] the
+            // challenge record JSON string; argv[1] the attempt cap.
+            // Bump attempts in the decoded record, remove the record at
+            // the cap, keep it within its remaining TTL otherwise.
+            // Answers the attempts now used, 0 at the cap (removed),
+            // -1 when absent, -2 when the stored value is not a
+            // decodable record (removed, fail-closed).
+            $key = (string) $keys[0];
+            $cap = (int) $rest[0];
+            $raw = $this->strings[$key] ?? null;
+            if ($raw === null) {
+                return -1;
+            }
+            $rec = json_decode($raw, true);
+            if (!\is_array($rec) || !\is_int($rec['attempts'] ?? null) || !\is_int($rec['max_attempts'] ?? null)) {
+                unset($this->strings[$key]);
+
+                return -2;
+            }
+            $rec['attempts']++;
+            if ($rec['attempts'] >= $cap) {
+                unset($this->strings[$key]);
+
+                return 0;
+            }
+            $this->strings[$key] = (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+
+            return $rec['attempts'];
+        }
+
+        if (str_contains($script, 'Step-up begin window')) {
+            // RedisStepUpChallengeStore::countBegin: keys[1] the
+            // per-principal fixed-window counter; argv[1] the window
+            // seconds. INCR, arm the expiry exactly once with the first
+            // admission, answer the new count.
+            $key = (string) $keys[0];
+            $n = $this->fakeIncr([$key]);
+            if ($n === 1) {
+                $this->fakePexpire([$key, (int) $rest[0] * 1000]);
+            }
+
+            return $n;
+        }
+
+        if (str_contains($script, 'Step-up totp step')) {
+            // RedisStepUpChallengeStore::markTotpStep: keys[1] the
+            // per-principal last-used step string; argv[1] the step,
+            // argv[2] the guard TTL seconds. A strictly newer step wins
+            // and is stored; anything at or below the stored one is a
+            // replay (0).
+            $key = (string) $keys[0];
+            $step = (int) $rest[0];
+            $current = isset($this->strings[$key]) ? (int) $this->strings[$key] : null;
+            if ($current !== null && $current >= $step) {
+                return 0;
+            }
+            $this->strings[$key] = (string) $step;
+            $this->fakePexpire([$key, (int) $rest[1] * 1000]);
+
+            return 1;
+        }
+
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] the per-source
             // membership ZSET (member = <source>:<nonce>, score = absolute
@@ -874,19 +940,83 @@ final class FakePredisClient extends \Predis\Client
 
         if (str_contains($script, 'Scope issuance cap')) {
             // ScopeIssuanceCap::allow: keys[1] =
-            // {kiwi:<ns>}:issuance:<canonical scope id>:<minute>
-            // (the reserved unknown-scope quota id for an unmapped
-            // scope; the raw scope is never a key component);
-            // argv[1] = cap. incr -> expire 60 on the first increment ->
-            // refuse beyond the cap (0), else 1.
-            $key = (string) $keys[0];
-            $cap = (int) $rest[0];
-            $n = $this->fakeIncr([$key]);
-            if ($n === 1) {
-                $this->fakePexpire([$key, 60000]);
-            }
+            // {kiwi:<ns>}:issuance:<canonical scope id>:sw (the
+            // per-scope sliding-window ZSET; the reserved unknown-scope
+            // quota id for an unmapped scope; the raw scope is never a
+            // key component), keys[2] = the unique-member counter;
+            // argv[1] = now_ms, argv[2] = window_ms, argv[3] = cap.
+            // Prune entries at or older than now-window -> ZCARD cap
+            // check (refuse with the live count) -> INCR the seq ->
+            // `ZADD` now..':'..seq -> `PEXPIRE` both keys (window + 1 s)
+            // -> {1, n+1} on admission.
+            $window = (string) $keys[0];
+            $seqKey = (string) $keys[1];
+            $now = (int) $rest[0];
+            $windowMs = (int) $rest[1];
+            $cap = (int) $rest[2];
+            $this->fakeZremrangebyscore([$window, '-inf', (string) ($now - $windowMs)]);
+            $n = $this->zcard($window);
+            if ($n >= $cap) {
+                $this->mirrorSourceCount($window);
 
-            return $n > $cap ? 0 : 1;
+                return [0, $n];
+            }
+            $seq = $this->fakeIncr([$seqKey]);
+            $this->fakeZadd([$window, (string) $now, $now.':'.$seq]);
+            $this->fakePexpire([$window, (string) ($windowMs + 1000)]);
+            $this->fakePexpire([$seqKey, (string) ($windowMs + 1000)]);
+            $this->mirrorSourceCount($window);
+
+            return [1, $n + 1];
+        }
+
+        if (str_contains($script, 'Verified-agent quota')) {
+            // AgentQuota::admit: keys[1..4] = the agent's minute/day
+            // sliding-window ZSETs and their seq counters; argv[1] =
+            // now_ms, argv[2] = minute window ms, argv[3] = day window
+            // ms, argv[4] = per-minute cap, argv[5] = per-day cap.
+            // Prune both windows by score -> minute zcard cap check ->
+            // day zcard cap check -> INCR the minute seq -> zadd the
+            // member into both windows -> pexpire all four keys.
+            // Returns {1, liveMin, liveDay, 0} on admission,
+            // {0, 1|2, liveCount, retryAfterSecs} on refusal.
+            $minuteZset = (string) $keys[0];
+            $minuteSeq = (string) $keys[1];
+            $dayZset = (string) $keys[2];
+            $now = (int) $rest[0];
+            $minuteMs = (int) $rest[1];
+            $dayMs = (int) $rest[2];
+            $capMinute = (int) $rest[3];
+            $capDay = (int) $rest[4];
+            $retryFor = function (string $zset, int $windowMs) use ($now): int {
+                $members = $this->zsets[$zset] ?? [];
+                if ($members === []) {
+                    return (int) ceil($windowMs / 1000);
+                }
+                $oldest = min($members);
+
+                return max(1, (int) ceil(($windowMs - ($now - $oldest)) / 1000));
+            };
+            $this->fakeZremrangebyscore([$minuteZset, '-inf', (string) ($now - $minuteMs)]);
+            $this->fakeZremrangebyscore([$dayZset, '-inf', (string) ($now - $dayMs)]);
+            $nMin = $this->zcard($minuteZset);
+            if ($nMin >= $capMinute) {
+                return [0, 1, $nMin, $retryFor($minuteZset, $minuteMs)];
+            }
+            $nDay = $this->zcard($dayZset);
+            if ($nDay >= $capDay) {
+                return [0, 2, $nDay, $retryFor($dayZset, $dayMs)];
+            }
+            $seq = $this->fakeIncr([$minuteSeq]);
+            $member = $now.':'.$seq;
+            $this->fakeZadd([$minuteZset, (string) $now, $member]);
+            $this->fakeZadd([$dayZset, (string) $now, $member]);
+            $this->fakePexpire([$minuteZset, (string) ($minuteMs + 1000)]);
+            $this->fakePexpire([$minuteSeq, (string) ($minuteMs + 1000)]);
+            $this->fakePexpire([$dayZset, (string) ($dayMs + 1000)]);
+            $this->fakePexpire([(string) $keys[3], (string) ($dayMs + 1000)]);
+
+            return [1, $nMin + 1, $nDay + 1, 0];
         }
 
         if (str_contains($script, 'redis.call(\'INCR\', KEYS[1])')) {

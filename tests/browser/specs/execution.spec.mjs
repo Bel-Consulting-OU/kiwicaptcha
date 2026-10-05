@@ -337,14 +337,15 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(blob[pos], 'the grammar version byte of a v5-capable issuance must be 5').toBe(5);
   });
 
-  test('a version-6 program from a newer server is refused by the version byte: the controlled kiwi:execution-unavailable state, never a token', async ({ page }) => {
+  test('a version-7 program from a newer server is refused by the version byte: the controlled kiwi:execution-unavailable state, never a token', async ({ page }) => {
     // The mixed-fleet decode fence: every interpreter version bounds
     // its own opcode space, and a newer server's grammar is rejected
-    // by the declared version byte alone (the driver advertises 5, so
-    // the fixture mints 5 and the tamper below rewrites the op-version
-    // byte of the response's program to 6). The armed lifecycle must
-    // fail closed in the controlled kiwi:execution-unavailable state
-    // with no token — never a silent success, never an unarmed solve.
+    // by the declared version byte alone (the driver advertises 6, so
+    // the fixture mints 5 under the exec_cap=5 knob and the tamper
+    // below rewrites the op-version byte of the response's program to
+    // 7, the first unknown rung). The armed lifecycle must fail closed
+    // in the controlled kiwi:execution-unavailable state with no
+    // token — never a silent success, never an unarmed solve.
     await page.route('**/challenge*', async (route) => {
       const response = await route.fetch();
       const body = await response.json();
@@ -355,7 +356,7 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
         pos += scopeLen;
         const actionLen = blob[pos++];
         pos += actionLen;
-        blob[pos] = 6;
+        blob[pos] = 7;
         body.execution_program = Buffer.from(blob).toString('base64');
       }
       await route.fulfill({ response, json: body });

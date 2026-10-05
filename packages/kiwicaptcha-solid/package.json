@@ -1,0 +1,45 @@
+{
+  "name": "@kiwicaptcha/solid",
+  "version": "0.1.0",
+  "description": "SolidJS KiwiCaptcha widget: the KiwiCaptcha component on the shared client core.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "solid": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "captcha",
+    "kiwicaptcha",
+    "solid",
+    "pow",
+    "widget"
+  ],
+  "peerDependencies": {
+    "@kiwicaptcha/client-core": "^0.1.0",
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "@kiwicaptcha/client-core": "file:../kiwicaptcha-client-core",
+    "happy-dom": "^17.4.4",
+    "solid-js": "^1.9.3",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vite-plugin-solid": "^2.11.0",
+    "vitest": "^3.1.1"
+  }
+}

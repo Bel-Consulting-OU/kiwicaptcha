@@ -1,0 +1,15 @@
+kiwi-flarum-captcha:
+  admin:
+    settings:
+      title: KiwiCaptcha
+      verify_url: Verify URL
+      verify_url_help: The deployment endpoint, e.g. http://127.0.0.1:7371/verify
+      bearer: Bearer secret
+      scope: Sign-up scope
+      trust_proxy: Honor X-Forwarded-For as the client ip
+      enabled: Protect registrations
+  lib:
+    error:
+      kiwi_captcha_missing: The security check did not run.
+      kiwi_captcha_challenge_failed: The security check did not pass. Solve the challenge and try again.
+      kiwi_captcha_verify_unavailable: The security service is unavailable. Try again shortly.

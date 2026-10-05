@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.kiwicaptcha</groupId>
+    <artifactId>kiwicaptcha-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>kiwicaptcha-stores-sqlite</artifactId>
+  <packaging>jar</packaging>
+
+  <name>kiwicaptcha-stores-sqlite</name>
+  <description>The file-backed SQLite store adapter of the KiwiCaptcha JVM SDK: a separate, optional module so the core artifact stays dependency-free. The schema and state machine are the ones the php SqliteStorage writes, over sqlite-jdbc.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.kiwicaptcha</groupId>
+      <artifactId>kiwicaptcha-core</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>3.50.3.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

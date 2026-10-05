@@ -17,7 +17,6 @@ use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
 use KiwiCaptcha\ChallengeRecord;
-use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
@@ -333,6 +332,19 @@ final class ChallengeController
          * the origin checks only (direct construction / legacy wiring).
          */
         private readonly ?IssuanceRateLimiter $cancellationLimiter = null,
+        /**
+         * The verified-agents gate (risk.agents, RFC 9421 HTTP
+         * Message Signatures). Null = no agent is configured, so no
+         * request can take the machine-client path: a Signature-Input
+         * header is then an ignorable stranger header on the ordinary
+         * widget flow. When wired, a request carrying Signature-Input
+         * must verify as a configured agent, with typed 401 refusals,
+         * fail closed. A verified request then skips the
+         * widget-facing gates (origin, fetch-metadata, the adaptive
+         * assessment) for its allowed scopes, priced at its tier,
+         * attributed to its agent id.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentsVerifier $agentsVerifier = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
     }
@@ -737,7 +749,36 @@ final class ChallengeController
             }
         }
 
-        if ($this->sameOriginOnly && !$this->isSameOrigin($request)) {
+        // Verified-agent identification (risk.agents, RFC 9421): a
+        // request carrying a Signature-Input header on a deployment
+        // with configured agents must verify as one of them — typed
+        // 401 refusals, fail closed, never a silent fallthrough into
+        // the widget flow. The gate runs after the framing and body
+        // read (the signature covers the exact body bytes) and before
+        // every browser-facing check, since a machine client sends no
+        // Origin header by design. A verified request is a direct
+        // issue: no widget eligibility, no origin gate, no adaptive
+        // assessment, the agent's own quota and its tier price.
+        $verifiedAgent = null;
+        if ($this->agentsVerifier !== null && $request->headers->has('Signature-Input')) {
+            $agentSignature = $this->agentsVerifier->verifySignature($request, $requestBody);
+            if (!$agentSignature->isVerified()) {
+                $this->logGate('kiwicaptcha: verified-agent signature refused: {code}', ['code' => $agentSignature->errorCode()]);
+
+                return $this->privateJson(
+                    ['error' => ['code' => $agentSignature->errorCode(), 'message' => $agentSignature->errorMessage()]],
+                    $agentSignature->statusCode(),
+                );
+            }
+            $verifiedAgent = $agentSignature->agent();
+            // The attribution identity rides the request attributes so
+            // every downstream observer (the application's own
+            // listeners, the outcome bridge) can attribute what this
+            // request does to the verified agent id.
+            $request->attributes->set('kiwi_agent', $verifiedAgent->name());
+        }
+
+        if ($this->sameOriginOnly && $verifiedAgent === null && !$this->isSameOrigin($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'CROSS_ORIGIN_DENIED', 'message' => 'Cross-origin challenge requests are not allowed.']],
                 Response::HTTP_FORBIDDEN,
@@ -751,15 +792,17 @@ final class ChallengeController
         // scheme, host and effective port. With enforce_origin, a request
         // without a usable Origin header, or carrying the literal "null"
         // origin, is rejected before the allowlist is consulted. Refused
-        // before any state is written.
+        // before any state is written. A verified agent skips all three
+        // browser-facing gates: the machine client authenticated
+        // cryptographically and sends no Origin header by design.
         $origin = $request->headers->get('Origin');
-        if ($this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
+        if ($verifiedAgent === null && $this->enforceOrigin && ($origin === null || $origin === '' || $origin === 'null')) {
             return $this->privateJson(
                 ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request carries no usable Origin header.']],
                 Response::HTTP_FORBIDDEN,
             );
         }
-        if ($this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
+        if ($verifiedAgent === null && $this->challengeOriginAllowlist !== [] && !$this->originIsAllowlisted($request)) {
             return $this->privateJson(
                 ['error' => ['code' => 'origin_rejected', 'message' => 'The challenge request origin is not allowlisted.']],
                 Response::HTTP_FORBIDDEN,
@@ -1142,6 +1185,20 @@ final class ChallengeController
         $chainId = null;
         $chainOwner = null;
         $chainRequirement = null;
+        if ($verifiedAgent !== null && $chainTicket !== null) {
+            // The chain is a browser-flow concept (a stage-2 stronger
+            // challenge resuming an obligation): a verified agent is a
+            // direct-issue machine client and never joins one, so a
+            // ticket-bearing agent request is refused, never silently
+            // downgraded to an unchained issuance either.
+            return $this->privateJson(
+                ['error' => ['code' => 'INVALID_METADATA', 'message' => 'Chain tickets are not accepted for verified-agent requests.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+                $request,
+                $riskSession,
+                $mintedCookie,
+            );
+        }
         if ($this->chainTickets === null) {
             if ($chainTicket !== null) {
                 return $this->privateJson(
@@ -1277,11 +1334,14 @@ final class ChallengeController
             );
         }
 
-        if ($this->rateLimiter !== null) {
+        if ($this->rateLimiter !== null && $verifiedAgent === null) {
             // The rate limiter is inside the structured failure boundary:
             // a Redis outage (or a malformed Redis TIME — the limiter never
             // falls back to the host clock for its epochs) answers the
             // private 503 with the reservation released, never a raw 500.
+            // A verified agent never consults it: the agent's own
+            // per-minute and per-day quota windows replace the per-IP
+            // browser limiter for the machine-client path.
             try {
                 $rate = $this->rateLimiter->check($clientIp);
             } catch (\Throwable $e) {
@@ -1349,8 +1409,10 @@ final class ChallengeController
         // resolved above) never repeats the read. No ticket presented but
         // an open obligation exists, so the chain resumes at stage 2: a
         // lost or cleared ticket never downgrades the flow to an
-        // unchained stage-1 issuance. A plain read, no transition.
-        if ($this->chainTickets !== null && $this->risk !== null && $chainTicket === null && $chainId === null) {
+        // unchained stage-1 issuance. A plain read, no transition. A
+        // verified agent never joins the read: the direct-issue path
+        // holds no chain obligation.
+        if ($this->chainTickets !== null && $this->risk !== null && $verifiedAgent === null && $chainTicket === null && $chainId === null) {
             try {
                 $chainRequirement = $this->chainTickets->findOpenRequirement($scope, $requestBinding ?? '', $this->effectivePolicyEpoch());
             } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException $e) {
@@ -1400,7 +1462,10 @@ final class ChallengeController
         // decision. An unknown scope depends on unknown_scope.mode:
         // 'minimum' (default) assesses it under the synthetic sha20 policy,
         // 'baseline' issues the default profile, 'reject' returns the
-        // risk-denied 429 without issuing.
+        // risk-denied 429 without issuing. A verified agent skips the
+        // assessment entirely (a cryptographically identified machine
+        // client has no browser risk surface) and is priced at its tier
+        // instead, see {@see self::agentIssuanceProfile()}.
         $profile = null;
         $riskAssessed = false;
         // The ExecutionChallengeV1 risk trigger: the resolved pre-issue
@@ -1409,7 +1474,30 @@ final class ChallengeController
         // on AND the trigger passes (a non-Allow decision; without the
         // risk engine, the gate alone).
         $executionRiskDecision = null;
-        if ($this->risk !== null) {
+        if ($verifiedAgent !== null) {
+            // The scope authorization and the quota of the verified
+            // agent: the allowed-scopes check (403 typed code) and the
+            // per-minute/per-day windows (429 with Retry-After and the
+            // escalation mark) run exactly here, after the scope is
+            // resolved and validated, before any challenge is minted.
+            $agentAuthorization = $this->agentsVerifier?->authorize($verifiedAgent, $scope);
+            if ($agentAuthorization !== null && !$agentAuthorization->isVerified()) {
+                $this->logGate('kiwicaptcha: verified agent {agent} refused: {code}', ['agent' => $verifiedAgent->name(), 'code' => $agentAuthorization->errorCode()]);
+                $response = $this->privateJson(
+                    ['error' => ['code' => $agentAuthorization->errorCode(), 'message' => $agentAuthorization->errorMessage()]],
+                    $agentAuthorization->statusCode(),
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+                if ($agentAuthorization->retryAfterSecs() !== null) {
+                    $response->headers->set('Retry-After', (string) max(1, $agentAuthorization->retryAfterSecs()));
+                }
+
+                return $response;
+            }
+            $profile = $this->agentIssuanceProfile($verifiedAgent);
+        } elseif ($this->risk !== null) {
             if ($riskSession === null) {
                 $riskSession = $this->continuityCookie?->mint();
                 $mintedCookie = $riskSession !== null;
@@ -1551,9 +1639,10 @@ final class ChallengeController
 
         // Per-scope issuance cap: when
         // risk.max_challenges_per_scope_per_minute is configured, the
-        // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:<minute> fixed-window
-        // counter (INCR + EXPIRE 60 in one Lua script) refuses 429
-        // `SCOPE_LIMITED` beyond the cap. The check consumes the slot it
+        // atomic {kiwi:<ns>}:issuance:<scopeIdentity>:sw sliding-window
+        // log (a sorted set pruned to the last 60 s in one Lua script)
+        // refuses 429 `SCOPE_LIMITED` beyond the cap. The check consumes
+        // the slot it
         // admits, so a denial below is not double-counted. The quota keys
         // on the server-owned scope identity (the risk policy's canonical
         // scope id), never on the raw scope string; when allowed_scopes is
@@ -1684,7 +1773,12 @@ final class ChallengeController
             // decoy extension segment, so a new node can
             // never emit a challenge a parent-revision verifier rejects.
             $issuer = $this->issuerForIssuance($ttlSecs);
-            $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
+            // A verified agent is never armed with the browser-facing
+            // dimensions: the decoy and the execution program are
+            // widget-driver surfaces a machine client does not run, so
+            // the direct issue stays on the plain protocol shape at the
+            // agent's tier.
+            $armDecoy = $verifiedAgent === null && $this->risk !== null && $this->protocolV3EmissionEnabled();
             // The ExecutionChallengeV1 seam: the dimension is armed when
             // the risk.execution_challenge gate is on AND a risk trigger
             // passes AND the confirmed central floor is >= 4, see
@@ -1701,7 +1795,7 @@ final class ChallengeController
             // confirmed central min_execution_version floor and the
             // generator maximum). An older client never advertises and
             // receives version 1.
-            $armExecution = $this->executionArmingEnabled($executionRiskDecision);
+            $armExecution = $verifiedAgent === null && $this->executionArmingEnabled($executionRiskDecision);
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             // The server-owned required execution tier: the client
             // capability declaration is never an authority over the
@@ -2096,10 +2190,33 @@ final class ChallengeController
         // Handoff: the challenge is durably issued and stored, the metadata
         // identity persisted, and (stage 2) the chain durably transitioned
         // to issued(stage2Nonce). The outstanding slot is now the client's
-        // responsibility and is not rolled back.
+        // responsibility and is not rolled back. A verified agent's
+        // response additionally carries the machine-client markers: the
+        // agent identity, its price tier and the explicit
+        // widget-eligibility flag off (the direct issue — the challenge
+        // is meant for the agent's own solver, never for a widget), so
+        // the client can never mistake its path for the browser flow.
         $outstandingAdmissionHeld = false;
+        if ($verifiedAgent !== null) {
+            $challengeData['agent'] = $verifiedAgent->name();
+            $challengeData['price_tier'] = $verifiedAgent->priceTier()->value;
+            $challengeData['widget_eligible'] = false;
+        }
 
         return $this->privateJson($challengeData, Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+    }
+
+    /**
+     * The issuance profile of a verified agent: the interim tier
+     * pricing of the bundle (the tier's documented rung, issued
+     * exactly as the tier names it and never clamped to the widget
+     * baseline). The core pricing stage of the risk packages will
+     * supersede this mapping when it lands; until then this is the
+     * price a verified agent is issued and billed at.
+     */
+    private function agentIssuanceProfile(\BelConsulting\KiwiCaptchaBundle\Security\Agents\VerifiedAgentRequest $agent): \KiwiCaptcha\ChallengeProfile
+    {
+        return $agent->priceProfile();
     }
 
     /**
@@ -2589,80 +2706,20 @@ final class ChallengeController
      * An issuance-variant Issuer: the wired issuer's Config rebuilt with
      * only ttlSecs and policyVersion replaced, issued against the same
      * storage and carrying the same deployment state (clock, region, rsw
-     * trapdoor keyring, legacy-identity migration mode). The core Issuer
-     * stamps both values from its Config, which is readonly, so this
-     * seam rebuilds the Config and the issuer instead of mutating
-     * either.
+     * trapdoor keyring, legacy-identity migration mode).
      *
-     * @throws \LogicException when the controller has no storage wired
-     *                         (the extension always wires one)
+     * The core Issuer stamps both values from its Config, which is
+     * readonly, so this seam rebuilds the Config through
+     * Config::withOverrides() and hands it to Issuer::withConfig(). The
+     * core constructor is the one authoritative copy of the issuer's
+     * own storage, clock, region, keyring and legacy mode, so the
+     * variant can never drift from the wired issuer's deployment state.
      */
     private function buildIssuanceVariantIssuer(int $ttlSecs, int $policyVersion): Issuer
     {
-        // The same storage as the wired issuer: the controller's own
-        // reference when the extension injected one (the production
-        // wiring), otherwise the issuer's private storage read once.
-        $storage = $this->storage ?? $this->issuerPrivateProperty('storage');
-        if (!$storage instanceof StorageInterface) {
-            throw new \LogicException('an effective-epoch or overridden-TTL issuance requires the storage service (the extension always wires it)');
-        }
-        $c = $this->issuer->config();
-        $config = new Config(
-            secretKey: $c->secretKey,
-            algorithm: $c->algorithm,
-            mKib: $c->mKib,
-            t: $c->t,
-            p: $c->p,
-            targetBits: $c->targetBits,
-            argon2TargetBits: $c->argon2TargetBits,
-            ttlSecs: $ttlSecs,
-            minDurationMs: $c->minDurationMs,
-            solverMaxHashes: $c->solverMaxHashes,
-            bindingMode: $c->bindingMode,
-            policyVersion: $policyVersion,
-            issuer: $c->issuer,
-            kid: $c->kid,
-            executionKey: $c->executionKey,
-            rswModulusN: $c->rswModulusN,
-            rswLambda: $c->rswLambda,
-            rswT: $c->rswT,
-            tenantId: $c->tenantId,
-        );
+        $config = $this->issuer->config()->withOverrides(ttlSecs: $ttlSecs, policyVersion: $policyVersion);
 
-        // The core Issuer owns its region and keyring privately, so they
-        // are read once from the wired issuer: the variant must keep a
-        // region-bound deployment's signed region and resolve the same
-        // outstanding rsw records.
-        $region = $this->issuerPrivateProperty('region');
-        $rswKeyring = $this->issuerPrivateProperty('rswVerificationKeys');
-        $legacyIdentity = $this->issuerPrivateProperty('allowLegacyRswIdentity');
-
-        return new Issuer(
-            $config,
-            $storage,
-            null,
-            \is_string($region) ? $region : null,
-            \is_array($rswKeyring) ? $rswKeyring : [],
-            $legacyIdentity === true,
-        );
-    }
-
-    /**
-     * Read a private core Issuer constructor field through reflection:
-     * the only read seam for deployment state the core keeps off its
-     * public Config (region, rsw keyring, legacy-identity mode). A core
-     * variant without the field reads null, so the variant simply keeps
-     * the constructor default.
-     */
-    private function issuerPrivateProperty(string $name): mixed
-    {
-        try {
-            $property = new \ReflectionProperty(Issuer::class, $name);
-        } catch (\ReflectionException) {
-            return null;
-        }
-
-        return $property->getValue($this->issuer);
+        return $this->issuer->withConfig($config);
     }
 
     /**
@@ -4072,11 +4129,4 @@ final class ChallengeController
         return $response;
     }
 }
-
-/**
- * @internal control-flow sentinel of the duplicate-JSON-key scan: thrown
- *           when the walker finds an object key it already saw at the same
- *           level. Carries the raw key for the error message. Never
- *           escapes the controller.
- */
 

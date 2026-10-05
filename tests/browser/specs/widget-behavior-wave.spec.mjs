@@ -8,6 +8,12 @@ import { test, expect } from '@playwright/test';
 
 test.describe('widget behavior wave', () => {
   test('the progress bar advances in the painted 10-unit buckets during the solve', async ({ page }) => {
+    // A hot browser process can finish the whole 18-bit solve inside
+    // one paint window, and then the only observed write is the final
+    // 100. Throttling the CPU pins the solve across several frames, so
+    // the mid-solve buckets must actually reach the paint.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 8 });
     await page.addInitScript(() => {
       window.__progressSeen = [];
       // The observer is installed after the document exists but long

@@ -9,17 +9,17 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 102601,
-      "brotli_bytes": 25646,
+      "raw_bytes": 103303,
+      "brotli_bytes": 25905,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 30720,
       "brotli_cap_bytes": 28000,
       "copies_identical": true,
       "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 30346,
-      "gzip_bytes_zlib13": 30346,
+      "gzip_bytes_zlib12": 30618,
+      "gzip_bytes_zlib13": 30618,
       "headroom_review": {
-        "gzip": "reviewed 2026-10-01: 30240/30720 bytes (98.4%). The eager driver core carries the always-loaded bootstrap (solvers, lifecycle, a11y, provider surface); the remaining gzip margin is real but thin. A hard 95% failure without this note would reject the asset today, so the note documents the reviewed follow-up: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Any further growth must either recover bytes or re-review this note."
+        "gzip": "reviewed 2026-10-05: 30618/30720 bytes (99.7%). The eager driver core carries the always-loaded bootstrap (solvers, lifecycle, a11y, provider surface); the remaining gzip margin is real but thin. A hard 95% failure without this note would reject the asset today, so the note documents the reviewed follow-up: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Any further growth must either recover bytes or re-review this note."
       }
     },
     "widget_worker": {
@@ -33,20 +33,20 @@
       "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies; the embedded worker source is regenerated from the worker solver source (the tail of assets/kiwi-worker.js) by the embed-worker tool, so the rsw solver rides the glue copy too; the release worker asset embeds this same glue text, so the files-mode worker needs no runtime fetch to solve. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
     },
     "widget_css": {
-      "raw_bytes": 12891,
+      "raw_bytes": 14974,
       "copies_identical": true,
       "note": "The widget stylesheet (widget.css), three byte-identical copies; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The narrow-container wrapping fix (status text wraps instead of ellipsizing) intentionally grew the sheet; the row carries no cap by design."
     },
     "widget_execution": {
-      "raw_bytes": 33039,
-      "brotli_bytes": 8675,
-      "raw_cap_bytes": 36000,
-      "gzip_cap_bytes": 11200,
-      "brotli_cap_bytes": 9500,
+      "raw_bytes": 49353,
+      "brotli_bytes": 12518,
+      "raw_cap_bytes": 56000,
+      "gzip_cap_bytes": 16500,
+      "brotli_cap_bytes": 14000,
       "copies_identical": true,
-      "note": "The execution interpreter asset, the lazy module the armed execution dimension fetches. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields and the hard caps are authoritative.",
-      "gzip_bytes_zlib12": 9998,
-      "gzip_bytes_zlib13": 9998
+      "note": "The execution interpreter asset, the lazy module the armed execution dimension fetches. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields and the hard caps are authoritative. The version-6 real-platform rung raised the record and all three caps deliberately (the five platform probes and the async runner): 49,353 raw / 14,592 gzip / 12,518 brotli, caps 56,000 / 16,500 / 14,000.",
+      "gzip_bytes_zlib12": 14592,
+      "gzip_bytes_zlib13": 14592
     },
     "challenge_response_json": {
       "sha256_bytes_min": 1014,
@@ -60,36 +60,36 @@
       "sha256_bytes_min": 2066,
       "sha256_bytes_max": 2266,
       "argon2id_bytes_min": 2093,
-      "argon2id_bytes_max": 2265,
+      "argon2id_bytes_max": 2321,
       "rsw_bytes_min": 2448,
       "rsw_bytes_max": 2656,
-      "largest_execution_response_bytes": 2656,
-      "op_count": 24,
-      "execution_version": 5,
+      "largest_execution_response_bytes": 2552,
+      "op_count": 23,
+      "execution_version": 6,
       "cap_bytes": 3000,
-      "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
+      "note": "The wire shape of the bundle /challenge response when the execution dimension is armed (the authenticated decoy rides along). Maximum deterministic execution-enabled challenge response at the manifest execution-version maximum and maximum valid execution-program op count. RSW fixture included. Re-recorded at the version-6 rung (op-count ceiling 20 + byte % 4, top 23). The per-algorithm ranges are the measured spread of the drawn program operands across hand re-measurement runs. Structured min/max, op count, version and cap fields are authoritative."
     },
     "widget_risk": {
-      "raw_bytes": 42369,
-      "brotli_bytes": 10592,
+      "raw_bytes": 42308,
+      "brotli_bytes": 10623,
       "raw_cap_bytes": 49152,
       "gzip_cap_bytes": 20000,
       "brotli_cap_bytes": 16000,
       "copies_identical": true,
       "note": "The lazy adaptive-risk module (widget-risk.js), three byte-identical copies; carries the Argon2id/rsw worker solve tier, the ExecutionChallengeV1 runner and the decoy/honeypot machinery. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 12340,
-      "gzip_bytes_zlib13": 12340
+      "gzip_bytes_zlib12": 12382,
+      "gzip_bytes_zlib13": 12382
     },
     "widget_telemetry": {
-      "raw_bytes": 3037,
-      "brotli_bytes": 1043,
+      "raw_bytes": 5621,
+      "brotli_bytes": 1780,
       "raw_cap_bytes": 8192,
       "gzip_cap_bytes": 2500,
       "brotli_cap_bytes": 2000,
       "copies_identical": true,
-      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 1287,
-      "gzip_bytes_zlib13": 1287
+      "note": "The lazy telemetry module (widget-telemetry.js), three byte-identical copies; mode-gated session factory, never fetched unless telemetry is enabled. Carries the telemetry-v1 aggregate session: FORM-level capture-phase listeners (a widget-only degrade without a form) and the published payload contract (event-class counts, one quantized inter-event entropy value, focus transitions, paste-versus-type ratio, sample count; protocol/telemetry-v1/payload.json). Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
+      "gzip_bytes_zlib12": 2104,
+      "gzip_bytes_zlib13": 2104
     },
     "widget_compat": {
       "raw_bytes": 32094,
@@ -115,6 +115,17 @@
       "note": "The lazy non-default locale packs (widget-locales.js), three byte-identical copies. Loaded by the eager core only when kiwiResolveLang() resolves a non-default language; a default-language page pays zero bytes. Never embedded inline (the compat loader carries its descriptor; the Symfony theme and the fixture issue data-kiwi-locales-src/-integrity in both asset tiers). Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
       "gzip_bytes_zlib12": 4403,
       "gzip_bytes_zlib13": 4403
+    },
+    "widget_shims": {
+      "raw_bytes": 24921,
+      "brotli_bytes": 6252,
+      "raw_cap_bytes": 36000,
+      "gzip_cap_bytes": 12000,
+      "brotli_cap_bytes": 10000,
+      "copies_identical": true,
+      "note": "The standalone incumbent API shims (widget-shims.js), three byte-identical copies. Fetched only by a page that presents the provider globals (grecaptcha / hcaptcha / turnstile) over a plain driver bootstrap, or that keeps Altcha / Friendly Captcha element markup; an ordinary widget page pays zero bytes. The /api.js?compat=... loader route carries widget-compat.js instead, so the two compat surfaces never load together. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
+      "gzip_bytes_zlib12": 7271,
+      "gzip_bytes_zlib13": 7271
     }
   },
   "bench": {

@@ -8,7 +8,7 @@ kiwi_captcha:
     # profiles".
     protection_profile: balanced
 
-    # Required, min 16 bytes. The manifest writes the generated value
+    # Required, min 32 bytes. The manifest writes the generated value
     # into .env; replace it with `openssl rand -hex 32`.
     secret_key: '%env(KIWI_SECRET_KEY)%'
 

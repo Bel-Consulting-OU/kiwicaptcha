@@ -41,7 +41,7 @@ steps:
         rm -f /tmp/composer-setup.php
       - &composer_audit |
         set -eu
-        cd packages/kiwicaptcha/integrations/symfony
+        cd "$$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony"
         # The repository does not commit composer.lock; the install
         # resolves and writes it first so the locked audit has a lock.
         composer install --no-interaction --prefer-dist
@@ -55,7 +55,7 @@ steps:
         composer audit --locked
       - |
         set -eu
-        cd packages/kiwicaptcha/integrations/symfony
+        cd "$$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony"
         composer install --no-interaction --prefer-dist
         vendor/bin/phpunit
 
@@ -70,7 +70,7 @@ steps:
       - *composer_audit
       - |
         set -eu
-        cd packages/kiwicaptcha/integrations/symfony
+        cd "$$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony"
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
         vendor/bin/phpunit
@@ -86,7 +86,7 @@ steps:
       - *composer_audit
       - |
         set -eu
-        cd packages/kiwicaptcha/integrations/symfony
+        cd "$$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony"
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
         vendor/bin/phpunit
@@ -102,7 +102,7 @@ steps:
       - *composer_audit
       - |
         set -eu
-        cd packages/kiwicaptcha/integrations/symfony
+        cd "$$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony"
         composer install --no-interaction --prefer-dist
         composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
         vendor/bin/phpunit

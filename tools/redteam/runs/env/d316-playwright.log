@@ -1,0 +1,513 @@
+[WebServer] [Mon Oct  5 20:30:18 2026] PHP 8.5.10 Development Server (http://127.0.0.1:8087) started
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58648 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58648 Closing
+
+
+Running 36 tests using 3 workers
+
+[1/36] [chromium] › specs/autofill-evidence.spec.mjs:258:3 › KiwiCaptcha engine form-assistance evidence › firefox-style heuristic autofill: the candidate scan and the focus blur fills stay off the decoy
+[2/36] [chromium] › specs/adversarial-portable.spec.mjs:195:3 › KiwiCaptcha portable adversarial lifecycle › decoy creation: one hidden non-interactive input named from the authenticated grammar
+[3/36] [chromium] › specs/a11y.spec.mjs:199:3 › KiwiCaptcha WCAG 2.2 AA evidence › badge contrast (WCAG 1.4.3): COMPUTED colors, light AND dark, every state >= 4.5:1 (target >= 5:1)
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58660 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58660 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58661 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58661 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58662 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58662 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58663 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58663 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58664 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58664 Closing
+
+[4/36] [chromium] › specs/adversarial-portable.spec.mjs:221:3 › KiwiCaptcha portable adversarial lifecycle › decoy submission: the serialized payload and the real POST body carry the filled decoy
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58665 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58665 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58666 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58666 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58667 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58667 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58668 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58668 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58669 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58669 Closing
+
+[5/36] [chromium] › specs/autofill-evidence.spec.mjs:288:3 › KiwiCaptcha engine form-assistance evidence › webkit-style form assistant: composition events and the delayed post-blur commit never reach the decoy
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58670 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58670 Closing
+
+[6/36] [chromium] › specs/a11y.spec.mjs:215:3 › KiwiCaptcha WCAG 2.2 AA evidence › axe: no WCAG violations in solved/idle/failed states, in BOTH light and dark
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58671 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58671 Closing
+
+[7/36] [chromium] › specs/adversarial-portable.spec.mjs:246:3 › KiwiCaptcha portable adversarial lifecycle › authenticated decoy name: the exact fill reports additive evidence while the proof stays valid
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58672 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58672 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58673 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58673 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58674 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58674 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58675 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58675 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58678 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58678 Closing
+
+[8/36] [chromium] › specs/adversarial-portable.spec.mjs:267:3 › KiwiCaptcha portable adversarial lifecycle › a wrong decoy name is ignored: no false hit, the proof stays valid
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58680 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58680 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58681 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58681 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58682 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58682 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58683 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58683 Closing
+
+[9/36] [chromium] › specs/autofill-evidence.spec.mjs:316:3 › KiwiCaptcha engine form-assistance evidence › chromium-style autofill preview: silent value writes committed at submit leave the decoy empty
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58684 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58684 Closing
+
+[10/36] [chromium] › specs/adversarial-portable.spec.mjs:286:3 › KiwiCaptcha portable adversarial lifecycle › reset clears the rendered decoy; a re-solve renders exactly one fresh decoy
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58685 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58685 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58686 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58686 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58687 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58687 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58688 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58688 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58689 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58689 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58690 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58690 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58691 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58691 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58692 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58692 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58693 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58693 Closing
+
+[11/36] [chromium] › specs/adversarial-portable.spec.mjs:339:3 › KiwiCaptcha portable adversarial lifecycle › reissue replaces the stale decoy: a new per-issuance name removes the stale input
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58694 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58694 Closing
+
+[12/36] [chromium] › specs/autofill-evidence.spec.mjs:355:3 › KiwiCaptcha engine form-assistance evidence › offscreen decoy under every engine fill simulation: never a candidate, never autofilled
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58695 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58695 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58696 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58696 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58697 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58697 Closing
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58698 Accepted
+
+[WebServer] [Mon Oct  5 20:30:19 2026] 127.0.0.1:58698 Closing
+
+[13/36] [chromium] › specs/adversarial-portable.spec.mjs:370:3 › KiwiCaptcha portable adversarial lifecycle › BFCache round-trip: persisted pageshow clears state, the decoy and the token, with no auto-solve
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58699 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58699 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58700 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58700 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58701 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58701 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58702 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58702 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58704 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58704 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58705 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58705 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58706 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58706 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58707 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58707 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58708 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58708 Closing
+
+[14/36] [chromium] › specs/autofill-evidence.spec.mjs:421:3 › KiwiCaptcha engine form-assistance evidence › deferred strategy: the post-solve decoy stays off the candidate surface under engine fills
+[15/36] [chromium] › specs/adversarial-portable.spec.mjs:401:3 › KiwiCaptcha portable adversarial lifecycle › multiple widgets on one page: independent solves, tokens and decoys, isolated reset
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58709 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58710 Accepted
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58711 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58709 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58710 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58711 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58712 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58712 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58713 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58713 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58714 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58714 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58715 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58715 Closing
+
+[16/36] [chromium] › specs/adversarial-portable.spec.mjs:496:3 › KiwiCaptcha portable adversarial lifecycle › dynamic insertion and removal: observe() auto-inits a later widget and remove() cleans up
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58716 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58716 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58717 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58717 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58718 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58718 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58719 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58719 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58720 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58720 Closing
+
+[17/36] [chromium] › specs/autofill-evidence.spec.mjs:457:3 › KiwiCaptcha engine form-assistance evidence › accessibility tooling: the aria-hidden decoy is absent from the AT snapshot under every strategy
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58721 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58721 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58722 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58722 Closing
+
+[18/36] [chromium] › specs/adversarial-portable.spec.mjs:537:3 › KiwiCaptcha portable adversarial lifecycle › abort isolation: a reset mid-fetch never writes the stale generation token
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58723 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58723 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58724 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58724 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58725 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58725 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58726 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58726 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58727 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58727 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58728 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58728 Closing
+
+[19/36] [chromium] › specs/adversarial-portable.spec.mjs:586:3 › KiwiCaptcha autofill and password-manager compatibility › autofill-style fills: only the exact authenticated decoy name yields additive evidence
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58729 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58729 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58730 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58730 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58731 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58731 Closing
+
+[20/36] [chromium] › specs/a11y.spec.mjs:230:3 › KiwiCaptcha WCAG 2.2 AA evidence › keyboard-only: REAL sequential navigation — Tab from a preceding control reaches Retry, Enter + Space reacquire, Tab/S-Tab traverse without trap
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58732 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58732 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58733 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58733 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58734 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58734 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58735 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58735 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58736 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58736 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58737 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58737 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58738 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58738 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58739 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58739 Closing
+
+[21/36] [chromium] › specs/adversarial-portable.spec.mjs:651:3 › KiwiCaptcha autofill and password-manager compatibility › autocomplete semantics: the decoy stays off the autofill candidate surface and out of the real-field names
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58740 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58740 Closing
+
+[22/36] [chromium] › specs/adversarial-portable.spec.mjs:689:3 › KiwiCaptcha autofill and password-manager compatibility › form-assistance DOM mutations: wrapping the form and adding attributes leave the lifecycle and evidence intact
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58741 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58741 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58747 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58747 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58749 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58749 Closing
+
+[23/36] [chromium] › specs/adversarial-portable.spec.mjs:735:3 › KiwiCaptcha autofill and password-manager compatibility › a FORCED same-name collision: the app field survives cleanup, the server answer stays deterministic
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58751 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58751 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58752 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58752 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58753 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58753 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58754 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58754 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58755 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58755 Closing
+
+[24/36] [chromium] › specs/adversarial-portable.spec.mjs:841:3 › KiwiCaptcha autofill and password-manager compatibility › an array-shaped parameter under the decoy name is deterministic, never a 500
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58756 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58756 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58757 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58757 Closing
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58758 Accepted
+
+[WebServer] [Mon Oct  5 20:30:20 2026] 127.0.0.1:58758 Closing
+
+[WebServer] [Mon Oct  5 20:30:23 2026] 127.0.0.1:58762 Accepted
+
+[WebServer] [Mon Oct  5 20:30:23 2026] 127.0.0.1:58762 Closing
+
+[WebServer] [Mon Oct  5 20:30:27 2026] 127.0.0.1:58766 Accepted
+
+[WebServer] [Mon Oct  5 20:30:27 2026] 127.0.0.1:58766 Closing
+
+[25/36] [chromium] › specs/a11y.spec.mjs:343:3 › KiwiCaptcha WCAG 2.2 AA evidence › pointer targets: Retry >= 44x44 CSS px (WCAG 2.5.8 AAA target size)
+[WebServer] [Mon Oct  5 20:30:27 2026] 127.0.0.1:58767 Accepted
+
+[WebServer] [Mon Oct  5 20:30:27 2026] 127.0.0.1:58767 Closing
+
+[26/36] [chromium] › specs/a11y.spec.mjs:362:3 › KiwiCaptcha WCAG 2.2 AA evidence › non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark
+[WebServer] [Mon Oct  5 20:30:30 2026] 127.0.0.1:58778 Accepted
+
+[WebServer] [Mon Oct  5 20:30:30 2026] 127.0.0.1:58778 Closing
+
+[WebServer] [Mon Oct  5 20:30:34 2026] 127.0.0.1:58789 Accepted
+
+[WebServer] [Mon Oct  5 20:30:34 2026] 127.0.0.1:58789 Closing
+
+[27/36] [chromium] › specs/a11y.spec.mjs:441:3 › KiwiCaptcha WCAG 2.2 AA evidence › focus appearance (WCAG 2.4.13): indicator AREA >= the 2px-perimeter minimum AND >= 3:1 contrast CHANGE at the SAME pixels, light AND dark
+[WebServer] [Mon Oct  5 20:30:37 2026] 127.0.0.1:58805 Accepted
+
+[WebServer] [Mon Oct  5 20:30:37 2026] 127.0.0.1:58805 Closing
+
+[WebServer] [Mon Oct  5 20:30:40 2026] 127.0.0.1:58843 Accepted
+
+[WebServer] [Mon Oct  5 20:30:40 2026] 127.0.0.1:58843 Closing
+
+[28/36] [chromium] › specs/a11y.spec.mjs:507:3 › KiwiCaptcha WCAG 2.2 AA evidence › semantics: progress track hidden from AT, status live region polite + meaningful only
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58862 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58862 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58863 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58863 Closing
+
+[29/36] [chromium] › specs/a11y.spec.mjs:529:3 › KiwiCaptcha WCAG 2.2 AA evidence › semantics: exactly ONE widget-local live region, in the static AND initialized markup
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58864 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58864 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58865 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58865 Closing
+
+[30/36] [chromium] › specs/a11y.spec.mjs:569:3 › KiwiCaptcha WCAG 2.2 AA evidence › responsive: 320px reflow loses no content or function
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58867 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58867 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58868 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58868 Closing
+
+[31/36] [chromium] › specs/a11y.spec.mjs:598:3 › KiwiCaptcha WCAG 2.2 AA evidence › responsive: 2x component font-scale enlargement loses no content or function
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58869 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58869 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58870 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58870 Closing
+
+[32/36] [chromium] › specs/a11y.spec.mjs:654:3 › KiwiCaptcha WCAG 2.2 AA evidence › responsive: WCAG 1.4.12 text-spacing overrides (all FOUR conditions) lose no content or function
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58871 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58871 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58872 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58872 Closing
+
+[33/36] [chromium] › specs/a11y.spec.mjs:694:3 › KiwiCaptcha WCAG 2.2 AA evidence › reduced motion: no decorative CSS animation and the SMIL wink is removed
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58873 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58873 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58874 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58874 Closing
+
+[34/36] [chromium] › specs/a11y.spec.mjs:707:3 › KiwiCaptcha WCAG 2.2 AA evidence › forced colors: the widget and Retry stay discernible with system colors
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58876 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58876 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58877 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58877 Closing
+
+[35/36] [chromium] › specs/a11y.spec.mjs:723:3 › KiwiCaptcha WCAG 2.2 AA evidence › locale contract: RTL (ar) sets dir=rtl + lang on the subtree; fallback stays lang=en
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58878 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58878 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58879 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58880 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58879 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58880 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58881 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58881 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58882 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58882 Closing
+
+[36/36] [chromium] › specs/a11y.spec.mjs:741:3 › KiwiCaptcha WCAG 2.2 AA evidence › locale contract: German long strings fit the widget without overflow
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58884 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58884 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58885 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58886 Accepted
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58885 Closing
+
+[WebServer] [Mon Oct  5 20:30:44 2026] 127.0.0.1:58886 Closing
+
+  36 passed (25.7s)

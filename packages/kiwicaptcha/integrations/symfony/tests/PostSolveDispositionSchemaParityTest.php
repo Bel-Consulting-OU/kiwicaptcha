@@ -103,6 +103,10 @@ final class PostSolveDispositionSchemaParityTest extends TestCase
             ['valid-chain-required-v1-expiry', $this->complete(['kind' => 'chain_required', 'chain_id' => self::CHAIN_ID, 'chain_expires_at' => time() + 300])],
             ['valid-chain-required-v1-legacy-null-expiry', $this->complete(['kind' => 'chain_required', 'chain_id' => self::CHAIN_ID])],
             ['valid-chain-required-v2-expiry', $this->complete(['kind' => 'chain_required', 'chain_id' => self::CHAIN_ID, 'chain_expires_at' => time() + 300], ['v' => 2])],
+            // The additive quarantine flag: written only when true, valid
+            // only on the pass kind (change.md 1.3 and 3.3.4).
+            ['valid-complete-pass-quarantined', $this->complete(['quarantined' => true])],
+            ['valid-complete-pass-quarantined-v2', $this->complete(['quarantined' => true], ['v' => 2])],
         ];
 
         $corrupt = [
@@ -131,6 +135,16 @@ final class PostSolveDispositionSchemaParityTest extends TestCase
             ['kind-missing', ['disposition' => ['decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null]]],
             ['kind-int', ['disposition' => ['kind' => 1, 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null]]],
             ['nested-unknown-key', ['disposition' => ['kind' => 'pass', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'extra' => 1]]],
+            // The quarantine flag's corruption surface: a non-boolean
+            // value, a false that the writers never emit, and the flag
+            // on every kind the severity rule forbids.
+            ['quarantined-string', ['disposition' => ['kind' => 'pass', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => 'yes']]],
+            ['quarantined-int', ['disposition' => ['kind' => 'pass', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => 1]]],
+            ['quarantined-false', ['disposition' => ['kind' => 'pass', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => false]]],
+            ['quarantined-null-explicit', ['disposition' => ['kind' => 'pass', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => null]]],
+            ['quarantined-on-deny', ['disposition' => ['kind' => 'deny', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => true]]],
+            ['quarantined-on-step-up', ['disposition' => ['kind' => 'step_up', 'decision_id' => null, 'chain_id' => null, 'chain_expires_at' => null, 'quarantined' => true]]],
+            ['quarantined-on-chain-required', ['disposition' => ['kind' => 'chain_required', 'decision_id' => null, 'chain_id' => self::CHAIN_ID, 'chain_expires_at' => time() + 300, 'quarantined' => true]]],
             ['nested-decision-int', ['disposition' => ['kind' => 'pass', 'decision_id' => 7, 'chain_id' => null, 'chain_expires_at' => null]]],
             ['nested-decision-empty', ['disposition' => ['kind' => 'pass', 'decision_id' => '', 'chain_id' => null, 'chain_expires_at' => null]]],
             // The kind <-> chain_id <-> chain_expires_at matrix.
@@ -186,6 +200,11 @@ final class PostSolveDispositionSchemaParityTest extends TestCase
         $records[] = ['v2-chain-required-without-expiry-key', $v2WithoutExpiryKey];
         $records[] = ['valid-v2-pending', $this->pending(['v' => 2])];
         $records[] = ['valid-v2-complete', $this->complete([], ['v' => 2])];
+        // Absence of the quarantine key is the earlier record shape and
+        // must decode as a non-quarantined pass on both sides.
+        $withoutQuarantineKey = $this->complete(['quarantined' => true]);
+        unset($withoutQuarantineKey['disposition']['quarantined']);
+        $records[] = ['complete-pass-without-quarantine-key', $withoutQuarantineKey];
 
         return $records;
     }

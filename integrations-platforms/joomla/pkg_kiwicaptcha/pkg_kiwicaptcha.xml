@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extension type="package" method="upgrade">
+    <name>pkg_kiwicaptcha</name>
+    <packagename>kiwicaptcha</packagename>
+    <title>KiwiCaptcha</title>
+    <author>KiwiCaptcha contributors</author>
+    <version>1.0.0</version>
+    <description>Proof-of-work CAPTCHA for Joomla as a captcha plugin, verified against a self-hosted KiwiCaptcha deployment. Installs the captcha plugin; select it under System, Plugins or the Captcha global option.</description>
+    <files>
+        <folder type="plugin" group="captcha" id="kiwicaptcha">plg_captcha_kiwicaptcha</folder>
+    </files>
+</extension>

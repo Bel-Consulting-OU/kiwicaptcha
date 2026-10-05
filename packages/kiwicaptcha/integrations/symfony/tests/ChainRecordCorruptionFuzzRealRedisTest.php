@@ -146,7 +146,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         } catch (\BelConsulting\KiwiCaptchaBundle\Risk\MalformedChainedChallengeStateException) {
             // expected
         }
-        self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the mapping is preserved');
+        self::assertSame($requirement->chainId, $this->client->get($this->obligationKey($obligationId)), 'the mapping is preserved');
         self::assertSame($ambiguous, $this->client->get($recordKey), 'the ambiguous bytes are never mutated');
         try {
             $store->reserve($requirement->chainId, 'owner-a', 15);
@@ -251,6 +251,7 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
     {
         $boundaries = [
             'read' => static fn () => $store->read($chainId),
+            'obligationChainId' => static fn () => $store->obligationChainId($obligationId),
             'reserve' => static fn () => $store->reserve($chainId, ChainStateWalk::OWNERS[0], 15),
             'markIssued' => static fn () => $store->markIssued($chainId, ChainStateWalk::OWNERS[0], ChainStateWalk::NONCES[0]),
             'markVerified' => static fn () => $store->markVerified($chainId, ChainStateWalk::NONCES[0]),
@@ -409,7 +410,13 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
         $this->client->set($this->chainKey($requirement->chainId), (string) json_encode($tampered, JSON_THROW_ON_ERROR), 'EX', 300);
 
         $this->assertEveryBoundaryFailsClosed($store, $requirement->chainId, $obligationId, 'redis '.$state.' '.$label);
-        self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
+        try {
+            self::assertSame($requirement->chainId, $store->obligationChainId($obligationId), 'the refusals leave the mapping alone');
+        } catch (MalformedChainedChallengeStateException) {
+            // A validating obligation read may throw on the corrupt chain
+            // instead of reporting the id: either way the mapping was NOT
+            // dropped.
+        }
         $rawAfter = $this->client->get($this->chainKey($requirement->chainId));
         self::assertSame($tampered, json_decode((string) $rawAfter, true, 8, JSON_THROW_ON_ERROR), 'the refusals leave the corrupt bytes alone');
         $this->assertMappingIsPreserved($store, $obligationId, $requirement->chainId, 'redis-'.$state.'-'.$label);
@@ -517,7 +524,13 @@ final class ChainRecordCorruptionFuzzRealRedisTest extends TestCase
             } catch (MalformedChainedChallengeStateException) {
                 // expected
             }
-            self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping still points at the corrupt chain');
+            try {
+                self::assertSame($chainId, $store->obligationChainId($obligationId), $context.': the mapping still points at the corrupt chain');
+            } catch (MalformedChainedChallengeStateException) {
+                // A validating obligation read may throw on the corrupt
+                // chain instead of reporting the id: either way the
+                // mapping was NOT dropped and no fresh chain exists.
+            }
             self::assertNull($store->read($fresh), $context.': no fresh chain was created');
         }
     }

@@ -495,14 +495,47 @@ final class ProtocolV4Test extends TestCase
         self::assertSame(VerifyError::MalformedRecord, $simulator->gate($storage->find($challenge->nonce), 3), 'the v3-only structural gate refuses v4');
     }
 
-    public function testArmedIssuanceAtMaxExecutionVersionMintsAndVerifies(): void
+    public function testArmedIssuanceAtTheSynthesisCeilingMintsAndVerifies(): void
     {
-        // The PHP side mints and verifies armed records at the current
-        // register maximum: an issuance at
-        // ExecutionChallengeGenerator::MAX_EXECUTION_VERSION stores an
-        // execution_version at the ceiling and the verifier's record
-        // gate accepts it (the same gate the Rust `validate_record`
-        // register mirrors), so the record verifies end to end.
+        // The PHP side mints and verifies armed records end to end at
+        // the browserless synthesis ceiling: an issuance at version 5
+        // (the last rung whose trace the pure fixture synthesizer can
+        // reproduce) stores an execution_version at that rung and the
+        // verifier's record gate accepts it (the same gate the Rust
+        // `validate_record` register mirrors), so the record verifies
+        // end to end.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->config(), $storage);
+        $challenge = $issuer->issueWithExecutionField(
+            'login',
+            '198.51.100.7',
+            true,
+            executionAction: 'a',
+            executionVersion: 5,
+        );
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(
+            5,
+            $record->executionVersion,
+            'an issuance at the synthesis ceiling stamps the canonical rung',
+        );
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
+        $outcome = (new Verifier($storage, now: static fn (): int => time()))->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the PHP verifier accepts its own armed synthesis-ceiling record, got %s', $outcome->code()));
+    }
+
+    public function testArmedIssuanceAtTheRealPlatformRungMintsAndFailsClosed(): void
+    {
+        // The version-6 real-platform rung: the record mints, the
+        // record gate accepts the register maximum, and the
+        // browserless synthesis trace (which cannot reproduce the five
+        // real-platform probes) fails closed with the deterministic
+        // execution_mismatch outcome. Only a real engine produces a
+        // verifiable version-6 trace.
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField(
@@ -520,11 +553,12 @@ final class ProtocolV4Test extends TestCase
             'an issuance at the register maximum stamps the canonical maximum',
         );
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertSame(6, $program['op_version'], 'the armed program declares the real-platform rung');
         $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
         $outcome = (new Verifier($storage, now: static fn (): int => time()))->verify($token, self::SECRET, 'login', '198.51.100.7');
-        self::assertTrue($outcome->isOk(), sprintf('the PHP verifier accepts its own max-register armed record, got %s', $outcome->code()));
+        self::assertSame(VerifyError::ExecutionMismatch, $outcome->error, 'the browserless version-6 trace must fail closed');
     }
 
     public function testExecutionVersionRegisterGateSweepMatchesTheRustSuite(): void

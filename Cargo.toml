@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "packages/kiwicaptcha",
     "packages/kiwicaptcha-risk",
+    "packages/kiwicaptcha-solver",
+    "packages/kiwicaptcha-verifier",
 ]
 exclude = [
     "packages/kiwicaptcha-wasm",

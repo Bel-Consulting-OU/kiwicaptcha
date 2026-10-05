@@ -295,6 +295,70 @@ final class ChallengeFlowTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('a challenge issued during the bump must verify immediately, got %s', $outcome->code()));
     }
 
+    public function testMixedFleetRedeemsThroughTheDeclaredRolloutWindow(): void
+    {
+        // The rollout-window contract: with the expected epoch rotated
+        // to 2 (the central min_policy_epoch bump the monitor follows)
+        // and the declared window floor 1 wired the way the extension
+        // wires risk.policy_rollout_min_epoch, a challenge issued under
+        // epoch 1 (the pre-bump node) redeems on the epoch-2 node with
+        // zero spurious rejections; with no window declared the same
+        // record is rejected WrongPolicyVersion (strict equality).
+        [$storage, $token] = $this->issueAndSolveAtEpoch1();
+
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '2');
+        $verifier = new Verifier($storage, expectedPolicyVersion: 1, policyVersionFloor: 1);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 300);
+        $monitor->refresh(); // follows the central bump: expected epoch 2, the declared floor survives
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('an epoch-1 record must redeem on the epoch-2 node during the declared window, got %s', $outcome->code()));
+
+        // Without the declared window the same shape of record is
+        // rejected strict: the window is the only widening of the
+        // epoch contract.
+        [$storage2, $token2] = $this->issueAndSolveAtEpoch1();
+        $strict = new Verifier($storage2, expectedPolicyVersion: 2);
+        $outcome2 = $strict->verify($token2, self::SECRET, 'login', '198.51.100.7');
+        self::assertSame(\KiwiCaptcha\VerifyError::WrongPolicyVersion, $outcome2->error, 'outside a declared window a wrong epoch is still rejected');
+    }
+
+    /**
+     * Issue and solve a challenge through a node still at its configured
+     * epoch 1 (no monitor: the pre-bump node), the record a mixed N/N+1
+     * fleet must drain.
+     *
+     * @return array{0: ArrayStorage, 1: string} the storage holding the record and the solution token
+     */
+    private function issueAndSolveAtEpoch1(): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(
+            secretKey: self::SECRET,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+            policyVersion: 1,
+        ), $storage);
+        $controller = new ChallengeController($issuer, policyVersion: 1);
+
+        $request = JsonRequest::create('/kiwi-captcha/challenge', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7'], '{"scope":"login"}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode());
+        $challenge = json_decode((string) $response->getContent(), true);
+        $this->waitOutMinDuration((float) $challenge['minDurationMs']);
+
+        $counter = 0;
+        $saltBytes = base64_decode($challenge['salt'], true);
+        do {
+            $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        --$counter;
+
+        return [$storage, \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [])->encode()];
+    }
+
     public function testArgon2ChallengeIssuesAndVerifiesLocally(): void
     {
         $storage = new ArrayStorage();
@@ -1486,8 +1550,8 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(429, $response->getStatusCode());
         self::assertSame('SCOPE_LIMITED', json_decode((string) $response->getContent(), true)['error']['code']);
 
-        $expectedKey = '{kiwi:reserved}:issuance:'.ScopeIssuanceCap::UNKNOWN_QUOTA_ID.':'.intdiv(1_800_000_000, 60);
-        self::assertSame(2, $client->counters[$expectedKey] ?? null, 'both invented scopes hit the SAME reserved quota window');
+        $expectedKey = '{kiwi:reserved}:issuance:'.ScopeIssuanceCap::UNKNOWN_QUOTA_ID.':sw';
+        self::assertCount(1, $client->zsets[$expectedKey] ?? [], 'both invented scopes hit the SAME reserved quota window (the refused attempt added no member)');
         foreach ($client->calls as $call) {
             foreach ((array) $call[1] as $arg) {
                 if (\is_string($arg) && str_contains($arg, ':issuance:')) {

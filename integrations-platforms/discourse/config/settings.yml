@@ -1,0 +1,20 @@
+plugins:
+  kiwi_captcha_enabled:
+    default: false
+    client: false
+  kiwi_verify_url:
+    default: 'http://127.0.0.1:7371/verify'
+    client: false
+  kiwi_bearer:
+    default: ''
+    client: false
+    secret: true
+  kiwi_signup_scope:
+    default: 'signup'
+    client: false
+  kiwi_signup_paths:
+    default: '/u|/u.json|/users'
+    client: false
+  kiwi_trust_proxy:
+    default: false
+    client: false

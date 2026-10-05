@@ -1,0 +1,31 @@
+# Caddy forward_auth gate for KiwiCaptcha. The gate is one
+# forward_auth directive per site; add it to every route that must
+# carry a captcha. Deploy: copy the forward_auth block into your
+# Caddyfile and list this file's kiwi-verify.php next to it (or point
+# the dial at the host that runs it).
+#
+# Validate: caddy validate --config Caddyfile (caddy 2.7+).
+#
+# The forward_auth subrequest carries the original method and headers,
+# not the body, so the token arrives in the X-Kiwi-Token header or the
+# kiwi_token cookie. On a deny (403) or a redirect (302 with
+# KIWI_DENY=302), Caddy copies the endpoint's status and Location to
+# the browser, so the redirect knob works natively here.
+
+:8443 {
+	forward_auth 127.0.0.1:8788 {
+		uri /kiwi-verify.php
+
+		# The gate knobs ride the upstream's environment (systemd
+		# Environment= lines or a container env), not the Caddyfile,
+		# so the bearer secret stays out of this file.
+	}
+
+	handle_path /admin/* {
+		respond "gated area" 200
+	}
+
+	handle {
+		respond "public area" 200
+	}
+}

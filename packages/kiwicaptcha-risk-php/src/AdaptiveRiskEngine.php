@@ -6,8 +6,18 @@ namespace KiwiCaptcha\Risk;
 
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
+use KiwiCaptcha\Risk\Evidence\DecoyEscalation;
+use KiwiCaptcha\Risk\Evidence\DecoyEscalationReaderInterface;
+use KiwiCaptcha\Risk\Evidence\EvidenceModel;
+use KiwiCaptcha\Risk\Marks\MarksEscalation;
+use KiwiCaptcha\Risk\Marks\MarksReaderInterface;
+use KiwiCaptcha\Risk\Marks\MarksRequest;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
+use KiwiCaptcha\Risk\Pricing\PriceContextSourceInterface;
+use KiwiCaptcha\Risk\Pricing\PriceInputs;
+use KiwiCaptcha\Risk\Pricing\PriceModel;
+use KiwiCaptcha\Risk\Pricing\PriceRequest;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\ConsolidatedAssessmentStoreInterface;
 use KiwiCaptcha\Risk\Storage\OutcomeRegistration;
@@ -107,6 +117,10 @@ final class AdaptiveRiskEngine
         private readonly ?CalibrationStore $calibration = null,
         private readonly bool $enableGlobalPressure = true,
         private readonly ScopeActionHysteresis $hysteresis = new ScopeActionHysteresis(),
+        private readonly ?TargetIdentifierResolverInterface $targetResolver = null,
+        private readonly ?MarksReaderInterface $marksReader = null,
+        private readonly ?PriceContextSourceInterface $priceContext = null,
+        private readonly ?DecoyEscalationReaderInterface $decoyEscalationReader = null,
     ) {
         // The timing configuration is validated at the construction
         // boundary: a zero epoch divides by zero in the observation
@@ -138,6 +152,95 @@ final class AdaptiveRiskEngine
     public function metrics(): RiskMetrics
     {
         return $this->metrics;
+    }
+
+    /**
+     * The target pseudonym of one assessment, as an optional side
+     * channel beside the frozen risk-v1 observation wire.
+     *
+     * The observation's Lua argv contract is frozen, so the target
+     * dimension rides its own API instead of the observation struct: a
+     * later plane consumes this HMAC and keys its state under it. The
+     * resolver maps the scope to its configured form field and returns
+     * the raw submitted value; this method normalizes it and returns
+     * only the derived pseudonym. The raw and the normalized value
+     * never leave this boundary, never reach the store, and never
+     * appear in metrics.
+     *
+     * Returns null when no resolver is configured, the scope carries no
+     * target field, the field value is empty, or the value normalizes
+     * to the empty string: that assessment simply has no target
+     * dimension. Scoring is untouched by this call.
+     *
+     * @param array<string, string> $fields the request's submitted form
+     *                                      field values keyed by field
+     *                                      name
+     *
+     * @throws \InvalidArgumentException when a normalization stage is
+     *                                   unavailable (fail-closed)
+     * @throws \RuntimeException         when the raw value is not valid
+     *                                   UTF-8
+     */
+    public function resolveTargetId(int $scope, array $fields): ?string
+    {
+        if ($this->targetResolver === null) {
+            return null;
+        }
+        $raw = $this->targetResolver->resolve($scope, $fields);
+        if ($raw === null) {
+            return null;
+        }
+        $normalized = TargetIdentifierNormalizer::normalize($raw);
+        if ($normalized === '') {
+            return null;
+        }
+
+        return $this->identityFactory->targetId($normalized);
+    }
+
+    /**
+     * Assesses one pre-issue request and attaches the names-only
+     * decision explanation (change.md 3.8.3) to the result: the top
+     * contributing reasons, the identity dimension names involved, the
+     * chosen action and, when a pricing stage is composed by the
+     * caller, the rung name. Identical pipeline to assessPreIssue();
+     * only the return type grows the additive explanation field.
+     *
+     * The engine reports the dimensions it can see on the request:
+     * source, subnet, the session and principal dimensions when the
+     * context carries those identities, and the target dimension when
+     * a target resolver is attached. The asn and agent dimensions
+     * belong to the caller's IdentityVector; pass their names through
+     * ExplainedDecision::wrap() to compose the full set. No pseudonym
+     * value ever enters the explanation.
+     */
+    public function assessPreIssueWithExplanation(RiskContext $c, ?string $idempotencyKey = null): ExplainedDecision
+    {
+        $dimensions = $this->explanationDimensions($c);
+
+        return ExplainedDecision::wrap($this->assessPreIssue($c, $idempotencyKey), $dimensions);
+    }
+
+    /**
+     * The identity dimension names the engine derives from the
+     * assessment context alone, beside the documented engine surface.
+     *
+     * @return list<string>
+     */
+    private function explanationDimensions(RiskContext $c): array
+    {
+        $dimensions = ['source', 'subnet'];
+        if ($c->sessionId !== null) {
+            $dimensions[] = 'session';
+        }
+        if ($c->principalId !== null) {
+            $dimensions[] = 'principal';
+        }
+        if ($this->targetResolver !== null) {
+            $dimensions[] = 'target';
+        }
+
+        return $dimensions;
     }
 
     /**
@@ -412,10 +515,144 @@ final class AdaptiveRiskEngine
             clientKey: $observation->sessionId ?? $observation->sourceId,
         );
 
+        // The decisive attacker stage: additive, after the plain policy
+        // decision, and only when a marks reader is wired. An unreadable
+        // marks surface floors the request at the maximum challenge rung
+        // fail-closed instead of fabricating a deny.
+        if ($this->marksReader !== null) {
+            $decision = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs);
+        }
+
+        // The decoy escalation stage: additive, after the marks stage,
+        // and only when a decoy-escalation reader is wired. An unreadable
+        // escalation surface degrades to not-live (the stage is a
+        // temporary price raise, so a backend miss must never escalate).
+        if ($this->decoyEscalationReader !== null) {
+            $decision = DecoyEscalation::apply(
+                $decision,
+                $this->decoyEscalationReader->escalationLive($observation->sessionId),
+            );
+            $decision = $this->dropQuarantineOnEscalation($decision);
+        }
+
+        // The evidence stage (change.md 3.2.1 and 3.2.3): additive,
+        // after the decoy escalation and before the pricing stage. It
+        // composes whenever the assessment carries evidence inputs (no
+        // separate wiring), and an absent or rejected payload is the
+        // neutral-unknown state: the stage passes the decision through
+        // byte-identically and may only raise.
+        if ($v2 !== null && ($v2->telemetryPayload !== null || $v2->solveMs !== null)) {
+            $decision = EvidenceModel::apply(
+                $decision,
+                EvidenceModel::inputs($v2->telemetryPayload, $v2->solveMs, $v2->solveRung),
+                $c->resources,
+            );
+            $decision = $this->dropQuarantineOnEscalation($decision);
+        }
+
+        // The continuous pricing stage: additive, after the marks stage,
+        // and only when a price-context source is wired. The observed
+        // global-pressure signal is the untrusted-scope pressure, so the
+        // ramp is inert exactly when the global channel is disabled. An
+        // unreadable pricing surface prices the request fail-closed as an
+        // unproven identity (zero bucket credit, full ramp).
+        if ($this->priceContext !== null) {
+            $decision = $this->applyPriceStage($decision, $c, $observation, $vector);
+            $decision = $this->dropQuarantineOnEscalation($decision);
+        }
+
         $this->metrics->gauge('global:level', $decision->globalLevel);
         $this->metrics->gauge('resources:argon_capacity', $c->resources->argonCapacity);
         $this->recordDecisionMetrics($c->scope, $decision);
         $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+        return $decision;
+    }
+
+    /**
+     * The continuous pricing stage behind runPipeline(): resolves the
+     * request's pricing inputs through the wired source and composes the
+     * priced rung with the plain decision. The price may only raise the
+     * composed action; an unreadable source prices the request
+     * fail-closed as an unproven identity.
+     */
+    private function applyPriceStage(
+        RiskDecision $decision,
+        RiskContext $c,
+        RiskObservation $observation,
+        SignalVector $vector,
+    ): RiskDecision {
+        $request = new PriceRequest(
+            scope: $c->scope,
+            sourceIp: $c->sourceIp,
+            session: $observation->sessionId,
+            principal: $observation->principalId,
+        );
+        try {
+            $inputs = $this->priceContext->priceInputs($request);
+        } catch (\Throwable) {
+            $inputs = PriceInputs::failClosed();
+        }
+
+        return PriceModel::apply($decision, $inputs, $vector->globalPressure, $c->resources);
+    }
+
+    /**
+     * The decisive attacker stage behind runPipeline(): reads the
+     * request's marks view through the wired reader and combines it with
+     * the plain decision. The engine hands the reader the session and
+     * principal pseudonyms it derived; the reader adds the deployment's
+     * own dimensions (agent, ASN bucket, the login target). The
+     * quarantine selection (change.md 1.3 and 3.3.4) is part of the
+     * decision plane's posture: a server-confirmed spam identity with a
+     * clean request quarantines instead of escalating, wire-identical
+     * to allow.
+     */
+    private function applyMarksStage(
+        RiskDecision $decision,
+        RiskContext $c,
+        RiskObservation $observation,
+        SignalVector $vector,
+        ?RiskV2Context $v2,
+        int $nowMs,
+    ): RiskDecision {
+        $request = new MarksRequest(
+            scope: $c->scope,
+            sourceIp: $c->sourceIp,
+            session: $observation->sessionId,
+            principal: $observation->principalId,
+        );
+        $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
+        try {
+            $view = $this->marksReader->requestMarks($request);
+        } catch (\Throwable) {
+            return MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources);
+        }
+
+        return MarksEscalation::apply(
+            $decision,
+            $view,
+            MarksEscalation::corroborated($vector, $decoyEvidence),
+            $nowMs,
+            $this->marksReader->markTtlMs(),
+            $c->resources,
+            true,
+        );
+    }
+
+    /**
+     * The severity-monotonic precedence of the composed pipeline: a
+     * quarantine disposition never survives an escalation. When a stage
+     * after the marks stage (decoy, evidence, pricing) raised the action
+     * above Allow, the raised action wins and the quarantine flag drops;
+     * an inert stage keeps the decision byte-identical, quarantine
+     * included.
+     */
+    private function dropQuarantineOnEscalation(RiskDecision $decision): RiskDecision
+    {
+        if ($decision->quarantined && $decision->action !== RiskAction::Allow) {
+            return $decision->withoutQuarantine();
+        }
+
         return $decision;
     }
 
@@ -458,11 +695,22 @@ final class AdaptiveRiskEngine
      * observation -> store -> EventReceipt flow without the confirmation-
      * event guard. Only the confirmed* methods may reach it (the outcome
      * ledger has already authorized the event exactly once).
+     *
+     * The pseudonym overrides carry the typed outcomes API's pre-derived
+     * session/principal pseudonyms. An outcome reported on an identity
+     * handle addresses exactly the identity the caller named, so the
+     * observation rides the handle's pseudonym instead of re-deriving
+     * the context's raw identifier.
      */
-    private function emitFeedback(RiskEventKind $event, RiskContext $c, ?string $idempotencyKey = null): EventReceipt
-    {
+    private function emitFeedback(
+        RiskEventKind $event,
+        RiskContext $c,
+        ?string $idempotencyKey = null,
+        ?string $sessionPseudonym = null,
+        ?string $principalPseudonym = null,
+    ): EventReceipt {
         $nowMs = (int) floor(microtime(true) * 1000);
-        $observation = $this->buildObservation($c, $nowMs, $idempotencyKey, $event);
+        $observation = $this->buildObservation($c, $nowMs, $idempotencyKey, $event, $sessionPseudonym, $principalPseudonym);
         try {
             if (method_exists($this->store, 'observeWithReply')) {
                 // Reply-object surface: the dedupe verdict comes back with
@@ -485,6 +733,28 @@ final class AdaptiveRiskEngine
             isDuplicate: $isDuplicate,
             signals: $vector,
         );
+    }
+
+    /**
+     * The typed outcomes API's feedback entry: books the mapped risk-v1
+     * event through the internal feedback path, optionally riding the
+     * handle's pre-derived session/principal pseudonyms. The typed API
+     * itself is the server-side authority here (an identity handle has
+     * no ledger entry to confirm first), so the confirmation-event guard
+     * of record_feedback() is deliberately absent; the caller's
+     * idempotency key is the dedupe authority of the report.
+     *
+     * @internal reserved for the Outcomes facade; application code uses
+     *           KiwiOutcomes::report()
+     */
+    public function recordOutcomeFeedback(
+        RiskEventKind $event,
+        RiskContext $c,
+        ?string $idempotencyKey = null,
+        ?string $sessionPseudonym = null,
+        ?string $principalPseudonym = null,
+    ): EventReceipt {
+        return $this->emitFeedback($event, $c, $idempotencyKey, $sessionPseudonym, $principalPseudonym);
     }
 
     /**
@@ -725,6 +995,16 @@ final class AdaptiveRiskEngine
                 RiskV2Context::MAX_TAG_BYTES
             ));
         }
+        if ($v2->telemetryPayload !== null
+            && strlen($v2->telemetryPayload) > RiskV2Context::MAX_TELEMETRY_PAYLOAD_BYTES) {
+            throw new \InvalidArgumentException(sprintf(
+                'telemetry payload must not exceed %d bytes',
+                RiskV2Context::MAX_TELEMETRY_PAYLOAD_BYTES
+            ));
+        }
+        if (($v2->solveMs === null) !== ($v2->solveRung === null)) {
+            throw new \InvalidArgumentException('solve facts must carry both the duration and the rung key');
+        }
     }
 
     /**
@@ -855,8 +1135,22 @@ final class AdaptiveRiskEngine
         return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent);
     }
 
-    private function buildObservation(RiskContext $c, int $nowMs, ?string $idempotencyKey = null, ?RiskEventKind $event = null): RiskObservation
-    {
+    /**
+     * Builds the observation of one assessment or feedback event. The
+     * pseudonym overrides carry the typed outcomes API's pre-derived
+     * session/principal pseudonyms: when given, the observation rides
+     * the caller's pseudonym verbatim instead of deriving the context's
+     * raw identifier. An outcome reported on an identity handle names
+     * its subject exactly; a wrong re-derivation would split it.
+     */
+    private function buildObservation(
+        RiskContext $c,
+        int $nowMs,
+        ?string $idempotencyKey = null,
+        ?RiskEventKind $event = null,
+        ?string $sessionPseudonym = null,
+        ?string $principalPseudonym = null,
+    ): RiskObservation {
         $event ??= $c->event;
         $nowSecs = intdiv($nowMs, 1000);
         $srcEpoch = intdiv($nowSecs, $this->sourceEpochSecs);
@@ -872,8 +1166,8 @@ final class AdaptiveRiskEngine
             subnetIdPrev: $this->identityFactory->subnetIdForEpoch($c, $netEpoch - 1),
             subnetId: $this->identityFactory->subnetIdForEpoch($c, $netEpoch),
             subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
-            sessionId: $c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null,
-            principalId: $c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null,
+            sessionId: $sessionPseudonym ?? ($c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null),
+            principalId: $principalPseudonym ?? ($c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null),
             eventId: $this->normalizeEventId($event, $c->scope, $idempotencyKey),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,
@@ -989,6 +1283,9 @@ final class AdaptiveRiskEngine
 
     private function recordDecisionMetrics(int $scope, RiskDecision $decision): void
     {
-        $this->metrics->increment(sprintf('decisions:%d:%s:%d', $scope, $decision->action->value, $decision->band));
+        // The disposition label: a quarantined decision counts as its own
+        // action label (its wire action stays allow), so the quarantine
+        // volume is observable without touching the ladder vocabulary.
+        $this->metrics->increment(sprintf('decisions:%d:%s:%d', $scope, $decision->dispositionLabel(), $decision->band));
     }
 }

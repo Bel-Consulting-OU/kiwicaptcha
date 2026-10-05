@@ -21,23 +21,37 @@
 //! and never weaken or bypass the risk-v1 state contract.
 
 pub mod action;
+pub mod asn;
 pub mod breaker;
 pub mod calibration;
+pub mod calibration_v2;
 pub mod context;
+pub mod escalation;
 pub mod event;
+pub mod evidence;
+pub mod explanation;
 pub mod hysteresis;
 pub mod identity;
+pub mod identity_vector;
 pub mod keys;
+pub mod keyspace;
+pub mod marks;
 pub mod metrics;
 pub mod namespace;
 pub mod network;
+pub mod outcomes;
 pub mod policy;
+pub mod pricing;
 pub mod profile;
+pub mod quarantine;
 pub mod redis;
 pub mod resources;
 pub mod score;
+pub mod sharded;
 pub mod signals;
 pub mod store;
+pub mod target;
+pub mod trust;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -52,6 +66,7 @@ use crate::action::RiskAction;
 use crate::calibration::CalibrationStore;
 use crate::context::{RiskContext, RiskV2Context};
 use crate::event::{normalize_idempotency_key, RiskEventKind, RiskObservation};
+use crate::explanation::ExplainedDecision;
 use crate::identity::RiskIdentityFactory;
 use crate::keys::RiskKeys;
 use crate::metrics::{FixedMetric, Metrics};
@@ -63,6 +78,7 @@ use crate::signals::SignalVector;
 use crate::store::{
     Observed, OutcomeRegistration, RiskStateStore, SessionContextTagStore, SessionTlsTagStore,
 };
+use crate::target::TargetIdentifierResolver;
 
 /// Engine-level input error.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -74,6 +90,15 @@ pub enum RiskError {
     /// (the assessment input is rejected, never silently truncated).
     #[error("client context tag must not exceed 64 bytes (got {0})")]
     InvalidContextTag(usize),
+    /// The risk-v2 telemetry payload exceeds the 512-byte contract bound
+    /// (the assessment input is rejected, never silently truncated; the
+    /// published schema is protocol/telemetry-v1/payload.json).
+    #[error("telemetry payload must not exceed 512 bytes (got {0})")]
+    InvalidTelemetryPayload(usize),
+    /// The risk-v2 solve facts are half-present (a duration without a
+    /// rung key or the reverse): the pair rides together or not at all.
+    #[error("solve facts must carry both the duration and the rung key")]
+    InvalidSolveFacts,
     /// A confirmed outcome requires the decision_id of the assessed
     /// decision.
     #[error("confirmed outcomes require the decision_id of the assessed decision")]
@@ -115,6 +140,12 @@ pub enum RiskError {
     /// empty or tiny master deterministically derives predictable keys.
     #[error("the risk master secret must be at least 16 bytes (got {0})")]
     InvalidMasterLength(usize),
+    /// A typed outcome handle is inadmissible: the identifier value
+    /// fails its byte-shape rule (a raw principal, target or session
+    /// identifier instead of the pseudonym), or the versioned mapping
+    /// table accepts no such handle dimension for the outcome.
+    #[error("invalid outcome handle: {0}")]
+    InvalidOutcomeHandle(String),
 }
 
 /// The engine-side inverse-probability contract: `Some(ppm)` must be
@@ -153,6 +184,18 @@ pub const RISK_MODEL_REVISION: u32 = 17;
 /// [`RiskEngine::record_feedback`]); `model_revision` is the
 /// current model revision generation the decision was computed under
 /// (public JSON, bounded).
+///
+/// `quarantined` is the decision-plane quarantine disposition (change.md
+/// 1.3 and 3.3.4), never a ladder rung: it rides the Allow action only,
+/// set by the marks stage for a server-confirmed spam identity (mark
+/// kind `spamReported`) with a clean request. The decision passes as an
+/// ordinary allow (same rung, same pricing, byte-identical wire) while
+/// the app-facing surfaces carry the flag, so the application withholds
+/// the submission from publication. The precedence is severity
+/// monotonic: quarantine never overrides deny, step-up or any stronger
+/// plain action, and any later composed stage that raises the action
+/// above Allow drops the flag (see [`RiskDecision::without_quarantine`]
+/// and `crate::quarantine`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskDecision {
     pub score: u16,
@@ -167,6 +210,9 @@ pub struct RiskDecision {
     /// always-on outcome ledger (and, with calibration attached, the
     /// calibration receipt) for ConfirmedLegitimate/ConfirmedAbuse.
     pub decision_id: String,
+    /// The quarantine disposition: true only on top of
+    /// [`RiskAction::Allow`], only from the marks stage, never a rung.
+    pub quarantined: bool,
 }
 
 impl RiskDecision {
@@ -179,14 +225,35 @@ impl RiskDecision {
     pub fn reasons_vec(&self) -> Vec<RiskReason> {
         self.reasons.iter().flatten().copied().collect()
     }
+
+    /// The disposition label of the decision for the metrics plane: the
+    /// quarantine disposition counts as its own action label, wire
+    /// decisions keep their ladder name.
+    pub fn disposition_label(&self) -> &'static str {
+        if self.quarantined {
+            "quarantine"
+        } else {
+            self.action.as_str()
+        }
+    }
+
+    /// The decision after a composed stage that raised the action above
+    /// Allow: the severity-monotonic precedence drops the quarantine
+    /// disposition (the escalated action wins), everything else passes
+    /// through untouched.
+    pub fn without_quarantine(mut self) -> RiskDecision {
+        self.quarantined = false;
+        self
+    }
 }
 
 impl Serialize for RiskDecision {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let reasons: Vec<&str> = self.reasons.iter().flatten().map(|r| r.as_str()).collect();
-        let mut state = serializer.serialize_struct("RiskDecision", 8)?;
+        let mut state = serializer.serialize_struct("RiskDecision", 9)?;
         state.serialize_field("score", &self.score)?;
         state.serialize_field("action", self.action.as_str())?;
+        state.serialize_field("quarantined", &self.quarantined)?;
         state.serialize_field("reasons", &reasons)?;
         state.serialize_field("policy_version", &self.policy_version)?;
         state.serialize_field("model_revision", &self.model_revision)?;
@@ -551,6 +618,29 @@ pub struct RiskEngine<
     current_global_level: AtomicU8,
     enable_global_pressure: bool,
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
+    /// Optional target-identifier resolver: when attached,
+    /// [`RiskEngine::resolve_target_id`] derives the target pseudonym of
+    /// an assessment as a side channel beside the frozen observation
+    /// wire. No assessment path reads it.
+    target_resolver: Option<Arc<dyn TargetIdentifierResolver>>,
+    /// Optional marks reader: when attached, the decisive attacker stage
+    /// ([`crate::marks::apply`]) runs after the policy decision on every
+    /// assessment, consulting the request's marks view. Absent by default
+    /// so the decision path is byte-identical for existing consumers.
+    marks_reader: Option<Arc<dyn crate::marks::MarksReader>>,
+    /// Optional price-context source: when attached, the continuous
+    /// pricing stage ([`crate::pricing::PriceModel::apply`]) runs after
+    /// the marks stage on every assessment, pricing the request against
+    /// its value class and its bucket trust with the observed global
+    /// pressure as the untrusted-scope pressure. Absent by default so
+    /// the decision path is byte-identical for existing consumers.
+    price_context: Option<Arc<dyn crate::pricing::PriceContextSource>>,
+    /// Optional decoy-escalation reader: when attached, the decoy
+    /// escalation stage ([`crate::escalation::apply`]) runs after the
+    /// marks stage on every assessment, raising a live session's price
+    /// by one rung. Absent by default so the decision path is
+    /// byte-identical for existing consumers.
+    decoy_escalation: Option<Arc<dyn crate::escalation::DecoyEscalationReader>>,
 }
 
 impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
@@ -582,6 +672,10 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             current_global_level: AtomicU8::new(0),
             enable_global_pressure: true,
             hysteresis: crate::hysteresis::ScopeActionHysteresis::new(),
+            target_resolver: None,
+            marks_reader: None,
+            price_context: None,
+            decoy_escalation: None,
         }
     }
 
@@ -641,6 +735,134 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     pub fn with_calibration(mut self, calibration: Arc<dyn CalibrationStore>) -> RiskEngine<S, N> {
         self.calibration = Some(calibration);
         self
+    }
+
+    /// Attaches the target-identifier resolver for the target-dimension
+    /// side channel ([`RiskEngine::resolve_target_id`]). No assessment
+    /// path reads the resolver: the risk-v1 observation wire stays frozen
+    /// and scoring stays untouched.
+    pub fn with_target_resolver(
+        mut self,
+        resolver: Arc<dyn TargetIdentifierResolver>,
+    ) -> RiskEngine<S, N> {
+        self.target_resolver = Some(resolver);
+        self
+    }
+
+    /// Attaches the marks reader of the decisive attacker stage: every
+    /// assessment then consults the request's marks view after the policy
+    /// decision (a marked own dimension floors the action at the maximum
+    /// challenge rung, a corroborated mark denies for the remaining mark
+    /// TTL, an attacked login target maps to StepUp). Without a reader
+    /// the assessment path is byte-identical to the unwired engine.
+    pub fn with_marks_reader(
+        mut self,
+        reader: Arc<dyn crate::marks::MarksReader>,
+    ) -> RiskEngine<S, N> {
+        self.marks_reader = Some(reader);
+        self
+    }
+
+    /// Attaches the price-context source of the continuous pricing stage
+    /// (change.md 3.3.1 and 3.3.2): every assessment is then priced after
+    /// the marks stage, with the request's value class and its bucket
+    /// trust in the current ASN bucket, and the observed global-pressure
+    /// signal as the untrusted-scope pressure. The priced rung may only
+    /// raise the composed action, and a trusted bucket keeps its price
+    /// within one rung under a full-pressure storm. Without a source the
+    /// assessment path is byte-identical to the unwired engine.
+    pub fn with_price_context(
+        mut self,
+        source: Arc<dyn crate::pricing::PriceContextSource>,
+    ) -> RiskEngine<S, N> {
+        self.price_context = Some(source);
+        self
+    }
+
+    /// Attaches the decoy-escalation reader of the decoy escalation
+    /// stage (change.md 3.2.2): every assessment then consults the
+    /// session's escalation record after the marks stage, raising a live
+    /// record's price by exactly one rung (an escalation, never a block;
+    /// the window and the qualification gate live in the record and its
+    /// writer). Without a reader the assessment path is byte-identical
+    /// to the unwired engine.
+    pub fn with_decoy_escalation(
+        mut self,
+        reader: Arc<dyn crate::escalation::DecoyEscalationReader>,
+    ) -> RiskEngine<S, N> {
+        self.decoy_escalation = Some(reader);
+        self
+    }
+
+    /// The target pseudonym of one assessment, as an optional side
+    /// channel beside the frozen risk-v1 observation wire.
+    ///
+    /// The observation's Lua argv contract is frozen, so the target
+    /// dimension rides its own API instead of the observation struct: a
+    /// later plane consumes this HMAC and keys its state under it. The
+    /// resolver maps the scope to its configured form field and returns
+    /// the raw submitted value; this method normalizes it and returns
+    /// only the derived pseudonym. The raw and the normalized value never
+    /// leave this boundary, never reach the store, and never appear in
+    /// metrics.
+    ///
+    /// Returns `None` when no resolver is attached, the scope carries no
+    /// target field, the field value is empty, or the value normalizes to
+    /// the empty string: that assessment simply has no target dimension.
+    /// Scoring is untouched by this call.
+    pub fn resolve_target_id(&self, scope: u32, fields: &[(&str, &str)]) -> Option<String> {
+        let resolver = self.target_resolver.as_ref()?;
+        let raw = resolver.resolve(scope, fields)?;
+        let normalized = crate::target::normalize_target(&raw);
+        if normalized.is_empty() {
+            return None;
+        }
+        Some(crate::target::target_id(&self.keys, &normalized))
+    }
+
+    /// Assesses one PreIssue request and attaches the names-only
+    /// decision explanation (change.md 3.8.3) to the result: the top
+    /// contributing reasons, the identity dimension names involved, the
+    /// chosen action and, when a pricing stage is composed by the
+    /// caller, the rung name. Identical pipeline to
+    /// [`RiskEngine::assess_pre_issue`]; only the return type grows the
+    /// additive explanation field.
+    ///
+    /// The engine reports the dimensions it can see on the request:
+    /// source, subnet, the session and principal dimensions when the
+    /// context carries those identities, and the target dimension when
+    /// a target resolver is attached. The asn and agent dimensions
+    /// belong to the caller's
+    /// [`crate::identity_vector::IdentityVector`]; pass their names
+    /// through [`ExplainedDecision::new`] or
+    /// [`crate::explanation::DecisionExplanation::for_decision`] to
+    /// compose the full set.
+    /// No pseudonym value ever enters the explanation.
+    pub fn assess_pre_issue_with_explanation(
+        &self,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+    ) -> Result<ExplainedDecision, RiskError> {
+        let dimensions = self.explanation_dimensions(&ctx);
+        let decision = self.assess_pre_issue(ctx, idempotency_key)?;
+        Ok(ExplainedDecision::new(decision, &dimensions, None))
+    }
+
+    /// The identity dimension names the engine derives from the
+    /// assessment context alone (see
+    /// [`RiskEngine::assess_pre_issue_with_explanation`]).
+    fn explanation_dimensions(&self, ctx: &RiskContext<'_>) -> Vec<&'static str> {
+        let mut dimensions = vec!["source", "subnet"];
+        if ctx.session_id.is_some() {
+            dimensions.push("session");
+        }
+        if ctx.principal_id.is_some() {
+            dimensions.push("principal");
+        }
+        if self.target_resolver.is_some() {
+            dimensions.push("target");
+        }
+        dimensions
     }
 
     /// Policy version of the loaded snapshot.
@@ -705,15 +927,26 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// Rejects a risk-v2 context whose client-context tag exceeds the
-    /// 64-byte contract bound (fail-closed: the assessment input is
-    /// rejected, never silently truncated — a truncation would split one
-    /// session's identity across tag records). The TLS tag keeps its
-    /// documented over-bound handling (treated as absent).
+    /// 64-byte contract bound or whose telemetry payload exceeds the
+    /// 512-byte bound (fail-closed: the assessment input is rejected,
+    /// never silently truncated — a truncation would split one session's
+    /// identity across tag records), and a half-present solve-facts pair
+    /// (the duration and the rung key ride together or not at all). The
+    /// TLS tag keeps its documented over-bound handling (treated as
+    /// absent).
     fn validate_v2_context(v2: &RiskV2Context) -> Result<(), RiskError> {
         if let Some(tag) = v2.client_context_tag.as_deref() {
             if tag.len() > crate::context::MAX_CONTEXT_TAG_BYTES {
                 return Err(RiskError::InvalidContextTag(tag.len()));
             }
+        }
+        if let Some(payload) = v2.telemetry_payload.as_deref() {
+            if payload.len() > crate::context::MAX_TELEMETRY_PAYLOAD_BYTES {
+                return Err(RiskError::InvalidTelemetryPayload(payload.len()));
+            }
+        }
+        if v2.solve_ms.is_some() != v2.solve_rung.is_some() {
+            return Err(RiskError::InvalidSolveFacts);
         }
         Ok(())
     }
@@ -740,6 +973,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 retry_after_ms: Some(1000),
                 band: 10,
                 decision_id: String::new(),
+                quarantined: false,
             };
             self.record_decision_metrics(ctx.scope, &decision);
             // A limiter hard-deny never reached the state backend; the
@@ -815,7 +1049,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Self::validate_v2_context(v2)?;
         }
         let now_ms = now_ms();
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key, None)?;
+        let observation =
+            self.build_observation(&ctx, now_ms, idempotency_key, None, None, None)?;
 
         if self.breaker.is_open() {
             self.metrics.incr_fixed(FixedMetric::DegradedBreaker);
@@ -960,6 +1195,93 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             hysteresis_client_key(&observation),
         );
         self.merge_contributor_reasons(&mut decision, &vector);
+        // The decisive attacker stage: additive, after the plain policy
+        // decision, and only when a marks reader is wired. An unreadable
+        // marks surface floors the request at the maximum challenge rung
+        // fail-closed instead of fabricating a deny. The quarantine
+        // selection (change.md 1.3 and 3.3.4) is part of the decision
+        // plane's posture: a server-confirmed spam identity with a clean
+        // request quarantines instead of escalating, wire-identical to
+        // allow.
+        if let Some(reader) = self.marks_reader.as_ref() {
+            let request = crate::marks::MarksRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+                principal: observation.principal_id.map(hex::encode),
+            };
+            let decoy_evidence =
+                v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot();
+            decision = match reader.request_marks(&request) {
+                Ok(view) => crate::marks::apply(
+                    decision,
+                    &view,
+                    crate::marks::corroborated(&vector, decoy_evidence),
+                    now_ms,
+                    reader.mark_ttl_ms(),
+                    &ctx.resources,
+                    true,
+                ),
+                Err(_) => crate::marks::apply_unreadable(decision, now_ms, &ctx.resources),
+            };
+        }
+        // The decoy escalation stage: additive, after the marks stage,
+        // and only when a decoy-escalation reader is wired. An unreadable
+        // escalation surface degrades to not-live (the stage is a
+        // temporary price raise, so a backend miss must never escalate).
+        if let Some(reader) = self.decoy_escalation.as_ref() {
+            let request = crate::escalation::DecoyEscalationRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+            };
+            decision = crate::escalation::apply(
+                decision,
+                reader.escalation_live(request.session.as_deref()),
+            );
+            decision = drop_quarantine_on_escalation(decision);
+        }
+        // The evidence stage (change.md 3.2.1 and 3.2.3): additive,
+        // after the decoy escalation and before the pricing stage. It
+        // composes whenever the assessment carries evidence inputs (no
+        // separate wiring), and an absent or rejected payload is the
+        // neutral-unknown state: the stage passes the decision through
+        // byte-identically and may only raise.
+        if let Some(context) = v2 {
+            if context.telemetry_payload.is_some() || context.solve_ms.is_some() {
+                let inputs = crate::evidence::evidence_inputs(
+                    context.telemetry_payload.as_deref(),
+                    context.solve_ms,
+                    context.solve_rung.as_deref(),
+                );
+                decision = crate::evidence::apply(decision, &inputs, &ctx.resources);
+                decision = drop_quarantine_on_escalation(decision);
+            }
+        }
+        // The continuous pricing stage: additive, after the marks stage,
+        // and only when a price-context source is wired. The observed
+        // global-pressure signal is the untrusted-scope pressure, so the
+        // ramp is inert exactly when the global channel is disabled. An
+        // unreadable pricing surface prices the request fail-closed as an
+        // unproven identity (zero bucket credit, full ramp).
+        if let Some(source) = self.price_context.as_ref() {
+            let request = crate::pricing::PriceRequest {
+                scope: ctx.scope,
+                source_ip: ctx.source_ip,
+                session: observation.session_id.map(hex::encode),
+                principal: observation.principal_id.map(hex::encode),
+            };
+            let inputs = source
+                .price_inputs(&request)
+                .unwrap_or_else(|_| crate::pricing::PriceInputs::fail_closed());
+            decision = crate::pricing::PriceModel::apply(
+                decision,
+                &inputs,
+                vector.global_pressure,
+                &ctx.resources,
+            );
+            decision = drop_quarantine_on_escalation(decision);
+        }
         self.record_decision_metrics(ctx.scope, &decision);
         Ok(self.finalize_decision(ctx.scope, decision, decision_id, outcome_registered))
     }
@@ -1091,13 +1413,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         ) {
             return Err(RiskError::ConfirmationApiRequired);
         }
-        self.emit_feedback(event, ctx, idempotency_key, decision_id, None)
+        self.emit_feedback(event, ctx, idempotency_key, decision_id, None, None, None)
     }
 
     /// The shared feedback pipeline; `weight` is the calibrator's inverse
     /// sampling probability (only the confirmed* wrappers pass it — they
     /// bypass the [`RiskError::ConfirmationApiRequired`] guard of
-    /// [`RiskEngine::record_feedback`]).
+    /// [`RiskEngine::record_feedback`]). The pseudonym overrides carry
+    /// the typed outcomes API's pre-derived session/principal
+    /// pseudonyms: an outcome reported on an identity handle addresses
+    /// exactly the identity the caller named, so the observation rides
+    /// the handle's pseudonym instead of re-deriving the context's raw
+    /// identifier.
+    #[allow(clippy::too_many_arguments)]
     fn emit_feedback(
         &self,
         event: RiskEventKind,
@@ -1105,6 +1433,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         idempotency_key: Option<String>,
         decision_id: Option<String>,
         weight: Option<f64>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
     ) -> Result<EventReceipt, RiskError> {
         let now_ms = now_ms();
         // The wrapper method's `event` is authoritative, exactly like the
@@ -1114,7 +1444,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // put in the context. Otherwise a PreIssue-labelled call with a
         // ConfirmedLegitimate context would book a confirmation event
         // without the outcome-ledger gate.
-        let observation = self.build_observation(&ctx, now_ms, idempotency_key, Some(event))?;
+        let observation = self.build_observation(
+            &ctx,
+            now_ms,
+            idempotency_key,
+            Some(event),
+            session_pseudonym,
+            principal_pseudonym,
+        )?;
 
         let confirmed = matches!(
             event,
@@ -1308,6 +1645,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             idempotency_key,
             Some(decision_id.to_string()),
             weight,
+            None,
+            None,
         )
     }
 
@@ -1342,6 +1681,35 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             idempotency_key,
             Some(decision_id.to_string()),
             weight,
+            None,
+            None,
+        )
+    }
+
+    /// The typed outcomes API's feedback entry: books the mapped risk-v1
+    /// event through the internal feedback pipeline, optionally riding
+    /// the handle's pre-derived session/principal pseudonyms (32-char
+    /// lowercase hex). The typed API itself is the server-side authority
+    /// here (an identity handle has no ledger entry to confirm first),
+    /// so the confirmation-event guard of
+    /// [`RiskEngine::record_feedback`] is deliberately absent; the
+    /// caller's idempotency key is the dedupe authority of the report.
+    pub(crate) fn record_outcome_feedback(
+        &self,
+        event: RiskEventKind,
+        ctx: RiskContext<'_>,
+        idempotency_key: Option<String>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
+    ) -> Result<EventReceipt, RiskError> {
+        self.emit_feedback(
+            event,
+            ctx,
+            idempotency_key,
+            None,
+            None,
+            session_pseudonym,
+            principal_pseudonym,
         )
     }
 
@@ -1401,12 +1769,20 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         self.record_feedback(RiskEventKind::RiskDenied, ctx, idempotency_key, None)
     }
 
+    /// Builds the observation of one assessment or feedback event. The
+    /// pseudonym overrides carry the typed outcomes API's pre-derived
+    /// session/principal pseudonyms (32-char lowercase hex): when given,
+    /// the observation rides the caller's pseudonym verbatim instead of
+    /// deriving the context's raw identifier, so an outcome reported on
+    /// an identity handle names its subject exactly.
     fn build_observation(
         &self,
         ctx: &RiskContext<'_>,
         now_ms: u64,
         idempotency_key: Option<String>,
         event_override: Option<RiskEventKind>,
+        session_pseudonym: Option<&str>,
+        principal_pseudonym: Option<&str>,
     ) -> Result<RiskObservation, RiskError> {
         // The feedback wrappers pass the method's event; the assessment
         // path passes None and takes the context's event. PHP parity:
@@ -1415,8 +1791,29 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let now_secs = (now_ms / 1000) as i64;
         let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
         let net_epoch = now_secs.div_euclid(self.timing.subnet_epoch_secs() as i64);
-        let session_id = ctx.session_id.map(|s| self.identity.session_id(s));
-        let principal_id = ctx.principal_id.map(|p| self.identity.principal_id(p));
+        let decode_pseudonym =
+            |name: &str, value: Option<&str>| -> Result<Option<[u8; 16]>, RiskError> {
+                match value {
+                    None => Ok(None),
+                    Some(hex) => {
+                        let bytes = hex::decode(hex).map_err(|_| {
+                            RiskError::Store(format!("{name} pseudonym override is not valid hex"))
+                        })?;
+                        let raw: [u8; 16] = bytes.try_into().map_err(|_| {
+                            RiskError::Store(format!("{name} pseudonym override is not 16 bytes"))
+                        })?;
+                        Ok(Some(raw))
+                    }
+                }
+            };
+        let session_id = match decode_pseudonym("session", session_pseudonym)? {
+            Some(raw) => Some(raw),
+            None => ctx.session_id.map(|s| self.identity.session_id(s)),
+        };
+        let principal_id = match decode_pseudonym("principal", principal_pseudonym)? {
+            Some(raw) => Some(raw),
+            None => ctx.principal_id.map(|p| self.identity.principal_id(p)),
+        };
         // Canonical idempotency normalization shared with PHP: verbatim keys
         // become the lowercase hex of the hmac-sha256 MAC over event_key,
         // pack('N', scope), chr(event) and key — domain-separated per scope
@@ -1540,8 +1937,25 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     fn record_decision_metrics(&self, scope: u32, decision: &RiskDecision) {
+        // The disposition label: a quarantined decision counts as its own
+        // action label (its wire action stays allow), so the quarantine
+        // volume is observable without touching the ladder vocabulary.
         self.metrics
-            .incr_decision(scope, decision.action.as_str(), decision.band);
+            .incr_decision(scope, decision.disposition_label(), decision.band);
+    }
+}
+
+/// The severity-monotonic precedence of the composed pipeline: a
+/// quarantine disposition never survives an escalation. When a stage
+/// after the marks stage (decoy, evidence, pricing) raised the action
+/// above Allow, the raised action wins and the quarantine flag drops;
+/// an inert stage keeps the decision byte-identical, quarantine
+/// included.
+fn drop_quarantine_on_escalation(decision: RiskDecision) -> RiskDecision {
+    if decision.quarantined && decision.action != RiskAction::Allow {
+        decision.without_quarantine()
+    } else {
+        decision
     }
 }
 
@@ -2126,6 +2540,7 @@ mod tests {
             honeypot_hit,
             client_context_tag: tag.map(str::to_string),
             tls_tag: tls_tag.map(str::to_string),
+            ..Default::default()
         }
     }
 
@@ -3476,9 +3891,10 @@ mod tests {
             json.get("decision_id").is_none(),
             "decision_id must never leak into the serialized decision"
         );
-        // 8 public fields: score, action, reasons, policy_version,
-        // model_revision, global_level, retry_after_ms, band.
-        assert_eq!(json.as_object().unwrap().len(), 8);
+        // 9 public fields: score, action, quarantined, reasons,
+        // policy_version, model_revision, global_level, retry_after_ms,
+        // band.
+        assert_eq!(json.as_object().unwrap().len(), 9);
         assert_eq!(json["model_revision"], 17);
     }
 
@@ -4314,5 +4730,99 @@ mod tests {
         let denied = blocked_engine.assess_pre_issue(blocked_ctx, None).unwrap();
         assert!(denied.has_reason(RiskReason::LocalNetworkRisk));
         assert_eq!(denied.action, RiskAction::Deny);
+    }
+
+    /// The decisive attacker stage on the engine's public assess surface:
+    /// with a marks reader wired, a marked session escalates the assessed
+    /// action to the maximum challenge rung; without a reader the same
+    /// assessment keeps the plain action (the wiring is opt-in and
+    /// byte-identical when absent).
+    #[test]
+    fn marks_reader_wiring_escalates_only_when_attached() {
+        struct MarkedSessionReader {
+            requests: Mutex<Vec<crate::marks::MarksRequest>>,
+        }
+        impl crate::marks::MarksReader for MarkedSessionReader {
+            fn request_marks(
+                &self,
+                request: &crate::marks::MarksRequest,
+            ) -> Result<crate::marks::MarksView, RiskError> {
+                self.requests.lock().unwrap().push(request.clone());
+                let view = match &request.session {
+                    Some(_session) => {
+                        let now = crate::now_ms() as i64;
+                        crate::marks::MarksView::from_parts(
+                            vec![(
+                                crate::outcomes::MarkDimension::Session,
+                                crate::outcomes::MarkRecord {
+                                    kind: "accountBanned".to_string(),
+                                    count: 1,
+                                    first_ms: now,
+                                    last_ms: now,
+                                },
+                            )],
+                            None,
+                        )
+                    }
+                    None => crate::marks::MarksView::default(),
+                };
+                Ok(view)
+            }
+            fn mark_ttl_ms(&self) -> u64 {
+                crate::marks::DEFAULT_MARK_TTL_MS
+            }
+        }
+
+        let session = [0x33u8; 16];
+        let plain_engine = RiskEngine::with_components(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            ProcessEmergencyCap::default(),
+        );
+        let ctx = || {
+            RiskContext::new(
+                1,
+                "203.0.113.27".parse().unwrap(),
+                Some(&session),
+                None,
+                RiskEventKind::PreIssue,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            )
+        };
+        let plain = plain_engine.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(plain.action, RiskAction::Allow);
+
+        let reader = std::sync::Arc::new(MarkedSessionReader {
+            requests: Mutex::new(Vec::new()),
+        });
+        let wired = RiskEngine::with_components(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+            breaker::CircuitBreaker::default(),
+            ProcessEmergencyCap::default(),
+        )
+        .with_marks_reader(reader.clone());
+        // The session is marked through the reader, so the wired
+        // assessment floors at the maximum rung with its reason, while the
+        // unwired engine keeps the plain action for the same request.
+        let escalated = wired.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(escalated.action, RiskAction::Argon64);
+        assert!(escalated.has_reason(RiskReason::MarkedIdentity));
+        let untouched = plain_engine.assess_pre_issue(ctx(), None).unwrap();
+        assert_eq!(untouched.action, RiskAction::Allow);
+        // The engine handed the reader the derived session pseudonym (32
+        // hex chars), never the raw cookie bytes.
+        let requests = reader.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let session_id = requests[0].session.as_deref().expect("session present");
+        assert_eq!(session_id.len(), 32);
+        assert!(session_id.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(session_id, hex::encode(session));
     }
 }
