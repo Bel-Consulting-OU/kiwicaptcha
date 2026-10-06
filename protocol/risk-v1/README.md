@@ -186,9 +186,11 @@ Files:
   carries the risk, value class, bucket trust and scope pressure inputs
   plus the expected work score and ladder rung. Both implementations
   (`RISK_PRICING_VECTORS_PATH` overrides the location) must resolve
-  every vector identically. The corpus ships 10000 vectors (grid
-  corners, a band-edge sweep and seeded interior draws): a 100000-vector
-  corpus at this encoding is about 20 MiB, far over the 3 MiB budget.
+  every vector identically. The corpus ships 100000 vectors (grid
+  corners, a band-edge sweep and seeded interior draws) in the columnar
+  schema version 2; the committed generator at
+  packages/kiwicaptcha-risk-php/tools/gen-pricing-vectors.php
+  reproduces it and self-checks the previously shipped corpus
 - `quarantine-vectors.json`: shared quarantine-selection vectors
   (authoritative). Quarantine is a decision disposition of the marks
   stage, never a ladder rung: a server-confirmed spam identity (every
