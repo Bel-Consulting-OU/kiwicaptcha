@@ -42,6 +42,10 @@ declare(strict_types=1);
  *                    answers code "record_not_found"). A replayed token
  *                    answers code "already_consumed": the consumed
  *                    marker in the core storage rejects it.
+ *                    `remoteip` is accepted for the shared gateway and
+ *                    siteverify client shape and is never honored: the
+ *                    connection's peer address governs IP binding, so a
+ *                    proxied caller can never claim a foreign address.
  *
  * The POST surfaces enforce a strict framing contract before any body
  * byte is read: no query parameters, a canonical bounded
@@ -678,7 +682,7 @@ function kiwiVerify(): void
 
         return;
     }
-    $payload = kiwiReadBody(['token', 'scope', 'request_binding']);
+    $payload = kiwiReadBody(['token', 'scope', 'request_binding', 'remoteip']);
     if ($payload === null) {
         return;
     }

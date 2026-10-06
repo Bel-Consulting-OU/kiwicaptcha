@@ -365,7 +365,9 @@ function kiwi_verify_call(string $verifyUrl, string $token, string $scope, strin
     $errorCodes = [];
     $parsed = json_decode((string) $response, true);
     if (is_array($parsed)) {
-        $success = ($parsed['success'] ?? false) === true;
+        // json mode fronts two answer shapes: the sidecar's provider
+        // shape (success) and the core deployment's ok shape.
+        $success = ($parsed['success'] ?? false) === true || ($parsed['ok'] ?? false) === true;
         $codes = $parsed['error-codes'] ?? [];
         if (is_array($codes)) {
             $errorCodes = array_values(array_filter($codes, 'is_string'));

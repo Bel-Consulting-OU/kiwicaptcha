@@ -86,7 +86,7 @@ KIWI_SECRET="$SECRET" KIWI_STORE="file=$TMP/sidecar-store" KIWI_PROFILE=sha18 \
 PIDS+=($!)
 for _ in $(seq 1 40); do curl -fsS "http://127.0.0.1:$SIDECAR_PORT/healthz" >/dev/null 2>&1 && break; sleep 0.25; done
 curl -fsS "http://127.0.0.1:$SIDECAR_PORT/healthz" >/dev/null || bad "sidecar healthz (see $TMP/sidecar.log)"
-STOKEN=$("$SOLVER" solve --endpoint "http://127.0.0.1:$SIDECAR_PORT/issue" --scope login 2>"$TMP/ssolve.err" | json_field token)
+STOKEN=$("$SOLVER" solve --endpoint "http://127.0.0.1:$SIDECAR_PORT/issue" --scope login --remoteip 127.0.0.1 2>"$TMP/ssolve.err" | json_field token)
 [ -n "$STOKEN" ] || bad "sidecar solve produced no token (see $TMP/ssolve.err)"
 SR=$(curl -fsS -X POST "http://127.0.0.1:$SIDECAR_PORT/verify" -H 'content-type: application/json' \
   -d "{\"token\":\"$STOKEN\",\"scope\":\"login\",\"remoteip\":\"127.0.0.1\"}")

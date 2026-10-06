@@ -1,0 +1,7 @@
+[Tue Oct  6 09:40:10 2026] PHP 8.5.10 Development Server (http://127.0.0.1:8493) started
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57038 Accepted
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57038 [403]: POST /kiwi-verify.php
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57038 Closing
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57040 Accepted
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57040 [403]: POST /kiwi-verify.php
+[Tue Oct  6 09:40:12 2026] 127.0.0.1:57040 Closing

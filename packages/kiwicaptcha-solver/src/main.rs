@@ -215,7 +215,7 @@ fn run_challenge(args: &[String]) -> ExitCode {
         eprintln!("usage error: --endpoint and --scope are required");
         return exit_code(2);
     };
-    let body = challenge_request_body(scope, opts.algorithm.as_deref());
+    let body = challenge_request_body(scope, opts.algorithm.as_deref(), opts.remoteip.as_deref());
     let response = match post_json(endpoint, &body, &opts.headers) {
         Ok(r) => r,
         Err(err) => {
@@ -261,7 +261,7 @@ fn run_solve(args: &[String]) -> ExitCode {
     };
 
     // 1. Fetch the challenge (the widget's own JSON flow).
-    let body = challenge_request_body(scope, opts.algorithm.as_deref());
+    let body = challenge_request_body(scope, opts.algorithm.as_deref(), opts.remoteip.as_deref());
     let response = match post_json(endpoint, &body, &opts.headers) {
         Ok(r) => r,
         Err(err) => {
@@ -572,11 +572,20 @@ fn refusal_code(err: &kiwicaptcha_solver::SolveError) -> Option<&'static str> {
 
 /// The challenge POST body: the scope always, the algorithm only when a
 /// non-default profile is requested (the widget's own body grammar).
-fn challenge_request_body(scope: &str, algorithm: Option<&str>) -> String {
-    match algorithm {
-        None => serde_json::json!({ "scope": scope }).to_string(),
-        Some(alg) => serde_json::json!({ "scope": scope, "algorithm": alg }).to_string(),
+fn challenge_request_body(scope: &str, algorithm: Option<&str>, remoteip: Option<&str>) -> String {
+    // remoteip rides the challenge request only when the caller supplied
+    // it: an IP-binding deployment (the sidecar under its default
+    // binding) requires it at issuance, while deployments that ignore it
+    // keep the strict two-field body.
+    let mut body = serde_json::Map::new();
+    body.insert("scope".to_string(), serde_json::json!(scope));
+    if let Some(alg) = algorithm {
+        body.insert("algorithm".to_string(), serde_json::json!(alg));
     }
+    if let Some(ip) = remoteip {
+        body.insert("remoteip".to_string(), serde_json::json!(ip));
+    }
+    serde_json::Value::Object(body).to_string()
 }
 
 /// Derive the default verify endpoint: the challenge URL with the trailing
