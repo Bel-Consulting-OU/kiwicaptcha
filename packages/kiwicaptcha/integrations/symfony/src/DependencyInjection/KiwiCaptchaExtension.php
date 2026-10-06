@@ -46,6 +46,9 @@ use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\FailClosedOutcomeTrustGate;
+use BelConsulting\KiwiCaptchaBundle\Risk\RedisAuthOutcomeWindow;
+use BelConsulting\KiwiCaptchaBundle\Risk\StoreBackedOutcomeTrustGate;
+use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkProbe;
 use BelConsulting\KiwiCaptchaBundle\Risk\KiwiOutcomeReporter;
 use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
@@ -1752,7 +1755,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 }
             }
             if ($bridgeArms) {
-                $container->setDefinition(OutcomeTrustGateInterface::class, new Definition(FailClosedOutcomeTrustGate::class));
+                $gateMode = (string) ($riskConfig['outcomes']['trust_gate'] ?? 'store');
+                $authWindowRef = null;
+                if ($gateMode === 'store' && $riskRedis !== null) {
+                    // The data-backed gate: the bridge-observed window
+                    // over the risk Redis, and the canonical marks
+                    // surface for the target-under-attack check.
+                    $container->setDefinition('kiwi_captcha.risk.auth_window', (new Definition(RedisAuthOutcomeWindow::class, [
+                        $riskRedis,
+                        sprintf('{kiwi:%s}:', $namespace),
+                    ]))->setArgument('$windowSecs', (int) ($riskConfig['outcomes']['auth_window_secs'] ?? 3600)));
+                    $authWindowRef = new Reference('kiwi_captcha.risk.auth_window');
+                    $container->setDefinition(TargetMarkProbe::class, new Definition(TargetMarkProbe::class, [
+                        new Reference('kiwi_captcha.risk.store'),
+                    ]));
+                    $container->setDefinition(OutcomeTrustGateInterface::class, (new Definition(StoreBackedOutcomeTrustGate::class, [
+                        new Reference('kiwi_captcha.risk.auth_window'),
+                        new Reference(TargetMarkProbe::class),
+                    ]))->setArgument('$theta', (float) ($riskConfig['outcomes']['failure_ratio_theta'] ?? 0.05)));
+                } else {
+                    $container->setDefinition(OutcomeTrustGateInterface::class, new Definition(FailClosedOutcomeTrustGate::class));
+                }
                 $container->setDefinition(KiwiOutcomeBridgeSubscriber::class, (new Definition(KiwiOutcomeBridgeSubscriber::class, [
                     new Reference(OutcomeReporterInterface::class),
                     new Reference('kiwi_captcha.risk.identity_factory'),
@@ -1770,6 +1793,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$trustGate', new Reference(OutcomeTrustGateInterface::class))
                     ->setArgument('$counters', new Reference('kiwi_captcha.metrics_counters'))
                     ->setArgument('$logger', $loggerRef)
+                    ->setArgument('$trustRequestIdHeader', (bool) ($riskConfig['outcomes']['trust_request_id_header'] ?? false))
+                    ->setArgument('$authWindow', $authWindowRef)
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
             }

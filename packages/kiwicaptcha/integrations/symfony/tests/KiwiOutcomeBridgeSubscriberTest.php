@@ -65,6 +65,8 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
         bool $targetFieldConfigured = true,
         ?OutcomeTrustGateInterface $trustGate = null,
         array $overrides = [],
+        bool $trustRequestIdHeader = false,
+        ?\BelConsulting\KiwiCaptchaBundle\Risk\AuthOutcomeWindowInterface $authWindow = null,
     ): KiwiOutcomeBridgeSubscriber {
         return new KiwiOutcomeBridgeSubscriber(
             $this->reporter,
@@ -78,6 +80,8 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
             $trustGate,
             $this->counters,
             $this->debugLogger(),
+            $trustRequestIdHeader,
+            $authWindow,
         );
     }
 
@@ -132,6 +136,45 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
     /**
      * @param array<string, mixed> $server
      */
+    public function testARepeatedRequestIdHeaderNeverCollapsesDistinctAttempts(): void
+    {
+        // The header is client-controlled: without a declared edge that
+        // overwrites it, two attempts on different connections must get
+        // distinct idempotency ids even when they send one shared value.
+        $subscriber = $this->subscriber();
+        $dispatcher = $this->dispatcher($subscriber);
+        $server = ['REMOTE_ADDR' => '203.0.113.9', 'REMOTE_PORT' => '54321', 'REQUEST_TIME_FLOAT' => 1700000000.5, 'HTTP_X_REQUEST_ID' => 'attacker-chosen-value'];
+        $attributes = ['_security.last_username' => self::CANARY_USERNAME];
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $this->request($server, [], $attributes)), LoginFailureEvent::class);
+        $server['REMOTE_PORT'] = '54322';
+        $server['REQUEST_TIME_FLOAT'] = 1700000000.9;
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $this->request($server, [], $attributes)), LoginFailureEvent::class);
+
+        self::assertCount(2, $this->reporter->reports);
+        $first = $this->reporter->reports[0]['idempotencyKey'];
+        $second = $this->reporter->reports[1]['idempotencyKey'];
+        self::assertNotNull($first);
+        self::assertNotNull($second);
+        self::assertNotSame($first, $second, 'one repeated header value must never collapse distinct attempt events');
+
+        // With the trusted-edge knob the header is honored: one value
+        // means one logical event, exactly what a rewriting proxy gives.
+        $this->reporter->reports = [];
+        $trusting = $this->subscriber(trustRequestIdHeader: true);
+        $trustingDispatcher = $this->dispatcher($trusting);
+        $server['REMOTE_PORT'] = '54323';
+        $trustingDispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $this->request($server, [], $attributes)), LoginFailureEvent::class);
+        $server['REMOTE_PORT'] = '54324';
+        $server['REQUEST_TIME_FLOAT'] = 1700000001.5;
+        $trustingDispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $this->request($server, [], $attributes)), LoginFailureEvent::class);
+        self::assertCount(2, $this->reporter->reports);
+        self::assertSame(
+            $this->reporter->reports[0]['idempotencyKey'],
+            $this->reporter->reports[1]['idempotencyKey'],
+            'a rewriting edge makes one header value one logical event'
+        );
+    }
+
     private function request(array $server = [], array $cookies = [], array $attributes = []): Request
     {
         $request = Request::create('https://example.com/login', 'POST', [], $cookies, [], $server);
@@ -216,12 +259,39 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
         );
     }
 
+    public function testTheStoreBackedGateCreditsACleanSessionAndRefusesAFailureHeavyOne(): void
+    {
+        $window = new \BelConsulting\KiwiCaptchaBundle\Risk\MemoryAuthOutcomeWindow();
+        $gate = new \BelConsulting\KiwiCaptchaBundle\Risk\StoreBackedOutcomeTrustGate($window, null, 0.05);
+        $session = $this->sessionCookie();
+        $request = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_PORT' => '54321'], ['__Host-kiwi-session' => $session]);
+        $dispatcher = $this->dispatcher($this->subscriber(trustGate: $gate, authWindow: $window));
+
+        $dispatcher->dispatch(new LoginSuccessEvent($request, $this->user('user-42')), LoginSuccessEvent::class);
+        self::assertCount(1, $this->reporter->reports);
+        self::assertNotNull($this->reporter->reports[0]['context']?->sessionId, 'a clean session earns the session credit');
+
+        // Three failures against one success put the ratio above the
+        // ceiling: the next success keeps the principal credit but the
+        // session rides no report context.
+        $this->reporter->reports = [];
+        for ($i = 0; $i < 3; ++$i) {
+            $failureRequest = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5 + $i, 'REMOTE_PORT' => (string) (54322 + $i)], ['__Host-kiwi-session' => $session], ['_security.last_username' => self::CANARY_USERNAME]);
+            $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $failureRequest), LoginFailureEvent::class);
+        }
+        $this->reporter->reports = [];
+        $successRequest = $this->request(['REQUEST_TIME_FLOAT' => 1234567891.5, 'REMOTE_PORT' => '54330'], ['__Host-kiwi-session' => $session]);
+        $dispatcher->dispatch(new LoginSuccessEvent($successRequest, $this->user('user-42')), LoginSuccessEvent::class);
+        self::assertCount(1, $this->reporter->reports, 'the principal credit is unconditional');
+        self::assertNull($this->reporter->reports[0]['context']?->sessionId, 'a failure-heavy session earns no session credit');
+    }
+
     public function testTrustGateAllowsSessionCreditWhenOpen(): void
     {
         $session = $this->sessionCookie();
         $request = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_PORT' => '54321'], ['__Host-kiwi-session' => $session]);
         $gate = new class implements OutcomeTrustGateInterface {
-            public function allowsSessionSourceCredit(string $principalPseudonym, ?string $targetPseudonym): bool
+            public function allowsSessionSourceCredit(string $principalPseudonym, ?string $sessionPseudonym, ?string $targetPseudonym): bool
             {
                 return true;
             }

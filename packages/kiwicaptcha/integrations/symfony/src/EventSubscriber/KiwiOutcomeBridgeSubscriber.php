@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\EventSubscriber;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\AuthOutcomeWindowInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
@@ -106,6 +107,8 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
         private readonly ?OutcomeTrustGateInterface $trustGate = null,
         private readonly ?MetricsCounterStore $counters = null,
         private readonly ?LoggerInterface $logger = null,
+        private readonly bool $trustRequestIdHeader = false,
+        private readonly ?AuthOutcomeWindowInterface $authWindow = null,
     ) {
         $this->idempotencyKey = self::deriveIdempotencyKey($idempotencyMaster);
     }
@@ -155,12 +158,17 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                 return;
             }
             $targetPseudonym = $this->targetPseudonymOf($request);
-            $sessionRaw = null;
-            if ($this->trustGate?->allowsSessionSourceCredit($principalPseudonym, $targetPseudonym) === true
-                && $request !== null
-                && $this->continuityCookie !== null
-            ) {
-                $sessionRaw = $this->continuityCookie->read($request);
+            $sessionRaw = $request !== null && $this->continuityCookie !== null
+                ? $this->continuityCookie->read($request)
+                : null;
+            $sessionPseudonym = $sessionRaw !== null ? $this->identityFactory->sessionId($sessionRaw) : null;
+            if ($sessionPseudonym !== null) {
+                $this->authWindow?->recordSuccess($sessionPseudonym);
+            }
+            if ($this->trustGate?->allowsSessionSourceCredit($principalPseudonym, $sessionPseudonym, $targetPseudonym) === true) {
+                // keep $sessionRaw: the gate approved session/source credit
+            } else {
+                $sessionRaw = null;
             }
             $context = $this->context(RiskEventKind::AuthenticationSuccess, $request, $sessionRaw);
             $this->report(Outcome::AuthenticationSuccess, $handle, $this->idempotencyKeyOf($request), $context);
@@ -181,7 +189,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
         try {
             $request = $this->requestOf($event);
             $username = $this->claimedIdentifier($request);
-            $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $this->sessionRaw($request));
+            $sessionRaw = $this->sessionRaw($request);
+            if ($sessionRaw !== null) {
+                $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
+            }
+            $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
             $idempotencyKey = $this->idempotencyKeyOf($request);
 
             if ($this->targetFieldConfigured && $username !== null) {
@@ -222,7 +234,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             }
             if (!$this->passportBadgeResolves($event)) {
                 $username = $identifier;
-                $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $this->sessionRaw($request));
+                $sessionRaw = $this->sessionRaw($request);
+                if ($sessionRaw !== null) {
+                    $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
+                }
+                $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
                 $handle = $username !== null && $this->targetFieldConfigured
                     ? $this->targetHandle($username)
                     : $this->sessionHandle($request);
@@ -361,12 +377,15 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * The request's unique id: Request::getRequestId() on newer Symfony,
-     * the conventional X-Request-Id header, or the deterministic
-     * fingerprint of the request's server material (time, address,
-     * port). An explicit id survives retries and replays with equal
-     * bytes; the fingerprint distinguishes distinct connections while
-     * collapsing replays of one request.
+     * The request's unique id, derived server-side: Request::getRequestId()
+     * on newer Symfony, or the fingerprint of the request's server
+     * material (time, address, port). The client-controlled X-Request-Id
+     * header is consulted ONLY when the deployment declares a fronting
+     * edge that overwrites it (risk.outcomes.trust_request_id_header);
+     * otherwise a caller could replay one header value across attempts
+     * and collapse every failure into one deduplicated event. The
+     * fingerprint distinguishes distinct connections while collapsing
+     * in-process replays of one request.
      */
     private function requestId(?Request $request): ?string
     {
@@ -379,9 +398,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                 return $id;
             }
         }
-        $header = $request->headers->get('X-Request-Id');
-        if (\is_string($header) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $header) === 1) {
-            return $header;
+        if ($this->trustRequestIdHeader) {
+            $header = $request->headers->get('X-Request-Id');
+            if (\is_string($header) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $header) === 1) {
+                return $header;
+            }
         }
         $parts = [
             $request->server->get('REQUEST_TIME_FLOAT'),
