@@ -6,8 +6,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 /**
  * The server-side state of the step-up plane: challenge records, the
- * per-principal begin bound and the durable principal state of the
- * time-based handler, its enrollment secret and its replay guard.
+ * per-principal begin bound, the escalating verification lockout
+ * budget and the durable principal state of the time-based handler,
+ * its enrollment secret and its replay guard.
  *
  * The challenge lifecycle is single-use and replay safe by
  * construction. create() mints an unguessable id under a TTL.
@@ -17,6 +18,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  * countBegin() is the store-backed rate bound of begin(), a fixed
  * per-principal window counter whose admission the handler compares
  * against the configured cap.
+ *
+ * The lockout budget is the cross-challenge brute-force bound: one
+ * fixed-window failure counter and one lockout deadline per
+ * (dimension, pseudonym) pair, where the dimension is "principal" or
+ * "target". The handlers escalate the lockout from the failure count
+ * and refuse both begin() and complete() while it holds, so the
+ * per-challenge attempt cap can never be farmed across challenges.
  *
  * Keys carry only pseudonyms and opaque ids: every key of this store
  * is derived from the deployment namespace plus either a random
@@ -101,4 +109,32 @@ interface StepUpChallengeStore
      * $withinSecs (a caller-supplied $now keeps the clock testable).
      */
     public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool;
+
+    /**
+     * Count one failed verification for the (dimension, pseudonym)
+     * budget key inside the fixed window and answer the window's new
+     * failure count. The dimension is "principal" or "target"; the
+     * pseudonym is the canonical form of that dimension. The handler
+     * escalates the lockout from the returned count.
+     */
+    public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int;
+
+    /**
+     * The lockout deadline (epoch seconds) of the budget key, or 0
+     * when the key is not locked.
+     */
+    public function lockoutUntil(string $dimension, string $pseudonym, int $now): int;
+
+    /**
+     * Arm (or extend) the lockout of the budget key to at least
+     * $now + $ttlSecs. Never shortens an existing deadline.
+     */
+    public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void;
+
+    /**
+     * Clear the failure counter and the lockout of the budget key: the
+     * reward of a completed step-up, so one verified identity is not
+     * kept locked by its own earlier typos.
+     */
+    public function clearLockout(string $dimension, string $pseudonym): void;
 }

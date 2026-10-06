@@ -620,8 +620,12 @@ pub struct RiskEngine<
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
     /// Optional target-identifier resolver: when attached,
     /// [`RiskEngine::resolve_target_id`] derives the target pseudonym of
-    /// an assessment as a side channel beside the frozen observation
-    /// wire. No assessment path reads it.
+    /// an assessment. The pseudonym is the live key of the
+    /// target-dimension state (failure counter + spread HLLs): the
+    /// outcomes facade reports authentication failures against it and
+    /// the marks stage reads the attacked-target record back, so the
+    /// decision path protects the account. The observation wire itself
+    /// stays frozen.
     target_resolver: Option<Arc<dyn TargetIdentifierResolver>>,
     /// Optional marks reader: when attached, the decisive attacker stage
     /// ([`crate::marks::apply`]) runs after the policy decision on every
@@ -1515,14 +1519,32 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     Err(RiskError::CalibrationWeightRequired(id)) => {
                         return Err(RiskError::CalibrationWeightRequired(id));
                     }
-                    Ok(0) | Err(_) => {
+                    // Reputation authorization: statuses 1 and 2 always;
+                    // status 3 (a capped label) only when the outcome is
+                    // abusive — a capped TRUST label must never mint
+                    // unlimited reputation credit (the v2 confirm's trust
+                    // caps return 4 for exactly that case). Status 0/4
+                    // and backend errors book nothing: the receipt/ledger
+                    // survives an error, so a retry applies the outcome
+                    // exactly once instead of amplifying it.
+                    Ok(status) => {
+                        let authorize = matches!(status, 1 | 2)
+                            || (status == 3 && !legitimate);
+                        if !authorize {
+                            return Ok(EventReceipt {
+                                event_id: observation.event_id,
+                                is_duplicate: true,
+                                signals: SignalVector::zero(),
+                            });
+                        }
+                    }
+                    Err(_) => {
                         return Ok(EventReceipt {
                             event_id: observation.event_id,
                             is_duplicate: true,
                             signals: SignalVector::zero(),
                         });
                     }
-                    Ok(_) => {}
                 }
             }
         }
@@ -1562,11 +1584,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// Returns the shared accepted-outcome status (wire contract with PHP):
     /// `0` nothing consumed (missing / already confirmed / corrupt /
     /// unsampled-discard), `1` first confirmation with calibration
-    /// recorded, `2` first confirmation, deliberately unsampled. Only
-    /// statuses 1 and 2 authorize the first-party reputation event (see
-    /// [`RiskEngine::record_feedback`]); the reputation event itself is
-    /// booked separately. `weight` is the inverse sampling probability for
-    /// weighted sampling (default 1.0).
+    /// recorded, `2` first confirmation, deliberately unsampled, `3`
+    /// first confirmation with calibration withheld by the per-source
+    /// window cap, `4` first confirmation whose trust-granting reputation
+    /// credit is withheld by a trust cap. Reputation is authorized on 1
+    /// and 2 (and on 3 only for abuse labels); 4 never authorizes it
+    /// (see [`RiskEngine::record_feedback`]); the reputation event itself
+    /// is booked separately. `weight` is the inverse sampling probability
+    /// for weighted sampling (default 1.0).
     ///
     /// # Errors
     ///
@@ -1722,6 +1747,62 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             None,
             None,
         )
+    }
+
+    /// The dedupe id of one typed outcome report: the exact
+    /// [`normalize_idempotency_key`] result the feedback pipeline books
+    /// under, so the long-memory mark write and the feedback event share
+    /// one idempotency domain. An absent or empty caller key returns `''`
+    /// (mark dedupe disabled — no marker key is written for a report
+    /// that cannot be retried).
+    pub(crate) fn derive_outcome_event_id(
+        &self,
+        idempotency_key: Option<&str>,
+        scope: u32,
+        event: RiskEventKind,
+    ) -> Result<String, RiskError> {
+        if idempotency_key.filter(|k| !k.is_empty()).is_none() {
+            return Ok(String::new());
+        }
+        normalize_idempotency_key(idempotency_key, scope, event, &self.keys.event)
+    }
+
+    /// The spread elements one outcome report contributes to the target
+    /// dimension's HLLs: the source pseudonym of the reporting context
+    /// (the current epoch's id, the same one the feedback observation
+    /// books) and no asn bucket (the deployment's ASN dataset resolves
+    /// that element at its own seam). An absent context records no
+    /// spread element.
+    pub(crate) fn target_spread_source(&self, ctx: Option<&RiskContext<'_>>) -> String {
+        let Some(ctx) = ctx else {
+            return String::new();
+        };
+        let now_secs = (crate::now_ms() / 1000) as i64;
+        let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
+        self.identity.source_id_for_epoch(ctx.source_ip, src_epoch)
+    }
+
+    /// Registers one authentication failure against the target
+    /// dimension (the outcome-bridge write path of target-account
+    /// protection). Fails closed: a store error surfaces, never a silent
+    /// drop.
+    pub(crate) fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<(), RiskError> {
+        self.store
+            .register_target_failure(target_id, source, asn)
+            .map_err(|e| RiskError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Resets the target's failure counter (step-up completed).
+    pub(crate) fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskError> {
+        self.store
+            .clear_target_failures(target_id)
+            .map_err(|e| RiskError::Store(e.to_string()))
     }
 
     /// The typed outcomes API's feedback entry: books the mapped risk-v1
@@ -4794,6 +4875,7 @@ mod tests {
                                 crate::outcomes::MarkDimension::Session,
                                 crate::outcomes::MarkRecord {
                                     kind: "accountBanned".to_string(),
+                                    last_kind: "accountBanned".to_string(),
                                     count: 1,
                                     first_ms: now,
                                     last_ms: now,

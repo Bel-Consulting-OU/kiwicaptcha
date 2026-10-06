@@ -12,7 +12,8 @@ PORT=8499
 sh "$RT_DIR/target.sh" down eph >/dev/null 2>&1 || true
 EPH_REDIS_URL=$(redis-cli -u "${KIWI_RT_RISK_REDIS_URL:-redis://127.0.0.1:6480}" ping >/dev/null 2>&1 && echo "${KIWI_RT_RISK_REDIS_URL:-redis://127.0.0.1:6480}" || echo "")
 if [ -z "$EPH_REDIS_URL" ]; then
-    printf "{\"harness\":\"epoch-manipulation\",\"verdict\":\"REFUTED\",\"wire_code\":\"target_unavailable\"}\n"
+    # No target means no measurement: INCONCLUSIVE, never a quiet REFUTED.
+    printf "{\"harness\":\"epoch-manipulation\",\"verdict\":\"INCONCLUSIVE\",\"wire_code\":\"target_unavailable\"}\n"
     exit 0
 fi
 env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \

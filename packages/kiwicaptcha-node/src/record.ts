@@ -18,7 +18,7 @@ export const RSW_IDENTITY_PROTOCOL_VERSION = 5;
 /** Maximum byte length of any wire string (the serde parse ceiling). */
 export const MAX_STRING_BYTES = 4096;
 
-export const MAX_EXECUTION_VERSION = 5;
+export const MAX_EXECUTION_VERSION = 6;
 export const MAX_PROGRAM_BASE64 = 4096;
 
 export interface ChallengeRecord {

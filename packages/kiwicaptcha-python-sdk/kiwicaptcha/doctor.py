@@ -18,6 +18,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
+from . import argon2 as argon2_backend
 from .argon2 import derive as argon2id_derive
 from .canonical import canonical_payload, sign_payload_v2
 from .constants import NONCE_B64_BYTES, SALT_B64_BYTES
@@ -45,7 +46,7 @@ class CheckResult:
 
 
 def check_settings(secret: str, profile: str) -> CheckResult:
-    from .config import MIN_SECRET_BYTES, PROFILES
+    from .config import MIN_SECRET_BYTES, PROFILES, PROFILE_ARGON_PARAMS, argon_rung_verifiable
 
     if len(secret) < MIN_SECRET_BYTES:
         return CheckResult(
@@ -58,6 +59,16 @@ def check_settings(secret: str, profile: str) -> CheckResult:
             "settings",
             False,
             f"the profile must be one of {', '.join(PROFILES)}",
+        )
+    rung = PROFILE_ARGON_PARAMS.get(profile)
+    if rung is not None and not argon_rung_verifiable(*rung):
+        return CheckResult(
+            "settings",
+            False,
+            f"the profile {profile!r} issues an argon2id rung this"
+            f" runtime cannot verify (backend"
+            f" {argon2_backend.backend_name()}); install argon2-cffi or"
+            " choose the standard profile",
         )
     return CheckResult("settings", True, "the settings shape is valid")
 
@@ -183,7 +194,8 @@ def check_proof_budget(profile: str) -> CheckResult:
     return CheckResult(
         "proof_budget",
         True,
-        f"argon2id m=16 t=3 derived in {elapsed * 1000:.0f} ms (pure python);"
+        f"argon2id m=16 t=3 derived in {elapsed * 1000:.0f} ms"
+        f" ({argon2_backend.backend_name()});"
         f" the {profile} rung accepts {bits} target bits",
     )
 

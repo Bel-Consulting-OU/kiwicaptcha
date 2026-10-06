@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeTrustGateInterface;
+use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
 use KiwiCaptcha\Risk\Outcomes\OutcomeHandle;
@@ -272,11 +273,13 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
 
     /**
      * The target handle. The engine derives the full 32-byte digest of
-     * the normalized identifier; the outcomes API's handle gate also
-     * accepts the 128-bit family shape, so the full digest is tried
-     * first and its 128-bit prefix second. Authentication outcomes
-     * write no target marks, so the two spellings cannot split a mark
-     * key; anything else is a skip with a debug log.
+     * the normalized identifier (the canonical 64-hex target
+     * pseudonym); the outcomes API addresses target marks under the
+     * 128-bit handle spelling, so the one projection lives in
+     * {@see TargetMarkKey::of()} — never a try-both fallback here.
+     * Authentication outcomes write no target marks of their own, so
+     * the projection cannot split a mark key; anything else is a skip
+     * with a debug log.
      */
     private function targetHandle(string $rawUsername): ?OutcomeHandle
     {
@@ -286,12 +289,12 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
 
             return null;
         }
-        foreach ([$digest, substr($digest, 0, 32)] as $candidate) {
-            try {
-                return OutcomeHandle::target($candidate);
-            } catch (\Throwable) {
-                continue;
-            }
+        try {
+            return OutcomeHandle::target(TargetMarkKey::of($digest));
+        } catch (\Throwable) {
+            // The projection refused a non-canonical digest (or the
+            // handle gate refused the derived key): the report is
+            // skipped, never sent under a raw identifier.
         }
         $this->debug('target handle rejected the derived pseudonym shape; the report is skipped, never raw');
         $this->countSkip('raw_identifier_rejected');

@@ -39,8 +39,12 @@ and guards exactly the sign-up endpoint.
 
 ## The shared gateway contract
 
-`kiwi-verify.php` (shipped at the top level and copied into each
-gateway directory) is the one companion every gateway needs. All
+`kiwi-verify.php` (the one canonical endpoint, at the top level of
+this directory) is the companion every gateway needs. The gateway
+directories (`nginx/`, `caddy/`, `traefik/`) ship a thin shim that
+requires that canonical file, so in-tree paths keep working without
+duplicated endpoint logic. In a deployment, copy the canonical
+`kiwi-verify.php` to the web root — do not copy a shim alone. All
 three gateways answer the same contract:
 
 - verify URL: `KIWI_VERIFY_URL` (default the sidecar at
@@ -48,7 +52,9 @@ three gateways answer the same contract:
   the wire format to a provider siteverify endpoint);
 - secret bearer: `KIWI_BEARER`, sent only server-to-server;
 - token sources: the `X-Kiwi-Token` header, the incumbent form fields,
-  a JSON body, or the `kiwi_token` cookie;
+  a JSON body under a namespaced key (`kiwi_token` or
+  `captcha_response` — never the bare `token` key, which is the
+  application's own wire field), or the `kiwi_token` cookie;
 - deny: 403 with `X-Kiwi-Deny: 1`, or 302 to `KIWI_REDIRECT` with
   `KIWI_DENY=302` (nginx turns the 403 into the redirect itself via
   `error_page`, since auth_request passes only 2xx);

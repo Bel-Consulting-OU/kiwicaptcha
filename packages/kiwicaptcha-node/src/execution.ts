@@ -14,12 +14,18 @@ import { decodeStdBase64, encodeStdBase64 } from './base64.js';
 
 export const EXECUTION_LABEL = 'kiwi-execution-v1';
 export const EXECUTION_FORMAT_VERSION = 1;
-export const EXECUTION_MAX_VERSION = 5;
+export const EXECUTION_MAX_VERSION = 6;
 export const EXECUTION_MIN_OPS = 8;
 export const EXECUTION_MAX_OPS = 24;
 export const EXECUTION_MAX_PROGRAM_BASE64 = 4096;
 export const SRCDOC_PREEXISTING_BODY_ELEMENTS = 1;
 export const SRCDOC_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
+
+/** The probe word vocabulary of OP_CSS_GEOM (mirrors the Rust core). */
+export const CSS_WORDS: readonly string[] = ['kiwicaptcha', 'execution', 'boundary'];
+
+/** The span vocabulary of OP_RANGE_ORDER (mirrors the Rust core). */
+export const RANGE_WORDS: readonly string[] = ['alpha', 'beta', 'gamma', 'delta'];
 
 export const OP_ADD = 0;
 export const OP_SUB = 1;
@@ -66,7 +72,12 @@ export const OP_DOM_EVENT_PHASE = 41;
 export const OP_DOM_URL_CANON = 42;
 export const OP_DOM_TEXT_MUTATE = 43;
 export const OP_DOM_SELECT_DEP = 44;
-export const OP_COUNT = 45;
+export const OP_CSS_GEOM = 45;
+export const OP_MUT_ORDER = 46;
+export const OP_EV_PHASE_FULL = 47;
+export const OP_RANGE_ORDER = 48;
+export const OP_INT_OBS = 49;
+export const OP_COUNT = 50;
 
 export const TRACE_NAMES: readonly string[] = [
   'add', 'sub', 'mul', 'xor', 'and', 'or', 'shl', 'shr',
@@ -76,6 +87,7 @@ export const TRACE_NAMES: readonly string[] = [
   'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
   'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
   'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
+  'dcsgeom', 'dmutord', 'devphf', 'drange', 'dintobs',
 ];
 
 export const ATTR_NAMES: readonly string[] = ['data-kiwi', 'data-a', 'data-b', 'title', 'data-x'];
@@ -192,7 +204,13 @@ function decodeProgramInner(programB64: string): ExecutionProgram | null {
   if (opCount === null || opCount < EXECUTION_MIN_OPS || opCount > EXECUTION_MAX_OPS) {
     return null;
   }
-  const maxOpcode = opVersion === 1 ? 33 : opVersion === 2 ? 34 : opVersion === 3 ? 35 : opVersion === 4 ? 37 : OP_COUNT;
+  const maxOpcode =
+    opVersion === 1 ? 33
+      : opVersion === 2 ? 34
+        : opVersion === 3 ? 35
+          : opVersion === 4 ? 37
+            : opVersion === 5 ? 45
+              : OP_COUNT;
   const ops: ExecutedOp[] = [];
   for (let i = 0; i < opCount; i++) {
     const opcode = reader.readByte();
@@ -396,6 +414,35 @@ function readOperands(reader: Reader, opcode: number): NumOperands | null {
       const b1 = reader.readByte();
       const b2 = reader.readByte();
       return b0 === null || b1 === null || b2 === null ? null : { b0, b1, b2 };
+    }
+    case OP_CSS_GEOM: case OP_INT_OBS: {
+      const id = readIdKeyed(reader);
+      if (id === null) {
+        return null;
+      }
+      const seed = reader.readByte();
+      const cell = reader.readByte();
+      return seed === null || cell === null ? null : { id: id.id, seed, cell: cell % 64 };
+    }
+    case OP_MUT_ORDER: case OP_RANGE_ORDER: {
+      const id = readIdKeyed(reader);
+      if (id === null) {
+        return null;
+      }
+      const b0 = reader.readByte();
+      const b1 = reader.readByte();
+      const cell = reader.readByte();
+      return b0 === null || b1 === null || cell === null
+        ? null
+        : { id: id.id, b0, b1, cell: cell % 64 };
+    }
+    case OP_EV_PHASE_FULL: {
+      const id = readIdKeyed(reader);
+      if (id === null) {
+        return null;
+      }
+      const cell = reader.readByte();
+      return cell === null ? null : { id: id.id, cell: cell % 64 };
     }
     default:
       return null;
@@ -902,6 +949,22 @@ function simulateOp(op: number, operands: NumOperands, state: SimState): string 
       }
       return String(completed);
     }
+    // The version-6 real-platform probes are browser-observed: the
+    // pure sim emits the placeholder and touches no model state (the
+    // browser probes run on self-removed anonymous nodes), and the
+    // submitted-trace walker validates every entry against its
+    // operand-derived envelope, replaying the reported observation
+    // into the u8 cell.
+    case OP_CSS_GEOM:
+      return 'dcsgeom';
+    case OP_MUT_ORDER:
+      return 'dmutord';
+    case OP_EV_PHASE_FULL:
+      return 'devphf';
+    case OP_RANGE_ORDER:
+      return 'drange';
+    case OP_INT_OBS:
+      return 'dintobs';
     default:
       return '0';
   }
@@ -980,6 +1043,66 @@ function digestOverTraceInner(
  * the exact sibling rank and ancestor depth, the observe replay into
  * the u8 state, and the pinned sandbox URL digest.
  */
+/**
+ * The OP_CSS_GEOM acceptance envelope, derived from the style seed
+ * exactly as the interpreter derives the inline declaration: the
+ * computed font size must equal the drawn px value (lo == hi), and the
+ * laid-out height must fall inside the wrapped-line-box interval the
+ * drawn word and border produce.
+ */
+function cssGeomEnvelope(seed: number): [number, number, number, number] {
+  const fs = 10 + ((seed >> 5) % 5);
+  const brd = 1 + ((seed >> 3) % 3);
+  const count = CSS_WORDS.length;
+  const textLen = CSS_WORDS[seed % count]!.length + 1 + CSS_WORDS[(seed + 1) % count]!.length;
+  const linesMax = Math.max(Math.floor((textLen * fs * 4 + 319) / 320) + 1, 1);
+  return [fs, fs, fs + 2 * brd, linesMax * 2 * fs + 2 * brd + 2];
+}
+
+/**
+ * The OP_MUT_ORDER acceptance envelope: the exact record-type code
+ * sequence the churn operands draw and the record count the cell
+ * replay carries.
+ */
+function mutOrderEnvelope(b0: number, b1: number): [string, number] {
+  const kids = 1 + (b0 % 2);
+  let expected = '1';
+  for (let i = 0; i < kids + 1; i++) {
+    expected += '2';
+  }
+  if ((b1 & 1) === 1) {
+    expected += '3';
+  }
+  expected += '7';
+  return [expected, kids + 2 + (b1 & 1)];
+}
+
+/**
+ * The OP_RANGE_ORDER acceptance envelope: the exact range string
+ * length over the drawn three-word text graph and the line-box
+ * fragment interval.
+ */
+function rangeOrderEnvelope(ra: number, rb: number): [number, number, number] {
+  const w0 = RANGE_WORDS[ra % 4]!.length;
+  const w1 = RANGE_WORDS[(ra + 1) % 4]!.length;
+  const w2 = RANGE_WORDS[(ra + 2) % 4]!.length;
+  const a = ra % 5;
+  const e = rb % (w2 + 1);
+  return [w0 - a + w1 + e, 1, 16];
+}
+
+/**
+ * The OP_INT_OBS acceptance envelope: the quantized intersection
+ * ratio interval the seed draws and the threshold percent band.
+ */
+function intObsEnvelope(seed: number): [number, number, number] {
+  const m = 5 + (seed % 36);
+  const ih = Math.min(Math.max(40 - m, 0), 20);
+  const qExp = ih * 5;
+  const t0 = [0, 25, 50, 75][seed % 4]!;
+  return [Math.max(qExp - 2, 0), Math.min(qExp + 2, 100), t0];
+}
+
 export function verifyExecutedTrace(
   programB64: string,
   nonce: string,
@@ -1088,6 +1211,116 @@ export function verifyExecutedTrace(
         return null;
       }
       pos += 65;
+    } else if (op === OP_CSS_GEOM) {
+      // The computed-geometry envelope: the computed font size must
+      // equal the drawn declaration exactly, and the laid-out height
+      // must land inside the operand-derived box-model interval.
+      if (!state.docIds.has(str(operands, 'id'))) {
+        return null;
+      }
+      const close = trace.indexOf(')', pos);
+      if (close < 0) {
+        return null;
+      }
+      const parts = trace.slice(pos, close).split(',', 2);
+      const fs = Number(parts[0]);
+      const height = Number(parts[1]);
+      const [fsLo, fsHi, hLo, hHi] = cssGeomEnvelope(num(operands, 'seed'));
+      if (!Number.isInteger(fs) || !Number.isInteger(height) || fs < fsLo || fs > fsHi || height < hLo || height > hHi) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), height);
+      pos = close + 1;
+    } else if (op === OP_MUT_ORDER) {
+      // The mutation delivery-order envelope: the exact record-type
+      // sequence the churn operands draw.
+      if (!state.docIds.has(str(operands, 'id'))) {
+        return null;
+      }
+      const close = trace.indexOf(')', pos);
+      if (close < 0) {
+        return null;
+      }
+      const [expected, records] = mutOrderEnvelope(num(operands, 'b0'), num(operands, 'b1'));
+      if (trace.slice(pos, close) !== expected) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), records);
+      pos = close + 1;
+    } else if (op === OP_EV_PHASE_FULL) {
+      // The full-phase envelope: capture 1, target-phase registration
+      // order 2 then 3, bubble 4, and the bubble listener's dataset
+      // side effect read back as "3".
+      if (!state.docIds.has(str(operands, 'id'))) {
+        return null;
+      }
+      const close = trace.indexOf(')', pos);
+      if (close < 0) {
+        return null;
+      }
+      const body = trace.slice(pos, close);
+      const sep = body.indexOf(':');
+      const seq = sep < 0 ? body : body.slice(0, sep);
+      const ds = sep < 0 ? '' : body.slice(sep + 1);
+      if (seq !== '1234' || ds !== '3') {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), 4);
+      pos = close + 1;
+    } else if (op === OP_RANGE_ORDER) {
+      // The Range/Selection envelope: the range string length derived
+      // from the drawn text graph, the line-box fragment interval, and
+      // the Selection holding exactly the added range.
+      if (!state.docIds.has(str(operands, 'id'))) {
+        return null;
+      }
+      const close = trace.indexOf(')', pos);
+      if (close < 0) {
+        return null;
+      }
+      const parts = trace.slice(pos, close).split(',', 3);
+      const t = Number(parts[0]);
+      const rects = Number(parts[1]);
+      const selCount = Number(parts[2]);
+      const [tExact, rectsLo, rectsHi] = rangeOrderEnvelope(num(operands, 'b0'), num(operands, 'b1'));
+      if (
+        !Number.isInteger(t) || !Number.isInteger(rects) || !Number.isInteger(selCount)
+        || t !== tExact || rects < rectsLo || rects > rectsHi || selCount !== 1
+      ) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), rects);
+      pos = close + 1;
+    } else if (op === OP_INT_OBS) {
+      // The intersection envelope: the observer's initial delivery,
+      // the quantized ratio interval, and isIntersecting agreeing with
+      // the ratio against the drawn threshold.
+      if (!state.docIds.has(str(operands, 'id'))) {
+        return null;
+      }
+      const close = trace.indexOf(')', pos);
+      if (close < 0) {
+        return null;
+      }
+      const parts = trace.slice(pos, close).split(',', 3);
+      const fired = Number(parts[0]);
+      const q = Number(parts[1]);
+      const isInt = Number(parts[2]);
+      const [qLo, qHi, t0Pct] = intObsEnvelope(num(operands, 'seed'));
+      if (!Number.isInteger(fired) || !Number.isInteger(q) || !Number.isInteger(isInt)) {
+        return null;
+      }
+      if (fired !== 1 || q < qLo || q > qHi) {
+        return null;
+      }
+      if (q >= t0Pct + 2 && isInt !== 1) {
+        return null;
+      }
+      if (q <= t0Pct - 2 && isInt !== 0) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), q);
+      pos = close + 1;
     } else {
       const simEntry = `${sim})`;
       if (!trace.startsWith(simEntry, pos)) {

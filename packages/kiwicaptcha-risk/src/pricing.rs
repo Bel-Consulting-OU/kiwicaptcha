@@ -732,6 +732,7 @@ mod tests {
                 MarkDimension::Session,
                 MarkRecord {
                     kind: "accountBanned".to_string(),
+                    last_kind: "accountBanned".to_string(),
                     count: 1,
                     first_ms: now,
                     last_ms: now,

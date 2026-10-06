@@ -81,6 +81,7 @@ mod tests {
     fn mark(kind: &str, last_ms: i64) -> MarkRecord {
         MarkRecord {
             kind: kind.to_string(),
+            last_kind: kind.to_string(),
             count: 1,
             first_ms: last_ms,
             last_ms,

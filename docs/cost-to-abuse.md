@@ -9,31 +9,133 @@ measurements on the release machine.
 Reference class provenance: Every figure below is a conservative class value compiled from free, public sources, rounded in the defender's disfavor (the attacker is assumed fast and cheap). No measurement precision is claimed: these are order-of-magnitude anchors for the bench's dollar comparison, refreshed by hand, and the bench prints this file's as_of beside every derived dollar figure.
 (as of 2026-10; refreshed by hand, stale entries replaced).
 
+## The value-class table
+
+What a solved request is worth per value class, against what the
+rung costs an attacker. Declared abuse values are the calibration
+defaults from `packages/kiwicaptcha-solver/reference-costs.json`
+(`economics.calibration`): each one is the bench-measured attacker
+cost per 1,000 solves of its rung, divided by the documented 10×
+margin and rounded down to the clean money figure at or below it.
+Adopters override the declared value per scope in their doctor
+configuration.
+
+| Value class | Rung | Declared abuse value (USD / 1,000 solves) | Measured attacker anchor (USD / 1,000 solves) | Margin |
+| --- | --- | --- | --- | --- |
+| low | sha16 | $0.00005 | $0.000937 | anchor ÷ 10, rounded down |
+| standard | sha18 | $0.0001 | $0.001962 | anchor ÷ 10, rounded down |
+| high | argon16 | $0.0001 | $0.001225 | anchor ÷ 10, rounded down |
+| critical | argon64 | $0.0002 | $0.00421 | anchor ÷ 10, rounded down |
+
+Provenance: anchors are the `this_cpu_usd` column of the bench's
+dollar table (the D3.3 campaign measurement on the release bench
+host, `tools/redteam/runs/env/d33-economics-<profile>.json`); the
+declared values follow `economics.calibration` exactly
+(`reference-costs.json`). Every default prices inside its rung on
+the honest anchor, so the D3.3 gate row measures the margin rather
+than a wish.
+
+The ceiling statement is the honest finding the calibration makes
+visible: raw proof of work cannot price a stake above its rung's
+measured cost at any difficulty. A scope whose real stake exceeds
+its rung's ceiling is answered by the doctor with exactly that
+verdict and the enforcement knob — raise the scope's disposition
+minimum (`risk.scopes.<name>.minimum`) to `step_up` or `deny`.
+
 ## Hardware classes the attacker rents
 
-| Hardware class | Advertised rate | Algorithm | Class id |
-| --- | --- | --- | --- |
-| mid-range consumer GPU | 2.0e+9 hashes/s | sha256 | gpu-mid-2026 |
-| high-end consumer GPU | 1.5e+10 hashes/s | sha256 | gpu-highend-2026 |
-| dedicated mining silicon | 1.0e+12 hashes/s | sha256 | mining-silicon-2026 |
+Dollar rates are current published on-demand rental, rounded in the
+defender's disfavor (the attacker is assumed to take the cheapest
+published community rate). Hash rates are conservative class anchors
+from public GPU cracking-benchmark indices (hashcat-class raw SHA-256
+figures), not a claim about any one card.
+
+| Hardware class | Class id | Algorithm | Rate (hashes/s) | Rental (USD/hour) | Source |
+| --- | --- | --- | --- | --- | --- |
+| mid-range consumer GPU (RTX 3090-class) | gpu-mid-2026 | sha256 | 3.0e+9 | $0.22 | RunPod Community Cloud, RTX 3090, pricing page updated 2026-09-27 (runpod.io/pricing, fetched 2026-10) |
+| high-end consumer GPU (RTX 4090-class) | gpu-highend-2026 | sha256 | 2.0e+10 | $0.34 | RunPod Community Cloud, RTX 4090, pricing page updated 2026-09-27 (runpod.io/pricing, fetched 2026-10) |
+
+Cross-check on the datacenter cards an attacker can also rent
+(same page, and lambda.ai/service/gpu-cloud fetched 2026-10): RTX A5000
+$0.16/hr, RTX A6000 $0.33/hr, A100 PCIe $1.19/hr (RunPod community);
+A6000 $1.09/hr, A100 $1.99/hr (Lambda on-demand). None of these is
+cheaper per unit SHA-256 work than the consumer classes above at the
+tabled hash rates, so the consumer rows are the binding ones.
+
+Mining-ASIC silicon is deliberately absent. A mining ASIC is
+sha256d-hardwired for the Bitcoin block-header midstate pipeline; the
+SHA rungs here hash an arbitrary challenge string (challenge ∥ nonce),
+so the chip cannot be pointed at this challenge format without a
+redesign, and no credible public rental market exists for
+captcha-scale ASIC cycles. It is not a usable attacker class for this
+challenge, and carrying a row for it would imply otherwise.
 
 ## What one solve costs an attacker here
 
-| Ladder rung | Measured cost | Note |
-| --- | --- | --- |
-| sha18 | ~4x the sha16 row (16x work, minus find cost) | native sha256, single core |
-| sha20 | ~16x the sha16 row | native sha256, single core |
-| argon16..64 | memory-hard; see the bench's own table | native argon2id, single core |
-| rsw | inherently sequential; no hardware class buys a parallel speedup | time-lock squaring |
+Ratios are against the sha16 rung. A leading-zero rung costs
+2^(bits) expected hashes, so the ladder multiplies work by 2 per
+2 bits of difficulty.
+
+| Ladder rung | Work vs sha16 | Measured cost | Note |
+| --- | --- | --- | --- |
+| sha16 | 1× (2^16 hashes) | the bench's own table | native sha256, single core |
+| sha18 | 4× (2^18 ÷ 2^16 = 4) | 4× the sha16 row | native sha256, single core |
+| sha20 | 16× (2^20 ÷ 2^16 = 16) | 16× the sha16 row | native sha256, single core |
+| argon16..64 | memory-hard; not a sha ratio | see the bench's own table | native argon2id, single core |
+| rsw | inherently sequential; no hardware class buys a parallel speedup | see the bench's own table | time-lock squaring |
+
+argon2id and rsw deliberately carry no attacker-rate rows in the
+hardware table. Published GPU argon2id figures swing with the memory
+cost and vendor, so one number would fabricate precision; rsw
+squaring is inherently sequential and no hardware class buys a
+parallel speedup. For those rungs the bench reports the native
+measurement and prints insufficient-reference-data verdicts instead
+of guessing.
+
+## Open measurement: browser-versus-native asymmetry on rsw
+
+**Unmeasured.** The rsw rung is solved by the honest client in the
+browser (JavaScript BigInt / WebCrypto), while an attacker would
+solve it natively (Rust `rug`/`num-bigint`, GMP). If a native
+implementation is *k*× faster than the shipped browser solver on the
+same hardware, the attacker's real cost is 1/*k* of the honest solve
+cost, and the honest-side measurement would overstate the price of
+abuse by that factor. **No value of *k* is asserted here** — this
+document does not invent one.
+
+Methodology to close it:
+
+1. Take the same rsw challenge (T ∈ {75,000, 150,000, 300,000}
+   squarings, the shipped ladder rungs) and the same modulus.
+2. Measure wall-clock per solve for (a) the shipped browser solver in
+   the three release engines (Chromium, Firefox, WebKit) and (b) a
+   native reference implementation (the repository's Rust/GMP path),
+   on the **same physical CPU**, warm, n ≥ 30 solves each.
+3. Publish *k* = native ÷ browser (geometric mean across engines),
+   the per-engine spread, and the three T points separately — the
+   asymmetry may not be constant in T.
+4. Repeat on at least one mainstream mobile CPU; the honest client
+   is disproportionately mobile.
+5. Until *k* is measured and published here, the rsw row reports the
+   sequential-work bound only, and any rsw dollar verdict from the
+   bench is labelled with this open measurement rather than folded
+   into a value-class figure.
 
 ## Reading the table
 
-The campaigns report cost per ACCEPTED abuse. Every green campaign in
-THREATS.md is a zero-acceptance run, so the attacker's cost per
-successful abuse is unbounded there: the spend is real (the bench
-prices every solve) and the yield is zero. The engine's economic
-lines carry the measured spend per honest solve; the bench's own
-verdict per value class (packages/kiwicaptcha-solver bench) prices
-each scope's abuse value against these rates.
+The campaigns report cost per ACCEPTED abuse. A green campaign in
+THREATS.md means the recorded run's required result held at the
+scale its evidence column states — not that every volume of the
+specification was replayed. Where the recorded run accepted zero
+abuses the attacker's cost per successful abuse is unbounded there:
+the spend is real (the bench prices every solve) and the yield is
+zero. Where a run measured a non-zero yield (for example D3.5's
+documented corpus residual), the economic line carries that count
+and the scale honestly. A hash budget is never restated as a solve
+count: the D3.5 wire sample, for example, paid millions of proof-of-work
+hashes for a few hundred wire solves, and the evidence note says so.
 
-argon2id and rsw deliberately carry no attacker-rate entries. Published GPU argon2id figures swing with the memory cost and vendor, so one number would fabricate precision; rsw squaring is inherently sequential and no hardware class buys a parallel speedup. For those rungs the bench reports the native measurement and prints insufficient-reference-data verdicts instead of guessing.
+The engine's economic lines carry the measured spend per honest
+solve; the bench's own verdict per value class
+(packages/kiwicaptcha-solver bench) prices each scope's abuse value
+against these rates.

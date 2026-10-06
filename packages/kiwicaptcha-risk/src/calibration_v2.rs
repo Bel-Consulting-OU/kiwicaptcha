@@ -437,6 +437,17 @@ impl RedisCalibrationStoreV2 {
     /// Discovers the receipt generation at first touch: a `Some` pair
     /// of scope and hour routes the confirmation to the v2 script;
     /// `None` — an older or already-consumed receipt — keeps the v1
+    /// The per-identity trust-cap counter key (shared tag, expiring with
+    /// the bucket window): the identity dimension of the trust-granting
+    /// reputation cap.
+    fn trust_cap_key(&self, identity: &str) -> String {
+        format!(
+            "{{kiwi:{}}}:trustcap:{}",
+            self.inner.namespace(),
+            identity
+        )
+    }
+
     /// path.
     fn v2_receipt(&self, decision_id: &str) -> Result<Option<(u32, i64)>, CalibrationError> {
         if !crate::redis::RedisRiskStateStore::valid_key_component(decision_id) {
@@ -473,19 +484,24 @@ impl RedisCalibrationStoreV2 {
     /// Confirms the outcome of one decision with the label's provenance
     /// class and reporting source named explicitly. `source` is the
     /// bounded source id (below [`Self::MAX_REPORTING_SOURCES`]);
-    /// `weight` is the inverse sampling probability in weighted mode.
+    /// `weight` is the inverse sampling probability in weighted mode;
+    /// `identity` is the pseudonym whose reputation this label would
+    /// credit (the per-identity trust cap of trust-granting labels).
     ///
     /// Returns the shared accepted-outcome status: 0 nothing consumed,
     /// 1 first confirmation with calibration recorded, 2 first
     /// confirmation deliberately unsampled, 3 first confirmation with
-    /// calibration withheld by the per-source window cap. Any nonzero
-    /// status authorizes the first-party reputation event exactly once.
+    /// calibration withheld by the per-source window cap, 4 first
+    /// confirmation whose trust-granting reputation credit is withheld
+    /// by the per-source or per-identity trust cap. Reputation is
+    /// authorized on 1 and 2 (and on 3 only for abuse labels); 4 never
+    /// authorizes it.
     ///
     /// # Errors
     ///
     /// [`CalibrationError::WeightRequired`] in weighted mode without a
     /// weight; [`CalibrationError::InvalidIdentifier`] for an unsafe
-    /// decision id or an out-of-range source; [`CalibrationError::Backend`]
+    /// decision id, source or identity; [`CalibrationError::Backend`]
     /// on a backend failure.
     pub fn confirm_outcome_with_provenance(
         &self,
@@ -494,6 +510,7 @@ impl RedisCalibrationStoreV2 {
         provenance: ProvenanceClass,
         source: u8,
         weight: Option<f64>,
+        identity: Option<&str>,
     ) -> Result<u8, CalibrationError> {
         if source >= Self::MAX_REPORTING_SOURCES {
             return Err(CalibrationError::Backend(format!(
@@ -509,12 +526,21 @@ impl RedisCalibrationStoreV2 {
             // an older ledger keeps exactly its v1 semantics.
             return self.inner.confirm_outcome(decision_id, legitimate, weight);
         };
+        if let Some(identity) = identity {
+            if !crate::redis::RedisRiskStateStore::valid_key_component(identity) {
+                return Err(CalibrationError::InvalidIdentifier(hex::encode(identity)));
+            }
+        }
         let bucket_key = self.inner.bucket_key(scope, hour);
         let ledger_key = self.inner.outcome_ledger_key(decision_id);
+        let identity_key = identity.map(|id| self.trust_cap_key(id));
         let mut invoke = self.confirm_script.prepare_invoke();
         invoke.key(self.inner.receipt_key(decision_id).as_str());
         invoke.key(bucket_key.as_str());
         invoke.key(ledger_key.as_str());
+        if let Some(key) = identity_key.as_deref() {
+            invoke.key(key);
+        }
         invoke.arg(self.mode_int().to_string());
         invoke.arg(weight.unwrap_or(1.0).to_string());
         invoke.arg(if legitimate { "1" } else { "0" });
@@ -670,6 +696,7 @@ impl CalibrationStore for RedisCalibrationStoreV2 {
             ProvenanceClass::HumanReview,
             0,
             weight,
+            None,
         )
     }
 
@@ -900,7 +927,7 @@ mod tests {
                 ProvenanceClass::HumanReview,
                 0,
                 None
-            )
+            , None)
             .unwrap(),
             1
         );
@@ -912,7 +939,7 @@ mod tests {
                 ProvenanceClass::SecurityEvent,
                 1,
                 None
-            )
+            , None)
             .unwrap(),
             1
         );
@@ -924,7 +951,7 @@ mod tests {
                 ProvenanceClass::PaymentNetwork,
                 2,
                 None
-            )
+            , None)
             .unwrap(),
             1
         );
@@ -949,6 +976,115 @@ mod tests {
         assert!(ledger.contains("\"pc\":2"), "provenance class: {ledger}");
     }
 
+    /// The per-identity trust cap: trust-granting confirmations beyond
+    /// the cap withhold the reputation credit (status 4) while the
+    /// ledger flip stands.
+    #[test]
+    fn trust_granting_reputation_is_capped_per_identity() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration v2 test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = v2_fast("tci", 1, 2);
+        let identity = "ab".repeat(16);
+        let mut statuses = Vec::new();
+        // Three sources, one L label each, all crediting the same
+        // identity: the volume cap never binds (one label per source),
+        // so the third status isolates the identity trust cap.
+        for i in 0..3u32 {
+            let id = format!("tci-{i}");
+            register_v2(&s, &id, 1, 900);
+            statuses.push(
+                s.confirm_outcome_with_provenance(
+                    &id,
+                    true,
+                    ProvenanceClass::HumanReview,
+                    i as u8,
+                    None,
+                    Some(&identity),
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(statuses, vec![1, 1, 4], "the third trust grant is capped");
+        // The identity counter is real state.
+        let key = format!("{{kiwi:{}}}:trustcap:{identity}", s.inner.namespace());
+        assert_eq!(hget_i64(&key, "n"), 3);
+    }
+
+    /// The per-source trust cap: beyond the cap, trust-granting labels
+    /// report status 4 (reputation withheld) even when the volume cap
+    /// would have reported 3.
+    #[test]
+    fn trust_granting_reputation_is_capped_per_source() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration v2 test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = v2_fast("tcs", 1, 2);
+        let mut statuses = Vec::new();
+        // Two abuse labels fill the volume cap, then three L labels:
+        // volume reports 3 from the third label on, but the trust cap
+        // (tcs counter, L only) reports 4 from the fifth label.
+        for i in 0..5u32 {
+            let id = format!("tcs-{i}");
+            register_v2(&s, &id, 1, 900);
+            let legitimate = i >= 2;
+            statuses.push(
+                s.confirm_outcome_with_provenance(
+                    &id,
+                    legitimate,
+                    ProvenanceClass::HumanReview,
+                    7,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        assert_eq!(statuses, vec![1, 1, 3, 3, 4]);
+        let bucket = s.inner.bucket_key(1, hour());
+        assert_eq!(hget_i64(&bucket, "tcs7"), 3);
+    }
+
+    /// Regression: a fractional receipt score can never split one
+    /// histogram sample across fractional distance slots — the score is
+    /// floored before the fields are named.
+    #[test]
+    fn histogram_fields_floor_a_fractional_receipt_score() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration v2 test: RISK_REDIS_URL not set");
+            return;
+        };
+        let s = v2_fast("flr", 1, 1_000_000);
+        let id = "flr-frac";
+        register_v2(&s, id, 1, 0);
+        // Rewrite the receipt with a fractional score (the typed writer
+        // floors before it gets here; a direct script caller does not).
+        let receipt_key = s.inner.receipt_key(id);
+        let raw: String = redis::cmd("GET")
+            .arg(&receipt_key)
+            .query(&mut conn())
+            .expect("receipt");
+        let patched = raw.replace("\"score\":0", "\"score\":899.5");
+        let _: redis::Value = redis::cmd("SET")
+            .arg(&receipt_key)
+            .arg(&patched)
+            .query(&mut conn())
+            .expect("receipt rewrite");
+        assert_eq!(
+            s.confirm_outcome_with_provenance(id, true, ProvenanceClass::HumanReview, 0, None, None)
+                .unwrap(),
+            1
+        );
+        let bucket = s.inner.bucket_key(1, hour());
+        // floor(899.5) - 600 = 299: the mass lands on the integer slot.
+        assert!((hget_f64(&bucket, "lh2_299") - 1.0).abs() < 1e-9);
+        for field in ["lh2_299.5", "lh2_300"] {
+            assert_eq!(hget_f64(&bucket, field), 0.0, "{field} must stay empty");
+        }
+    }
+
     #[test]
     fn per_source_window_cap_withholds_calibration_and_books_the_outcome() {
         let Some(_url) = redis_url() else {
@@ -965,9 +1101,13 @@ mod tests {
             let id = format!("cap-{i}");
             register_v2(&s, &id, 1, 1000);
             let status = s
-                .confirm_outcome_with_provenance(&id, true, ProvenanceClass::HumanReview, 1, None)
+                .confirm_outcome_with_provenance(&id, true, ProvenanceClass::HumanReview, 1, None, None)
                 .unwrap();
-            assert_eq!(status, if i < 2 { 1 } else { 3 });
+            // Beyond the caps a trust-granting label reports 4: the
+            // volume cap would say 3, but the trust cap of the same
+            // width binds on the L stream and withholds the reputation
+            // credit outright.
+            assert_eq!(status, if i < 2 { 1 } else { 4 });
         }
         let bucket = s.inner.bucket_key(1, hour());
         assert_eq!(hget_i64(&bucket, "sc1"), 4);
@@ -988,7 +1128,7 @@ mod tests {
                 ProvenanceClass::HumanReview,
                 0,
                 None
-            )
+            , None)
             .unwrap(),
             1
         );
@@ -1072,7 +1212,7 @@ mod tests {
                 ProvenanceClass::PaymentNetwork,
                 0,
                 None
-            )
+            , None)
             .unwrap(),
             1
         );
@@ -1234,7 +1374,7 @@ mod tests {
                     ProvenanceClass::PaymentNetwork,
                     0,
                     None
-                )
+                , None)
                 .unwrap(),
             1
         );
@@ -1406,8 +1546,7 @@ mod tests {
                 // Path 2: the engine's confirmed-outcome feedback path
                 // (record_feedback rejects confirmed events by design;
                 // confirmed_legitimate is its calibration-carrying
-                // wrapper, which books the reputation event on any
-                // nonzero confirm status and swallows the status).
+                // wrapper, which swallows the confirm status).
                 let ctx = RiskContext::new(
                     1,
                     "203.0.113.27".parse().unwrap(),
@@ -1417,12 +1556,12 @@ mod tests {
                     NetworkFlags::default(),
                     ResourcePressure::default(),
                 );
-                assert!(
-                    !engine
-                        .confirmed_legitimate(ctx, Some(format!("idem-{i}")), &id, None)
-                        .unwrap()
-                        .is_duplicate
-                );
+                // The reputation event is booked only while the trust
+                // caps admit the label; the outcome itself always lands,
+                // and the bias bound below is the assertion that matters.
+                let _ = engine
+                    .confirmed_legitimate(ctx, Some(format!("idem-{i}")), &id, None)
+                    .unwrap();
             } else {
                 // Path 3: the direct store confirmation.
                 let status = direct.confirm_outcome(&id, true, None).unwrap();

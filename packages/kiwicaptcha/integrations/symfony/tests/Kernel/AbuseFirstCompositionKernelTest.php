@@ -174,12 +174,15 @@ final class AbuseFirstCompositionKernelTest extends TestCase
         self::assertNotSame($target, self::gateway()->targetPseudonym('login', ['username' => 'other@example.com']));
 
         // The confirmed abuse outcome writes the long-memory target mark
-        // under the 128-bit mark key form (the outcome bridge's own
-        // reduction: the full digest first, its prefix second).
-        self::reportAbuse(OutcomeHandle::target(substr($target, 0, 32)), '10.1.0.1', null);
+        // under the one derived mark-key spelling (the leading 128 bits
+        // of the canonical 64-hex pseudonym, exactly the projection the
+        // outcome bridge and the mark probe share).
+        $markKey = \BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey::of($target);
+        self::assertSame(substr($target, 0, 32), $markKey);
+        self::reportAbuse(OutcomeHandle::target($markKey), '10.1.0.1', null);
 
         $store = self::$container->get('kiwi_captcha.risk.store');
-        $mark = $store->readMark('target', substr($target, 0, 32));
+        $mark = $store->readMark('target', $markKey);
         self::assertNotNull($mark, 'the confirmed abuse outcome wrote the long-memory target mark');
         self::assertSame(Outcome::FraudConfirmed->value, $mark['kind']);
 

@@ -154,6 +154,7 @@ fn escalation_drops_the_quarantine_and_inertia_keeps_it() {
             MarkDimension::Session,
             MarkRecord {
                 kind: quarantine::SPAM_MARK_KIND.to_string(),
+                last_kind: quarantine::SPAM_MARK_KIND.to_string(),
                 count: 1,
                 first_ms: 1_700_000_000_000,
                 last_ms: 1_700_000_000_000,
@@ -197,6 +198,7 @@ fn engine_emits_the_quarantine_disposition_and_its_metric_label() {
                     MarkDimension::Session,
                     MarkRecord {
                         kind: quarantine::SPAM_MARK_KIND.to_string(),
+                        last_kind: quarantine::SPAM_MARK_KIND.to_string(),
                         count: 1,
                         first_ms: 1,
                         last_ms: 1,
@@ -342,8 +344,14 @@ fn sample_decision(quarantined: bool) -> kiwicaptcha_risk::RiskDecision {
 }
 
 fn record_from_json(record: &serde_json::Value) -> MarkRecord {
+    let kind = record["kind"].as_str().expect("kind").to_string();
     MarkRecord {
-        kind: record["kind"].as_str().expect("kind").to_string(),
+        last_kind: record
+            .get("last_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&kind)
+            .to_string(),
+        kind,
         count: record["count"].as_i64().expect("count"),
         first_ms: record["first_ms"].as_i64().expect("first"),
         last_ms: record["last_ms"].as_i64().expect("last"),

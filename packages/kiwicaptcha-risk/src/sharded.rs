@@ -123,6 +123,14 @@ pub const SHARDED_HYSTERESIS_LUA: &str = include_str!("../resources/sharded_hyst
 /// `SET NX EX`, exactly once.
 pub const OUTCOME_REGISTER_LUA: &str = include_str!("../resources/outcome_register.lua");
 
+/// The canonical outcome-ledger confirm script (shared verbatim with
+/// the legacy store): pending -> L/A exactly once.
+pub const OUTCOME_CONFIRM_LUA: &str = include_str!("../resources/outcome_confirm.lua");
+
+/// The canonical outcome-ledger correction script (shared verbatim with
+/// the legacy store): flip L <-> A after confirmation.
+pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct.lua");
+
 /// The scope aggregate id the assessment path maintains: the
 /// deployment-wide aggregate. Per-scope ids may be addressed through the
 /// same shard key builders ([`crate::keyspace::scope_shard_key`]).
@@ -263,6 +271,8 @@ pub struct ShardedRedisRiskStateStore {
     scope_script: Arc<redis_crate::Script>,
     hysteresis_script: Arc<redis_crate::Script>,
     outcome_register_script: Arc<redis_crate::Script>,
+    outcome_confirm_script: Arc<redis_crate::Script>,
+    outcome_correct_script: Arc<redis_crate::Script>,
     merge: MergeCache,
     merge_gate: MergeGate,
     last_global_level: AtomicU8,
@@ -401,6 +411,8 @@ impl ShardedRedisRiskStateStore {
             scope_script: Arc::new(redis_crate::Script::new(SHARDED_SCOPE_LUA)),
             hysteresis_script: Arc::new(redis_crate::Script::new(SHARDED_HYSTERESIS_LUA)),
             outcome_register_script: Arc::new(redis_crate::Script::new(OUTCOME_REGISTER_LUA)),
+            outcome_confirm_script: Arc::new(redis_crate::Script::new(OUTCOME_CONFIRM_LUA)),
+            outcome_correct_script: Arc::new(redis_crate::Script::new(OUTCOME_CORRECT_LUA)),
             merge: MergeCache::empty(),
             merge_gate: MergeGate::default(),
             last_global_level: AtomicU8::new(0),
@@ -452,7 +464,7 @@ impl ShardedRedisRiskStateStore {
         if at == 0 {
             return None;
         }
-        let now_ms = monotonic_wall_ms().max(at);
+        let now_ms = crate::keyspace::monotonic_ms().max(at);
         Some(Duration::from_millis(now_ms - at))
     }
 
@@ -474,7 +486,7 @@ impl ShardedRedisRiskStateStore {
     fn merged_snapshot(&self) -> Result<[i64; 16], RiskStoreError> {
         let cached_at = self.merge.merged_at_ms();
         if cached_at != 0 {
-            let now_ms = monotonic_wall_ms();
+            let now_ms = crate::keyspace::monotonic_ms();
             let elapsed = now_ms.saturating_sub(cached_at);
             if u64::try_from(crate::keyspace::MERGE_STALENESS.as_millis())
                 .map(|window| elapsed < window)
@@ -490,7 +502,7 @@ impl ShardedRedisRiskStateStore {
             }
             self.merge
                 .at_ms
-                .store(monotonic_wall_ms(), Ordering::Release);
+                .store(crate::keyspace::monotonic_ms(), Ordering::Release);
             return Ok(per_shard);
         }
         // Another thread owns this window's refresh and it is about to
@@ -507,8 +519,14 @@ impl ShardedRedisRiskStateStore {
         self.merge.per_shard[usize::from(shard)].store(sum, Ordering::Relaxed);
     }
 
-    /// The merge batch: one read-only scope invocation per shard, every
-    /// shard on its own slot, summed client-side in shard order.
+    /// The merge batch: one read-only scope invocation per shard (every
+    /// shard on its own slot, summed client-side in shard order), then
+    /// the single-slot level/cooldown transition on the summed pressure.
+    /// The level transition runs HERE — once per staleness window —
+    /// instead of on every assessment: the hot path reuses the published
+    /// level/cooldown, so the hysteresis hash is no longer a per-request
+    /// single-slot write. Both steps stay bounded (16 reads + one
+    /// transition, at most once per second).
     fn fetch_merged_gp(&self) -> Result<[i64; 16], RiskStoreError> {
         let ns = &self.encoded_namespace;
         let mut units = Vec::with_capacity(usize::from(crate::keyspace::SCOPE_SHARDS));
@@ -523,17 +541,40 @@ impl ShardedRedisRiskStateStore {
         }
         let replies = self.dispatch(units)?;
         let mut per_shard = [0i64; 16];
+        let mut merged_gp = 0i64;
         for (shard, reply) in replies.iter().enumerate() {
             per_shard[shard] = decode_channels(reply, SCOPE_CHANNELS, "scope shard")?
                 .iter()
                 .sum::<i64>();
+            merged_gp += per_shard[shard];
         }
+        // The level/cooldown ratchet on the merged pressure, then publish
+        // for the hot path.
+        let hyst_key = hysteresis_key(ns);
+        let mut hyst_eval = redis_crate::cmd("EVALSHA");
+        hyst_eval
+            .arg(self.hysteresis_script.get_hash())
+            .arg(1)
+            .arg(&hyst_key)
+            .arg(merged_gp)
+            .arg(self.options.saturations[8])
+            .arg(self.options.hysteresis_ms);
+        let replies = self.dispatch(vec![BatchUnit {
+            endpoint: self.endpoint_for_key(&hyst_key),
+            eval: hyst_eval,
+            script: Some(SHARDED_HYSTERESIS_LUA),
+        }])?;
+        let hyst = decode_channels(&replies[0], 2, "hysteresis transition")?;
+        self.last_global_level.store(hyst[0].clamp(0, 4) as u8, Ordering::Relaxed);
+        self.last_cooldown_until_ms.store(hyst[1].max(0) as u64, Ordering::Relaxed);
         Ok(per_shard)
     }
 
     /// The full sharded assessment: one pipelined batch of per-dimension
-    /// scripts on their own slots, the nonce verdict and the single-slot
-    /// level transition, plus the consolidated single-key extras.
+    /// scripts on their own slots and the nonce verdict, plus the
+    /// consolidated single-key extras on their own families. Absent
+    /// dimensions are never read (no zero-id round trips); the level
+    /// transition rides the once-per-second merge refresh, not this path.
     fn run_assessment(
         &self,
         o: &RiskObservation,
@@ -554,16 +595,24 @@ impl ShardedRedisRiskStateStore {
         let session_present = o.session_id.is_some();
         let principal_present = o.principal_id.is_some();
 
-        // The merged aggregate feeds both the global pressure signal and
-        // the level transition, so it is resolved before the batch is
-        // built (its own batch runs at most once per second).
+        // The merged aggregate feeds the global pressure signal; the
+        // level transition runs inside the merge refresh (at most once
+        // per second) and the published level/cooldown is what this
+        // assessment reports.
         let snapshot: [i64; 16] = self.merged_snapshot()?;
-        let snapshot_shard = usize::from(crate::keyspace::scope_shard(&o.event_id));
+        // An empty event id (dedupe disabled) has no id bytes to spread;
+        // the source pseudonym is the stable fallback so those writes do
+        // not all funnel onto fnv1a32("")'s shard.
+        let shard_fallback = o.source_id.as_bytes();
+        let shard_of_event = |event_id: &str| crate::keyspace::scope_shard(event_id, shard_fallback);
+        let snapshot_shard = usize::from(shard_of_event(&o.event_id));
 
-        let mut units: Vec<BatchUnit> = Vec::with_capacity(15);
-        // Identity units: source ±1 epoch, subnet ±1 epoch, session,
-        // principal. Boundary and absent-dimension reads are read-only;
-        // the present dimensions carry their own dedupe marker.
+        let mut units: Vec<BatchUnit> = Vec::with_capacity(12);
+        // Identity units: source ±1 epoch, subnet ±1 epoch always; the
+        // session and principal states only when the dimension is present
+        // (an absent dimension is not read — no zero-id state hash).
+        // Boundary and absent-dimension reads are read-only; the present
+        // dimensions carry their own dedupe marker.
         let push_identity = |units: &mut Vec<BatchUnit>,
                              dimension: ShardedDimension,
                              epoch: i64,
@@ -634,26 +683,30 @@ impl ShardedRedisRiskStateStore {
             false,
             self.options.state_ttl_secs,
         );
-        push_identity(
-            &mut units,
-            ShardedDimension::Session,
-            0,
-            &session_hex,
-            session_present,
-            self.options.session_ttl_secs,
-        );
-        push_identity(
-            &mut units,
-            ShardedDimension::Principal,
-            0,
-            &principal_hex,
-            principal_present,
-            self.options.principal_ttl_secs,
-        );
+        if session_present {
+            push_identity(
+                &mut units,
+                ShardedDimension::Session,
+                0,
+                &session_hex,
+                true,
+                self.options.session_ttl_secs,
+            );
+        }
+        if principal_present {
+            push_identity(
+                &mut units,
+                ShardedDimension::Principal,
+                0,
+                &principal_hex,
+                true,
+                self.options.principal_ttl_secs,
+            );
+        }
 
         // The event's scope shard: one of the 16 sharded counters,
-        // chosen by fnv1a over the event id.
-        let shard = crate::keyspace::scope_shard(&o.event_id);
+        // chosen by fnv1a over the event id (or the source fallback).
+        let shard = shard_of_event(&o.event_id);
         let shard_key = crate::keyspace::scope_shard_key(ns, GLOBAL_AGGREGATE_ID, shard);
         let shard_marker =
             crate::keyspace::scope_marker_key(ns, GLOBAL_AGGREGATE_ID, shard, &o.event_id);
@@ -690,49 +743,35 @@ impl ShardedRedisRiskStateStore {
             });
         }
 
-        // The single-slot level transition, fed with the merged pressure.
-        let hyst_key = hysteresis_key(ns);
-        let merged_gp: i64 = snapshot.iter().sum();
-        let mut hyst_eval = redis_crate::cmd("EVALSHA");
-        hyst_eval
-            .arg(self.hysteresis_script.get_hash())
-            .arg(1)
-            .arg(&hyst_key)
-            .arg(merged_gp)
-            .arg(self.options.saturations[8])
-            .arg(self.options.hysteresis_ms);
-        units.push(BatchUnit {
-            endpoint: self.endpoint_for_key(&hyst_key),
-            eval: hyst_eval,
-            script: Some(SHARDED_HYSTERESIS_LUA),
-        });
-
-        // The consolidated extras live on the shared tag (single-key
-        // surfaces): the two first-seen tag records and the optional
-        // ledger registration.
-        let ctx_key = format!("{{kiwi:{ns}}}:risk:ctx:{session_hex}");
-        let tls_key = format!("{{kiwi:{ns}}}:risk:tls:{session_hex}");
-        for (key, presented) in [(ctx_key, context_tag), (tls_key, tls_tag)] {
+        // The consolidated extras on the session/decision families: the
+        // first-seen tag records (SET NX + GET on the session
+        // pseudonym's own slot, one round trip — the GET resolves the
+        // first-write race) and the optional ledger registration (its
+        // own phase below). A tag that is not presented is not read at
+        // all: assess_v2 reports '' for it.
+        let ctx_key = crate::keyspace::session_tag_key(ns, "ctx", &session_hex);
+        let tls_key = crate::keyspace::session_tag_key(ns, "tls", &session_hex);
+        for (key, presented) in [(&ctx_key, context_tag), (&tls_key, tls_tag)] {
             if let Some(tag) = presented.filter(|tag| !tag.is_empty()) {
                 let mut set = redis_crate::cmd("SET");
-                set.arg(&key)
+                set.arg(key.as_str())
                     .arg(tag)
                     .arg("NX")
                     .arg("EX")
                     .arg(self.options.session_ttl_secs);
                 units.push(BatchUnit {
-                    endpoint: self.endpoint_for_key(&key),
+                    endpoint: self.endpoint_for_key(key),
                     eval: set,
                     script: None,
                 });
+                let mut get = redis_crate::cmd("GET");
+                get.arg(key.as_str());
+                units.push(BatchUnit {
+                    endpoint: self.endpoint_for_key(key),
+                    eval: get,
+                    script: None,
+                });
             }
-            let mut get = redis_crate::cmd("GET");
-            get.arg(&key);
-            units.push(BatchUnit {
-                endpoint: self.endpoint_for_key(&key),
-                eval: get,
-                script: None,
-            });
         }
         let replies = self.dispatch(units)?;
         let mut it = replies.into_iter();
@@ -746,23 +785,17 @@ impl ShardedRedisRiskStateStore {
             context_tag,
             tls_tag,
         )?;
-        self.record_shard_sum(
-            crate::keyspace::scope_shard(&o.event_id),
-            assessment.shard_sum,
-        );
-        // The last-decision side channels (level, cooldown), mirroring
-        // the legacy store's post-assessment bookkeeping.
-        self.last_global_level
-            .store(assessment.global_level, Ordering::Relaxed);
-        self.last_cooldown_until_ms
-            .store(assessment.cooldown_until_ms, Ordering::Relaxed);
+        self.record_shard_sum(shard, assessment.shard_sum);
+        assessment.global_level = self.last_global_level();
+        assessment.cooldown_until_ms = self.last_cooldown_until_ms();
         if let Some(reg) = registration {
             // The ledger score is computed client-side from the decoded
             // vector and tags (the exact assess_v2 formula), so the
             // canonical registration script runs as the batch's second
-            // phase. It is a SET NX on the decision id: a retry of a
-            // batch whose first phase committed stays idempotent.
-            let ledger_key = format!("{{kiwi:{ns}}}:outcome:{}", reg.decision_id);
+            // phase on the decision-id key family. It is a SET NX on the
+            // decision id: a retry of a batch whose first phase committed
+            // stays idempotent.
+            let ledger_key = crate::keyspace::outcome_ledger_key(ns, &reg.decision_id);
             let score = ledger_score(o, &assessment, context_tag, tls_tag, reg);
             let mut eval = redis_crate::cmd("EVALSHA");
             eval.arg(self.outcome_register_script.get_hash())
@@ -971,17 +1004,6 @@ fn scope_evalsha(
     eval
 }
 
-/// Wall-clock milliseconds for the merge freshness stamp (the merge
-/// gate compares wall-clock windows; skew between processes is bounded
-/// by the staleness contract).
-fn monotonic_wall_ms() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// The assembled result of one sharded assessment.
 struct Assessment {
     vector: SignalVector,
@@ -1001,8 +1023,9 @@ impl Assessment {
     /// risk-v1 aggregation client-side: rotated-epoch pseudonyms of one
     /// dimension SUM (the replies carry the leaked channels), identity
     /// dimensions MAX, every channel normalizes with the saturation the
-    /// legacy script divides by.
-    #[allow(clippy::too_many_arguments)]
+    /// legacy script divides by. The level/cooldown are the published
+    /// values of the merge refresh (the transition no longer rides the
+    /// assessment batch).
     #[allow(clippy::too_many_arguments)]
     fn decode(
         it: &mut std::vec::IntoIter<redis_crate::Value>,
@@ -1029,8 +1052,18 @@ impl Assessment {
         let net_prev = next_channels(it, IDENTITY_CHANNELS, "subnet boundary")?;
         let net_cur = next_channels(it, IDENTITY_CHANNELS, "subnet state")?;
         let net_next = next_channels(it, IDENTITY_CHANNELS, "subnet boundary")?;
-        let sess = next_channels(it, IDENTITY_CHANNELS, "session state")?;
-        let prin = next_channels(it, IDENTITY_CHANNELS, "principal state")?;
+        // Absent dimensions were never read: their channels are zero.
+        let zeros = vec![0i64; IDENTITY_CHANNELS];
+        let sess = if o.session_id.is_some() {
+            next_channels(it, IDENTITY_CHANNELS, "session state")?
+        } else {
+            zeros.clone()
+        };
+        let prin = if o.principal_id.is_some() {
+            next_channels(it, IDENTITY_CHANNELS, "principal state")?
+        } else {
+            zeros
+        };
         let shard_channels = next_channels(it, SCOPE_CHANNELS, "scope shard")?;
         let shard_sum: i64 = shard_channels.iter().sum();
         // The event's own shard contribution is exact: the fresh merged
@@ -1052,9 +1085,6 @@ impl Assessment {
         } else {
             false
         };
-        let hyst = next_channels(it, 2, "hysteresis transition")?;
-        let level = hyst[0].clamp(0, 4) as u8;
-        let cooldown_until_ms = hyst[1].max(0) as u64;
 
         // First-seen tag records: the SET reply (when the tag was
         // presented) wins; its Nil miss falls back to the GET reply.
@@ -1063,16 +1093,19 @@ impl Assessment {
                         what: &'static str|
          -> Result<Option<String>, RiskStoreError> {
             let write_attempted = matches!(presented, Some(tag) if !tag.is_empty());
-            if write_attempted {
-                let set_reply = it
-                    .next()
-                    .ok_or_else(|| RiskStoreError::ScriptError(format!("missing {what} reply")))?;
-                if set_reply == redis_crate::Value::Okay {
-                    // Consume the trailing GET; the successful write
-                    // already carries the recorded value.
-                    let _ = it.next();
-                    return Ok(presented.map(str::to_string));
-                }
+            if !write_attempted {
+                // Nothing presented, nothing read (assess_v2 parity: the
+                // existing value is reported as absent).
+                return Ok(None);
+            }
+            let set_reply = it
+                .next()
+                .ok_or_else(|| RiskStoreError::ScriptError(format!("missing {what} reply")))?;
+            if set_reply == redis_crate::Value::Okay {
+                // Consume the trailing GET; the successful write already
+                // carries the recorded value.
+                let _ = it.next();
+                return Ok(presented.map(str::to_string));
             }
             match it.next() {
                 Some(redis_crate::Value::Nil) => Ok(None),
@@ -1122,8 +1155,10 @@ impl Assessment {
                 trust_credit: normalize(maxn(&[src_trust, sess[8], 0]), sat[9]),
                 principal_credit: normalize(prin[8], sat[10]),
             },
-            global_level: level,
-            cooldown_until_ms,
+            // The published merge-refresh values (the transition is no
+            // longer run per assessment).
+            global_level: 0,
+            cooldown_until_ms: 0,
             is_duplicate,
             existing_context_tag,
             existing_tls_tag,
@@ -1364,16 +1399,79 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
         decision_hour: i64,
         score: u32,
     ) -> Result<bool, RiskStoreError> {
-        self.legacy
-            .register_outcome(decision_id, scope, decision_hour, score)
+        // The decision-id key family (the same key the assessment path's
+        // consolidated registration writes), so confirm/correct resolve
+        // the same ledger in both modes.
+        let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
+        let mut eval = redis_crate::cmd("EVALSHA");
+        eval.arg(self.outcome_register_script.get_hash())
+            .arg(1)
+            .arg(&key)
+            .arg(scope.to_string())
+            .arg(decision_hour.to_string())
+            .arg(score.to_string())
+            .arg(self.options.outcome_ttl_secs.to_string());
+        let replies = self.dispatch(vec![BatchUnit {
+            endpoint: self.endpoint_for_key(&key),
+            eval,
+            script: Some(OUTCOME_REGISTER_LUA),
+        }])?;
+        Ok(matches!(
+            replies.first(),
+            Some(redis_crate::Value::Int(created)) if *created != 0
+        ) || matches!(
+            replies.first(),
+            Some(redis_crate::Value::BulkString(b)) if b.as_slice() == b"1"
+        ))
     }
 
     fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
-        self.legacy.confirm_outcome(decision_id, legitimate)
+        let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
+        let mut eval = redis_crate::cmd("EVALSHA");
+        eval.arg(self.outcome_confirm_script.get_hash())
+            .arg(1)
+            .arg(&key)
+            .arg(if legitimate { "L" } else { "A" })
+            .arg(self.options.outcome_ttl_secs.to_string());
+        let replies = self.dispatch(vec![BatchUnit {
+            endpoint: self.endpoint_for_key(&key),
+            eval,
+            script: Some(OUTCOME_CONFIRM_LUA),
+        }])?;
+        match replies.first() {
+            Some(redis_crate::Value::Int(status)) => Ok(*status as u8),
+            Some(redis_crate::Value::BulkString(b)) => std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse::<u8>().ok())
+                .ok_or_else(|| {
+                    RiskStoreError::ScriptError("outcome confirm returned a non-integer".to_string())
+                }),
+            _ => Err(RiskStoreError::ScriptError(
+                "outcome confirm returned no status".to_string(),
+            )),
+        }
     }
 
     fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError> {
-        self.legacy.correct_outcome(decision_id, legitimate)
+        let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
+        let mut eval = redis_crate::cmd("EVALSHA");
+        eval.arg(self.outcome_correct_script.get_hash())
+            .arg(1)
+            .arg(&key)
+            .arg(if legitimate { "L" } else { "A" })
+            .arg(self.options.outcome_ttl_secs.to_string());
+        let replies = self.dispatch(vec![BatchUnit {
+            endpoint: self.endpoint_for_key(&key),
+            eval,
+            script: Some(OUTCOME_CORRECT_LUA),
+        }])?;
+        Ok(matches!(
+            replies.first(),
+            Some(redis_crate::Value::Int(applied)) if *applied != 0
+        ) || matches!(
+            replies.first(),
+            Some(redis_crate::Value::BulkString(b)) if b.as_slice() == b"1"
+        ))
     }
 
     fn last_global_level(&self) -> u8 {
@@ -1385,16 +1483,19 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
     }
 }
 
-/// The first-seen session tag surfaces delegate to the embedded legacy
-/// store: the records are single-key `SET NX EX` writes on the shared
-/// tag, identical in both modes.
+/// The first-seen session tag surfaces write the session-family record
+/// (`{kiwi:<ns>:session:<hex2>}:risk:ctx|tls:<hex>`): the same SET NX
+/// semantics as the legacy store, on the session's own slot family
+/// (the consolidated assessment path addresses the identical keys).
 impl SessionContextTagStore for ShardedRedisRiskStateStore {
     fn session_first_context_tag(
         &self,
         session_id: &[u8; 16],
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
-        self.legacy.session_first_context_tag(session_id, tag)
+        let key =
+            crate::keyspace::session_tag_key(&self.encoded_namespace, "ctx", &hex::encode(session_id));
+        self.session_first_tag_record(&key, tag)
     }
 }
 
@@ -1404,11 +1505,43 @@ impl SessionTlsTagStore for ShardedRedisRiskStateStore {
         session_id: &[u8; 16],
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
-        self.legacy.session_first_tls_tag(session_id, tag)
+        let key =
+            crate::keyspace::session_tag_key(&self.encoded_namespace, "tls", &hex::encode(session_id));
+        self.session_first_tag_record(&key, tag)
     }
 }
 
 impl ShardedRedisRiskStateStore {
+    /// ONE atomic `SET key tag NX EX ttl`, falling back to GET on a lost
+    /// first-write race (the legacy store's identical rule).
+    fn session_first_tag_record(
+        &self,
+        key: &str,
+        tag: &str,
+    ) -> Result<Option<String>, RiskStoreError> {
+        let endpoint = &self.endpoints[self.endpoint_for_key(key)];
+        let ttl: i64 = self
+            .options
+            .session_ttl_secs
+            .try_into()
+            .unwrap_or(i64::MAX);
+        endpoint.pool.with_connection(&endpoint.client, |conn| {
+            use ::redis::Commands;
+            let set: Option<String> = ::redis::cmd("SET")
+                .arg(key)
+                .arg(tag)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl)
+                .query(conn)?;
+            if set.is_some() {
+                return Ok(Some(tag.to_string()));
+            }
+            let stored: Option<String> = conn.get(key)?;
+            Ok(stored)
+        })
+    }
+
     /// Writes one long-memory mark through the canonical marks script on
     /// the shared tag (the marks surface is mode-insensitive).
     ///
@@ -1422,8 +1555,9 @@ impl ShardedRedisRiskStateStore {
         id: &str,
         kind: &str,
         now_ms: u64,
+        event_id: &str,
     ) -> Result<i64, RiskStoreError> {
-        self.legacy.write_mark(dimension, id, kind, now_ms)
+        self.legacy.write_mark(dimension, id, kind, now_ms, event_id)
     }
 
     /// Reads one long-memory mark on the shared tag.

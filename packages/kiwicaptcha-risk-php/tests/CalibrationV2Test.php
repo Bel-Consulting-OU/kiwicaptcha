@@ -201,7 +201,11 @@ final class CalibrationV2Test extends TestCase
         foreach (range(0, 3) as $i) {
             $id = "cap-{$i}";
             self::assertTrue($c->recordReceipt($id, 1, 6, RiskAction::Argon16, 1000, 1, $this->decisionHour()));
-            self::assertSame($i < 2 ? 1 : 3, $c->confirmOutcomeWithProvenance($id, true, ProvenanceClass::HumanReview, 1));
+            // Beyond the caps a trust-granting label reports 4: the
+            // volume cap would say 3, but the trust cap of the same
+            // width binds on the L stream and withholds the reputation
+            // credit outright.
+            self::assertSame($i < 2 ? 1 : 4, $c->confirmOutcomeWithProvenance($id, true, ProvenanceClass::HumanReview, 1));
         }
         $bucket = $this->bucket($c, 1);
         self::assertSame(4, $this->hgetInt($bucket, 'sc1'));
@@ -219,6 +223,53 @@ final class CalibrationV2Test extends TestCase
         self::assertStringContainsString('"o":"L"', $ledger);
         self::assertStringContainsString('"c":0', $ledger);
         self::assertStringContainsString('"v":3', $ledger);
+    }
+
+    public function testTrustGrantingReputationIsCappedPerSourceAndPerIdentity(): void
+    {
+        // Per identity: three sources, one L label each, all crediting
+        // the same identity — the volume cap never binds, so the third
+        // status isolates the identity trust cap.
+        $c = $this->fastV2($this->uniqueNamespace('tci'), minSamples: 1, cap: 2);
+        $identity = str_repeat('ab', 16);
+        $statuses = [];
+        foreach (range(0, 2) as $i) {
+            $id = "tci-{$i}";
+            self::assertTrue($c->recordReceipt($id, 1, 6, RiskAction::Argon16, 900, 1, $this->decisionHour()));
+            $statuses[] = $c->confirmOutcomeWithProvenance($id, true, ProvenanceClass::HumanReview, $i, null, $identity);
+        }
+        self::assertSame([1, 1, 4], $statuses, 'the third trust grant is capped');
+
+        // Per source: two abuse labels fill the volume cap, then three L
+        // labels — the trust cap reports 4 where the volume cap says 3.
+        $s = $this->fastV2($this->uniqueNamespace('tcs'), minSamples: 1, cap: 2);
+        $statuses = [];
+        foreach (range(0, 4) as $i) {
+            $id = "tcs-{$i}";
+            self::assertTrue($s->recordReceipt($id, 1, 6, RiskAction::Argon16, 900, 1, $this->decisionHour()));
+            $statuses[] = $s->confirmOutcomeWithProvenance($id, $i >= 2, ProvenanceClass::HumanReview, 7);
+        }
+        self::assertSame([1, 1, 3, 3, 4], $statuses);
+        self::assertSame(3, $this->hgetInt($this->bucket($s, 1), 'tcs7'));
+    }
+
+    public function testHistogramFieldsFloorAFractionalReceiptScore(): void
+    {
+        $c = $this->fastV2($this->uniqueNamespace('flr'));
+        $id = 'flr-frac';
+        self::assertTrue($c->recordReceipt($id, 1, 6, RiskAction::Argon16, 0, 1, $this->decisionHour()));
+        // Rewrite the receipt with a fractional score (the typed writer
+        // floors before it gets here; a direct script caller does not).
+        $client = $this->requireClient();
+        $key = '{kiwi:' . $c->namespace() . '}:cal:receipt:' . $id;
+        $raw = $client->get($key);
+        self::assertIsString($raw);
+        $client->set($key, str_replace('"score":0', '"score":899.5', $raw));
+        self::assertSame(1, $c->confirmOutcomeWithProvenance($id, true, ProvenanceClass::HumanReview, 0));
+        $bucket = $this->bucket($c, 1);
+        self::assertEqualsWithDelta(1.0, $this->hgetFloat($bucket, 'lh2_299'), 1e-9);
+        self::assertSame(0.0, $this->hgetFloat($bucket, 'lh2_299.5'));
+        self::assertSame(0.0, $this->hgetFloat($bucket, 'lh2_300'));
     }
 
     public function testV1LedgersKeepV1SemanticsAndNewLedgersAreV2(): void
@@ -484,10 +535,11 @@ final class CalibrationV2Test extends TestCase
                 // Path 2: the engine's confirmed-outcome feedback path
                 // (record_feedback rejects confirmed events by design;
                 // confirmedLegitimate is its calibration-carrying
-                // wrapper, which books the reputation event on any
-                // nonzero confirm status and swallows the status).
-                $event = $engine->confirmedLegitimate($context(), $id, "idem-{$i}");
-                self::assertFalse($event->isDuplicate);
+                // wrapper, which swallows the confirm status). The
+                // reputation event is booked only while the trust caps
+                // admit the label; the outcome itself always lands, and
+                // the bias bound below is the assertion that matters.
+                $engine->confirmedLegitimate($context(), $id, "idem-{$i}");
             } else {
                 // Path 3: the direct store confirmation.
                 $status = $direct->confirmOutcome($id, true);

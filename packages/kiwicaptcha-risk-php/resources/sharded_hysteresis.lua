@@ -59,12 +59,14 @@ if hysteresis_ms < 1 then
 end
 
 local v = redis.call('HMGET', KEYS[1], 'scope', 'cool')
--- Corrupt or tampered stored levels above the hysteresis table are
--- clamped into range (the risk-v1 global script applies the same
--- .min(4)); the floor stays 0: a fresh state legitimately starts at
--- level 0.
-local prev_level = math.min(4, num(v[1]))
-local cool = num(v[2])
+-- Corrupt or tampered stored levels outside 0..4 are clamped into range
+-- (the risk-v1 global script applies the same clamp); the floor also
+-- stops a negative stored level from feeding the ratchet as a huge
+-- upgrade head-start (target > level would fire on every assessment).
+local raw_level = tonumber(v[1])
+local raw_cool = tonumber(v[2])
+local prev_level = math.max(0, math.min(4, num(v[1])))
+local cool = math.max(0, num(v[2]))
 
 local gnorm = normalize(merged_gp, sat_global)
 local enter = { 300, 550, 750, 900 }
@@ -87,6 +89,12 @@ elseif target < level and gnorm < exit[math.max(1, level)] then
     end
 end
 
-redis.call('HSET', KEYS[1], 'scope', level, 'cool', cool)
+-- Write only on change: the hysteresis hash is a hot single-slot key,
+-- and the steady state (level holds, cooldown untouched) must not
+-- rewrite it on every merge refresh. A raw value that differs from the
+-- clamped computed state (corrupt or stale) is a change and is repaired.
+if raw_level ~= level or raw_cool ~= cool then
+    redis.call('HSET', KEYS[1], 'scope', level, 'cool', cool)
+end
 
 return { level, cool }

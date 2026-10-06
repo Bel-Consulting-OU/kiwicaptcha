@@ -35,7 +35,11 @@ final class StepUpHandlersTest extends TestCase
 
     private const PRINCIPAL = '00112233445566778899aabbccddeeff';
 
-    private const TARGET = 'ffeeddccbbaa99887766554433221100';
+    /** The canonical target spelling: the full 32-byte digest, 64 hex chars. */
+    private const TARGET = 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100';
+
+    /** The outcomes handle / mark key of the target: its leading 128 bits. */
+    private const TARGET_MARK_KEY = 'ffeeddccbbaa99887766554433221100';
 
     private ArrayStepUpChallengeStore $store;
 
@@ -89,7 +93,9 @@ final class StepUpHandlersTest extends TestCase
         self::assertSame(OutcomeHandleDimension::Principal, $this->reporter->reports[0]['handle']->dimension);
         self::assertSame(self::PRINCIPAL, $this->reporter->reports[0]['handle']->id);
         self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[1]['handle']->dimension);
-        self::assertSame(self::TARGET, $this->reporter->reports[1]['handle']->id);
+        // The target handle carries the one derived mark key (the
+        // leading 128 bits of the canonical 64-hex pseudonym).
+        self::assertSame(self::TARGET_MARK_KEY, $this->reporter->reports[1]['handle']->id);
         self::assertNotSame($this->reporter->reports[0]['idempotencyKey'], $this->reporter->reports[1]['idempotencyKey']);
 
         // The replayed completion is rejected and credits nothing.
@@ -161,6 +167,26 @@ final class StepUpHandlersTest extends TestCase
             public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
             {
                 return $this->inner->recentStepUpSuccess($principalPseudonym, $withinSecs, $now);
+            }
+
+            public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
+            {
+                return $this->inner->countLockoutFailure($dimension, $pseudonym, $windowSecs);
+            }
+
+            public function lockoutUntil(string $dimension, string $pseudonym, int $now): int
+            {
+                return $this->inner->lockoutUntil($dimension, $pseudonym, $now);
+            }
+
+            public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void
+            {
+                $this->inner->armLockout($dimension, $pseudonym, $now, $ttlSecs);
+            }
+
+            public function clearLockout(string $dimension, string $pseudonym): void
+            {
+                $this->inner->clearLockout($dimension, $pseudonym);
             }
 
             /** @return list<string> */
@@ -409,10 +435,15 @@ final class StepUpHandlersTest extends TestCase
 
     private function completeRequest(string $ticket, string $code): Request
     {
-        return Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
+        $request = Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
             EmailOtpStepUpHandler::TICKET_FIELD => $ticket,
             EmailOtpStepUpHandler::CODE_FIELD => $code,
         ]);
+        // The controller binds the re-resolved principal before the
+        // handler runs; direct handler calls bind it the same way.
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
+
+        return $request;
     }
 
     private function ticketOf(\Symfony\Component\HttpFoundation\Response $response): string

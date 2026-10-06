@@ -93,6 +93,9 @@ local ledger_ttl = tonumber(ARGV[4])
 if ttl_out_of_bounds(ledger_ttl) then
     return redis.error_reply('correction: outcome_ttl_s must be a positive integer no greater than 2147483647')
 end
+if tonumber(ARGV[5]) == nil or tonumber(ARGV[6]) == nil then
+    return redis.error_reply('correction: expected scope and decision_hour must be numeric')
+end
 
 local raw = redis.call('GET', KEYS[1])
 if not raw then
@@ -115,9 +118,13 @@ if ledger.o == new_o then
     return 0
 end
 
+-- The score is FLOORED before any field is named from it: a fractional
+-- ledger score must never split one sample across fractional histogram
+-- slots (the confirm_v2.lua floor rule, mirrored for the reversal).
 local score = tonumber(ledger.score or 0)
 if score < 0 then score = 0 end
 if score > 1000 then score = 1000 end
+score = math.floor(score)
 
 -- Reverse the original contribution (exact recorded weight).
 local old_w = tonumber(ledger.w or 1)

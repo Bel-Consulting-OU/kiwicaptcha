@@ -20,6 +20,7 @@ import { decodeToken, type SolutionToken } from './token.js';
 import {
   isValidDecoyFieldName,
   protocolExtensionGrammarOk,
+  MAX_EXECUTION_VERSION,
   type ChallengeRecord,
 } from './record.js';
 import { consumedResultMac, recordMetaMac, serverStateKey, timingSafeEqualsHex } from './mac.js';
@@ -774,7 +775,7 @@ export function validateRecord(record: ChallengeRecord): boolean {
     if (
       record.executionVersion === null ||
       record.executionVersion < 1 ||
-      record.executionVersion > 5 ||
+      record.executionVersion > MAX_EXECUTION_VERSION ||
       record.executionCommitment === null
     ) {
       return false;

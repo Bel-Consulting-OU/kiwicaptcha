@@ -9,7 +9,8 @@ PORT=8498
 sh "$RT_DIR/target.sh" down skew >/dev/null 2>&1 || true
 REDIS_URL=$(repro_redis_url)
 if [ -z "$REDIS_URL" ]; then
-    printf '{"harness":"clock-skew","verdict":"REFUTED","wire_code":"target_unavailable"}\n'
+    # No target means no measurement: INCONCLUSIVE, never a quiet REFUTED.
+    printf '{"harness":"clock-skew","verdict":"INCONCLUSIVE","wire_code":"target_unavailable"}\n'
     exit 0
 fi
 env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \

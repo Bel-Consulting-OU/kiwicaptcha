@@ -17,7 +17,7 @@ The public surface mirrors the shared server SDK contract:
 - ``python -m kiwicaptcha.doctor`` validates a deployment.
 """
 
-from .config import Settings, VerifierConfig
+from .config import Settings, VerifierConfig, argon_rung_verifiable
 from .decision import VerifyDecision
 from .errors import VerifyError, VerifyOutcome
 from .middleware import (
@@ -58,11 +58,12 @@ from .stores import (
     open_store,
 )
 from .tokens import DecodeError, SolutionToken
-from .verify import VerifyOptions, Verifier
+from .verify import ArgonAdmissionGate, VerifyOptions, Verifier
 
 __version__ = "1.0.0"
 
 __all__ = [
+    "ArgonAdmissionGate",
     "ChallengeRecord",
     "ChallengeRuntimeState",
     "ChallengeRuntimeStateKind",
@@ -96,6 +97,7 @@ __all__ = [
     "VerifyOptions",
     "VerifyOutcome",
     "WsgiKiwiCaptcha",
+    "argon_rung_verifiable",
     "open_store",
     "__version__",
 ]

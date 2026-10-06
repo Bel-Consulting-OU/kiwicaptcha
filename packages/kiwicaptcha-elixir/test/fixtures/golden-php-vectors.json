@@ -9,7 +9,7 @@
             "Every record is minted by the real PHP Issuer with its sealed record-metadata MAC.",
             "The rsw trapdoor pair is the shared committed fixture; the PHP Rsw gate validates it before issuance.",
             "sha_execution_v4 pins the Ruby and Elixir fail-closed mapping: no browser-trace walker, so the armed dimension answers execution_mismatch.",
-            "argon2id pins the unsupported_argon2_params mapping: no native Argon2id in the Ruby and Elixir runtimes."
+            "argon2id pins a solved proof through the optional native binding: ok when argon2_elixir (Elixir) or the argon2 gem (Ruby) is present, unsupported_argon2_params without it."
         ]
     },
     "hkdf": {
@@ -220,10 +220,9 @@
                 "hostname": null,
                 "server_mac": "e9a18e9be1aea93716636ca9d8750d884fc23fbf28b4d3b6c3c628caab00be6c"
             },
-            "token_b64": "ZW5lNkovRmw3U2drNVdBQzFWZW9ocGhCZE9ISVp5TmhIL0paMVdnbmRnbz0uMjEuMTUwMC57InYiOjF9",
+            "token_b64": "ZW5lNkovRmw3U2drNVdBQzFWZW9ocGhCZE9ISVp5TmhIL0paMVdnbmRnbz0uMy4xNTAwLnsidiI6MX0=",
             "expected": {
-                "ok": false,
-                "code": "unsupported_argon2_params"
+                "ok": true
             },
             "verify_opts": {
                 "expected_scope": "login"

@@ -32,6 +32,8 @@ check('header token', KiwiVerifyLogic::extractToken(['HTTP_X_KIWI_TOKEN' => 'h1'
 check('native form token', KiwiVerifyLogic::extractToken([], ['kiwi__token' => 'n1'], []) === 'n1');
 check('incumbent form token', KiwiVerifyLogic::extractToken([], ['h-captcha-response' => 'hc'], []) === 'hc');
 check('cookie token', KiwiVerifyLogic::extractToken([], [], ['kiwi_token' => 'c1']) === 'c1');
+check('json body namespaced token', KiwiVerifyLogic::extractToken(['CONTENT_TYPE' => 'application/json'], [], [], '{"kiwi_token":"jt"}') === 'jt');
+check('json body bare token field is ignored', KiwiVerifyLogic::extractToken(['CONTENT_TYPE' => 'application/json'], [], [], '{"token":"app-secret"}') === null);
 check('no token is null', KiwiVerifyLogic::extractToken([], [], []) === null);
 
 // Scope resolution over the settings shape.
@@ -67,6 +69,7 @@ check('compat mode omits the bearer header', !isset($compat['headers']['Authoriz
 // moves the binding without a trusted peer.
 check('untrusted peer ignores xff', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '192.0.2.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.9');
 check('trusted lb takes next left', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '198.51.100.4, 10.0.0.9'], ['trusted_proxies' => '10.0.0.0/24']) === '198.51.100.4');
+check('client-supplied leftmost entry is ignored', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 198.51.100.4, 10.0.0.9'], ['trusted_proxies' => '10.0.0.0/24']) === '198.51.100.4');
 check('garbage hop fails closed', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.9'], ['trusted_proxies' => '10.0.0.0/24']) === '10.0.0.9');
 check('real ip when trusted and no xff', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_REAL_IP' => '198.51.100.7'], ['trusted_proxies' => '10.0.0.0/24']) === '198.51.100.7');
 

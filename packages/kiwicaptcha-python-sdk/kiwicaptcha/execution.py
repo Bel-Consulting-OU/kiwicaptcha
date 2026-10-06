@@ -23,11 +23,11 @@ from typing import Any, Dict, List, Optional
 
 LABEL = "kiwi-execution-v1"
 FORMAT_VERSION = 1
-MAX_EXECUTION_VERSION = 5
+MAX_EXECUTION_VERSION = 6
 MIN_OPS = 8
 MAX_OPS = 24
 MAX_PROGRAM_BASE64 = 4096
-OP_COUNT = 45
+OP_COUNT = 50
 
 OP_ADD = 0
 OP_SUB = 1
@@ -74,10 +74,15 @@ OP_DOM_EVENT_PHASE = 41
 OP_DOM_URL_CANON = 42
 OP_DOM_TEXT_MUTATE = 43
 OP_DOM_SELECT_DEP = 44
+OP_CSS_GEOM = 45
+OP_MUT_ORDER = 46
+OP_EV_PHASE_FULL = 47
+OP_RANGE_ORDER = 48
+OP_INT_OBS = 49
 
 IDENTIFIER_PATTERN = re.compile(r"\A[A-Za-z0-9._:-]+\Z")
 
-_MAX_OPCODE_BY_VERSION = {1: 33, 2: 34, 3: 35, 4: 37, 5: OP_COUNT}
+_MAX_OPCODE_BY_VERSION = {1: 33, 2: 34, 3: 35, 4: 37, 5: 45, 6: OP_COUNT}
 
 
 class _Cursor:
@@ -191,7 +196,7 @@ def _read_set_attr(cur: _Cursor) -> Optional[Dict[str, Any]]:
     name = _read_byte(cur)
     if name is None:
         return None
-    value = _read_string(cur)
+    value = _read_value(cur)
     if value is None:
         return None
     return {"name": name % 5, "val": value["s"]}
@@ -299,6 +304,42 @@ def _read_text_mutate(cur: _Cursor) -> Optional[Dict[str, Any]]:
     return {"val": value["s"], "cell": cell % 64}
 
 
+def _read_probe_seed_cell(cur: _Cursor) -> Optional[Dict[str, Any]]:
+    """Version-6 CSS_GEOM / INT_OBS: probed id, raw seed, raw dst cell."""
+    ident = _read_id_keyed(cur)
+    if ident is None:
+        return None
+    seed = _read_byte(cur)
+    cell = _read_byte(cur)
+    if seed is None or cell is None:
+        return None
+    return {"id": ident["id"], "seed": seed, "cell": cell % 64}
+
+
+def _read_probe_two_bytes_cell(cur: _Cursor) -> Optional[Dict[str, Any]]:
+    """Version-6 MUT_ORDER / RANGE_ORDER: probed id, two raw bytes, cell."""
+    ident = _read_id_keyed(cur)
+    if ident is None:
+        return None
+    b0 = _read_byte(cur)
+    b1 = _read_byte(cur)
+    cell = _read_byte(cur)
+    if b0 is None or b1 is None or cell is None:
+        return None
+    return {"id": ident["id"], "b0": b0, "b1": b1, "cell": cell % 64}
+
+
+def _read_probe_cell(cur: _Cursor) -> Optional[Dict[str, Any]]:
+    """Version-6 EV_PHASE_FULL: probed id and raw dst cell."""
+    ident = _read_id_keyed(cur)
+    if ident is None:
+        return None
+    cell = _read_byte(cur)
+    if cell is None:
+        return None
+    return {"id": ident["id"], "cell": cell % 64}
+
+
 def _read_operands(cur: _Cursor, opcode: int) -> Optional[Dict[str, Any]]:
     if opcode in (OP_ADD, OP_SUB, OP_MUL, OP_XOR, OP_AND, OP_OR, OP_SHL, OP_SHR):
         return _read_u32_pair(cur)
@@ -371,6 +412,12 @@ def _read_operands(cur: _Cursor, opcode: int) -> Optional[Dict[str, Any]]:
         return {"b0": b0 if b0 is not None else 0,
                 "b1": b1 if b1 is not None else 0,
                 "b2": b2 if b2 is not None else 0}
+    if opcode in (OP_CSS_GEOM, OP_INT_OBS):
+        return _read_probe_seed_cell(cur)
+    if opcode in (OP_MUT_ORDER, OP_RANGE_ORDER):
+        return _read_probe_two_bytes_cell(cur)
+    if opcode == OP_EV_PHASE_FULL:
+        return _read_probe_cell(cur)
     return None
 
 

@@ -67,7 +67,7 @@ const (
 )
 
 // MaxExecutionVersion is the execution-dimension grammar ceiling.
-const MaxExecutionVersion = 5
+const MaxExecutionVersion = 6
 
 // MaxClockSkew is the maximum tolerated future issuance skew in
 // seconds. A challenge claiming issuance further ahead than this is

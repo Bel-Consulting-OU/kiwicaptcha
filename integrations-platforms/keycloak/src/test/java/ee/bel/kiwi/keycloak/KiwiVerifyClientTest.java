@@ -28,12 +28,20 @@ public final class KiwiVerifyClientTest {
     }
 
     public static void main(String[] args) throws Exception {
-        // Decision surface without network: scan the provider body.
+        // Decision surface without network: parse the provider body
+        // with a real JSON parser, never a substring scan.
         check("success body is detected", KiwiVerifyClient.responseBodyHasSuccess("{\"success\":true,\"error-codes\":[]}"));
         check("failure body is rejected", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":false}"));
         check("whitespace tolerance", KiwiVerifyClient.responseBodyHasSuccess("{ \"success\" : true }"));
         check("success in a string is not success", !KiwiVerifyClient.responseBodyHasSuccess("{\"x\":\"success:true\"}"));
         check("empty body is rejected", !KiwiVerifyClient.responseBodyHasSuccess(""));
+        check("string success is not boolean success", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":\"true\"}"));
+        check("nested success does not count", !KiwiVerifyClient.responseBodyHasSuccess("{\"error\":{\"success\":true}}"));
+        check("truncated body is rejected", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":true"));
+        check("trailing garbage is rejected", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":true} extra"));
+        check("number one is not success", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":1}"));
+        check("duplicate success keys fail closed", !KiwiVerifyClient.responseBodyHasSuccess("{\"success\":true,\"success\":false}"));
+        check("bare true is not an object", !KiwiVerifyClient.responseBodyHasSuccess("true"));
 
         // Token extraction order: header first, then the field list.
         var fields = KiwiVerifyClient.tokenFieldNames();

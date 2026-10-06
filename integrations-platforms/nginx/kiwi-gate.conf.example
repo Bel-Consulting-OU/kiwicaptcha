@@ -43,20 +43,25 @@ http {
             # The token sources and the client ip the endpoint binds.
             fastcgi_param HTTP_X_KIWI_TOKEN $http_x_kiwi_token;
             fastcgi_param HTTP_COOKIE $http_cookie;
+            # This config assumes nginx is the EDGE (no proxy in front
+            # of it). The socket peer the endpoint binds is nginx's own
+            # $remote_addr, so trust is OFF (KIWI_TRUSTED_PROXIES empty,
+            # the default) and no forwarding header is passed at all.
+            # Never pass $proxy_add_x_forwarded_for here: it would carry
+            # the client's own leftmost X-Forwarded-For entry into the
+            # endpoint. Never pass $http_x_forwarded_for raw either —
+            # the client would then pick the bound ip with one header.
             fastcgi_param REMOTE_ADDR $remote_addr;
-            # The trust chain, spelled out: $proxy_add_x_forwarded_for
-            # APPENDS the real client ip ($remote_addr) after whatever
-            # the client sent, and the endpoint walks the chain from the
-            # right. With KIWI_TRUSTED_PROXIES covering only the local
-            # FPM peer (127.0.0.0/8), the first untrusted entry from the
-            # right is nginx's own append, never a forged leftmost hop.
-            # Never pass $http_x_forwarded_for raw here: the client
-            # would then pick the bound ip with one header.
-            fastcgi_param HTTP_X_FORWARDED_FOR $proxy_add_x_forwarded_for;
+            # Behind another proxy instead of the edge: re-enable the
+            # chain and name only that proxy as trusted, e.g.
+            #   fastcgi_param HTTP_X_FORWARDED_FOR $proxy_add_x_forwarded_for;
+            #   fastcgi_param KIWI_TRUSTED_PROXIES 10.0.0.0/8;
+            # The endpoint then walks the chain right to left and takes
+            # the first hop outside KIWI_TRUSTED_PROXIES; a forged
+            # leftmost entry is ignored.
             # The gate knobs (kiwi-verify.php reads them from $_SERVER).
             fastcgi_param KIWI_VERIFY_URL http://127.0.0.1:7371/verify;
             fastcgi_param KIWI_SCOPE login;
-            fastcgi_param KIWI_TRUSTED_PROXIES 127.0.0.0/8;
             fastcgi_param KIWI_DENY 403;
             # KIWI_BEARER rides the FPM pool env, never the config file.
         }
@@ -71,9 +76,12 @@ http {
             error_page 403 = @kiwi_denied;
             error_page 500 502 503 504 = @kiwi_gate_fault;
             proxy_pass http://127.0.0.1:3000;
-            # The same append rule as the fastcgi leg: nginx adds the
-            # real client ip to the end of the chain the client sent.
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            # Edge again: replace (never append to) the client's
+            # X-Forwarded-For, so a forged leftmost hop cannot reach
+            # the upstream application. Behind another proxy, use
+            # $proxy_add_x_forwarded_for instead and configure that
+            # proxy's trusted list on the application.
+            proxy_set_header X-Forwarded-For $remote_addr;
         }
 
         # ---- piece 3: the deny and fault outcomes

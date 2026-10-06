@@ -58,8 +58,33 @@ class SqliteStorageError(Exception):
     unavailable store."""
 
 
+def _main_database_file(connection: sqlite3.Connection) -> str:
+    """The file path behind a caller's connection, or '' when the main
+    database is in memory (and therefore not shareable)."""
+    try:
+        rows = connection.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
+        if row[1] == "main":
+            return row[2] or ""
+    return ""
+
+
+def _is_memory_file(path: str) -> bool:
+    return (not path) or path == ":memory:" or "mode=memory" in path
+
+
 class SqliteStorage:
-    """The SQLite store adapter, mirroring the PHP SqliteStorage."""
+    """The SQLite store adapter, mirroring the PHP SqliteStorage.
+
+    The adapter always drives its own connection. A path opens one; a
+    caller-passed connection is never touched (setting ``isolation_level``
+    on it would silently flip the host application into autocommit) —
+    the adapter resolves the connection's main database file and opens a
+    dedicated connection to that file instead. An in-memory database has
+    no shareable file and is refused with a configuration error.
+    """
 
     def __init__(
         self,
@@ -75,11 +100,17 @@ class SqliteStorage:
         self._ttl_margin = ttl_margin_secs
         self._now = now
         if isinstance(connection_or_path, str):
-            self._owns_connection = True
-            self.conn = sqlite3.connect(connection_or_path, timeout=busy_timeout_ms / 1000.0)
+            path = connection_or_path
         else:
-            self._owns_connection = False
-            self.conn = connection_or_path
+            path = _main_database_file(connection_or_path)
+            if _is_memory_file(path):
+                raise ValueError(
+                    "SqliteStorage opens a dedicated connection and cannot"
+                    " share an in-memory database: pass a file path (or a"
+                    " connection to a file-backed database)"
+                )
+        self._owns_connection = True
+        self.conn = sqlite3.connect(path, timeout=busy_timeout_ms / 1000.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.isolation_level = None
         self.conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")

@@ -26,6 +26,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\Agents;
  */
 final class StructuredFieldsSubsetParser
 {
+    /** The exact Ed25519 signature length the byte-sequence must decode to. */
+    private const ED25519_SIGNATURE_BYTES = 64;
+
     /**
      * Parses one Signature-Input field value into its single labeled
      * inner list. Exactly one member is accepted: a field carrying
@@ -59,19 +62,21 @@ final class StructuredFieldsSubsetParser
         while ($value !== '' && $value[0] === ';') {
             $value = substr($value, 1);
             $key = $this->parseKey($value);
-            $kind = 'string';
-            $parameterValue = '';
-            if ($value !== '' && $value[0] === '=') {
-                $value = substr($value, 1);
-                if ($value !== '' && $value[0] === '"') {
-                    $parameterValue = $this->parseString($value);
-                    $kind = 'string';
-                } elseif ($value !== '' && ($value[0] === '-' || ctype_digit($value[0]))) {
-                    $parameterValue = $this->parseInteger($value);
-                    $kind = 'integer';
-                } else {
-                    throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" carries an unsupported value', $key));
-                }
+            if ($value === '' || $value[0] !== '=') {
+                // A bare parameter is RFC 8941 boolean true; this
+                // subset parses strings and integers only, so it is
+                // refused, never coerced to "".
+                throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" must carry a string or integer value; bare boolean parameters are refused', $key));
+            }
+            $value = substr($value, 1);
+            if ($value !== '' && $value[0] === '"') {
+                $parameterValue = $this->parseString($value);
+                $kind = 'string';
+            } elseif ($value !== '' && ($value[0] === '-' || ctype_digit($value[0]))) {
+                $parameterValue = $this->parseInteger($value);
+                $kind = 'integer';
+            } else {
+                throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" carries an unsupported value', $key));
             }
             foreach ($parameters as [$existingKey]) {
                 if ($existingKey === $key) {
@@ -121,6 +126,9 @@ final class StructuredFieldsSubsetParser
         $bytes = base64_decode($encoded, true);
         if ($bytes === false) {
             throw new \InvalidArgumentException('Signature byte-sequence is not valid base64');
+        }
+        if (\strlen($bytes) !== self::ED25519_SIGNATURE_BYTES) {
+            throw new \InvalidArgumentException('Signature byte-sequence must be exactly 64 bytes (one Ed25519 signature)');
         }
 
         return [$label, $bytes];

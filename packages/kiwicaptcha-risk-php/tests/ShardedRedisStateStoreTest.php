@@ -322,7 +322,7 @@ final class ShardedRedisStateStoreTest extends TestCase
         // The ledger entries mirror each other field by field (the score
         // is computed from the same signals and weights).
         $classicRaw = $this->client->get($legacy->ledgerKey('dec-classic'));
-        $shardedRaw = $this->client->get('{kiwi:' . $sharded->namespace() . '}:outcome:dec-sharded');
+        $shardedRaw = $this->client->get(KeyspaceMode::outcomeLedgerKey($sharded->namespace(), 'dec-sharded'));
         self::assertIsString($classicRaw);
         self::assertIsString($shardedRaw);
         $classicLedger = json_decode($classicRaw, true);

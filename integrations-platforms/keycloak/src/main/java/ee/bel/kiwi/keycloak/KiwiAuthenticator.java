@@ -19,7 +19,10 @@ import org.keycloak.models.UserModel;
  * deployment fails the flow closed.
  *
  * Configuration rides the authenticator's config model:
- * kiwi.verify.url, kiwi.bearer, kiwi.scope, kiwi.trust.proxy.
+ * kiwi.verify.url, kiwi.bearer, kiwi.scope. There is deliberately no
+ * custom forwarding-header option: the bound client IP is the socket
+ * peer (see authenticate()), and proxy handling is Keycloak's own
+ * KC_PROXY configuration.
  */
 public class KiwiAuthenticator implements Authenticator {
 
@@ -105,8 +108,15 @@ public class KiwiAuthenticator implements Authenticator {
 
     @Override
     public void action(AuthenticationFlowContext context) {
-        // No interactive action: the authenticator decides in authenticate().
-        context.attempted();
+        // No interactive form: any submission that lands here is
+        // re-verified against the same contract as authenticate(), and
+        // nothing else. The previous attempted() marked this execution
+        // done without verifying, which let an ALTERNATIVE-flow
+        // request continue to the next alternative and skip the check
+        // entirely; a REQUIRED execution then "failed closed" only by
+        // accident. Re-verification (not attempted()) is the one
+        // behavior that is correct under both requirements.
+        authenticate(context);
     }
 
     @Override

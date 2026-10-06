@@ -114,6 +114,23 @@ pub struct AssessV2Reply {
     pub registration_status: bool,
 }
 
+/// The live target-dimension state (change.md 3.2.1): the leaky-bucket
+/// authentication-failure counter of one target plus its source+asn
+/// spread. Compiled into the marks stage's attacked-target record by
+/// [`crate::marks::MarksView::read`]; written by the outcome-bridge
+/// path when a failure is reported against a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TargetState {
+    /// The decayed failure count (one failure leaks per minute).
+    pub fails: u32,
+    /// The first recorded failure of the retained window (epoch ms).
+    pub first_ms: i64,
+    /// The most recent failure (epoch ms).
+    pub last_ms: i64,
+    /// The distinct source+asn spread (the two HyperLogLogs summed).
+    pub spread: u32,
+}
+
 /// Risk state store: applies an observation (event_id dedupe) and returns
 /// the current signal vector.
 ///
@@ -210,6 +227,47 @@ pub trait RiskStateStore {
         _registration: Option<&OutcomeRegistration>,
     ) -> Result<Option<AssessV2Reply>, RiskStoreError> {
         Ok(None)
+    }
+
+    /// Registers one authentication failure against the target
+    /// dimension (`target_failure.lua`): increments the target's leaky
+    /// failure counter and PFADDs the failing source/asn spread
+    /// elements. The outcome-bridge write path of target-account
+    /// protection — failures are stored by the engine state, never by
+    /// callers. Stores without the capability record nothing (the
+    /// neutral state), exactly like the session-tag seams.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn register_target_failure(
+        &self,
+        _target_id: &str,
+        _source: &str,
+        _asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        Ok(TargetState::default())
+    }
+
+    /// Resets the target's failure counter (step-up completed: the
+    /// account owner proved themselves, so a legitimate user is not
+    /// stepped up twice). The spread HLLs keep their history.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn clear_target_failures(&self, _target_id: &str) -> Result<(), RiskStoreError> {
+        Ok(())
+    }
+
+    /// The live target-dimension state of one target (the decayed
+    /// failure count and the source+asn spread).
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn read_target_state(&self, _target_id: &str) -> Result<TargetState, RiskStoreError> {
+        Ok(TargetState::default())
     }
 }
 

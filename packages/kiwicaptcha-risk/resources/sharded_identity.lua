@@ -27,7 +27,8 @@
 -- ARGV:
 --   [1] event        RiskEventKind int (1..21)
 --   [2] scope        int (0 = unknown)
---   [3] dimension    1=source, 2=subnet, 3=session, 4=principal
+--   [3] dimension    1=source, 2=subnet, 3=session, 4=principal,
+--                    5=asn, 6=target, 7=agent
 --   [4] has_write    0/1 — 0 = read-only leak (an absent dimension or a
 --                    boundary-epoch read); the marker is never touched
 --   [5] dedupe_ttl_s
@@ -47,9 +48,11 @@
 -- and the marker turns the increment into a no-op.
 --
 -- Event semantics, leak rates and aggregation mirror risk-v1.lua exactly:
--- dimension 1/2 run the source event table (including the event 15
+-- dimension 1/2/5 run the source event table (including the event 15
 -- source/session-only branch for dimension 1 and 3), dimension 3 the
--- session table, dimension 4 the principal table.
+-- session table, dimension 4/6/7 the principal table (the target and
+-- agent dimensions are reputation/failure dimensions like the
+-- principal).
 
 local function num(v)
     if not v then return 0 end
@@ -180,13 +183,19 @@ local function ttl_out_of_bounds(value)
 end
 
 local dimension = tonumber(ARGV[3])
-local has_write = tonumber(ARGV[4]) == 1
+local has_write_arg = ARGV[4]
 local dedupe_ttl = tonumber(ARGV[5])
-local event_id = ARGV[6]
+local event_id = ARGV[6] or ''
 local state_ttl = tonumber(ARGV[7])
-if dimension == nil or dimension < 1 or dimension > 4 then
-    return redis.error_reply('risk-v1-sharded: dimension must be 1..4')
+if dimension == nil or dimension < 1 or dimension > 7 then
+    return redis.error_reply('risk-v1-sharded: dimension must be 1..7')
 end
+-- Fail closed on a malformed has_write: a garbage flag that silently
+-- coerced to read-only would drop the event instead of refusing it.
+if has_write_arg ~= '0' and has_write_arg ~= '1' then
+    return redis.error_reply('risk-v1-sharded: has_write must be 0 or 1')
+end
+local has_write = has_write_arg == '1'
 if ttl_out_of_bounds(dedupe_ttl) then
     return redis.error_reply('risk-v1-sharded: dedupe_ttl_s must be a positive integer no greater than 2147483647')
 end
@@ -201,6 +210,9 @@ end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
+if event ~= math.floor(event) or event < 1 or event > 21 then
+    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..21')
+end
 
 -- ── Per-dimension dedupe: the marker is SET NX inside this script, so
 -- the increment is exactly once per event id even when the assessment
@@ -216,9 +228,9 @@ end
 
 local s = read_state(KEYS[1], now)
 if has_write and not is_duplicate then
-    if dimension == 1 then
+    if dimension == 1 or dimension == 5 then
         apply_event(s, event, scope)
-        if event == 15 then
+        if event == 15 and dimension == 1 then
             -- SourceRateLimitHit: per-source limit, source/session only.
             s.bad = s.bad + 3000
         end

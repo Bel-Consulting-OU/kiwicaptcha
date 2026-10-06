@@ -36,6 +36,9 @@ check("peer ip trusted list empty", KiwiCaptcha::Verifier.client_ip(
 check("forwarded ip trusted", KiwiCaptcha::Verifier.client_ip(
   { "REMOTE_ADDR" => "10.0.0.1", "HTTP_X_FORWARDED_FOR" => "1.2.3.4, 10.0.0.1" }, "10.0.0.0/8"
 ) == "1.2.3.4")
+check("client-supplied leftmost entry is ignored", KiwiCaptcha::Verifier.client_ip(
+  { "REMOTE_ADDR" => "10.0.0.1", "HTTP_X_FORWARDED_FOR" => "6.6.6.6, 1.2.3.4, 10.0.0.1" }, "10.0.0.0/8"
+) == "1.2.3.4")
 check("garbage hop fails closed", KiwiCaptcha::Verifier.client_ip(
   { "REMOTE_ADDR" => "10.0.0.1", "HTTP_X_FORWARDED_FOR" => "1.2.3.4, garbage!!, 10.0.0.1" }, "10.0.0.0/8"
 ) == "10.0.0.1")

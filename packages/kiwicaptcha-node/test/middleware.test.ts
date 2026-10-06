@@ -8,8 +8,8 @@ import { goldenVectors, frozenClock } from './corpus.js';
 import { challengeRecordFromJson } from '../src/record.js';
 import { MemoryStore } from '../src/stores/memory.js';
 import { verify } from '../src/verify.js';
-import { kiwiVerifyExpress } from '../src/middleware/express.js';
-import { kiwiVerifyFastify } from '../src/middleware/fastify.js';
+import { kiwiVerifyExpress, clientIpFromRequest } from '../src/middleware/express.js';
+import { kiwiVerifyFastify, clientIpFromRequestFastify } from '../src/middleware/fastify.js';
 
 /**
  * The framework middleware: reads the configured token field, verifies
@@ -228,5 +228,48 @@ describe('fastify middleware', () => {
     );
     assert.ok(result.price !== null);
     assert.ok(result.decisionHandle !== null);
+  });
+});
+
+describe('adapter client-ip resolution', () => {
+  const TRUSTED = ['10.0.0.0/24'];
+
+  function expressReq(rawHeaders: string[]): Parameters<typeof clientIpFromRequest>[0] {
+    return {
+      rawHeaders,
+      socket: { remoteAddress: '10.0.0.9' },
+    } as unknown as Parameters<typeof clientIpFromRequest>[0];
+  }
+
+  function fastifyReq(rawHeaders: string[]): Parameters<typeof clientIpFromRequestFastify>[0] {
+    return {
+      raw: { rawHeaders },
+      socket: { remoteAddress: '10.0.0.9' },
+    } as unknown as Parameters<typeof clientIpFromRequestFastify>[0];
+  }
+
+  test('a single trusted-hop X-Real-IP is honored', () => {
+    const headers = ['X-Real-IP', '198.51.100.5'];
+    assert.equal(clientIpFromRequest(expressReq(headers), TRUSTED), '198.51.100.5');
+    assert.equal(clientIpFromRequestFastify(fastifyReq(headers), TRUSTED), '198.51.100.5');
+  });
+
+  test('a repeated X-Real-IP is parser ambiguity and never selects a line', () => {
+    // One intermediary reads the first line, another the last: a
+    // header-derived identity is untrustworthy and the peer wins. This
+    // must never pick the attacker-supplied first line.
+    const headers = ['X-Real-IP', '1.2.3.4', 'X-Real-IP', '10.0.0.9'];
+    assert.equal(clientIpFromRequest(expressReq(headers), TRUSTED), '10.0.0.9');
+    assert.equal(clientIpFromRequestFastify(fastifyReq(headers), TRUSTED), '10.0.0.9');
+  });
+
+  test('a repeated X-Real-IP also overrides a valid X-Forwarded-For chain', () => {
+    const headers = [
+      'X-Forwarded-For', '198.51.100.5',
+      'X-Real-IP', '1.2.3.4',
+      'X-Real-IP', '5.6.7.8',
+    ];
+    assert.equal(clientIpFromRequest(expressReq(headers), TRUSTED), '10.0.0.9');
+    assert.equal(clientIpFromRequestFastify(fastifyReq(headers), TRUSTED), '10.0.0.9');
   });
 });

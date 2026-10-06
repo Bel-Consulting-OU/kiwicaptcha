@@ -113,10 +113,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $ticket = (string) $body['challenge'];
 
         $code = TotpCode::at($secretRaw, TotpCode::stepOf(self::NOW), 'sha1', 6);
-        $result = $this->handler->complete(Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', [
-            TotpStepUpHandler::TICKET_FIELD => $ticket,
-            TotpStepUpHandler::CODE_FIELD => $code,
-        ]));
+        $result = $this->handler->complete($this->completeRequest($ticket, $code));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted, consumed and credited end to end');
         self::assertTrue($result->creditedPrincipal);
     }
@@ -132,10 +129,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         self::assertNotNull($this->store->read($this->challengeIdOf($ticket)), 'the record is readable before consumption');
 
         self::assertNotNull($this->store->consume($this->challengeIdOf($ticket)));
-        $result = $this->handler->complete(Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', [
-            TotpStepUpHandler::TICKET_FIELD => $ticket,
-            TotpStepUpHandler::CODE_FIELD => '000000',
-        ]));
+        $result = $this->handler->complete($this->completeRequest($ticket, '000000'));
         self::assertSame(StepUpResultStatus::Failed, $result->status);
         self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $result->failureCode, 'the GETDEL boundary holds over the real client');
     }
@@ -171,5 +165,18 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             5,
             str_repeat('a', 64),
         );
+    }
+
+    private function completeRequest(string $ticket, string $code): Request
+    {
+        $request = Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', [
+            TotpStepUpHandler::TICKET_FIELD => $ticket,
+            TotpStepUpHandler::CODE_FIELD => $code,
+        ]);
+        // The controller binds the re-resolved principal before the
+        // handler runs; direct handler calls bind it the same way.
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
+
+        return $request;
     }
 }

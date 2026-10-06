@@ -76,19 +76,47 @@ final class KiwiOutcomes
         $eventId = null;
 
         if ($handle->dimension->isLedger()) {
-            $status = $this->engine->confirmOutcome($handle->id, $mapping->ledgerLegitimate === true);
-            if ($status !== 0 && $context !== null) {
+            $legitimate = $mapping->ledgerLegitimate === true;
+            $status = $this->engine->confirmOutcome($handle->id, $legitimate);
+            // Reputation authorization: statuses 1 and 2 always; status
+            // 3 (a capped label) only for abuse outcomes — a capped
+            // trust label must never mint unlimited reputation credit
+            // (status 4 is the v2 confirm's trust cap and never
+            // authorizes).
+            $authorize = $status === 1 || $status === 2 || ($status === 3 && !$legitimate);
+            if ($authorize && $context !== null) {
                 $receipt = $this->engine->recordOutcomeFeedback($mapping->channel, $context, $idempotencyKey);
                 $eventId = $receipt->eventId;
                 $channelBooked = true;
             }
         } else {
+            // The outcome-bridge write path of target-account
+            // protection: an authentication failure reported against a
+            // target registers the failure in the engine's target state;
+            // a completed step-up clears the counter (change.md 3.4.2).
+            if ($handle->dimension === OutcomeHandleDimension::Target && $this->marks instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface) {
+                if ($outcome === Outcome::AuthenticationFailure) {
+                    $this->marks->registerTargetFailure($handle->id, '', '');
+                } elseif ($outcome === Outcome::StepUpCompleted) {
+                    $this->marks->clearTargetFailures($handle->id);
+                }
+            }
             if ($mapping->writesAbuseMark) {
+                // The mark write dedupes on the report's own event id
+                // (the same one the feedback channel books), so a
+                // retried report never double-counts the mark. No
+                // idempotency key yields '' (dedupe disabled).
+                $markEventId = $this->engine->deriveOutcomeEventId(
+                    $idempotencyKey,
+                    $context?->scope ?? 0,
+                    $mapping->channel,
+                );
                 $markCount = $this->marks->writeMark(
                     (string) $handle->dimension->markDimension(),
                     $handle->id,
                     (string) $mapping->markKind(),
                     $nowMs,
+                    $markEventId,
                 );
                 $marksWritten = 1;
             }

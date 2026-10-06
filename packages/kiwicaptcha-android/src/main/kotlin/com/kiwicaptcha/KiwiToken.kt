@@ -55,7 +55,13 @@ internal object KiwiJsonReader {
                         'r' -> out.append('\r')
                         'u' -> {
                             if (i + 4 >= raw.length) return null
-                            out.append(raw.substring(i + 1, i + 5).toInt(16).toChar())
+                            val hex = raw.substring(i + 1, i + 5)
+                            // A JSON \\u escape is exactly four hex digits:
+                            // anything else is malformed input, not an
+                            // exception. The reader answers null and the
+                            // caller raises the typed Malformed error.
+                            if (!hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
+                            out.append(hex.toInt(16).toChar())
                             i += 4
                         }
                         else -> out.append(esc)

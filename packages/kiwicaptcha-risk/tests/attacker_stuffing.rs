@@ -1,29 +1,39 @@
 //! The credential-stuffing simulator: the done-when of decisive
-//! attacker handling (change.md 3.3.3). One victim account; K attacker
-//! identities (distinct session dimensions, three groups sharing an ASN
-//! bucket) attempt M logins against the victim. Every attacker identity
-//! must be denied within N = 3 attempts of its own traffic, while the
-//! victim logs in with exactly one step-up and zero lockouts end-to-end.
+//! attacker handling (change.md 3.3.3 / D3.5). One victim account; K
+//! attacker identities (distinct session dimensions, three groups
+//! sharing an ASN bucket) attempt M logins against the victim. Every
+//! attacker identity must be denied within N = 3 attempts of its own
+//! traffic, while the victim logs in with exactly one step-up and zero
+//! lockouts end-to-end.
 //!
-//! The simulation is deterministic and policy-layer only: attempt j of
-//! an attacker carries the accumulated invalid-proof evidence
-//! `bad_proof = min(1000, 250 * j)` through the real scorer and policy,
-//! the outcome plane writes the attacker's abuse marks (session plus
-//! ASN bucket) once its evidence corroborates (bad_proof at the
-//! corroboration floor, attempt 2), and the target-attack state is the
-//! reader-side view derived from the target's rolling failure count. A
-//! denied attempt never reaches authentication, so it adds no target
-//! failure. The marks store is in-memory; with the Redis url variable
-//! set the identical simulation runs over the real marks surface.
+//! The simulation is deterministic and policy-layer only: each attempt
+//! is a realistic FIRST attempt with a fresh stuffed credential pair
+//! (the OpenBullet-class list shape of D3.5 — one pair per attempt, no
+//! retries of a malformed token). Attempt j carries the accumulated
+//! invalid-proof evidence `bad_proof = min(1000, 250 * j)` through the
+//! real scorer and policy; the outcome plane writes the attacker's
+//! abuse marks (session plus ASN bucket) once its evidence corroborates
+//! (bad_proof at the corroboration floor, attempt 2). When an attempt
+//! is not denied it reaches authentication and fails (the stuffed pair
+//! is not the victim's password) — and the ENGINE stores that target
+//! failure through the typed outcomes facade
+//! (`Outcome::AuthenticationFailure` on the target handle), which owns
+//! the leaky counter and the spread HLLs. The test never injects the
+//! target record: [`MarksView::read`] compiles the attacked-target
+//! record from the engine's own state once the count reaches
+//! [`kiwicaptcha_risk::marks::TARGET_ATTACK_THRESHOLD`]. A denied
+//! attempt never reaches authentication, so it adds no target failure.
+//! The marks store is in-memory; with the Redis url variable set the
+//! identical simulation runs over the real marks surface.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use kiwicaptcha_risk::action::RiskAction;
 use kiwicaptcha_risk::context::RiskContext;
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::marks::MarksView;
+use kiwicaptcha_risk::marks::{MarksView, TARGET_ATTACK_THRESHOLD};
 use kiwicaptcha_risk::network::CidrNetworkClassifier;
 use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::outcomes::{
@@ -33,11 +43,8 @@ use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::score::{score as compute_score, RiskWeights};
 use kiwicaptcha_risk::signals::SignalVector;
-use kiwicaptcha_risk::store::RiskStoreError;
-use kiwicaptcha_risk::store::{
-    Observed, RiskStateStore, SessionContextTagStore, SessionTlsTagStore,
-};
-use kiwicaptcha_risk::{marks, RiskEngine, RiskError};
+use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError, TargetState};
+use kiwicaptcha_risk::{marks, RiskError};
 use serde_json::json;
 
 const K: usize = 24;
@@ -46,7 +53,6 @@ const M: u32 = 6;
 const N: u32 = 3;
 const GROUPS: usize = 3;
 const T0: u64 = 1_700_000_000_000;
-const TARGET_ATTACK_THRESHOLD: u32 = 5;
 const QUIET_WINDOW_MS: u64 = 900_000;
 
 fn policy() -> Arc<RiskPolicy> {
@@ -82,10 +88,17 @@ fn asn_buckets() -> Vec<String> {
         .collect()
 }
 
-/// The deterministic stuffing storm over one marks surface; the credit
-/// closure reports the victim's stepUpCompleted outcome through the
-/// typed outcomes facade and answers (channel_booked, marks_written).
-fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn() -> (bool, u32)) {
+/// The deterministic stuffing storm over one marks-and-target surface.
+/// The credit closure reports the victim's stepUpCompleted outcome
+/// through the typed outcomes facade and answers (channel_booked,
+/// marks_written); the failure closure reports one attacker
+/// authentication failure against the victim target — the ENGINE stores
+/// the target failure. Both closures run the real report path.
+fn run_simulation(
+    store: &dyn OutcomeMarksStore,
+    report_failure: &dyn Fn(),
+    report_step_up_credit: &dyn Fn() -> (bool, u32),
+) {
     let weights = RiskWeights::default();
     let policy = policy();
     let healthy = ResourcePressure::default();
@@ -94,33 +107,21 @@ fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn(
     // Hex-only 32-char pseudonyms (the handle contract's shape).
     let victim_session = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5".to_string();
     let victim_principal = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6".to_string();
+    let victim_target = "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813".to_string();
     let sessions = attacker_sessions();
     let buckets = asn_buckets();
 
-    let mut target_failures = 0u32;
     let mut last_failure_at = 0u64;
-    let mut attack_started_at = 0u64;
     let mut step_up_completed = false;
     let mut marked = [false; K];
     let mut denied_at: Vec<Option<u32>> = vec![None; K];
     let mut victim_step_ups = 0u32;
     let mut victim_denies = 0u32;
 
-    // The reader-side target view: while the target's rolling failure
-    // count is at or above the attack threshold, a login claiming the
-    // target sees the attacked-target record.
-    let target_record = |failures: u32, started_at: u64, last_at: u64| {
-        (failures >= TARGET_ATTACK_THRESHOLD).then(|| MarkRecord {
-            kind: "targetUnderAttack".to_string(),
-            count: failures as i64,
-            first_ms: started_at as i64,
-            last_ms: last_at as i64,
-        })
-    };
-
     // Round-robin attempts: round j runs attacker 0..K-1 in order, so
     // each group's first attacker writes the shared ASN bucket mark
-    // before its group-mates attempt in the same round.
+    // before its group-mates attempt in the same round. Every attempt
+    // is a first attempt with a fresh stuffed credential pair.
     for j in 1..=M {
         for i in 0..K {
             let now = T0 + (((j - 1) as u64 * K as u64) + i as u64) * 1000;
@@ -137,20 +138,17 @@ fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn(
                 assert_eq!(plain.action.as_str(), "sha16");
             }
             let bucket = &buckets[i * GROUPS / K];
+            // The ENGINE compiles the target record from its own
+            // failure state — the test injects nothing.
             let view = MarksView::read(
-                marks,
+                store,
                 &[
                     (MarkDimension::Session, sessions[i].clone()),
                     (MarkDimension::Asn, bucket.clone()),
                 ],
-                None,
+                Some(&victim_target),
             )
-            .expect("marks read")
-            .with_target(target_record(
-                target_failures,
-                attack_started_at,
-                last_failure_at,
-            ));
+            .expect("marks read");
             let decision = marks::apply(
                 plain,
                 &view,
@@ -163,46 +161,40 @@ fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn(
             if decision.action == RiskAction::Deny {
                 denied_at[i].get_or_insert(j);
             } else {
-                // The attempt proceeds and fails authentication: one more
-                // target failure.
-                target_failures += 1;
-                if target_failures == TARGET_ATTACK_THRESHOLD {
-                    attack_started_at = now;
-                }
+                // The attempt reaches authentication with its fresh
+                // stuffed pair and fails: the ENGINE stores the target
+                // failure (leaky counter + spread HLLs).
+                report_failure();
                 last_failure_at = now;
             }
             if !marked[i] && bad_proof >= marks::CORROBORATION_FLOOR {
                 // The outcome plane confirms the abuse: long-memory marks
                 // on the attacker's session and ASN bucket.
-                marks
-                    .write_mark("session", &sessions[i], "accountBanned", now)
+                store
+                    .write_mark("session", &sessions[i], "accountBanned", now, "")
                     .expect("session mark");
-                marks
-                    .write_mark("asn", bucket, "accountBanned", now)
+                store
+                    .write_mark("asn", bucket, "accountBanned", now, "")
                     .expect("asn mark");
                 marked[i] = true;
             }
         }
 
         if j == 2 {
-            // The victim logs in while the target is under attack:
+            // The victim logs in while the target is under attack (the
+            // engine's failure state is at or above the threshold):
             // exactly the interactive step-up, never a lockout.
             let now = T0 + (K as u64 * 2) * 1000;
             let plain = policy.decide(1, 100, &SignalVector::zero(), &healthy, 0, now, 0);
             let view = MarksView::read(
-                marks,
+                store,
                 &[
                     (MarkDimension::Session, victim_session.clone()),
                     (MarkDimension::Principal, victim_principal.clone()),
                 ],
-                None,
+                Some(&victim_target),
             )
-            .expect("marks read")
-            .with_target(target_record(
-                target_failures,
-                attack_started_at,
-                last_failure_at,
-            ));
+            .expect("marks read");
             let decision = marks::apply(plain, &view, false, now, ttl, &healthy, false);
             assert_eq!(decision.action.as_str(), "step_up");
             assert!(decision.has_reason(RiskReason::TargetUnderAttack));
@@ -240,33 +232,36 @@ fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn(
     // ASN bucket mark and are denied at attempt 2.
     assert_eq!(leaders, vec![0, 8, 16]);
 
-    // The attack subsides: denied attempts add no target failures, so a
-    // quiet window decays the rolling count back below the threshold.
-    let quiet_at = last_failure_at + QUIET_WINDOW_MS;
-    assert!(quiet_at > attack_started_at);
+    // The attack subsides: denied attempts add no target failures and
+    // the step-up completion cleared the counter, so the ENGINE state
+    // is below the threshold again (the leaky bucket would also decay
+    // it across the quiet window).
     assert!(
         step_up_completed,
         "the victim completed its step-up before relief"
     );
-    target_failures = 0;
+    let quiet_at = last_failure_at + QUIET_WINDOW_MS;
+    assert!(quiet_at > 0);
+    let state = OutcomeMarksStore::read_target_state(store, &victim_target)
+        .expect("target state");
+    assert!(
+        state.fails < TARGET_ATTACK_THRESHOLD,
+        "the engine's target state is relieved (got {})",
+        state.fails
+    );
 
     // (b) the victim's next login is the plain allow again: no step-up,
     // no lockout, and exactly one step-up happened overall.
     let plain = policy.decide(1, 100, &SignalVector::zero(), &healthy, 0, quiet_at, 0);
     let view = MarksView::read(
-        marks,
+        store,
         &[
             (MarkDimension::Session, victim_session),
             (MarkDimension::Principal, victim_principal),
         ],
-        None,
+        Some(&victim_target),
     )
-    .expect("marks read")
-    .with_target(target_record(
-        target_failures,
-        attack_started_at,
-        last_failure_at,
-    ));
+    .expect("marks read");
     let decision = marks::apply(plain, &view, false, quiet_at, ttl, &healthy, false);
     assert_eq!(decision.action.as_str(), "allow");
     assert!(!decision.has_reason(RiskReason::TargetUnderAttack));
@@ -276,11 +271,43 @@ fn run_simulation(marks: &dyn OutcomeMarksStore, report_step_up_credit: &dyn Fn(
 
 /// The in-memory marks-and-state twin of the PHP RiskStateStoreStub:
 /// cloning shares the state, so the engine owns one clone while the
-/// simulation drives another.
+/// simulation drives another. The TARGET STATE is the engine's own
+/// (leaky counter + spread set): `register_target_failure` is what the
+/// outcomes facade calls, and `MarksView::read` compiles the
+/// attacked-target record from it.
 #[derive(Default, Clone)]
 struct SimStore {
     observed: Arc<Mutex<Vec<RiskObservation>>>,
     marks: Arc<Mutex<HashMap<(String, String), MarkRecord>>>,
+    target_fails: Arc<Mutex<HashMap<String, (u32, i64, i64)>>>,
+    target_spread: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+}
+
+impl SimStore {
+    /// The engine-side failure registration (the exact contract the
+    /// Redis target_failure.lua implements).
+    fn target_failure_state(&self, target_id: &str) -> TargetState {
+        let (fails, first_ms, last_ms) = self
+            .target_fails
+            .lock()
+            .unwrap()
+            .get(target_id)
+            .copied()
+            .unwrap_or((0, 0, 0));
+        let spread = self
+            .target_spread
+            .lock()
+            .unwrap()
+            .get(target_id)
+            .map(|s| s.len() as u32)
+            .unwrap_or(0);
+        TargetState {
+            fails,
+            spread,
+            first_ms,
+            last_ms,
+        }
+    }
 }
 
 impl RiskStateStore for SimStore {
@@ -312,10 +339,47 @@ impl RiskStateStore for SimStore {
     ) -> Result<bool, RiskStoreError> {
         Ok(true)
     }
+
+    fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        let now_ms = T0 as i64;
+        {
+            let mut fails = self.target_fails.lock().unwrap();
+            let entry = fails.entry(target_id.to_string()).or_insert((0, now_ms, now_ms));
+            entry.0 += 1;
+            entry.2 = now_ms;
+        }
+        {
+            let mut spread = self.target_spread.lock().unwrap();
+            let set = spread.entry(target_id.to_string()).or_default();
+            if !source.is_empty() {
+                set.insert(format!("src:{source}"));
+            }
+            if !asn.is_empty() {
+                set.insert(format!("asn:{asn}"));
+            }
+        }
+        Ok(self.target_failure_state(target_id))
+    }
+
+    fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
+        if let Some(entry) = self.target_fails.lock().unwrap().get_mut(target_id) {
+            entry.0 = 0;
+        }
+        Ok(())
+    }
+
+    fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskStoreError> {
+        Ok(self.target_failure_state(target_id))
+    }
 }
 
-impl SessionContextTagStore for SimStore {}
-impl SessionTlsTagStore for SimStore {}
+impl kiwicaptcha_risk::store::SessionContextTagStore for SimStore {}
+impl kiwicaptcha_risk::store::SessionTlsTagStore for SimStore {}
 
 impl OutcomeMarksStore for SimStore {
     fn mark_key(&self, dimension: &str, id: &str) -> Result<String, RiskError> {
@@ -327,17 +391,24 @@ impl OutcomeMarksStore for SimStore {
         id: &str,
         kind: &str,
         now_ms: u64,
+        _event_id: &str,
     ) -> Result<i64, RiskError> {
         let mut marks = self.marks.lock().unwrap();
         let entry = marks
             .entry((dimension.to_string(), id.to_string()))
             .or_insert(MarkRecord {
                 kind: kind.to_string(),
+                last_kind: kind.to_string(),
                 count: 0,
                 first_ms: now_ms as i64,
                 last_ms: now_ms as i64,
             });
-        entry.kind = kind.to_string();
+        if kiwicaptcha_risk::outcomes::mark_kind_severity(kind)
+            > kiwicaptcha_risk::outcomes::mark_kind_severity(&entry.kind)
+        {
+            entry.kind = kind.to_string();
+        }
+        entry.last_kind = kind.to_string();
         entry.count += 1;
         entry.last_ms = now_ms as i64;
         Ok(entry.count)
@@ -358,6 +429,10 @@ impl OutcomeMarksStore for SimStore {
             .remove(&(dimension.to_string(), id.to_string()))
             .map_or(0, |_| 1))
     }
+
+    fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskError> {
+        Ok(self.target_failure_state(target_id))
+    }
 }
 
 fn victim_context() -> RiskContext<'static> {
@@ -375,7 +450,7 @@ fn victim_context() -> RiskContext<'static> {
 #[test]
 fn stuffing_storm_denies_attackers_and_saves_the_victim() {
     let store = SimStore::default();
-    let engine = RiskEngine::new(
+    let engine = kiwicaptcha_risk::RiskEngine::new(
         store.clone(),
         CidrNetworkClassifier::from_entries(vec![]),
         policy(),
@@ -383,6 +458,20 @@ fn stuffing_storm_denies_attackers_and_saves_the_victim() {
     );
     let outcomes = KiwiOutcomes::new(&engine, &store);
     let victim_principal = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6".to_string();
+    let victim_target = "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813".to_string();
+    // The ENGINE stores each authentication failure against the target
+    // (the outcome-bridge write path) — the simulation never touches the
+    // target state directly.
+    let report_failure = || {
+        outcomes
+            .report(
+                Outcome::AuthenticationFailure,
+                &OutcomeHandle::target(&victim_target).unwrap(),
+                Some(format!("stuff-fail-{}", rand::random::<u32>())),
+                Some(victim_context()),
+            )
+            .expect("the target failure report succeeds");
+    };
     let report = || {
         let receipt = outcomes
             .report(
@@ -392,9 +481,20 @@ fn stuffing_storm_denies_attackers_and_saves_the_victim() {
                 Some(victim_context()),
             )
             .expect("the credit report succeeds");
+        // Completion credits the target too (change.md 3.4.2): the
+        // engine clears the target failure counter, so a legitimate
+        // user is not stepped up twice.
+        outcomes
+            .report(
+                Outcome::StepUpCompleted,
+                &OutcomeHandle::target(&victim_target).unwrap(),
+                Some("victim-step-up-target-credit".to_string()),
+                Some(victim_context()),
+            )
+            .expect("the target credit report succeeds");
         (receipt.channel_booked, receipt.marks_written)
     };
-    run_simulation(&store, &report);
+    run_simulation(&store, &report_failure, &report);
     assert!(
         !store.observed.lock().unwrap().is_empty(),
         "the credit booked its feedback observation"
@@ -402,7 +502,8 @@ fn stuffing_storm_denies_attackers_and_saves_the_victim() {
 }
 
 /// The identical simulation against the real Redis marks surface
-/// (marks.lua writes and reads).
+/// (marks.lua writes and reads) and the real target-failure state
+/// (target_failure.lua).
 #[test]
 fn stuffing_storm_over_real_redis_marks() {
     let Ok(raw_url) = std::env::var("RISK_REDIS_URL") else {
@@ -423,7 +524,7 @@ fn stuffing_storm_over_real_redis_marks() {
     let marks_store = kiwicaptcha_risk::redis::RedisRiskStateStore::new(client, &namespace)
         .with_io_timeouts(2_000, 2_000);
 
-    let engine = RiskEngine::new(
+    let engine = kiwicaptcha_risk::RiskEngine::new(
         engine_store,
         CidrNetworkClassifier::from_entries(vec![]),
         policy(),
@@ -431,6 +532,17 @@ fn stuffing_storm_over_real_redis_marks() {
     );
     let outcomes = KiwiOutcomes::new(&engine, &marks_store);
     let victim_principal = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6".to_string();
+    let victim_target = "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813".to_string();
+    let report_failure = || {
+        outcomes
+            .report(
+                Outcome::AuthenticationFailure,
+                &OutcomeHandle::target(&victim_target).unwrap(),
+                Some(format!("stuff-fail-{}", rand::random::<u32>())),
+                Some(victim_context()),
+            )
+            .expect("the target failure report succeeds");
+    };
     let report = || {
         let receipt = outcomes
             .report(
@@ -440,11 +552,22 @@ fn stuffing_storm_over_real_redis_marks() {
                 Some(victim_context()),
             )
             .expect("the credit report succeeds");
+        outcomes
+            .report(
+                Outcome::StepUpCompleted,
+                &OutcomeHandle::target(&victim_target).unwrap(),
+                Some("victim-step-up-target-credit".to_string()),
+                Some(victim_context()),
+            )
+            .expect("the target credit report succeeds");
         (receipt.channel_booked, receipt.marks_written)
     };
-    run_simulation(&marks_store, &report);
+    // The simulation reads the marks/target state through the same
+    // store the engine writes (the target record is compiled from the
+    // engine's failure state).
+    run_simulation(&marks_store, &report_failure, &report);
 
-    // Cleanup: the exact mark keys of the run.
+    // Cleanup: the exact mark keys of the run plus the target state.
     let mut keys = Vec::new();
     for session in attacker_sessions() {
         keys.push(marks_store.mark_key("session", &session).unwrap());
@@ -452,6 +575,9 @@ fn stuffing_storm_over_real_redis_marks() {
     for bucket in asn_buckets() {
         keys.push(marks_store.mark_key("asn", &bucket).unwrap());
     }
+    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:{victim_target}"));
+    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:src:{victim_target}"));
+    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:asn:{victim_target}"));
     let mut conn = ::redis::Client::open(url)
         .unwrap()
         .get_connection()

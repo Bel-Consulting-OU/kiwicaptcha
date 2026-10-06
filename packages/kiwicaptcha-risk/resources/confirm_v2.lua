@@ -40,6 +40,8 @@
 --            sc<id>    admitted count for reporting source id (0..7)
 --            sc<id>c   capped-out count for source id (never reversed;
 --                      a capped label is history, not estimator state)
+--            tcs<id>   trust-granting confirmation count for source id
+--                      (the reputation-credit cap of L labels)
 -- KEYS[3]  outcome ledger entry (STRING, JSON
 --          {"o","scope","hour","score","w","c","v","pc"}). `v` = 3 is
 --          the generation-2 writer marker (correction_v2.lua reverses
@@ -47,6 +49,9 @@
 --          the provenance class id so a correction re-applies the same
 --          class weight; `c` = 1 only for a counted sample (capped-out
 --          and unsampled confirmations leave nothing to reverse).
+-- KEYS[4]  OPTIONAL per-identity trust-cap counter (hash, field 'n'):
+--          present only when the caller names the identity whose
+--          reputation this label would credit.
 -- ARGV[1]  sampling mode: 0 = complete, 1 = random_sample, 2 = weighted
 -- ARGV[2]  weight (decimal string; required and validated when mode == 2)
 -- ARGV[3]  legitimate (0 = abuse, 1 = legitimate)
@@ -73,15 +78,23 @@
 -- is incremented before the ledger write, so the counted/capped
 -- decision and every bucket write happen in one atomic invocation. A
 -- label that lands beyond the cap is still a first confirmation (the
--- ledger flips, exactly once, and the reputation event stays
--- authorized) but contributes NOTHING to calibration: no generation-1
--- fields, no histogram mass, no admitted count. The capped-out counter
--- sc<id>c records it, and in random_sample mode the resolved counter
--- still moves (the label was resolved; capping is a calibration volume
--- policy, not a sampling decision). The returned status is 3 = first
--- confirmation with calibration withheld by the cap. Callers treat any
--- nonzero status as the once-only reputation authorization, exactly as
--- for statuses 1 and 2.
+-- ledger flips, exactly once) but contributes NOTHING to calibration:
+-- no generation-1 fields, no histogram mass, no admitted count. The
+-- capped-out counter sc<id>c records it, and in random_sample mode the
+-- resolved counter still moves (the label was resolved; capping is a
+-- calibration volume policy, not a sampling decision).
+--
+-- TRUST-GRANTING REPUTATION CAPS (per source AND per identity):
+-- reputation credit is farmable, calibration mass is not the only
+-- surface — an unlimited stream of L labels would otherwise mint
+-- unlimited trust. Every first confirmation of a trust-granting label
+-- (legitimate = 1) consumes one slot of the source's trust counter
+-- (tcs<id>) and, when the caller names the credited identity, one slot
+-- of that identity's counter (KEYS[4]). Beyond either cap the
+-- reputation credit is WITHHELD (status 4) while the ledger flip and
+-- the calibration contribution (when admitted) stand: the outcome is
+-- real, only its trust minting is bounded. The cap number is the same
+-- per-source window cap (ARGV[10]).
 --
 -- ALL arguments are validated BEFORE any read or deletion or state
 -- change (the same contract as confirm.lua), and the weight product
@@ -93,12 +106,18 @@
 --   1 = FIRST confirmation; reputation eligible AND calibration recorded
 --   2 = FIRST confirmation; deliberately unsampled — reputation
 --       eligible exactly once, calibration skipped (receipt consumed)
---   3 = FIRST confirmation; reputation eligible, calibration withheld
---       by the per-source window cap
+--   3 = FIRST confirmation; calibration withheld by the per-source
+--       window cap (reputation eligibility is the caller's abuse/trust
+--       rule; a trust-granting label here has also consumed its trust
+--       caps)
+--   4 = FIRST confirmation; the trust-granting reputation credit is
+--       WITHHELD by the per-source or per-identity trust cap
 --
 -- Invariant: one real-world outcome -> at most ONE reputation mutation
--- (callers gate on any nonzero status) and ZERO or ONE calibration
--- sample.
+-- (callers gate on the accepted statuses) and ZERO or ONE calibration
+-- sample. The histogram fields are named from the FLOORED score, so a
+-- non-integer receipt score can never split one distance across two
+-- fractional slots.
 
 -- The decision boundary T shared with action.rs/score.rs and with the
 -- calibration scripts: the first score of the Argon16 band (sha20 ends
@@ -191,11 +210,14 @@ end
 
 local outcome = ARGV[3] == '1' and 'L' or 'A'
 
--- Score read + clamp here (before any mutation): the product guard below
--- needs the exact bounded score 0..1000.
+-- Score read + floor + clamp here (before any mutation): the product
+-- guard below needs the exact bounded integer score 0..1000, and the
+-- histogram slots are named from the integer distance — a fractional
+-- receipt score must never split one sample across two fields.
 local score = tonumber(receipt.score or 0)
 if score < 0 then score = 0 end
 if score > 1000 then score = 1000 end
+score = math.floor(score)
 
 -- Effective sample weight: the caller's weight times the provenance
 -- class weight. PRODUCT GUARD (pre-mutation, the confirm.lua style):
@@ -286,6 +308,31 @@ if status == 1 then
     redis.call('EXPIRE', KEYS[2], bucket_ttl)
     if mode == 1 then
         redis.call('HINCRBY', KEYS[2], 'sample_resolved', 1)
+    end
+end
+
+-- ── Trust-granting reputation caps (per source AND per identity): a
+-- first confirmation of an L label consumes one source trust slot and,
+-- when the caller names the credited identity, one identity slot.
+-- Beyond either cap the trust minting is withheld (status 4) while the
+-- ledger flip and the admitted calibration contribution stand: the
+-- outcome stays real, only its reputation credit is bounded. Abuse
+-- labels never mint trust, so they consume no trust slot.
+if outcome == 'L' then
+    local source_trust = redis.call('HINCRBY', KEYS[2], 'tcs' .. source, 1)
+    redis.call('EXPIRE', KEYS[2], bucket_ttl)
+    local within = source_trust <= cap
+    if KEYS[4] ~= nil and KEYS[4] ~= '' then
+        local id_trust = redis.call('HINCRBY', KEYS[4], 'n', 1)
+        if id_trust == 1 then
+            redis.call('EXPIRE', KEYS[4], bucket_ttl)
+        end
+        if id_trust > cap then
+            within = false
+        end
+    end
+    if not within then
+        status = 4
     end
 end
 

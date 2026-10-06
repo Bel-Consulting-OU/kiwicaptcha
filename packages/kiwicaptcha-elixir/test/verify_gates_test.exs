@@ -61,17 +61,37 @@ defmodule Kiwicaptcha.VerifyGatesTest do
   end
 
   test "the golden negative records answer their pinned codes" do
-    {storage, record, row} = store_of("argon2id")
-    result = Kiwicaptcha.verify(token_of(row), options_for(record, row, storage))
-    refute result.ok
-    assert result.code == :unsupported_argon2_params
-
     {storage, record, row} = store_of("tampered_signature")
     result = Kiwicaptcha.verify(token_of(row), options_for(record, row, storage))
     refute result.ok
     assert result.code == :bad_signature
     assert result.decision_handle == nil
     assert result.price == nil
+  end
+
+  test "an argon2id rung verifies through the native binding" do
+    if Kiwicaptcha.Pow.argon2_available?() do
+      {storage, record, row} = store_of("argon2id")
+      result = Kiwicaptcha.verify(token_of(row), options_for(record, row, storage))
+      assert result.ok, inspect(result.code)
+      assert result.disposition == :allow
+    end
+  end
+
+  test "an unrepresentable argon2id rung refuses loudly, never downgrades" do
+    record = %{record_from_row(golden_record("argon2id")) | m_kib: 100}
+
+    token = %Kiwicaptcha.Token{
+      nonce: record.nonce,
+      counter: 3,
+      duration_ms: 1500,
+      telemetry: %{"v" => 1},
+      execution_digest: nil,
+      execution_trace: nil,
+      rsw_proof: nil
+    }
+
+    assert Kiwicaptcha.Verify.recompute_valid_proof(nil, record, token) == :unsupported
   end
 
   test "an unknown token answers record_not_found" do

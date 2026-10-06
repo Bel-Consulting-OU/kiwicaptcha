@@ -108,7 +108,7 @@ class OutcomesDoctorTest < Minitest::Test
   def test_the_doctor_passes_a_sound_memory_deployment
     report = KiwiCaptcha::Doctor.run(secret: SECRET, store: KiwiCaptcha::MemoryStore.new)
     assert report.ok, report.checks.map { |c| "#{c.name}: #{c.detail}" }.join(', ')
-    assert_equal %w[secret region issuer store], report.checks.map(&:name)
+    assert_equal %w[secret region issuer argon2 store], report.checks.map(&:name)
   end
 
   def test_the_doctor_flags_a_weak_secret_and_a_dead_store
@@ -149,6 +149,24 @@ class OutcomesDoctorTest < Minitest::Test
     assert_equal 'abuse_first', settings.profile
     assert_equal({ 'login' => 'critical', 'comment' => 'low' }, settings.scopes)
     assert settings.valid_secret?
+  end
+
+  def test_the_issuer_guard_refuses_argon_rungs_without_the_binding
+    original = KiwiCaptcha::Pow.method(:argon2_available?)
+    begin
+      KiwiCaptcha::Pow.define_singleton_method(:argon2_available?) { false }
+      raised = assert_raises(ArgumentError) do
+        KiwiCaptcha::Settings.new(secret: SECRET, store_url: 'memory://', profile: 'abuse_first', env: {})
+      end
+      assert_match(/never silently downgraded/, raised.message)
+      assert_raises(ArgumentError) do
+        KiwiCaptcha::Settings.new(secret: SECRET, store_url: 'memory://', profile: 'argon64', env: {})
+      end
+      # A sha-only profile boots without the binding.
+      KiwiCaptcha::Settings.new(secret: SECRET, store_url: 'memory://', profile: 'minimal', env: {})
+    ensure
+      KiwiCaptcha::Pow.define_singleton_method(:argon2_available?, original)
+    end
   end
 
   # A store whose every read raises: the doctor must report it, not

@@ -49,6 +49,25 @@ public sealed class Settings
     /// <summary>Reports whether the profile names a shipped budget.</summary>
     public static bool ProfileKnown(string profile) => Profiles.Contains(profile);
 
+    /// <summary>The argon2id rung (m_kib, t, p) each argon profile issues.</summary>
+    public static (int MemoryKib, int T, int P)? ProfileArgonParams(string profile) => profile switch
+    {
+        "argon16" => (16 * 1024, 3, 1),
+        "argon32" => (32 * 1024, 3, 1),
+        "argon64" => (64 * 1024, 3, 1),
+        _ => null,
+    };
+
+    /// <summary>
+    /// Whether this verifier runtime can recompute the argon2id rung:
+    /// inside the process ceilings and the protocol derivation profile
+    /// (p == 1, t at least 3).
+    /// </summary>
+    public static bool RungVerifiable(int memoryKib, int t, int p) =>
+        memoryKib >= Kiwi.MinArgonMemoryKib && memoryKib <= Kiwi.MaxArgonMemoryKib
+        && t >= Kiwi.MinArgonTime && t <= Kiwi.MaxArgonTime
+        && p == 1;
+
     /// <summary>Wires the settings into a verifier over the store the url selects.</summary>
     public Verifier BuildVerifier()
     {
@@ -60,6 +79,15 @@ public sealed class Settings
         {
             throw new ArgumentException(
                 "kiwicaptcha: the profile must be one of standard, argon16, argon32, argon64");
+        }
+        // The issuer guard: a profile naming a rung this verifier
+        // cannot verify is a loud configuration error, never a silent
+        // downgrade.
+        var rung = ProfileArgonParams(Profile);
+        if (rung is { } r && !RungVerifiable(r.MemoryKib, r.T, r.P))
+        {
+            throw new ArgumentException(
+                $"kiwicaptcha: profile {Profile} issues an argon2id rung (m_kib={r.MemoryKib} t={r.T} p={r.P}) this verifier cannot verify \u2014 refusing to issue it (never silently downgraded)");
         }
         var config = new Verifier.Config
         {

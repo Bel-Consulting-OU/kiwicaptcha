@@ -1,26 +1,31 @@
-"""Pure-stdlib Argon2id (version 1.3) over hashlib.blake2b.
+"""Argon2id (version 1.3) for the proof-phase recompute.
 
-Python ships no Argon2 binding, so the proof-phase recompute for
-argon2id records is implemented here per RFC 9106 and the reference
-implementation. Every exported profile the protocol allows is
-computed: one to four lanes and one to sixteen passes, with the memory
-parameter in KiB exactly like the PHP verifier's libsodium call
-(sodium_crypto_pwhash with memlimit = m_kib * 1024, a 32-byte tag).
+Two backends, one byte-exact contract per RFC 9106 and the reference
+implementation. The native backend is ``argon2-cffi``'s
+``argon2.low_level`` when importable: milliseconds instead of minutes
+for the 16-64 MiB rungs. The pure-stdlib backend over hashlib.blake2b
+stays as the last resort for deployments without the binding; it is
+correct but slow, so the verifier's default admission gate caps the
+profiles it will even attempt (see ``kiwicaptcha.verify``). Every
+exported profile the protocol allows is computed by both: one to four
+lanes and one to sixteen passes, with the memory parameter in KiB
+exactly like the PHP verifier's libsodium call (sodium_crypto_pwhash
+with memlimit = m_kib * 1024, a 32-byte tag).
 
-The compression function works on blocks of 128 unsigned 64-bit words.
-A block is therefore a plain Python list of ints and the whole memory
-matrix a list of such lists, addressed by lane and index. The Argon2id
-addressing rule is honored exactly: the first two slices of the first
-pass use the data-independent address generator, every later segment
-reads its pseudo-random word from the previous block. Index selection
-follows index_alpha() from the reference implementation, including the
-uint32 wrap when the reference area underflows (only reachable off the
-same lane).
+The pure compression function works on blocks of 128 unsigned 64-bit
+words. A block is therefore a plain Python list of ints and the whole
+memory matrix a list of such lists, addressed by lane and index. The
+Argon2id addressing rule is honored exactly: the first two slices of
+the first pass use the data-independent address generator, every later
+segment reads its pseudo-random word from the previous block. Index
+selection follows index_alpha() from the reference implementation,
+including the uint32 wrap when the reference area underflows (only
+reachable off the same lane).
 
-Pure Python is slow for large memory profiles; a 64 MiB challenge takes
-minutes here against milliseconds under libsodium. Correctness is
-unaffected: the verifier budget gate caps the accepted profiles and the
-test suite pins byte-exact vectors at the protocol's m_kib = 64 floor.
+Argon2-cffi exposes neither the secret key nor the associated data
+adder, so derivations carrying either input (the RFC 9106 vector) fall
+back to the pure implementation; the protocol's own proof recompute
+always runs with empty secret and ad and takes the native path.
 """
 
 import hashlib
@@ -34,6 +39,46 @@ _MASK64 = (1 << 64) - 1
 _MASK32 = (1 << 32) - 1
 
 _ZERO_BLOCK = [0] * _BLOCK_QWORDS
+
+try:  # pragma: no cover - exercised only when argon2-cffi is installed
+    from argon2.low_level import Type as _NativeType
+    from argon2.low_level import Version as _NativeVersion
+    from argon2.low_level import hash_secret_raw as _native_hash_secret_raw
+
+    _NATIVE = True
+except Exception:  # pragma: no cover - the documented last-resort path
+    _NATIVE = False
+
+
+def native_available() -> bool:
+    """True when the argon2-cffi binding is importable."""
+    return _NATIVE
+
+
+def backend_name() -> str:
+    """The active derivation backend, for the doctor's report."""
+    return "argon2-cffi" if _NATIVE else "pure-python"
+
+
+def _native_derive(password: bytes, salt: bytes, t_cost: int, m_cost: int,
+                   lanes: int, out_len: int) -> bytes:
+    try:
+        return _native_hash_secret_raw(
+            secret=password,
+            salt=salt,
+            time_cost=t_cost,
+            memory_cost=m_cost,
+            parallelism=lanes,
+            hash_len=out_len,
+            type=_NativeType.ID,
+            version=_NativeVersion.V13,
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        # Allocation refusal and binding errors surface as the same
+        # typed failure the pure backend raises for impossible params.
+        raise _Argon2idError(f"argon2id derivation failed: {exc}") from exc
 
 
 def _rotr(value: int, bits: int) -> int:
@@ -192,7 +237,29 @@ def _next_addresses(input_block, counter_cell):
 def derive(password: bytes, salt: bytes, t_cost: int, m_cost: int,
            lanes: int = 1, out_len: int = 32,
            secret: bytes = b"", ad: bytes = b"") -> bytes:
-    """Derive an Argon2id tag, byte-identical to the reference build."""
+    """Derive an Argon2id tag, byte-identical to the reference build.
+
+    Prefers the argon2-cffi binding when it is importable and the
+    inputs fit its surface (no secret/AD adder there); otherwise the
+    pure last-resort implementation answers. Both paths are pinned to
+    the same RFC 9106 and reference-build vectors by the test suite.
+    """
+    if t_cost < 1:
+        raise _Argon2idError("argon2 passes must be at least 1")
+    if lanes < 1 or lanes > 0xFFFFFF:
+        raise _Argon2idError("argon2 lanes out of range")
+    if m_cost < 8 * lanes:
+        raise _Argon2idError("argon2 memory must cover eight blocks per lane")
+    if _NATIVE and not secret and not ad:
+        return _native_derive(password, salt, t_cost, m_cost, lanes, out_len)
+    return derive_pure(password, salt, t_cost, m_cost, lanes, out_len,
+                       secret, ad)
+
+
+def derive_pure(password: bytes, salt: bytes, t_cost: int, m_cost: int,
+                lanes: int = 1, out_len: int = 32,
+                secret: bytes = b"", ad: bytes = b"") -> bytes:
+    """Derive an Argon2id tag in pure Python, byte-identical to the reference build."""
     if t_cost < 1:
         raise _Argon2idError("argon2 passes must be at least 1")
     if lanes < 1 or lanes > 0xFFFFFF:

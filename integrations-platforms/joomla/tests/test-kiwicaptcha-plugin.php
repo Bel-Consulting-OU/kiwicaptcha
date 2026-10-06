@@ -38,6 +38,7 @@ check('native form token', KiwiClient::extractToken([], ['kiwi__token' => 'n'], 
 check('explicit answer code', KiwiClient::extractToken([], [], [], 'code-token') === 'code-token');
 check('form beats code', KiwiClient::extractToken([], ['kiwi__token' => 'n'], [], 'code-token') === 'n');
 check('cookie token', KiwiClient::extractToken([], [], ['kiwi_token' => 'c']) === 'c');
+check('json token fields are namespaced, never bare token', KiwiClient::JSON_TOKEN_FIELDS === ['kiwi_token', 'captcha_response'] && !in_array('token', KiwiClient::JSON_TOKEN_FIELDS, true));
 check('no token is null', KiwiClient::extractToken([], [], []) === null);
 check('bad scope falls back to login', KiwiClient::sanitizeScope('bad scope') === 'login');
 check('action suffix scopes survive', KiwiClient::sanitizeScope('login:signup') === 'login:signup');
@@ -51,6 +52,7 @@ $compat = KiwiClient::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' 
 check('compat mode encodes response and secret', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=sec') !== false && strpos($compat['body'], 'remoteip=203.0.113.5') !== false);
 check('untrusted peer ignores xff', KiwiClient::clientIp(['REMOTE_ADDR' => '192.0.2.7', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.7');
 check('trusted lb takes next left', KiwiClient::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.5, 10.0.0.1'], '10.0.0.0/24') === '203.0.113.5');
+check('client-supplied leftmost entry is ignored', KiwiClient::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 203.0.113.5, 10.0.0.1'], '10.0.0.0/24') === '203.0.113.5');
 check('garbage hop fails closed', KiwiClient::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.1'], '10.0.0.0/24') === '10.0.0.1');
 
 // The decision table over the test transport.

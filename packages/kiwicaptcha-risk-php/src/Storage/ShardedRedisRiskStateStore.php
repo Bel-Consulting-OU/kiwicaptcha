@@ -101,7 +101,7 @@ use Predis\Response\ServerException;
  * delegates them to an embedded classic store aimed at the node that
  * owns that tag. The assessment path is where the sharded layout lives.
  */
-final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface
+final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -151,6 +151,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     private readonly int $principalTtlSecs;
     private readonly int $dedupeTtlSecs;
     private readonly int $hysteresisMs;
+    private readonly int $outcomeTtlSecs;
 
     /** @var array<string, int> */
     private array $saturations;
@@ -267,6 +268,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $this->principalTtlSecs = $principalTtlSecs;
         $this->dedupeTtlSecs = $dedupeTtlSecs;
         $this->hysteresisMs = $hysteresisMs;
+        $this->outcomeTtlSecs = $outcomeTtlSecs;
         $this->saturations = $saturations;
         $this->connectTimeoutSecs = $connectTimeoutSecs;
         $this->commandTimeoutSecs = $commandTimeoutSecs;
@@ -498,22 +500,73 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         ];
     }
 
-    /** The canonical ledger registration through the embedded classic store. */
+    /**
+     * The canonical ledger registration on the decision-id key family
+     * (the same key the assessment path's consolidated registration
+     * writes), so confirm/correct resolve the same ledger.
+     */
     public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
     {
-        return $this->legacy->registerOutcome($decisionId, $scope, $decisionHour, $score);
+        $result = $this->runOutcomeScript('outcome_register.lua', $decisionId, [
+            (string) $scope,
+            (string) $decisionHour,
+            (string) $score,
+            (string) $this->outcomeTtlSecs,
+        ]);
+
+        return (int) $result !== 0;
     }
 
-    /** The canonical exactly-once confirmation through the embedded classic store. */
+    /** The canonical exactly-once confirmation on the decision-id key family. */
     public function confirmOutcome(string $decisionId, bool $legitimate): int
     {
-        return $this->legacy->confirmOutcome($decisionId, $legitimate);
+        return (int) $this->runOutcomeScript('outcome_confirm.lua', $decisionId, [
+            $legitimate ? 'L' : 'A',
+            (string) $this->outcomeTtlSecs,
+        ]);
     }
 
-    /** The canonical correction through the embedded classic store. */
+    /** The canonical correction on the decision-id key family. */
     public function correctOutcome(string $decisionId, bool $legitimate): bool
     {
-        return $this->legacy->correctOutcome($decisionId, $legitimate);
+        $result = $this->runOutcomeScript('outcome_correct.lua', $decisionId, [
+            $legitimate ? 'L' : 'A',
+            (string) $this->outcomeTtlSecs,
+        ]);
+
+        return (int) $result !== 0;
+    }
+
+    /** One single-key canonical outcome-ledger script on the decision-id family key. */
+    private function runOutcomeScript(string $file, string $decisionId, array $args): mixed
+    {
+        $key = KeyspaceMode::outcomeLedgerKey($this->namespace, $decisionId);
+        $script = self::shardedScript($file);
+        $replies = $this->dispatch([[
+            'endpoint' => $this->endpointForKey($key),
+            'cmd' => $this->evalshaCmd($script, [$key], $args),
+            'script' => $script,
+        ]]);
+
+        return $replies[0] ?? null;
+    }
+
+    /** @inheritdoc */
+    public function registerTargetFailure(string $targetId, string $source, string $asn): array
+    {
+        return $this->legacy->registerTargetFailure($targetId, $source, $asn);
+    }
+
+    /** @inheritdoc */
+    public function clearTargetFailures(string $targetId): void
+    {
+        $this->legacy->clearTargetFailures($targetId);
+    }
+
+    /** @inheritdoc */
+    public function readTargetState(string $targetId): array
+    {
+        return $this->legacy->readTargetState($targetId);
     }
 
     /** The classic mark key: the marks surface is mode-insensitive (shared tag). */
@@ -523,9 +576,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     }
 
     /** The canonical mark write through the embedded classic store. */
-    public function writeMark(string $dimension, string $id, string $kind, int $nowMs): int
+    public function writeMark(string $dimension, string $id, string $kind, int $nowMs, string $eventId = ''): int
     {
-        return $this->legacy->writeMark($dimension, $id, $kind, $nowMs);
+        return $this->legacy->writeMark($dimension, $id, $kind, $nowMs, $eventId);
     }
 
     /** The canonical mark read through the embedded classic store. */
@@ -564,16 +617,49 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         return $this->legacy->decayBucketTrust($sessionId, $bucket, $delta);
     }
 
-    /** The first-seen client-context record: single-key SET NX on the shared tag, identical in both modes. */
+    /** The first-seen client-context record on the session key family. */
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
     {
-        return $this->legacy->sessionFirstContextTag($sessionId, $tag);
+        return $this->sessionFirstTagRecord(
+            KeyspaceMode::sessionTagKey($this->namespace, 'ctx', $sessionId),
+            $tag,
+        );
     }
 
-    /** The first-seen TLS record: single-key SET NX on the shared tag, identical in both modes. */
+    /** The first-seen TLS record on the session key family. */
     public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
     {
-        return $this->legacy->sessionFirstTlsTag($sessionId, $tag);
+        return $this->sessionFirstTagRecord(
+            KeyspaceMode::sessionTagKey($this->namespace, 'tls', $sessionId),
+            $tag,
+        );
+    }
+
+    /**
+     * ONE atomic SET NX EX with a GET fallback on the lost first-write
+     * race (the classic store's identical rule), on the given key.
+     */
+    private function sessionFirstTagRecord(string $key, string $tag): ?string
+    {
+        $replies = $this->dispatch([
+            [
+                'endpoint' => $this->endpointForKey($key),
+                'cmd' => RawCommand::create('SET', $key, $tag, 'NX', 'EX', $this->sessionTtlSecs),
+                'script' => null,
+            ],
+            [
+                'endpoint' => $this->endpointForKey($key),
+                'cmd' => RawCommand::create('GET', $key),
+                'script' => null,
+            ],
+        ]);
+        $set = $replies[0] ?? null;
+        if ($set instanceof \Predis\Response\Status && $set->getPayload() === 'OK') {
+            return $tag;
+        }
+        $stored = $replies[1] ?? null;
+
+        return \is_string($stored) && $stored !== '' ? $stored : null;
     }
 
     /**
@@ -597,11 +683,15 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $hasSession = $observation->sessionId !== null;
         $hasPrincipal = $observation->principalId !== null;
 
-        // The merged aggregate feeds both the global pressure signal and
-        // the level transition, so it is resolved before the batch is
-        // built (its own batch runs at most once per second).
+        // The merged aggregate feeds the global pressure signal; the
+        // level transition runs inside the merge refresh (at most once
+        // per second) and the published level/cooldown is what this
+        // assessment reports.
         $snapshot = $this->mergedPerShard();
-        $shard = KeyspaceMode::scopeShard($observation->eventId);
+        // An empty event id (dedupe disabled) has no id bytes to spread;
+        // the source pseudonym is the stable fallback so those writes do
+        // not all funnel onto fnv1a32('')'s shard.
+        $shard = KeyspaceMode::scopeShard($observation->eventId, $observation->sourceId);
         $sat = array_replace(self::DEFAULT_SATURATIONS, $this->saturations);
 
         $units = [];
@@ -620,8 +710,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $pushIdentity('net', $observation->subnetEpoch - 1, $observation->subnetIdPrev, false, $this->stateTtlSecs);
         $pushIdentity('net', $observation->subnetEpoch, $observation->subnetId, true, $this->stateTtlSecs);
         $pushIdentity('net', $observation->subnetEpoch + 1, $observation->subnetIdNext, false, $this->stateTtlSecs);
-        $pushIdentity('session', null, $sessionHex, $hasSession, $this->sessionTtlSecs);
-        $pushIdentity('principal', null, $principalHex, $hasPrincipal, $this->principalTtlSecs);
+        if ($hasSession) {
+            $pushIdentity('session', null, $sessionHex, true, $this->sessionTtlSecs);
+        }
+        if ($hasPrincipal) {
+            $pushIdentity('principal', null, $principalHex, true, $this->principalTtlSecs);
+        }
 
         // The event's scope shard: one of the 16 sharded counters.
         $shardKey = KeyspaceMode::scopeShardKey($ns, self::GLOBAL_AGGREGATE_ID, $shard);
@@ -644,20 +738,14 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             ];
         }
 
-        // The single-slot level transition, fed with the merged pressure.
-        $hystKey = KeyspaceMode::hysteresisKey($ns);
+        // The consolidated extras on the session family: the first-seen
+        // tag records (SET NX + GET on the session pseudonym's own slot).
+        // A tag that is not presented is not read at all (assess_v2
+        // parity: the existing value is reported as absent).
         $mergedGp = array_sum($snapshot);
-        $units[] = [
-            'endpoint' => $this->endpointForKey($hystKey),
-            'cmd' => $this->evalshaCmd(self::shardedScript('sharded_hysteresis.lua'), [$hystKey], [$mergedGp, $sat['global'], $this->hysteresisMs]),
-            'script' => self::shardedScript('sharded_hysteresis.lua'),
-        ];
-
-        // The consolidated extras live on the shared tag (single-key
-        // surfaces): the two first-seen tag records.
         foreach ([
-            ['{kiwi:' . $ns . '}:risk:ctx:' . $sessionHex, $contextTag],
-            ['{kiwi:' . $ns . '}:risk:tls:' . $sessionHex, $tlsTag],
+            [KeyspaceMode::sessionTagKey($ns, 'ctx', $sessionHex), $contextTag],
+            [KeyspaceMode::sessionTagKey($ns, 'tls', $sessionHex), $tlsTag],
         ] as [$recordKey, $presented]) {
             if (\is_string($presented) && $presented !== '') {
                 $units[] = [
@@ -665,12 +753,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
                     'cmd' => RawCommand::create('SET', $recordKey, $presented, 'NX', 'EX', $this->sessionTtlSecs),
                     'script' => null,
                 ];
+                $units[] = [
+                    'endpoint' => $this->endpointForKey($recordKey),
+                    'cmd' => RawCommand::create('GET', $recordKey),
+                    'script' => null,
+                ];
             }
-            $units[] = [
-                'endpoint' => $this->endpointForKey($recordKey),
-                'cmd' => RawCommand::create('GET', $recordKey),
-                'script' => null,
-            ];
         }
 
         $replies = $this->dispatch($units);
@@ -709,8 +797,10 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $netPrev = $channels(9, 'subnet boundary');
         $netCur = $channels(9, 'subnet state');
         $netNext = $channels(9, 'subnet boundary');
-        $sess = $channels(9, 'session state');
-        $prin = $channels(9, 'principal state');
+        // Absent dimensions were never read: their channels are zero.
+        $zeros = array_fill(0, 9, 0);
+        $sess = $hasSession ? $channels(9, 'session state') : $zeros;
+        $prin = $hasPrincipal ? $channels(9, 'principal state') : $zeros;
         $shardChannels = $channels(7, 'scope shard');
         $shardSum = array_sum($shardChannels);
         $src = [$srcPrev, $srcCur, $srcNext];
@@ -719,20 +809,23 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         if ($hasNonce) {
             $isDuplicate = $next() === null;
         }
-        $hyst = $channels(2, 'hysteresis transition');
-        $globalLevel = max(0, min(4, (int) $hyst[0]));
-        $cooldownUntilMs = max(0, (int) $hyst[1]);
+        // The level/cooldown are the published merge-refresh values (the
+        // transition is no longer run per assessment).
+        $globalLevel = $this->lastGlobalLevel;
+        $cooldownUntilMs = $this->lastCooldownUntilMs;
 
         // First-seen tag records: the SET reply (when the tag was
-        // presented) wins; its null miss falls back to the GET reply.
+        // presented) wins; its null miss falls back to the GET reply. A
+        // tag that was not presented was never read (assess_v2 parity).
         $readTag = function (?string $presented, string $what) use ($next): ?string {
-            if (\is_string($presented) && $presented !== '') {
-                $setReply = $next();
-                if ($setReply instanceof \Predis\Response\Status && $setReply->getPayload() === 'OK') {
-                    $next();
+            if (!\is_string($presented) || $presented === '') {
+                return null;
+            }
+            $setReply = $next();
+            if ($setReply instanceof \Predis\Response\Status && $setReply->getPayload() === 'OK') {
+                $next();
 
-                    return $presented;
-                }
+                return $presented;
             }
             $reply = $next();
             if ($reply === null) {
@@ -800,7 +893,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
                 $tlsTag,
                 $registration,
             );
-            $registrationStatus = $this->legacy->registerOutcome(
+            $registrationStatus = $this->registerOutcome(
                 $registration->decisionId,
                 $observation->scope,
                 $registration->decisionHour,
@@ -879,7 +972,9 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      */
     private function mergedPerShard(): array
     {
-        $nowMs = (int) floor(microtime(true) * 1000);
+        // hrtime is monotonic: a backward NTP step must never freeze
+        // the refresh window the way a stepped-back wall clock would.
+        $nowMs = (int) floor(hrtime(true) / 1e6);
         if (\count($this->mergePerShard) === KeyspaceMode::SCOPE_SHARDS
             && ($nowMs - $this->mergedAtMs) < KeyspaceMode::MERGE_STALENESS_MS) {
             return $this->mergePerShard;
@@ -897,6 +992,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         }
         $replies = $this->dispatch($units);
         $perShard = [];
+        $mergedGp = 0;
         foreach ($replies as $reply) {
             if (!\is_array($reply) || \count($reply) < 7) {
                 throw new RiskStoreException('the scope shard merge reply is not a 7-channel array');
@@ -906,9 +1002,32 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
                 $sum += self::scriptInteger($reply[$i], 'scope shard merge');
             }
             $perShard[] = $sum;
+            $mergedGp += $sum;
         }
         $this->mergePerShard = $perShard;
         $this->mergedAtMs = $nowMs;
+
+        // The level/cooldown ratchet runs HERE — once per staleness
+        // window — not on every assessment: the hot path reuses the
+        // published level/cooldown, so the hysteresis hash is no longer
+        // a per-request single-slot write.
+        $sat = array_replace(self::DEFAULT_SATURATIONS, $this->saturations);
+        $hystKey = KeyspaceMode::hysteresisKey($this->namespace);
+        $hystReplies = $this->dispatch([[
+            'endpoint' => $this->endpointForKey($hystKey),
+            'cmd' => $this->evalshaCmd(
+                self::shardedScript('sharded_hysteresis.lua'),
+                [$hystKey],
+                [$mergedGp, $sat['global'], $this->hysteresisMs],
+            ),
+            'script' => self::shardedScript('sharded_hysteresis.lua'),
+        ]]);
+        $hyst = $hystReplies[0] ?? null;
+        if (!\is_array($hyst) || \count($hyst) < 2) {
+            throw new RiskStoreException('the hysteresis transition reply is not a 2-channel array');
+        }
+        $this->lastGlobalLevel = max(0, min(4, self::scriptInteger($hyst[0], 'hysteresis level')));
+        $this->lastCooldownUntilMs = max(0, self::scriptInteger($hyst[1], 'hysteresis cooldown'));
 
         return $perShard;
     }

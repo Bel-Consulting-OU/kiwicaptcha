@@ -422,12 +422,18 @@ pub fn identity_dimensions() -> [HandleDimension; 4] {
     IDENTITY_DIMENSIONS
 }
 
-/// The current content of one written mark: the hash fields kind, count,
-/// first_ms and last_ms.
+/// The current content of one written mark: the hash fields kind,
+/// last_kind, count, first_ms and last_ms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkRecord {
-    /// The most recent outcome name written onto the mark.
+    /// The MAXIMUM-SEVERITY outcome name ever written onto the mark: a
+    /// mild report after a chargeback can never downgrade it (severity
+    /// order: spamReported < accountBanned < fraudConfirmed < chargeback;
+    /// unknown kinds rank lowest and never displace an earned kind).
     pub kind: String,
+    /// The most recent outcome name written onto the mark (the write's
+    /// own kind, always).
+    pub last_kind: String,
     /// The total writes onto the mark (monotone; only the erasure path
     /// removes a mark).
     pub count: i64,
@@ -435,6 +441,19 @@ pub struct MarkRecord {
     pub first_ms: i64,
     /// The most recent write's timestamp (epoch ms).
     pub last_ms: i64,
+}
+
+/// The frozen mark-kind severity ranks (mirrors marks.lua): unknown kinds
+/// rank 0 so they record `last_kind` but never displace an earned
+/// higher-severity kind.
+pub fn mark_kind_severity(kind: &str) -> u8 {
+    match kind {
+        "spamReported" => 1,
+        "accountBanned" => 2,
+        "fraudConfirmed" => 3,
+        "chargeback" => 4,
+        _ => 0,
+    }
 }
 
 /// The receipt of one typed outcome report: what the report actually did
@@ -464,18 +483,27 @@ pub trait OutcomeMarksStore {
     /// The exact mark key of one dimension key segment and identifier.
     fn mark_key(&self, dimension: &str, id: &str) -> Result<String, RiskError>;
     /// Writes one mark atomically and returns the mark's new total
-    /// count.
+    /// count. `event_id` dedupes the write (empty disables dedupe): a
+    /// retried report with the same id returns the count unchanged and
+    /// never increments it again.
     fn write_mark(
         &self,
         dimension: &str,
         id: &str,
         kind: &str,
         now_ms: u64,
+        event_id: &str,
     ) -> Result<i64, RiskError>;
     /// The current mark, or `None` when no mark exists.
     fn read_mark(&self, dimension: &str, id: &str) -> Result<Option<MarkRecord>, RiskError>;
     /// Removes the mark and returns the number of keys removed.
     fn forget_marks(&self, dimension: &str, id: &str) -> Result<u32, RiskError>;
+    /// The live target-dimension failure state of one target (the
+    /// engine-stored failure counter and spread). Stores without the
+    /// capability answer the neutral state.
+    fn read_target_state(&self, _target_id: &str) -> Result<crate::store::TargetState, RiskError> {
+        Ok(crate::store::TargetState::default())
+    }
 }
 
 fn store_err(e: RiskStoreError) -> RiskError {
@@ -493,8 +521,10 @@ impl OutcomeMarksStore for RedisRiskStateStore {
         id: &str,
         kind: &str,
         now_ms: u64,
+        event_id: &str,
     ) -> Result<i64, RiskError> {
-        RedisRiskStateStore::write_mark(self, dimension, id, kind, now_ms).map_err(store_err)
+        RedisRiskStateStore::write_mark(self, dimension, id, kind, now_ms, event_id)
+            .map_err(store_err)
     }
 
     fn read_mark(&self, dimension: &str, id: &str) -> Result<Option<MarkRecord>, RiskError> {
@@ -503,6 +533,10 @@ impl OutcomeMarksStore for RedisRiskStateStore {
 
     fn forget_marks(&self, dimension: &str, id: &str) -> Result<u32, RiskError> {
         RedisRiskStateStore::forget_marks(self, dimension, id).map_err(store_err)
+    }
+
+    fn read_target_state(&self, target_id: &str) -> Result<crate::store::TargetState, RiskError> {
+        RiskStateStore::read_target_state(self, target_id).map_err(store_err)
     }
 }
 
@@ -575,12 +609,16 @@ where
         let mut event_id: Option<String> = None;
 
         if handle.dimension.is_ledger() {
-            status = self.engine.confirm_outcome(
-                &handle.id,
-                map.ledger_legitimate == Some(true),
-                None,
-            )?;
-            if status != 0 {
+            let legitimate = map.ledger_legitimate == Some(true);
+            status = self.engine.confirm_outcome(&handle.id, legitimate, None)?;
+            // Reputation authorization: statuses 1 and 2 always; status
+            // 3 (a capped label) only for abuse outcomes — a capped
+            // trust label must never mint unlimited reputation credit
+            // (status 4 is the v2 confirm's trust cap and never
+            // authorizes).
+            let authorize =
+                matches!(status, 1 | 2) || (status == 3 && !legitimate);
+            if authorize {
                 if let Some(ctx) = context {
                     let receipt: EventReceipt = self.engine.record_outcome_feedback(
                         map.channel,
@@ -594,7 +632,40 @@ where
                 }
             }
         } else {
+            // The outcome-bridge write path of target-account
+            // protection: an authentication failure reported against a
+            // target registers the failure in the engine's target state
+            // (the leaky counter + spread HLLs assess_v2.lua maintains);
+            // a completed step-up clears the counter so a legitimate
+            // user is not stepped up twice. Failures are stored by the
+            // engine, never injected by callers.
+            if handle.dimension == HandleDimension::Target {
+                match outcome {
+                    Outcome::AuthenticationFailure => {
+                        let source = self.engine.target_spread_source(context.as_ref());
+                        self.engine
+                            .register_target_failure(&handle.id, &source, "")?;
+                    }
+                    Outcome::StepUpCompleted => {
+                        self.engine.clear_target_failures(&handle.id)?;
+                    }
+                    _ => {}
+                }
+            }
             if let Some(kind) = map.mark_kind() {
+                // The mark write dedupes on the report's own event id
+                // (the same one the feedback channel books), so a
+                // retried report never double-counts the mark. No
+                // context and no idempotency key draws a fresh id per
+                // call (dedupe effectively disabled).
+                let mark_event_id = self.engine.derive_outcome_event_id(
+                    idempotency_key.as_deref(),
+                    context.as_ref().map(|ctx| ctx.scope).unwrap_or(0),
+                    map.channel,
+                )?;
+                // An empty id disables mark dedupe (no marker key): only
+                // a caller-supplied idempotency key can make a report
+                // idempotent.
                 mark_count = self.marks.write_mark(
                     handle
                         .dimension
@@ -604,6 +675,7 @@ where
                     &handle.id,
                     kind,
                     crate::now_ms(),
+                    &mark_event_id,
                 )?;
                 marks_written = 1;
             }
@@ -691,6 +763,7 @@ mod tests {
         observed: std::sync::Arc<Mutex<Vec<RiskObservation>>>,
         ledger: std::sync::Arc<Mutex<HashMap<String, Option<bool>>>>,
         marks: std::sync::Arc<Mutex<HashMap<String, MarkRecord>>>,
+        seen_mark_events: std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl StubStore {
@@ -779,16 +852,36 @@ mod tests {
             id: &str,
             kind: &str,
             now_ms: u64,
+            event_id: &str,
         ) -> Result<i64, RiskError> {
+            if !event_id.is_empty()
+                && !self
+                    .seen_mark_events
+                    .lock()
+                    .unwrap()
+                    .insert(format!("{dimension}:{id}:{event_id}"))
+            {
+                return Ok(self
+                    .marks
+                    .lock()
+                    .unwrap()
+                    .get(&format!("{dimension}:{id}"))
+                    .map(|m| m.count)
+                    .unwrap_or(0));
+            }
             let mut marks = self.marks.lock().unwrap();
             let key = format!("{dimension}:{id}");
             let entry = marks.entry(key).or_insert(MarkRecord {
                 kind: kind.to_string(),
+                last_kind: kind.to_string(),
                 count: 0,
                 first_ms: now_ms as i64,
                 last_ms: now_ms as i64,
             });
-            entry.kind = kind.to_string();
+            if mark_kind_severity(kind) > mark_kind_severity(&entry.kind) {
+                entry.kind = kind.to_string();
+            }
+            entry.last_kind = kind.to_string();
             entry.count += 1;
             entry.last_ms = now_ms as i64;
             Ok(entry.count)
@@ -1360,26 +1453,25 @@ mod tests {
 
         assert_eq!(
             store
-                .write_mark("principal", PRINCIPAL, "spamReported", T0)
+                .write_mark("principal", PRINCIPAL, "spamReported", T0, "")
                 .unwrap(),
             1
         );
         assert_eq!(
             store
-                .write_mark("principal", PRINCIPAL, "chargeback", T0 + 5_000)
+                .write_mark("principal", PRINCIPAL, "chargeback", T0 + 5_000, "")
                 .unwrap(),
             2
         );
         let mark = store.read_mark("principal", PRINCIPAL).unwrap().unwrap();
-        assert_eq!(
-            mark,
-            MarkRecord {
-                kind: "chargeback".to_string(),
-                count: 2,
-                first_ms: T0 as i64,
-                last_ms: (T0 + 5_000) as i64,
-            }
-        );
+        assert_eq!(mark.kind, "chargeback", "max-severity kind is kept");
+        assert_eq!(mark.last_kind, "chargeback");
+        assert_eq!(mark.count, 2);
+        // The mark clock is the server's TIME (marks.lua ignores the
+        // caller timestamp), so the stamps are wall-clock, not T0.
+        let now = crate::now_ms() as i64;
+        assert!(mark.first_ms > now - 60_000 && mark.first_ms <= now + 1_000);
+        assert!(mark.last_ms >= mark.first_ms && mark.last_ms <= now + 1_000);
         let pttl: i64 = {
             use ::redis::Commands;
             let mut conn = store_pool_connection(&store);
@@ -1401,6 +1493,67 @@ mod tests {
     }
 
     #[test]
+    fn mark_severity_never_downgrades_and_the_latest_is_kept_separately() {
+        let Some(store) = redis_store(None) else {
+            eprintln!("skipping: RISK_REDIS_URL not set");
+            return;
+        };
+        store
+            .write_mark("principal", PRINCIPAL, "chargeback", T0, "")
+            .unwrap();
+        store
+            .write_mark("principal", PRINCIPAL, "spamReported", T0 + 1_000, "")
+            .unwrap();
+        let mark = store.read_mark("principal", PRINCIPAL).unwrap().unwrap();
+        assert_eq!(mark.kind, "chargeback", "a mild report never downgrades");
+        assert_eq!(mark.last_kind, "spamReported", "latest is kept separately");
+        assert_eq!(mark.count, 2);
+        store.forget_marks("principal", PRINCIPAL).unwrap();
+    }
+
+    #[test]
+    fn mark_writes_dedupe_by_event_id() {
+        let Some(store) = redis_store(None) else {
+            eprintln!("skipping: RISK_REDIS_URL not set");
+            return;
+        };
+        let event = "cafe".repeat(16);
+        assert_eq!(
+            store
+                .write_mark("session", SESSION, "accountBanned", T0, &event)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .write_mark("session", SESSION, "accountBanned", T0 + 5, &event)
+                .unwrap(),
+            1,
+            "a retried report must not double-count"
+        );
+        assert_eq!(
+            store
+                .write_mark("session", SESSION, "accountBanned", T0 + 5, &"beef".repeat(16))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store.read_mark("session", SESSION).unwrap().unwrap().count,
+            2
+        );
+        store.forget_marks("session", SESSION).unwrap();
+        let _: i64 = {
+            use ::redis::Commands;
+            let mut conn = store_pool_connection(&store);
+            conn.del(format!(
+                "mark:{{kiwi:{}}}:dd:{event}",
+                store.namespace()
+            ))
+            .unwrap()
+        };
+    }
+
+    #[test]
     fn every_write_refreshes_the_whole_key_ttl() {
         let Some(store) = redis_store(Some(6)) else {
             eprintln!("skipping: RISK_REDIS_URL not set");
@@ -1411,7 +1564,7 @@ mod tests {
         let mut conn = store_pool_connection(&store);
 
         store
-            .write_mark("session", SESSION, "accountBanned", T0)
+            .write_mark("session", SESSION, "accountBanned", T0, "")
             .unwrap();
         std::thread::sleep(std::time::Duration::from_secs(2));
         let decayed: i64 = conn.pttl(&key).unwrap();
@@ -1421,7 +1574,7 @@ mod tests {
         );
 
         store
-            .write_mark("session", SESSION, "fraudConfirmed", T0)
+            .write_mark("session", SESSION, "fraudConfirmed", T0, "")
             .unwrap();
         let refreshed: i64 = conn.pttl(&key).unwrap();
         assert!(

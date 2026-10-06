@@ -11,7 +11,7 @@ defmodule Kiwicaptcha.Record do
   @execution_protocol_version 4
   @rsw_identity_protocol_version 5
   @max_string_bytes 4096
-  @max_execution_version 5
+  @max_execution_version 6
   @max_program_base64 4096
   @u32_max 4_294_967_295
 

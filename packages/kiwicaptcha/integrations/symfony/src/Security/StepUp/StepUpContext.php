@@ -7,13 +7,17 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 /**
  * One step-up demand: who must step up, under which scope, and why.
  *
- * The identity fields carry pseudonyms only, exactly the 128-bit
- * lowercase-hex shapes the risk engine derives (the principal pseudonym
- * of {@see \KiwiCaptcha\Risk\RiskIdentityFactory::principalId()}, and
- * the 128-bit prefix of the target digest the outcome bridge uses). A
- * raw-looking value is rejected at construction, fail-closed, so a raw
- * username or email can never ride a challenge record, a store key or
- * an outcome handle.
+ * The identity fields carry pseudonyms only, exactly the shapes the
+ * risk engine derives (the principal pseudonym of
+ * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::principalId()} — 32
+ * lowercase hex chars — and the target pseudonym of
+ * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()} — the full
+ * 64 lowercase hex char digest). A raw-looking value is rejected at
+ * construction, fail-closed, so a raw username or email can never ride
+ * a challenge record, a store key or an outcome handle. The one place
+ * the target narrows to 32 hex is the outcomes handle/marking key,
+ * derived in exactly one function
+ * ({@see \BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey}).
  */
 final class StepUpContext
 {
@@ -33,14 +37,17 @@ final class StepUpContext
         public readonly string $reason,
         public readonly string $mode = self::MODE_HTML,
     ) {
-        foreach (['principal' => $principalPseudonym, 'target' => $targetPseudonym] as $name => $pseudonym) {
-            if ($pseudonym !== null && preg_match('/^[0-9a-f]{32}$/D', $pseudonym) !== 1) {
-                throw new \InvalidArgumentException(sprintf(
-                    'The %s pseudonym of a step-up context must be 32 lowercase hex chars, never a raw identifier (got 0x%s)',
-                    $name,
-                    bin2hex($pseudonym),
-                ));
-            }
+        if (preg_match('/^[0-9a-f]{32}$/D', $principalPseudonym) !== 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'The principal pseudonym of a step-up context must be 32 lowercase hex chars, never a raw identifier (got 0x%s)',
+                bin2hex($principalPseudonym),
+            ));
+        }
+        if ($targetPseudonym !== null && preg_match('/^[0-9a-f]{64}$/D', $targetPseudonym) !== 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'The target pseudonym of a step-up context must be 64 lowercase hex chars, never a raw identifier (got 0x%s)',
+                bin2hex($targetPseudonym),
+            ));
         }
         if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) !== 1) {
             throw new \InvalidArgumentException('The scope of a step-up context must be 1-128 chars of [A-Za-z0-9._:-]');

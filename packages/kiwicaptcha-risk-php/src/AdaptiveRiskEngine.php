@@ -736,6 +736,25 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * The dedupe id of one typed outcome report: the exact
+     * normalizeEventId() result the feedback path books under, so the
+     * long-memory mark write and the feedback event share one
+     * idempotency domain. An absent or empty caller key returns ''
+     * (mark dedupe disabled — no marker key is written for a report
+     * that cannot be retried). Rust mirror: derive_outcome_event_id.
+     *
+     * @internal reserved for the Outcomes facade
+     */
+    public function deriveOutcomeEventId(?string $idempotencyKey, int $scope, RiskEventKind $event): string
+    {
+        if ($idempotencyKey === null || $idempotencyKey === '') {
+            return '';
+        }
+
+        return $this->normalizeEventId($event, $scope, $idempotencyKey);
+    }
+
+    /**
      * The typed outcomes API's feedback entry: books the mapped risk-v1
      * event through the internal feedback path, optionally riding the
      * handle's pre-derived session/principal pseudonyms. The typed API
@@ -820,6 +839,18 @@ final class AdaptiveRiskEngine
     }
 
     /**
+     * Reputation authorization of one accepted-outcome status: statuses
+     * 1 and 2 always; status 3 (a capped label) only when the outcome is
+     * abusive — a capped trust label must never mint unlimited
+     * reputation credit (status 4 is the v2 confirm's trust cap and
+     * never authorizes). Rust mirror: emit_feedback's confirm gate.
+     */
+    private static function reputationAuthorized(int $status, bool $legitimate): bool
+    {
+        return $status === 1 || $status === 2 || ($status === 3 && !$legitimate);
+    }
+
+    /**
      * Confirmed-legitimate outcome: requires the id of the decision being
      * confirmed so the outcome is recorded against the original decision's
      * scope bucket. First runs the always-on outcome-ledger confirmation
@@ -848,7 +879,7 @@ final class AdaptiveRiskEngine
             throw new \InvalidArgumentException('samplingProbabilityPpm must be within 1..1000000');
         }
         $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
-        if ($this->confirmOutcome($decisionId, true, $weight) === 0) {
+        if (!self::reputationAuthorized($this->confirmOutcome($decisionId, true, $weight), true)) {
             return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
         }
         return $this->emitFeedback(RiskEventKind::ConfirmedLegitimate, $ctx, $idempotencyKey);
@@ -884,7 +915,7 @@ final class AdaptiveRiskEngine
             throw new \InvalidArgumentException('samplingProbabilityPpm must be within 1..1000000');
         }
         $weight = $samplingProbabilityPpm === null ? null : 1_000_000 / $samplingProbabilityPpm;
-        if ($this->confirmOutcome($decisionId, false, $weight) === 0) {
+        if (!self::reputationAuthorized($this->confirmOutcome($decisionId, false, $weight), false)) {
             return $this->skippedConfirmationReceipt(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);
         }
         return $this->emitFeedback(RiskEventKind::ConfirmedAbuse, $ctx, $idempotencyKey);

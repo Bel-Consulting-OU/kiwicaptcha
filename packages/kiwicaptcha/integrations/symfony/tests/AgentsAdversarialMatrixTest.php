@@ -420,7 +420,7 @@ final class AgentsAdversarialMatrixTest extends TestCase
         ]]);
 
         return new AgentsVerifier(
-            new AgentSignatureVerifier($registry, new AgentNonceStore($redis, '{kiwi:test}:')),
+            new AgentSignatureVerifier($registry, new AgentNonceStore($redis, '{kiwi:test}:'), 300, null, 'http://localhost'),
             new AgentQuota($redis, '{kiwi:test}:'),
             $this->outcomes,
             $this->logger,

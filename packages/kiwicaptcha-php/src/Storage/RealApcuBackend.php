@@ -15,20 +15,38 @@ namespace KiwiCaptcha\Storage;
  * APCu while a cli process does not, so the message names the
  * `apc.enable_cli` remedy for that case.
  *
- * The atomicity promises are APCu's own: the segment is one shared
- * memory region guarded by its internal lock, `apcu_add()` is the
- * atomic create-if-absent the storage's transition lock builds on, and
- * a TTL-expired entry reads as absent on fetch.
+ * Construction also refuses the cli SAPI outside test runners: a CLI
+ * process (RoadRunner worker, queue consumer, command) owns a private
+ * APCu segment invisible to the PHP-FPM workers that serve traffic, so
+ * records stored from CLI can never be verified by the web tier and
+ * vice versa — the one-host shared-segment contract of this adapter
+ * only holds inside one web SAPI. Tests (phpunit) construct it for the
+ * real-extension leg; production CLI hosts select the Redis or SQLite
+ * store instead.
+ *
+ * The atomicity promises are APCu's own: within one SAPI's segment the
+ * region is shared memory guarded by APCu's internal lock,
+ * `apcu_add()` is the atomic create-if-absent the storage's transition
+ * lock builds on, and a TTL-expired entry reads as absent on fetch.
  */
 final class RealApcuBackend implements ApcuBackendInterface
 {
     /**
      * @throws ApcuStorageException when the APCu extension is not
      *                              loaded or is disabled for this
-     *                              process
+     *                              process, or the process runs under
+     *                              the cli SAPI outside a test runner
      */
     public function __construct()
     {
+        if (self::cliConstructionRefused(\PHP_SAPI, self::underTestRunner())) {
+            throw new ApcuStorageException(
+                'ApcuStorage refuses the cli SAPI: a CLI process (RoadRunner worker, queue '
+                . 'consumer, command) owns a private APCu segment invisible to the web tier '
+                . 'that serves traffic. Serve verification from a web SAPI (php-fpm) or '
+                . 'select the Redis/SQLite store for CLI hosts.'
+            );
+        }
         if (!\function_exists('apcu_store')) {
             throw new ApcuStorageException(
                 'the APCu extension is not installed; install or enable ext-apcu to use ApcuStorage'
@@ -39,6 +57,25 @@ final class RealApcuBackend implements ApcuBackendInterface
                 'APCu is disabled for this process; enable the extension (for cli runs also set apc.enable_cli=1) to use ApcuStorage'
             );
         }
+    }
+
+    /**
+     * The cli-refusal decision, pure: the cli SAPI refuses outside a
+     * test runner, every other SAPI constructs.
+     */
+    public static function cliConstructionRefused(string $sapi, bool $underTestRunner): bool
+    {
+        return $sapi === 'cli' && !$underTestRunner;
+    }
+
+    /**
+     * Whether a test runner owns the process (phpunit loads its
+     * TestCase before constructing storage fixtures). Outside a test
+     * runner the cli SAPI is refused.
+     */
+    private static function underTestRunner(): bool
+    {
+        return \class_exists(\PHPUnit\Framework\TestCase::class, false);
     }
 
     public function fetch(string $key): ApcuFetchOutcome

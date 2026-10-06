@@ -47,6 +47,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         private readonly string $completePath = '/kiwi/step-up/complete',
         private readonly ?\Closure $now = null,
         private readonly string $master = '',
+        private readonly ?StepUpLockoutGuard $lockout = null,
     ) {
         if ($master === '') {
             throw new \InvalidArgumentException('The time-based handler needs the step-up master so enrollment secrets are sealed at rest; pass the same master the ticket service uses');
@@ -138,6 +139,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
                 'This account has no enrolled authenticator; enroll one before step-up.',
             );
         }
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_locked_out',
+                'Too many failed verification attempts; retry after the lockout window.',
+                ['Retry-After' => (string) $retryAfter],
+            );
+        }
         $admissions = $this->store->countBegin($context->principalPseudonym, $this->beginWindowSecs);
         if ($admissions > $this->maxBegins) {
             return $this->refusal(
@@ -181,6 +192,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if ($challenge->kind !== StepUpChallengeKind::Totp) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
+        // The completion is bound to the session that began the
+        // challenge: a ticket presented under another principal is
+        // refused before any code is compared.
+        if (!StepUpSessionBinding::matches($request, $challenge)) {
+            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
+        }
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
+        }
         if ($challenge->expired($now)) {
             $this->store->consume($challenge->id);
 
@@ -211,6 +232,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
 
         return $this->credit($challenge);
     }
@@ -245,6 +267,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
     private function failedAttempt(StepUpChallenge $challenge): StepUpResult
     {
+        // Every rejected code feeds the cross-challenge brute-force
+        // budget before the per-challenge attempt cap.
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);

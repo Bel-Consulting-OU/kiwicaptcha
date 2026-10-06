@@ -9,6 +9,13 @@ module KiwiCaptcha
   # and the scopes. Settings resolves a store URL into the shipped
   # adapter without any other configuration.
   class Settings
+    # Profiles whose work ladder prices Argon2id rungs (the explicit
+    # argon budgets and the full-stack adoption profiles). A deployment
+    # that names one must run a verifier that can recompute them: the
+    # argon2 gem carries the native binding, and an absent binding is a
+    # loud configuration error — never a silent downgrade.
+    ARGON_RUNG_PROFILES = %w[argon16 argon32 argon64 abuse_first high_abuse].freeze
+
     attr_reader :profile, :secret, :store_url, :scopes
 
     # Build settings from explicit values or environment variables
@@ -19,7 +26,20 @@ module KiwiCaptcha
       @secret = secret || env['KIWI_SECRET']
       @store_url = store_url || env['KIWI_STORE'] || 'memory://'
       @scopes = parse_scopes_when_string(scopes) || parse_scopes(env['KIWI_SCOPES'] || '')
+      self.class.assert_argon_rung_verifiable!(@profile)
       freeze
+    end
+
+    # The issuer guard: a profile whose ladder issues Argon2id rungs
+    # this runtime cannot verify refuses to boot.
+    def self.assert_argon_rung_verifiable!(profile)
+      return unless ARGON_RUNG_PROFILES.include?(profile.to_s)
+      return if Pow.argon2_available?
+
+      raise ArgumentError,
+            "profile #{profile.inspect} issues Argon2id rungs this runtime cannot " \
+            'verify: install the argon2 gem for the native binding (or choose a ' \
+            'sha-only profile). The rung is never silently downgraded'
     end
 
     def valid_secret?

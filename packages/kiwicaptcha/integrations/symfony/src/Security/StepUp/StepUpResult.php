@@ -25,6 +25,10 @@ final class StepUpResult
     public const FAIL_NOT_ENROLLED = 'not_enrolled';
     public const FAIL_REPLAYED_STEP = 'replayed_step';
     public const FAIL_OUTCOME_UNAVAILABLE = 'outcome_unavailable';
+    /** The completing session is not the one that began the challenge. */
+    public const FAIL_SESSION_MISMATCH = 'session_mismatch';
+    /** The principal or target budget is locked out; retry later. */
+    public const FAIL_LOCKED_OUT = 'locked_out';
 
     private function __construct(
         public readonly StepUpResultStatus $status,

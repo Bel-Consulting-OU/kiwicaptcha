@@ -6,9 +6,10 @@ subrequest).
 
 ## Pieces
 
-- `kiwi-verify.php`: the companion endpoint (byte-identical with the
-  top-level copy). Run it with PHP's built-in server, an FPM pool or
-  a tiny container; the Caddyfile dials `127.0.0.1:8788`.
+- `kiwi-verify.php`: a shim to the canonical endpoint at
+  `../kiwi-verify.php` (one shared endpoint, no per-gateway drift).
+  Deploy the canonical file. Run it with PHP's built-in server, an FPM
+  pool or a tiny container; the Caddyfile dials `127.0.0.1:8788`.
 - `Caddyfile`: the site block with the `forward_auth` directive and a
   gated route.
 

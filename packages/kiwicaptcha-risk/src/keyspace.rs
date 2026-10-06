@@ -9,18 +9,24 @@
 //!
 //!   identity state   `{kiwi:<ns>:<dim>:<hex2>}:risk:<dim>[:<epoch>]:<id>`
 //!   per-dim marker   `{kiwi:<ns>:<dim>:<hex2>}:risk:dd:<event_id>`
+//!   session tags     `{kiwi:<ns>:session:<hex2>}:risk:ctx|tls:<session>`
 //!   nonce dedupe     `{kiwi:<ns>:n:<hex2>}:risk:dedupe:<event_id>`
 //!   scope aggregate  `{kiwi:<ns>:s:<id>:<shard>}:scope:<id>:<shard>`
 //!   shard marker     `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`
+//!   outcome ledger   `{kiwi:<ns>:o:<hex2>}:outcome:<decision_id>`
+//!   mark dedupe      `mark:{kiwi:<ns>}:dd:<event_id>`
 //!   hysteresis state `{kiwi:<ns>}:risk:hyst`
 //!   mode marker      `{kiwi:<ns>}:mode`
 //!
 //! `<hex2>` is the two hex characters of the identifier's first byte, so
-//! each dimension disperses over 256 slots. `<shard>` is
-//! `fnv1a32(event_id) mod 16` (0..=15), so one event increments exactly
-//! one scope shard while the 16 shards spread the aggregate write load.
-//! The aggregate is merged on read with a staleness contract of at most
-//! one second (the stores refresh their merge at most once per second).
+//! each dimension disperses over 256 slots. `<dim>` is one of the seven
+//! sharded dimensions (src, net, session, principal, asn, target, agent).
+//! `<shard>` is `fnv1a32(event_id) mod 16` (0..=15), or the caller's
+//! stable fallback hash for an empty event id, so one event increments
+//! exactly one scope shard while the 16 shards spread the aggregate
+//! write load. The aggregate is merged on read with a staleness contract
+//! of at most one second (the stores refresh their merge at most once
+//! per second).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -87,21 +93,27 @@ pub enum ShardedDimension {
     Subnet = 2,
     Session = 3,
     Principal = 4,
+    Asn = 5,
+    Target = 6,
+    Agent = 7,
 }
 
 impl ShardedDimension {
     /// The dimension name inside the family tag (`src`, `net`,
-    /// `session`, `principal`).
+    /// `session`, `principal`, `asn`, `target`, `agent`).
     pub fn as_name(self) -> &'static str {
         match self {
             ShardedDimension::Source => "src",
             ShardedDimension::Subnet => "net",
             ShardedDimension::Session => "session",
             ShardedDimension::Principal => "principal",
+            ShardedDimension::Asn => "asn",
+            ShardedDimension::Target => "target",
+            ShardedDimension::Agent => "agent",
         }
     }
 
-    /// The Lua dimension argument (1..4).
+    /// The Lua dimension argument (1..7).
     pub fn as_u8(self) -> u8 {
         self as u8
     }
@@ -127,10 +139,17 @@ pub fn fnv1a32(bytes: &[u8]) -> u32 {
 }
 
 /// The scope shard an event id increments: `fnv1a32(event_id) mod 16`,
-/// 0..=15. The empty event id (dedupe disabled) maps deterministically
-/// to `fnv1a32("") mod 16 = 5`.
-pub fn scope_shard(event_id: &str) -> u8 {
-    (fnv1a32(event_id.as_bytes()) % 16) as u8
+/// 0..=15. The empty event id (dedupe disabled) has no id bytes to hash,
+/// so the caller's stable fallback (the assessment's source pseudonym)
+/// is hashed instead: routing every dedupe-less write to the single
+/// `fnv1a32("")` shard would put all of that traffic on one slot.
+pub fn scope_shard(event_id: &str, fallback: &[u8]) -> u8 {
+    let bytes: &[u8] = if event_id.is_empty() {
+        fallback
+    } else {
+        event_id.as_bytes()
+    };
+    (fnv1a32(bytes) % 16) as u8
 }
 
 /// The identity state key of one pseudonym
@@ -177,6 +196,36 @@ pub fn nonce_dedupe_key(encoded_namespace: &str, event_id: &str) -> String {
         "{{kiwi:{encoded_namespace}:n:{}}}:risk:dedupe:{event_id}",
         id_prefix(event_id)
     )
+}
+
+/// The session-family first-seen tag record (`ctx` or `tls`):
+/// `{kiwi:<ns>:session:<hex2>}:risk:<kind>:<session_hex>`. The record
+/// lives on the session pseudonym's own family slot instead of the
+/// shared namespace tag, so first-seen writes disperse with the session
+/// dimension.
+pub fn session_tag_key(encoded_namespace: &str, kind: &str, session_hex: &str) -> String {
+    format!(
+        "{{kiwi:{encoded_namespace}:session:{}}}:risk:{kind}:{session_hex}",
+        id_prefix(session_hex)
+    )
+}
+
+/// The decision-id-family outcome ledger key:
+/// `{kiwi:<ns>:o:<hex2>}:outcome:<decision_id>`. The ledger of one
+/// decision lives on the decision id's own family slot instead of the
+/// shared namespace tag, so registration writes disperse instead of
+/// funneling through one slot.
+pub fn outcome_ledger_key(encoded_namespace: &str, decision_id: &str) -> String {
+    format!(
+        "{{kiwi:{encoded_namespace}:o:{}}}:outcome:{decision_id}",
+        id_prefix(decision_id)
+    )
+}
+
+/// The event-id dedupe marker of one long-memory mark write, on the
+/// same slot as the mark hash (`mark:{kiwi:<ns>}:dd:<event_id>`).
+pub fn mark_dedupe_key(encoded_namespace: &str, event_id: &str) -> String {
+    format!("mark:{{kiwi:{encoded_namespace}}}:dd:{event_id}")
 }
 
 /// The scope aggregate shard hash of one aggregate id and shard:
@@ -287,7 +336,7 @@ pub struct MergeGate {
 
 /// The process-start anchor of the monotonic millisecond clock the gate
 /// uses (windows only need to be consistent within one process).
-fn monotonic_ms() -> u64 {
+pub(crate) fn monotonic_ms() -> u64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis().max(1) as u64
 }
@@ -354,13 +403,29 @@ mod tests {
 
     #[test]
     fn scope_shards_are_deterministic_and_in_band() {
-        assert_eq!(scope_shard(""), 5);
-        assert_eq!(scope_shard("abc"), 11);
+        assert_eq!(scope_shard("abc", b""), 11);
         for i in 0..64u32 {
             let id = format!("{i:064x}");
-            assert!(scope_shard(&id) <= 15);
-            assert_eq!(scope_shard(&id), scope_shard(&id), "deterministic");
+            assert!(scope_shard(&id, b"") <= 15);
+            assert_eq!(scope_shard(&id, b""), scope_shard(&id, b""), "deterministic");
         }
+    }
+
+    #[test]
+    fn empty_event_ids_hash_the_fallback_instead_of_one_shard() {
+        // fnv1a32("") mod 16 == 5: without the fallback every dedupe-less
+        // write would land on shard 5.
+        assert_eq!(fnv1a32(b"") % 16, 5);
+        let mut shards = std::collections::BTreeSet::new();
+        for i in 0..64u32 {
+            let source = format!("{i:032x}");
+            shards.insert(scope_shard("", source.as_bytes()));
+        }
+        assert!(
+            shards.len() > 8,
+            "empty event ids dispersed over {} shards",
+            shards.len()
+        );
     }
 
     #[test]
@@ -394,6 +459,34 @@ mod tests {
         assert_eq!(
             nonce_dedupe_key(ns, "00".repeat(16).as_str()),
             format!("{{kiwi:n1:n:00}}:risk:dedupe:{}", "00".repeat(16))
+        );
+        assert_eq!(
+            session_tag_key(ns, "ctx", "beef"),
+            "{kiwi:n1:session:be}:risk:ctx:beef"
+        );
+        assert_eq!(
+            session_tag_key(ns, "tls", "beef"),
+            "{kiwi:n1:session:be}:risk:tls:beef"
+        );
+        assert_eq!(
+            outcome_ledger_key(ns, "ab".repeat(16).as_str()),
+            format!("{{kiwi:n1:o:ab}}:outcome:{}", "ab".repeat(16))
+        );
+        assert_eq!(
+            mark_dedupe_key(ns, "cd"),
+            "mark:{kiwi:n1}:dd:cd"
+        );
+        assert_eq!(
+            identity_state_key(ns, ShardedDimension::Target, None, "5e2a"),
+            "{kiwi:n1:target:5e}:risk:target:5e2a"
+        );
+        assert_eq!(
+            identity_state_key(ns, ShardedDimension::Asn, Some(3), "a6"),
+            "{kiwi:n1:asn:a6}:risk:asn:3:a6"
+        );
+        assert_eq!(
+            identity_state_key(ns, ShardedDimension::Agent, None, "0f"),
+            "{kiwi:n1:agent:0f}:risk:agent:0f"
         );
         assert_eq!(
             scope_shard_key(ns, "global", 7),

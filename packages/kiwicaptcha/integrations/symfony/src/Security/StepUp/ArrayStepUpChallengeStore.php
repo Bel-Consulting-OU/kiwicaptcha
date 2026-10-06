@@ -33,6 +33,12 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
     /** @var array<string, array{at: int, expires: int}> principal -> completion marker */
     private array $stepUpSuccess = [];
 
+    /** @var array<string, int> "<dimension>:<pseudonym>" -> failure count */
+    private array $lockoutFailures = [];
+
+    /** @var array<string, int> "<dimension>:<pseudonym>" -> lockout deadline (epoch secs) */
+    private array $lockoutUntil = [];
+
     public function __construct(
         private readonly ?\Closure $now = null,
     ) {
@@ -139,5 +145,35 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
 
         return ($now - $marker['at']) <= $withinSecs;
+    }
+
+    public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
+    {
+        $key = $dimension.':'.$pseudonym;
+        $this->lockoutFailures[$key] = ($this->lockoutFailures[$key] ?? 0) + 1;
+
+        return $this->lockoutFailures[$key];
+    }
+
+    public function lockoutUntil(string $dimension, string $pseudonym, int $now): int
+    {
+        $until = $this->lockoutUntil[$dimension.':'.$pseudonym] ?? 0;
+
+        return $until > $now ? $until : 0;
+    }
+
+    public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void
+    {
+        $key = $dimension.':'.$pseudonym;
+        $until = $now + max(1, $ttlSecs);
+        if (($this->lockoutUntil[$key] ?? 0) < $until) {
+            $this->lockoutUntil[$key] = $until;
+        }
+    }
+
+    public function clearLockout(string $dimension, string $pseudonym): void
+    {
+        $key = $dimension.':'.$pseudonym;
+        unset($this->lockoutFailures[$key], $this->lockoutUntil[$key]);
     }
 }

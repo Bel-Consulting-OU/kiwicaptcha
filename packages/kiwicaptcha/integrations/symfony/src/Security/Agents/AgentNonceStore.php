@@ -59,9 +59,9 @@ final class AgentNonceStore
      * @throws \Throwable when Redis refuses (fail-closed; the caller
      *                   must treat the nonce as unverifiable)
      */
-    public function claim(string $keyId, string $nonce): bool
+    public function claim(string $keyId, string $nonce, int $ttlSecs = self::NONCE_TTL_SECS): bool
     {
-        $result = $this->setNxEx(sprintf('%sagent-nonce:%s:%s', $this->keyPrefix, $keyId, $nonce));
+        $result = $this->setNxEx(sprintf('%sagent-nonce:%s:%s', $this->keyPrefix, $keyId, $nonce), $ttlSecs);
 
         return $result !== null && $result !== false;
     }
@@ -71,12 +71,12 @@ final class AgentNonceStore
      * in use. Both shapes carry the identical atomic semantics: the
      * key is written with its TTL only when absent.
      */
-    private function setNxEx(string $key): mixed
+    private function setNxEx(string $key, int $ttlSecs): mixed
     {
         if ($this->redis instanceof \Redis) {
-            return $this->redis->set($key, '1', ['nx', 'ex' => self::NONCE_TTL_SECS]);
+            return $this->redis->set($key, '1', ['nx', 'ex' => max(1, $ttlSecs)]);
         }
 
-        return $this->redis->set($key, '1', 'EX', self::NONCE_TTL_SECS, 'NX');
+        return $this->redis->set($key, '1', 'EX', max(1, $ttlSecs), 'NX');
     }
 }

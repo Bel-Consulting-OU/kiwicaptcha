@@ -7,19 +7,39 @@ the ``profile`` naming the challenge budget the deployment issues.
 Everything else stays optional. ``build_verifier`` wires them into a
 :class:`~kiwicaptcha.verify.Verifier` over the store adapter chosen by
 ``open_store``.
+
+Issuer guard: a profile is an issuance promise. Constructing settings
+for a rung this runtime cannot verify raises a loud configuration
+error — a deployment that would mint argon32 challenges against a
+verifier that refuses them must never boot into a silent downgrade.
 """
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from . import argon2 as argon2_backend
 from .stores import open_store
-from .verify import Verifier, VerifierConfig
+from .verify import ArgonAdmissionGate, Verifier, VerifierConfig
 
 MIN_SECRET_BYTES = 32
 
 #: The named challenge budgets, mirroring the issuance-side profiles:
 #: the sha256 standard rung and the three Argon2id memory rungs.
 PROFILES = ("standard", "argon16", "argon32", "argon64")
+
+#: The Argon2id parameters (m_kib, t) each argon profile issues.
+PROFILE_ARGON_PARAMS = {
+    "argon16": (16 * 1024, 3),
+    "argon32": (32 * 1024, 3),
+    "argon64": (64 * 1024, 3),
+}
+
+
+def argon_rung_verifiable(m_kib: int, t_cost: int,
+                          gate: Optional[ArgonAdmissionGate] = None) -> bool:
+    """Whether this runtime can verify the argon2id rung (m_kib, t)."""
+    gate = gate if gate is not None else ArgonAdmissionGate()
+    return gate.admits_params(m_kib, t_cost)
 
 
 @dataclass
@@ -56,6 +76,17 @@ class Settings:
             )
         if not isinstance(self.scopes, tuple):
             self.scopes = tuple(self.scopes)
+        rung = PROFILE_ARGON_PARAMS.get(self.profile)
+        if rung is not None and not argon_rung_verifiable(*rung):
+            raise ValueError(
+                f"profile {self.profile!r} issues an argon2id rung"
+                f" (m_kib={rung[0]}, t={rung[1]}) this runtime cannot"
+                " verify within its admission budget"
+                f" (backend {argon2_backend.backend_name()}); install"
+                " argon2-cffi for the native path or choose the"
+                " standard profile — the rung is never silently"
+                " downgraded"
+            )
 
     def build_verifier(self) -> Verifier:
         """Build the verifier over the configured store adapter."""
@@ -74,6 +105,9 @@ class Settings:
 __all__ = [
     "MIN_SECRET_BYTES",
     "PROFILES",
+    "PROFILE_ARGON_PARAMS",
+    "ArgonAdmissionGate",
     "Settings",
     "VerifierConfig",
+    "argon_rung_verifiable",
 ]

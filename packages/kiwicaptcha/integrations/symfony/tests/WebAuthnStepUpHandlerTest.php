@@ -35,7 +35,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private const PRINCIPAL = '00112233445566778899aabbccddeeff';
 
-    private const TARGET = 'ffeeddccbbaa99887766554433221100';
+    private const TARGET = 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100';
 
     private const HOST = 'captcha.example.com';
 
@@ -409,10 +409,15 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private function completeRequest(string $ticket, string $credentialJson): Request
     {
-        return Request::create('https://'.self::HOST.'/kiwi/step-up/complete', 'POST', [
+        $request = Request::create('https://'.self::HOST.'/kiwi/step-up/complete', 'POST', [
             WebAuthnStepUpHandler::TICKET_FIELD => $ticket,
             WebAuthnStepUpHandler::CREDENTIAL_FIELD => $credentialJson,
         ]);
+        // The controller binds the re-resolved principal before the
+        // handler runs; direct handler calls bind it the same way.
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
+
+        return $request;
     }
 
     /** @return array<string, mixed> */

@@ -171,6 +171,7 @@ for (const candidate of candidates) {
         verdict = null;
     }
     const reproduced = stable && verdict !== null && verdict.verdict === "REPRODUCED";
+    const refuted = stable && verdict !== null && verdict.verdict === "REFUTED";
     let findingId = null;
     if (reproduced) {
         findingId = fileFinding({
@@ -182,11 +183,21 @@ for (const candidate of candidates) {
             evidence: [harness.script],
         });
     }
+    // A stable transcript whose verdict is neither REPRODUCED nor
+    // REFUTED (for example INCONCLUSIVE: target_unavailable) is not a
+    // settled refutation — it is named inconclusive and counted.
+    const disposition = !stable
+        ? "unstable"
+        : reproduced
+            ? "finding-filed"
+            : refuted
+                ? "refuted"
+                : "inconclusive";
     rows.push({
         id: candidate.id,
         candidate: candidate.rationale ?? `${candidate.class} via ${candidate.mutation}`,
         harness: harness.script,
-        disposition: stable ? (reproduced ? "finding-filed" : "refuted") : "unstable",
+        disposition,
         stable,
         reproduced,
         wireCode: verdict?.wire_code ?? null,
@@ -194,7 +205,7 @@ for (const candidate of candidates) {
         findingId,
         durationMs: first.durationMs + second.durationMs,
     });
-    console.error(`triage: ${candidate.id} ${candidate.class} -> ${stable ? (reproduced ? "REPRODUCED (finding)" : "refuted") : "unstable harness"} (${verdict?.wire_code ?? "?"})`);
+    console.error(`triage: ${candidate.id} ${candidate.class} -> ${disposition} (${verdict?.wire_code ?? "?"})`);
 }
 
 const summary = {
@@ -206,10 +217,12 @@ const summary = {
     refuted: rows.filter((r) => r.disposition === "refuted").length,
     findingsFiled: rows.filter((r) => r.disposition === "finding-filed").length,
     unstable: rows.filter((r) => r.disposition === "unstable").length,
+    inconclusive: rows.filter((r) => r.disposition === "inconclusive").length,
+    harnessError: rows.filter((r) => r.disposition === "harness-error").length,
     noHarness: rows.filter((r) => r.disposition === "no-harness").length,
     rows,
 };
 writeFileSync(outPath, JSON.stringify(summary, null, 2) + "\n");
-console.log(`TRIAGE-SUMMARY: candidates=${summary.candidates} refuted=${summary.refuted} findings=${summary.findingsFiled} unstable=${summary.unstable} noharness=${summary.noHarness}`);
+console.log(`TRIAGE-SUMMARY: candidates=${summary.candidates} refuted=${summary.refuted} findings=${summary.findingsFiled} unstable=${summary.unstable} inconclusive=${summary.inconclusive} harness_error=${summary.harnessError} noharness=${summary.noHarness}`);
 console.log(`triage: report written to ${outPath}`);
 process.exit(0);

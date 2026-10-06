@@ -62,10 +62,18 @@ final class AgentSignatureVerifier
     public const CODE_INVALID = 'AGENT_SIGNATURE_INVALID';
     public const CODE_REPLAYED = 'AGENT_SIGNATURE_REPLAYED';
     public const CODE_NONCE_UNAVAILABLE = 'AGENT_NONCE_UNAVAILABLE';
+    public const CODE_ORIGIN_UNCONFIGURED = 'AGENT_ORIGIN_UNCONFIGURED';
 
     private const METHOD = '@method';
     private const TARGET_URI = '@target-uri';
     private const CONTENT_DIGEST = 'content-digest';
+
+    /** The nonce ledger's minimum TTL: bounded replay protection. */
+    private const NONCE_TTL_FLOOR_SECS = 300;
+
+    /** The slack added past the signature acceptance deadline when sizing the nonce TTL. */
+    private const NONCE_TTL_MARGIN_SECS = 60;
+
     private const CONTENT_LENGTH = 'content-length';
 
     /**
@@ -87,7 +95,14 @@ final class AgentSignatureVerifier
         private readonly AgentNonceStore $nonceStore,
         private readonly int $clockSkewSecs = self::DEFAULT_CLOCK_SKEW_SECS,
         private readonly ?\Closure $now = null,
+        private readonly ?string $publicOrigin = null,
     ) {
+        if ($this->publicOrigin !== null) {
+            $normalized = rtrim($this->publicOrigin, '/');
+            if (preg_match('#^https?://[A-Za-z0-9.-]+(:[0-9]+)?$#D', $normalized) !== 1) {
+                throw new \InvalidArgumentException('risk.agents public origin must be an absolute origin like https://api.example.com');
+            }
+        }
     }
 
     /**
@@ -126,6 +141,9 @@ final class AgentSignatureVerifier
         if (!\is_string($tag) || $tag !== self::REQUIRED_TAG) {
             return $this->refused(self::CODE_MALFORMED, 'The signature tag parameter must name '.self::REQUIRED_TAG.'.');
         }
+        if ($this->publicOrigin === null) {
+            return $this->refused(self::CODE_ORIGIN_UNCONFIGURED, 'The agent plane needs the configured public origin (public_base_url) so @target-uri can never be forged through the Host header.');
+        }
 
         $keyId = $input->parameter('keyid');
         if (!\is_string($keyId) || $keyId === '') {
@@ -147,7 +165,15 @@ final class AgentSignatureVerifier
         }
 
         $now = (int) ($this->now !== null ? ($this->now)() : time());
-        if (\abs($now - $created) > $this->clockSkewSecs) {
+        // The created parameter is capped in both directions by the
+        // skew window; the future bound matters for the nonce TTL
+        // below (a far-future created would stretch the ledger entry
+        // without bound), so it is stated explicitly rather than
+        // implied by abs().
+        if ($created > $now + $this->clockSkewSecs) {
+            return $this->refused(self::CODE_SKEW, sprintf('The signature created parameter is more than %d seconds in the future.', $this->clockSkewSecs));
+        }
+        if ($created < $now - $this->clockSkewSecs) {
             return $this->refused(self::CODE_SKEW, sprintf('The signature created parameter is outside the ±%d second window.', $this->clockSkewSecs));
         }
         if ($expires <= $now || $expires < $created) {
@@ -173,18 +199,40 @@ final class AgentSignatureVerifier
             }
         }
 
+        // The digest is required, never optional: a request that drops
+        // the covered header would otherwise keep only length integrity,
+        // and RFC 9421 treats a missing covered component as a failure.
         $digestHeader = $request->headers->get(self::CONTENT_DIGEST);
-        if ($digestHeader !== null && !$this->contentDigestMatches($digestHeader, $rawBody)) {
+        if (!\is_string($digestHeader) || trim($digestHeader) === '') {
+            return $this->refused(self::CODE_INVALID, 'The covered content-digest header is required.');
+        }
+        if (!$this->contentDigestMatches($digestHeader, $rawBody)) {
             return $this->refused(self::CODE_INVALID, 'The content-digest does not match the request body.');
         }
 
-        $base = $this->signatureBase($request, $input, $rawBody);
+        try {
+            $base = $this->signatureBase($request, $input, $rawBody);
+        } catch (\Throwable) {
+            return $this->refused(self::CODE_INVALID, 'A covered component is missing from the request.');
+        }
         if (!$this->signatureVerifies($signatureBytes, $base, $agent)) {
             return $this->refused(self::CODE_INVALID, 'The signature does not verify.');
         }
 
+        // The nonce must outlive the whole acceptance window, or the
+        // same signature could be replayed after the ledger entry
+        // expired but while created ± skew still admits it. The
+        // acceptance window ends at min(expires, created + skew); the
+        // TTL covers that deadline plus a margin, floored so the
+        // ledger entry is always worth its write and capped so no
+        // crafted created/expires pair can stretch it past twice the
+        // skew window (the future-created bound above is what makes
+        // that ceiling hold).
+        $acceptanceEndsAt = min($expires, $created + $this->clockSkewSecs);
+        $nonceTtl = max(self::NONCE_TTL_FLOOR_SECS, $acceptanceEndsAt - $now + self::NONCE_TTL_MARGIN_SECS);
+        $nonceTtl = min($nonceTtl, max(self::NONCE_TTL_FLOOR_SECS, 2 * $this->clockSkewSecs + self::NONCE_TTL_MARGIN_SECS));
         try {
-            if (!$this->nonceStore->claim($agent->keyId, $nonce)) {
+            if (!$this->nonceStore->claim($agent->keyId, $nonce, $nonceTtl)) {
                 return $this->refused(self::CODE_REPLAYED, 'The signature nonce was already used.');
             }
         } catch (\Throwable) {
@@ -226,11 +274,32 @@ final class AgentSignatureVerifier
     {
         return match ($component) {
             self::METHOD => $request->getMethod(),
-            self::TARGET_URI => $request->getScheme().'://'.$request->getHttpHost().$request->getRequestUri(),
-            self::CONTENT_DIGEST => trim((string) $request->headers->get(self::CONTENT_DIGEST, '')),
-            self::CONTENT_LENGTH => trim((string) $request->headers->get(self::CONTENT_LENGTH, (string) \strlen($rawBody))),
+            // The configured origin, never the request's Host header:
+            // a signature captured for one environment must not replay
+            // against another through a loosely trusted proxy.
+            self::TARGET_URI => $this->publicOrigin.$request->getRequestUri(),
+            // A covered component that is absent from the message is a
+            // failure, never an empty value: an empty content-digest
+            // line would silently drop body integrity, and an empty
+            // content-length line would drop length integrity. The
+            // verify() path refuses these earlier; this keeps
+            // signatureBase() honest for every caller.
+            self::CONTENT_DIGEST => $this->requiredHeader($request, self::CONTENT_DIGEST),
+            self::CONTENT_LENGTH => $request->headers->has(self::CONTENT_LENGTH)
+                ? trim((string) $request->headers->get(self::CONTENT_LENGTH))
+                : (string) \strlen($rawBody),
             default => throw new \LogicException(sprintf('The covered component "%s" was not validated', $component)),
         };
+    }
+
+    private function requiredHeader(Request $request, string $name): string
+    {
+        $value = $request->headers->get($name);
+        if (!\is_string($value) || trim($value) === '') {
+            throw new \LogicException(sprintf('The covered component "%s" is missing from the request; a covered component must be present', $name));
+        }
+
+        return trim($value);
     }
 
     /**
@@ -299,9 +368,21 @@ final class AgentSignatureVerifier
      */
     private function signatureVerifies(string $signatureBytes, string $base, AgentDefinition $agent): bool
     {
+        if (\strlen($signatureBytes) !== \SODIUM_CRYPTO_SIGN_BYTES) {
+            return false;
+        }
         foreach ($agent->publicKeys as $publicKey) {
-            if (sodium_crypto_sign_verify_detached($signatureBytes, $base, $publicKey)) {
-                return true;
+            if (\strlen($publicKey) !== \SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
+                continue;
+            }
+            try {
+                if (sodium_crypto_sign_verify_detached($signatureBytes, $base, $publicKey)) {
+                    return true;
+                }
+            } catch (\Throwable) {
+                // A sodium refusal (a malformed key the registry did
+                // not catch) is a failed verification, never a 500.
+                continue;
             }
         }
 

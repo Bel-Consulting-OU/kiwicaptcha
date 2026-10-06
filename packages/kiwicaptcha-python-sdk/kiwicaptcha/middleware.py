@@ -18,7 +18,7 @@ token source order is the ``x-kiwi-token`` header, then the
 """
 
 import json
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .clientip import resolve_client_ip
 from .decision import VerifyDecision

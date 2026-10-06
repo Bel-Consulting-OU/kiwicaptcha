@@ -134,9 +134,11 @@ module KiwiCaptcha
       end
 
       # Select the signature secret for a record (kid set or legacy
-      # secret).
+      # secret). An unknown or absent kid resolves to nil (the
+      # UNKNOWN_KID refusal), matching the other cores.
       def secret_for_key(secrets, record, legacy_secret)
         return legacy_secret if secrets[:by_kid].empty?
+        return nil if record.kid.nil?
 
         secrets[:newest] ||= secrets[:by_kid].keys.max
         return nil if record.kid > secrets[:newest]
@@ -633,8 +635,9 @@ module KiwiCaptcha
       # The deterministic proof verdict of a presented token against a
       # record. SHA-256 re-derives the hash and compares leading zero
       # bits; rsw compares the trapdoor expectation; an argon2id record
-      # is authentic but unrepresentable by this runtime and fails
-      # closed with the cores' unsupported mapping (nil).
+      # derives through the native binding when the argon2 gem is
+      # present and fails closed with the cores' unsupported mapping
+      # (nil) when it is not — never a silent downgrade.
       def recompute_valid_proof(options, record, token)
         if record.algorithm == 'rsw'
           trapdoor = resolve_trapdoor(options.rsw, record)
@@ -649,7 +652,20 @@ module KiwiCaptcha
           # derived for a record it does not belong to.
           return false
         end
-        return nil if record.algorithm == 'argon2id'
+        if record.algorithm == 'argon2id'
+          return nil unless argon2_ceilings_ok?(record)
+          return nil unless record.p == 1 && record.t >= 3
+
+          salt_bytes = Base64Utils.decode_std(record.salt)
+          return nil if salt_bytes.nil?
+
+          hash = Pow.derive_argon2id_hash(
+            "#{record.prefix}#{token.counter}", salt_bytes, record.t, record.m_kib, record.p, 32
+          )
+          return nil if hash.nil?
+
+          return Pow.meets_target?(hash, record.target_bits)
+        end
 
         salt_bytes = Base64Utils.decode_std(record.salt)
         return nil if salt_bytes.nil?
@@ -673,15 +689,43 @@ module KiwiCaptcha
         )
       end
 
+      # The per-process trapdoor cache: constructing an Rsw::Trapdoor
+      # parses the base64 modulus and lambda and validates them on
+      # every call, so verification rebuilt the same static keyring
+      # objects once per token. The cache keys on the raw pair values;
+      # the cap keeps a hostile flood of distinct pairs bounded, and a
+      # cached RangeError is remembered as :invalid so a bad pair is
+      # never re-parsed.
+      TRAPDOOR_CACHE_LIMIT = 64
+
+      def trapdoor_for(modulus_n, lambda_b64)
+        modulus = modulus_n.to_s
+        lam = lambda_b64.to_s
+        return nil if modulus.empty? || lam.empty?
+
+        @trapdoor_cache ||= {}
+        key = [modulus, lam]
+        cached = @trapdoor_cache[key]
+        return nil if cached == :invalid
+        return cached unless cached.nil?
+
+        built = begin
+                  Rsw::Trapdoor.new(modulus, lam)
+                rescue RangeError
+                  :invalid
+                end
+        if @trapdoor_cache.size >= TRAPDOOR_CACHE_LIMIT && !@trapdoor_cache.key?(key)
+          @trapdoor_cache.clear
+        end
+        @trapdoor_cache[key] = built
+        built == :invalid ? nil : built
+      end
+
       def resolve_trapdoor(rsw_config, record)
         config = normalized_rsw(rsw_config)
         active = nil
         if config && !config.modulus_n.to_s.empty? && !config.lambda.to_s.empty?
-          begin
-            active = Rsw::Trapdoor.new(config.modulus_n, config.lambda)
-          rescue RangeError
-            active = nil
-          end
+          active = trapdoor_for(config.modulus_n, config.lambda)
         end
         keyring = {}
         modulus_by_hash = {}
@@ -692,11 +736,8 @@ module KiwiCaptcha
 
             pair_modulus = pair.is_a?(Hash) ? (pair[:modulus_n] || pair['modulus_n']) : nil
             pair_lambda = pair.is_a?(Hash) ? (pair[:lambda] || pair['lambda']) : nil
-            begin
-              trapdoor = Rsw::Trapdoor.new(pair_modulus, pair_lambda)
-            rescue RangeError
-              next
-            end
+            trapdoor = trapdoor_for(pair_modulus, pair_lambda)
+            next if trapdoor.nil?
             next unless Rsw.identity_matches?(hash.to_s, pair_modulus, allow_legacy)
 
             keyring[hash.to_s] = trapdoor

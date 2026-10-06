@@ -61,6 +61,10 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
  */
 final class MarksEscalation
 {
+
+    /** The D3.5 target-attack threshold (Rust mirror: marks::TARGET_ATTACK_THRESHOLD). */
+    public const TARGET_ATTACK_THRESHOLD = 5;
+
     /** The whole-window default: the store's 90-day mark TTL in ms. */
     public const DEFAULT_MARK_TTL_MS = RedisRiskStateStore::DEFAULT_MARK_TTL_SECS * 1000;
 
@@ -209,7 +213,7 @@ final class MarksEscalation
         ResourcePressure $resources,
     ): RiskDecision {
         $view = MarksView::fromParts(
-            ['session' => ['kind' => 'unreadable', 'count' => 1, 'first_ms' => $nowMs, 'last_ms' => $nowMs]],
+            ['session' => ['kind' => 'unreadable', 'last_kind' => 'unreadable', 'count' => 1, 'first_ms' => $nowMs, 'last_ms' => $nowMs]],
             null,
         );
 

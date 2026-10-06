@@ -129,6 +129,30 @@ class KiwiSolverTest {
     }
 
     @Test
+    fun challengeJsonRejectsBrokenUnicodeEscapesAsMalformed() {
+        // A non-hex \u escape is malformed input and must raise the typed
+        // Malformed error, never escape as a raw parse exception.
+        val broken = """
+            {"nonce":"$nonce","salt":"AAECAw==","algorithm":"sha256","mKib":0,
+             "t":1,"p":1,"targetBits":8,"prefix":"kiwi|login|\uZZZZ","ttlSecs":120,
+             "minDurationMs":50}
+        """.trimIndent()
+        try {
+            KiwiChallenge.fromJson(broken)
+            fail("expected a malformed refusal")
+        } catch (e: KiwiSolveError.Malformed) {
+            // expected: typed refusal
+        }
+        // A valid four-hex-digit escape still parses.
+        val ok = """
+            {"nonce":"$nonce","salt":"AAECAw==","algorithm":"sha256","mKib":0,
+             "t":1,"p":1,"targetBits":8,"prefix":"a\u0042c","ttlSecs":120,
+             "minDurationMs":50}
+        """.trimIndent()
+        assertEquals("aBc", KiwiChallenge.fromJson(ok).prefix)
+    }
+
+    @Test
     fun siteverifyBodyCarriesSecretResponseAndOptionalRemoteip() {
         assertEquals(
             "{\"secret\":\"s\",\"response\":\"tok\",\"remoteip\":\"203.0.113.9\"}",

@@ -19,6 +19,14 @@ TOKEN_FIELDS: List[str] = [
     "altcha",
 ]
 
+# The namespaced JSON body keys. The bare "token" key is deliberately
+# absent: an application POSTing its own {"token": ...} API credential
+# must never have that value consumed (and forwarded) as a captcha token.
+JSON_TOKEN_FIELDS: List[str] = [
+    "kiwi_token",
+    "captcha_response",
+]
+
 VERIFY_URL_DEFAULT = "http://127.0.0.1:7371/verify"
 
 Transport = Callable[[str, str, Dict[str, str]], Dict[str, Any]]
@@ -43,9 +51,10 @@ def extract_token(
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, dict):
-            value = parsed.get("token")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+            for field in JSON_TOKEN_FIELDS:
+                value = parsed.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
     cookie = cookies.get("kiwi_token")
     if isinstance(cookie, str) and cookie.strip():
         return cookie.strip()

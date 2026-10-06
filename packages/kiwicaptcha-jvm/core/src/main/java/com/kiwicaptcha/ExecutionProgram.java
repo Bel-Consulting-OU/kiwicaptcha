@@ -21,7 +21,7 @@ public final class ExecutionProgram {
     public static final int EXECUTION_MIN_OPS = 8;
     public static final int EXECUTION_MAX_OPS = 24;
     public static final int MAX_PROGRAM_BASE64 = 4096;
-    private static final int EXECUTION_OPCODE_COUNT = 45;
+    private static final int EXECUTION_OPCODE_COUNT = 50;
 
     // Execution opcodes, in vocabulary order.
     private static final int OP_ADD = 0;
@@ -69,6 +69,11 @@ public final class ExecutionProgram {
     private static final int OP_DOM_URL_CANON = 42;
     private static final int OP_DOM_TEXT_MUTATE = 43;
     private static final int OP_DOM_SELECT_DEP = 44;
+    private static final int OP_CSS_GEOM = 45;
+    private static final int OP_MUT_ORDER = 46;
+    private static final int OP_EV_PHASE_FULL = 47;
+    private static final int OP_RANGE_ORDER = 48;
+    private static final int OP_INT_OBS = 49;
 
     /** Per-version opcode ceilings of the execution grammar. */
     private static int maxOpcodeByVersion(int version) {
@@ -77,7 +82,8 @@ public final class ExecutionProgram {
             case 2 -> 34;
             case 3 -> 35;
             case 4 -> 37;
-            case 5 -> EXECUTION_OPCODE_COUNT;
+            case 5 -> 45;
+            case 6 -> EXECUTION_OPCODE_COUNT;
             default -> -1;
         };
     }
@@ -268,6 +274,14 @@ public final class ExecutionProgram {
                     return readValue() && skipByte();
                 case OP_DOM_SELECT_DEP:
                     return read(3) != null;
+                case OP_CSS_GEOM, OP_INT_OBS:
+                    // Version-6 real-platform probes: the probed id
+                    // plus one raw seed byte and one raw dst cell.
+                    return readId() && read(2) != null;
+                case OP_MUT_ORDER, OP_RANGE_ORDER:
+                    return readId() && read(3) != null;
+                case OP_EV_PHASE_FULL:
+                    return readId() && skipByte();
                 default:
                     return false;
             }

@@ -55,6 +55,25 @@ function solveSha(string $prefix, string $saltB64, int $targetBits): int
     throw new RuntimeException('no proof below the solver ceiling');
 }
 
+function solveArgon2id(string $prefix, string $saltB64, int $t, int $mKib, int $p, int $targetBits): int
+{
+    $salt = base64_decode($saltB64);
+    for ($counter = 0; $counter < 20_000_000; $counter++) {
+        $digest = sodium_crypto_pwhash(
+            32,
+            $prefix . (string) $counter,
+            $salt,
+            $t,
+            $mKib * 1024,
+            SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13
+        );
+        if (leadingZeroBits($digest) >= $targetBits) {
+            return $counter;
+        }
+    }
+    throw new RuntimeException('no argon2id proof below the solver ceiling');
+}
+
 function mint(Config $config, ?string $region = null): ChallengeRecord
 {
     $storage = new ArrayStorage();
@@ -170,9 +189,11 @@ $records[] = [
     'verify_opts' => ['expected_scope' => 'checkout'],
 ];
 
-// 5. argon2id: within the ceilings, authentic and unsupported by the
-//    SDK runtimes (no native Argon2id), so the pinned verdict is the
-//    cores' unsupported mapping.
+// 5. argon2id: within the ceilings and solved through the protocol's
+//    Argon2id profile, so the pinned verdict is the real acceptance —
+//    the SDK runtimes recompute the rung through their optional native
+//    binding (argon2 gem / argon2_elixir) and refuse it loudly
+//    (unsupported_argon2_params) when the binding is absent.
 $config = new Config(
     secretKey: SECRET,
     algorithm: PoWAlgorithm::Argon2id,
@@ -187,8 +208,8 @@ $record = mint($config);
 $records[] = [
     'name' => 'argon2id',
     'record' => $record->toArray(),
-    'token_b64' => tokenFor($record, 21, 1500, ['v' => 1]),
-    'expected' => ['ok' => false, 'code' => 'unsupported_argon2_params'],
+    'token_b64' => tokenFor($record, solveArgon2id($record->prefix, $record->salt, $record->t, $record->mKib, $record->p, $record->targetBits), 1500, ['v' => 1]),
+    'expected' => ['ok' => true],
     'verify_opts' => ['expected_scope' => 'login'],
 ];
 
@@ -254,7 +275,7 @@ $out = [
             'Every record is minted by the real PHP Issuer with its sealed record-metadata MAC.',
             'The rsw trapdoor pair is the shared committed fixture; the PHP Rsw gate validates it before issuance.',
             'sha_execution_v4 pins the Ruby and Elixir fail-closed mapping: no browser-trace walker, so the armed dimension answers execution_mismatch.',
-            'argon2id pins the unsupported_argon2_params mapping: no native Argon2id in the Ruby and Elixir runtimes.',
+            'argon2id pins a solved proof through the optional native binding: ok when the argon2 gem (Ruby) or argon2_elixir (Elixir) is present, unsupported_argon2_params without it.',
         ],
     ],
     'hkdf' => [

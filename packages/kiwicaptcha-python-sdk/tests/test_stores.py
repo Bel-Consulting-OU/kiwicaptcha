@@ -319,5 +319,46 @@ class SqliteStoreSpecificTest(unittest.TestCase):
             os.unlink(path)
 
 
+class SqliteConnectionPolicyTest(unittest.TestCase):
+    def test_caller_connection_is_never_mutated(self):
+        import sqlite3
+
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(path)
+        caller = sqlite3.connect(path)
+        # The host application's isolation posture: implicit
+        # transactions (isolation_level == "") and its own row shape.
+        self.assertEqual("", caller.isolation_level)
+        self.assertIsNone(caller.row_factory)
+        storage = SqliteStorage(caller)
+        try:
+            # The caller's connection keeps its own settings: the store
+            # drove a dedicated connection instead of switching the host
+            # app into autocommit.
+            self.assertEqual("", caller.isolation_level)
+            self.assertIsNone(caller.row_factory)
+            self.assertIsNot(storage.conn, caller)
+            record = mint_v2_record()
+            storage.store(record)
+            self.assertIsNotNone(storage.find(record.nonce))
+        finally:
+            storage.close()
+            caller.close()
+            os.unlink(path)
+
+    def test_in_memory_caller_connection_refused(self):
+        import sqlite3
+
+        caller = sqlite3.connect(":memory:")
+        try:
+            SqliteStorage(caller)
+            self.fail("an in-memory connection cannot be shared and must be refused")
+        except ValueError as exc:
+            self.assertIn("in-memory", str(exc))
+        finally:
+            caller.close()
+
+
 if __name__ == "__main__":
     unittest.main()

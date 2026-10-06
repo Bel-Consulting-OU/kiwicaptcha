@@ -110,6 +110,16 @@ if [ "${1:-}" = "--synth" ] || [ "${KIWI_RT_SYNTH:-0}" = "1" ] || [ -n "$ESCALAT
     node "$RT_DIR/engine/triage.mjs" >&2 || log "triage agent failed; the run continues with the campaign battery"
 fi
 
+# The agent loop: consulted only when the operator configured a local
+# model. It plans, executes a constrained action list against the
+# allowlisted staging target, and triages deterministically. Offline
+# it is a no-op that says so.
+if [ -n "${KIWI_RT_LOCAL_LLM_URL:-}" ]; then
+    log "agent loop: planning and executing constrained actions against the staging target"
+    node "$RT_DIR/engine/model-adapter.mjs" >"$RUNS_DIR/agent-loop.json" 2>"$RUNS_DIR/agent-loop.err" \
+        || log "agent loop reported a finding candidate or failed (see $RUNS_DIR/agent-loop.json)"
+fi
+
 # ---------- the campaign battery ----------
 CAMPAIGNS=${KIWI_RT_CAMPAIGNS:-"d3.1-commodity-nojs d3.2-stealth-headless d3.3-pow-economics d3.4-proxy-pools d3.5-credential-stuffing d3.6-token-brokering d3.7-solver-farms d3.8-ai-agents d3.9-risk-gaming d3.10-infrastructure d3.11-dos d3.12-protocol-parser d3.13-supply-chain d3.14-privacy d3.15-multi-tenant d3.16-accessibility d3.17-cross-sdk-parity"}
 

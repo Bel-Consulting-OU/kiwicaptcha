@@ -29,11 +29,22 @@ echo "== unit tests: endpoint logic =="
 php "$HERE/unit-kiwi-verify.php" >/dev/null
 check $? "unit-kiwi-verify"
 
-echo "== endpoint copies are byte-identical =="
-cmp -s "$ROOT/kiwi-verify.php" "$ROOT/nginx/kiwi-verify.php" \
-  && cmp -s "$ROOT/kiwi-verify.php" "$ROOT/caddy/kiwi-verify.php" \
-  && cmp -s "$ROOT/kiwi-verify.php" "$ROOT/traefik/kiwi-verify.php"
-check $? "kiwi-verify.php copies identical"
+echo "== gateway shims load the one canonical endpoint =="
+# The three gateway directories ship a shim that requires the
+# canonical integrations-platforms/kiwi-verify.php; no duplicated
+# endpoint logic may reappear next to a shim.
+shim_status=0
+for d in nginx caddy traefik; do
+    if ! grep -q "dirname(__DIR__).'/kiwi-verify.php'" "$ROOT/$d/kiwi-verify.php" 2>/dev/null; then
+        echo "missing canonical shim: $d/kiwi-verify.php" >&2
+        shim_status=1
+    fi
+    if grep -q 'function kiwi_verify_config' "$ROOT/$d/kiwi-verify.php" 2>/dev/null; then
+        echo "duplicated endpoint logic: $d/kiwi-verify.php" >&2
+        shim_status=1
+    fi
+done
+check "$shim_status" "gateway shims delegate to the canonical endpoint"
 
 echo "== nginx config lint =="
 if command -v nginx >/dev/null 2>&1; then
@@ -126,8 +137,11 @@ check "$([ "$code" = 403 ]; echo $?)" "stale token denies 403 (got $code)"
 code=$(curl -s -o /dev/null -w '%{http_code}' -d 'g-recaptcha-response=good' "$gate")
 check "$([ "$code" = 204 ]; echo $?)" "incumbent form field token passes (got $code)"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"token":"good","scope":"login"}' "$gate")
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"kiwi_token":"good","scope":"login"}' "$gate")
 check "$([ "$code" = 204 ]; echo $?)" "json body token passes (got $code)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"token":"good","scope":"login"}' "$gate")
+check "$([ "$code" = 403 ]; echo $?)" "bare application token field is not consumed (got $code)"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -b 'kiwi_token=good' "$gate")
 check "$([ "$code" = 204 ]; echo $?)" "cookie token passes (got $code)"

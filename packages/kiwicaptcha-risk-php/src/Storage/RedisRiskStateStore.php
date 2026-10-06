@@ -35,7 +35,7 @@ use Predis\Response\ServerException;
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
-final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface
+final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -327,6 +327,63 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     }
 
     /**
+     * The target-dimension state keys of one target pseudonym: the
+     * failure hash plus the source/asn spread HLLs, byte-identical with
+     * the keys assess_v2.lua maintains (KEYS[14..16]).
+     *
+     * @return list<string>
+     */
+    private function targetStateKeys(string $targetId): array
+    {
+        self::assertKeySafeIdentifier('targetId', $targetId);
+
+        return [
+            "{kiwi:{$this->namespace}}:risk:tgt:{$targetId}",
+            "{kiwi:{$this->namespace}}:risk:tgt:src:{$targetId}",
+            "{kiwi:{$this->namespace}}:risk:tgt:asn:{$targetId}",
+        ];
+    }
+
+    /** One target_failure.lua op, returning {fails, spread, first_ms, last_ms}. */
+    private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
+    {
+        $keys = $this->targetStateKeys($targetId);
+        $result = $this->runScript(
+            $keys,
+            [$op, $source, $asn, (string) $this->principalTtlSecs],
+            self::loadOutcomeScript('target_failure.lua'),
+        );
+        if (!\is_array($result) || \count($result) < 4) {
+            throw new RiskStoreException('the target_failure reply is not a 4-slot array');
+        }
+
+        return [
+            'fails' => self::scriptInteger($result[0], 'target fails'),
+            'spread' => self::scriptInteger($result[1], 'target spread'),
+            'first_ms' => self::scriptInteger($result[2], 'target first_ms'),
+            'last_ms' => self::scriptInteger($result[3], 'target last_ms'),
+        ];
+    }
+
+    /** @inheritdoc */
+    public function registerTargetFailure(string $targetId, string $source, string $asn): array
+    {
+        return $this->runTargetOp('fail', $targetId, $source, $asn);
+    }
+
+    /** @inheritdoc */
+    public function clearTargetFailures(string $targetId): void
+    {
+        $this->runTargetOp('clear', $targetId, '', '');
+    }
+
+    /** @inheritdoc */
+    public function readTargetState(string $targetId): array
+    {
+        return $this->runTargetOp('read', $targetId, '', '');
+    }
+
+    /**
      * The long-memory mark key of one dimension and identifier:
      * mark:{kiwi:<ns>}:<dim>:<id>. The hash tag keeps every mark in the
      * risk keyspace's cluster slot; the dimension is one of the five
@@ -343,13 +400,16 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * Writes one long-memory mark atomically through the canonical
-     * marks.lua: the kind (the outcome name), the count increment, the
-     * first/last timestamps and the refreshed whole-key TTL land in one
-     * script call. Returns the mark's new total count.
+     * marks.lua: the max-severity kind, the latest kind, the count
+     * increment, the first/last timestamps and the refreshed whole-key
+     * TTL land in one script call. The clock is the server's TIME; the
+     * \$nowMs argument is kept for wire compatibility and ignored.
+     * \$eventId dedupes the write ('' disables dedupe). Returns the
+     * mark's total count.
      *
      * @throws RiskStoreException when the underlying state backend fails
      */
-    public function writeMark(string $dimension, string $id, string $kind, int $nowMs): int
+    public function writeMark(string $dimension, string $id, string $kind, int $nowMs, string $eventId = ''): int
     {
         $key = $this->markKey($dimension, $id);
         if ($kind === '' || strlen($kind) > self::MAX_MARK_KIND_BYTES) {
@@ -361,9 +421,12 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         if ($nowMs < 0) {
             throw new \InvalidArgumentException('nowMs must be >= 0');
         }
+        // KEYS[2] is the event-id dedupe marker on the same slot; with
+        // dedupe disabled the script never touches it.
+        $marker = $eventId === '' ? $key : "mark:{kiwi:{$this->namespace}}:dd:{$eventId}";
         $result = $this->runScript(
-            [$key],
-            [$kind, $nowMs, $this->markTtlSecs * 1000],
+            [$key, $marker],
+            [$kind, $nowMs, $this->markTtlSecs * 1000, $eventId],
             $this->marksScript,
         );
 
@@ -372,7 +435,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * The current mark of one dimension and identifier: the hash fields
-     * kind, count, first_ms and last_ms, or null when no mark exists.
+     * kind (max severity), last_kind, count, first_ms and last_ms, or
+     * null when no mark exists.
      *
      * @return null|array{kind: string, count: int, first_ms: int, last_ms: int}
      * @throws RiskStoreException when the underlying state backend fails
@@ -395,9 +459,13 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         if (!\is_string($kind) || $kind === '') {
             throw new RiskStoreException('Risk mark hash is missing its kind field');
         }
+        // A pre-severity writer has no last_kind; its kind WAS the
+        // latest write, so it doubles as the latest.
+        $lastKind = $raw['last_kind'] ?? null;
 
         return [
             'kind' => $kind,
+            'last_kind' => \is_string($lastKind) && $lastKind !== '' ? $lastKind : $kind,
             'count' => self::scriptInteger($raw['count'] ?? null, 'mark count'),
             'first_ms' => self::scriptInteger($raw['first_ms'] ?? null, 'mark first_ms'),
             'last_ms' => self::scriptInteger($raw['last_ms'] ?? null, 'mark last_ms'),

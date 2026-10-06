@@ -74,7 +74,7 @@ final class StepUpChallenge
             $id,
             $kind,
             self::pseudonym('principal', $principalPseudonym),
-            $targetPseudonym === null ? null : self::pseudonym('target', $targetPseudonym),
+            $targetPseudonym === null ? null : self::targetPseudonym($targetPseudonym),
             self::token('scope', $scope),
             $returnPath,
             self::token('reason', $reason),
@@ -234,6 +234,21 @@ final class StepUpChallenge
                 'The %s pseudonym of a step-up challenge must be 32 lowercase hex chars, never a raw identifier',
                 $name,
             ));
+        }
+
+        return $value;
+    }
+
+    /**
+     * The target pseudonym: the canonical full digest (64 hex chars),
+     * never a raw identifier and never a truncated form.
+     */
+    private static function targetPseudonym(string $value): string
+    {
+        if (preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
+            throw new \InvalidArgumentException(
+                'The target pseudonym of a step-up challenge must be 64 lowercase hex chars, never a raw identifier',
+            );
         }
 
         return $value;

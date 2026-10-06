@@ -39,6 +39,27 @@ public final class Settings {
         return PROFILES.contains(profile);
     }
 
+    /** The argon2id rung (m_kib, t, p) each argon profile issues; null for the sha rungs. */
+    public static int[] profileArgonParams(String profile) {
+        return switch (profile) {
+            case "argon16" -> new int[] {16 * 1024, 3, 1};
+            case "argon32" -> new int[] {32 * 1024, 3, 1};
+            case "argon64" -> new int[] {64 * 1024, 3, 1};
+            default -> null;
+        };
+    }
+
+    /**
+     * Whether this verifier runtime can recompute the argon2id rung:
+     * inside the process ceilings and the protocol derivation profile
+     * (p == 1, t at least 3).
+     */
+    public static boolean rungVerifiable(int memoryKib, int t, int p) {
+        return memoryKib >= Kiwi.MIN_ARGON_MEMORY_KIB && memoryKib <= Kiwi.MAX_ARGON_MEMORY_KIB
+                && t >= Kiwi.MIN_ARGON_TIME && t <= Kiwi.MAX_ARGON_TIME
+                && p == 1;
+    }
+
     /** Wires the settings into a verifier over the store the url selects. */
     public Verifier buildVerifier() {
         if (secret.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < Kiwi.MIN_SECRET_BYTES) {
@@ -47,6 +68,16 @@ public final class Settings {
         if (!profileKnown(profile)) {
             throw new IllegalArgumentException(
                     "kiwicaptcha: the profile must be one of standard, argon16, argon32, argon64");
+        }
+        // The issuer guard: a profile naming a rung this verifier
+        // cannot verify is a loud configuration error, never a silent
+        // downgrade.
+        int[] rung = profileArgonParams(profile);
+        if (rung != null && !rungVerifiable(rung[0], rung[1], rung[2])) {
+            throw new IllegalArgumentException(
+                    "kiwicaptcha: profile " + profile + " issues an argon2id rung (m_kib="
+                            + rung[0] + " t=" + rung[1] + " p=" + rung[2]
+                            + ") this verifier cannot verify \u2014 refusing to issue it (never silently downgraded)");
         }
         Verifier.Config config = new Verifier.Config();
         config.acceptLegacyV1 = acceptLegacyV1;

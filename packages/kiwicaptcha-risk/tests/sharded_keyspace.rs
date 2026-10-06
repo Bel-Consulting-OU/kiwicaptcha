@@ -423,9 +423,9 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
         .query(&mut conn)
         .expect("legacy ledger read");
     let sharded_raw: String = redis::cmd("GET")
-        .arg(format!(
-            "{{kiwi:{}}}:outcome:dec-sharded-2",
-            sharded.namespace()
+        .arg(kiwicaptcha_risk::keyspace::outcome_ledger_key(
+            sharded.namespace(),
+            "dec-sharded-2",
         ))
         .query(&mut conn)
         .expect("sharded ledger read");
@@ -455,6 +455,60 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
         Some("aa"),
         "the first tag wins"
     );
+}
+
+/// The hysteresis script floors a corrupt negative level at 0 and never
+/// lets it feed the ratchet as upgrade head-start. The write-on-change
+/// guard is pinned at the source: a steady-state transition must not
+/// rewrite the hot key (OBJECT IDLETIME cannot observe it — the
+/// script's own HMGET resets the idle clock — so the guard itself is
+/// the regression surface).
+#[test]
+fn hysteresis_floors_negative_levels_and_writes_only_on_change() {
+    let Some(url) = common::redis_url() else {
+        eprintln!("skipping: RISK_REDIS_URL not set");
+        return;
+    };
+    let src = kiwicaptcha_risk::sharded::SHARDED_HYSTERESIS_LUA;
+    assert!(
+        src.contains("if raw_level ~= level or raw_cool ~= cool then"),
+        "the hysteresis hash must be written only on change"
+    );
+    assert!(
+        src.contains("math.max(0, math.min(4, num(v[1])))"),
+        "a stored level must be floored at 0 and clamped at 4"
+    );
+    let ns = common::unique_namespace("hystfloor");
+    let key = format!("{{kiwi:{ns}}}:risk:hyst");
+    let mut conn = redis::Client::open(url.as_str())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    use redis::Commands;
+    // A tampered -3 level must read as 0 after one transition.
+    let _: i32 = conn.hset(&key, "scope", -3).unwrap();
+    let _: i32 = conn.hset(&key, "cool", -9).unwrap();
+    let run = |conn: &mut redis::Connection, gp: i64| -> (Vec<i64>) {
+        redis::cmd("EVAL")
+            .arg(kiwicaptcha_risk::sharded::SHARDED_HYSTERESIS_LUA)
+            .arg(1)
+            .arg(&key)
+            .arg(gp)
+            .arg(70_000i64)
+            .arg(60_000i64)
+            .query(conn)
+            .expect("hysteresis eval")
+    };
+    let reply: Vec<i64> = run(&mut conn, 0);
+    assert_eq!(reply[0], 0, "the negative level floors at 0");
+    assert_eq!(reply[1], 0, "the negative cooldown floors at 0");
+    // Steady state: the recomputed state equals the stored one.
+    let reply: Vec<i64> = run(&mut conn, 0);
+    assert_eq!(reply, vec![0, 0]);
+    // A real transition (pressure enters level 1) reports the new level.
+    let reply: Vec<i64> = run(&mut conn, 21_000);
+    assert_eq!(reply[0], 1);
+    let _: i32 = conn.del(&key).unwrap();
 }
 
 #[test]
@@ -546,7 +600,7 @@ fn auxiliary_surfaces_stay_mode_insensitive() {
 
     // Marks through the sharded store.
     let count = store
-        .write_mark("principal", "mark-one", "ConfirmedAbuse", common::T0)
+        .write_mark("principal", "mark-one", "ConfirmedAbuse", common::T0, "")
         .unwrap();
     assert_eq!(count, 1);
     let mark = store
@@ -751,7 +805,7 @@ fn cluster_topology_serves_the_sharded_invariants() {
     assert_eq!(store.confirm_outcome("clu-led", true).unwrap(), 1);
     assert_eq!(
         store
-            .write_mark("principal", "clu-p", "ConfirmedAbuse", common::T0)
+            .write_mark("principal", "clu-p", "ConfirmedAbuse", common::T0, "")
             .unwrap(),
         1
     );

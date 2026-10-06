@@ -276,12 +276,19 @@ final class AggregateCalibratorV2 implements CalibrationStore
      *                                    this label. Its per-window
      *                                    admission is capped.
      *
+     * @param string|null       $identity  the pseudonym whose reputation
+     *                                    this label would credit (the
+     *                                    per-identity trust cap of
+     *                                    trust-granting labels)
+     *
      * @return int the shared accepted-outcome status: 0 nothing
      *             consumed, 1 first confirmation with calibration
      *             recorded, 2 first confirmation deliberately unsampled,
      *             3 first confirmation with calibration withheld by the
-     *             per-source window cap. Any nonzero status authorizes
-     *             the first-party reputation event exactly once.
+     *             per-source window cap, 4 first confirmation whose
+     *             trust-granting reputation credit is withheld by a
+     *             trust cap. Reputation is authorized on 1 and 2 (and on
+     *             3 only for abuse labels); 4 never authorizes it.
      *
      * @throws \InvalidArgumentException when the sampling mode is
      *                                   'weighted' and $weight is null
@@ -292,8 +299,12 @@ final class AggregateCalibratorV2 implements CalibrationStore
         ProvenanceClass $provenance,
         int $source,
         ?float $weight = null,
+        ?string $identity = null,
     ): int {
         \KiwiCaptcha\Risk\Storage\RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
+        if ($identity !== null) {
+            \KiwiCaptcha\Risk\Storage\RedisRiskStateStore::assertKeySafeIdentifier('identity', $identity);
+        }
         if ($source < 0 || $source >= self::MAX_REPORTING_SOURCES) {
             throw new \InvalidArgumentException(sprintf('source must be within 0..%d', self::MAX_REPORTING_SOURCES - 1));
         }
@@ -323,9 +334,13 @@ final class AggregateCalibratorV2 implements CalibrationStore
             'weighted' => 2,
             default => 1,
         };
+        $keys = [$this->receiptKey($decisionId), $this->bucketKey($scope, $hour), $this->ledgerKey($decisionId)];
+        if ($identity !== null && $identity !== '') {
+            $keys[] = $this->trustCapKey($identity);
+        }
         $status = (int) $this->runScript(
             $this->confirmV2Script,
-            [$this->receiptKey($decisionId), $this->bucketKey($scope, $hour), $this->ledgerKey($decisionId)],
+            $keys,
             [
                 (string) $mode,
                 self::weightText($weight ?? 1.0),
@@ -344,6 +359,16 @@ final class AggregateCalibratorV2 implements CalibrationStore
         }
 
         return $status;
+    }
+
+    /**
+     * The per-identity trust-cap counter key (shared tag, expiring with
+     * the bucket window): the identity dimension of the trust-granting
+     * reputation cap.
+     */
+    private function trustCapKey(string $identity): string
+    {
+        return \sprintf('{kiwi:%s}:trustcap:%s', $this->inner->namespace(), $identity);
     }
 
     /**

@@ -114,6 +114,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         private readonly ?bool $libPresent = null,
         private readonly string $rpId = '',
         private readonly array $allowedOrigins = [],
+        private readonly ?StepUpLockoutGuard $lockout = null,
     ) {
         if (\strlen($master) < 32) {
             throw new \InvalidArgumentException('The WebAuthn handler master must be at least 32 bytes (the same floor as secret_key)');
@@ -174,6 +175,16 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 'risk.step_up.webauthn.rp_id and risk.step_up.webauthn.allowed_origins must be configured before the WebAuthn handler can run.',
             );
         }
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_locked_out',
+                'Too many failed verification attempts; retry after the lockout window.',
+                ['Retry-After' => (string) $retryAfter],
+            );
+        }
 
         $admissions = $this->store->countBegin($context->principalPseudonym, $this->beginWindowSecs);
         if ($admissions > $this->maxBegins) {
@@ -220,6 +231,16 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $challenge = $resolved;
         if ($challenge->kind !== StepUpChallengeKind::WebAuthn || $challenge->ceremony === null || $challenge->codeHash === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
+        }
+        // The completion is bound to the session that began the
+        // challenge: a ticket presented under another principal is
+        // refused before any credential is loaded.
+        if (!StepUpSessionBinding::matches($request, $challenge)) {
+            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
+        }
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
         if ($challenge->expired($now)) {
             $this->store->consume($challenge->id);
@@ -306,6 +327,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
 
         return $this->credit($challenge);
     }
@@ -490,6 +512,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
     private function failedAttempt(StepUpChallenge $challenge): StepUpResult
     {
+        // Every rejected verification feeds the cross-challenge
+        // brute-force budget before the per-challenge attempt cap.
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);

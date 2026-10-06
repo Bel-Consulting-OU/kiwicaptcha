@@ -20,8 +20,11 @@ module KiwiCaptcha
     # Run every deployment check. The store probe writes a nonce-shaped
     # probe record, consumes it, and requires the exactly-once
     # semantics: the second consume must answer consumed_before with no
-    # fresh win.
-    def run(secret:, store:, rsw: nil, region: nil, issuer: nil)
+    # fresh win. ``profile`` names the adoption profile whose work
+    # ladder the deployment prices (defaults to the quickstart
+    # profile): a ladder that prices Argon2id rungs fails the argon2
+    # check when the native binding is absent.
+    def run(secret:, store:, rsw: nil, region: nil, issuer: nil, profile: nil)
       checks = []
 
       secret_length = secret.is_a?(String) ? secret.b.bytesize : secret.to_s.bytesize
@@ -45,6 +48,22 @@ module KiwiCaptcha
       checks << DoctorCheck.new(
         name: 'issuer', ok: issuer_ok,
         detail: issuer_ok ? 'identifier shape valid or unset' : 'issuer must match [A-Za-z0-9._:-]'
+      )
+
+      argon_ok = Pow.argon2_available?
+      argon_required = Settings::ARGON_RUNG_PROFILES.include?(profile.to_s) || profile.nil?
+      checks << DoctorCheck.new(
+        name: 'argon2',
+        ok: argon_ok || !argon_required,
+        detail: if argon_ok
+                  'native Argon2id binding present (argon2 gem); argon rungs verify'
+                elsif argon_required
+                  'native Argon2id binding missing: the priced ladder issues argon2id ' \
+                  'rungs that refuse with unsupported_argon2_params (install the argon2 ' \
+                  'gem or choose a sha-only profile); never silently downgraded'
+                else
+                  'native Argon2id binding missing (this profile prices no argon rungs)'
+                end
       )
 
       checks << probe_store(store)

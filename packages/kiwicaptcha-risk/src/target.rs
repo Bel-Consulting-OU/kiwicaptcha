@@ -13,6 +13,15 @@
 //!   identifier, keyed by the master-derived target key, with the
 //!   pipeline version stamped into the derivation context. Only that
 //!   digest is ever passed onward.
+//!
+//! The live path of the derived pseudonym (not a side channel): the
+//! engine's `resolve_target_id` feeds the typed outcomes facade
+//! (`OutcomeHandle::target`), whose authentication-failure reports
+//! register the failure in the target-dimension state
+//! (`protocol/risk-v1/target_failure.lua` / `assess_v2.lua` KEYS[14..16])
+//! that the marks stage reads back as the attacked-target record. The
+//! pseudonym is the sole key; the raw and normalized identifier never
+//! leave this boundary.
 
 use std::collections::HashMap;
 

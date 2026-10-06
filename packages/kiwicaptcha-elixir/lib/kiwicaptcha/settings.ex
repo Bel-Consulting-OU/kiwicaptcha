@@ -8,6 +8,13 @@ defmodule Kiwicaptcha.Settings do
 
   defstruct [:profile, :secret, :store_url, :scopes]
 
+  # Profiles whose work ladder prices Argon2id rungs (the explicit
+  # argon budgets and the full-stack adoption profiles). A deployment
+  # that names one must run a verifier that can recompute them: the
+  # argon2_elixir package carries the native binding, and an absent
+  # binding is a loud configuration error — never a silent downgrade.
+  @argon_rung_profiles ["argon16", "argon32", "argon64", "abuse_first", "high_abuse"]
+
   @type t :: %__MODULE__{
           profile: String.t(),
           secret: String.t() | nil,
@@ -18,14 +25,17 @@ defmodule Kiwicaptcha.Settings do
   @doc """
   Build settings from explicit values or environment variables
   (KIWI_PROFILE, KIWI_SECRET, KIWI_STORE, KIWI_SCOPES). The scopes
-  string is name=value pairs joined by commas.
+  string is name=value pairs joined by commas. Raises ArgumentError
+  when the profile issues Argon2id rungs this runtime cannot verify.
   """
-  @spec new(keyword()) :: t()
+  @spec new(keyword()) :: t() | no_return()
   def new(opts \\ []) do
     env = Keyword.get(opts, :env, %{})
+    profile = opts[:profile] || env["KIWI_PROFILE"] || "abuse_first"
+    assert_argon_rung_verifiable!(profile)
 
     %__MODULE__{
-      profile: opts[:profile] || env["KIWI_PROFILE"] || "abuse_first",
+      profile: profile,
       secret: opts[:secret] || env["KIWI_SECRET"],
       store_url: opts[:store_url] || env["KIWI_STORE"] || "memory://",
       scopes:
@@ -35,6 +45,25 @@ defmodule Kiwicaptcha.Settings do
         end
     }
   end
+
+  @doc """
+  The issuer guard: a profile whose ladder issues Argon2id rungs this
+  runtime cannot verify refuses to boot.
+  """
+  @spec assert_argon_rung_verifiable!(String.t()) :: :ok | no_return()
+  def assert_argon_rung_verifiable!(profile) when is_binary(profile) do
+    if profile in @argon_rung_profiles and not Kiwicaptcha.Pow.argon2_available?() do
+      raise ArgumentError,
+            "profile #{inspect(profile)} issues Argon2id rungs this runtime cannot " <>
+              "verify: add the optional argon2_elixir dependency for the native " <>
+              "binding (or choose a sha-only profile). The rung is never silently " <>
+              "downgraded"
+    end
+
+    :ok
+  end
+
+  def assert_argon_rung_verifiable!(_), do: :ok
 
   @doc "Whether the configured secret meets the 32-byte floor."
   @spec valid_secret?(t()) :: boolean()

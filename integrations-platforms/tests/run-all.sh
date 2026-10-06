@@ -64,6 +64,7 @@ echo "== keycloak =="
 if command -v java >/dev/null 2>&1 && command -v javac >/dev/null 2>&1; then
     classes=$(mktemp -d)
     if javac -d "$classes" \
+        "$ROOT/keycloak/src/main/java/ee/bel/kiwi/keycloak/Json.java" \
         "$ROOT/keycloak/src/main/java/ee/bel/kiwi/keycloak/KiwiVerifyClient.java" \
         "$ROOT/keycloak/src/test/java/ee/bel/kiwi/keycloak/KiwiVerifyClientTest.java" >/dev/null 2>&1; then
         run "keycloak: verify client tests" java -cp "$classes" ee.bel.kiwi.keycloak.KiwiVerifyClientTest

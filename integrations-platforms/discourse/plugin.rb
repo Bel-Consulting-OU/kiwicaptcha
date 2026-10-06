@@ -46,8 +46,12 @@ class KiwiSignupGate
       server: env,
       transport: method(:transport),
     )
-    return denied("invalid-input-response") unless result[:ok]
+    # Unreachable/unreadable upstream first: those answers carry the
+    # retry disposition (503), never a definitive 403. Checking `ok`
+    # first would shadow the outage branch and pin outages to a deny
+    # the client cannot usefully retry.
     return unavailable if result[:code] == :unavailable || result[:code] == :unreadable
+    return denied("invalid-input-response") unless result[:ok]
 
     @app.call(env)
   end

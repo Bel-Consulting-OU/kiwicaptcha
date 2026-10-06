@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
+use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
 use KiwiCaptcha\Risk\Outcomes\OutcomeHandle;
 
@@ -67,7 +68,7 @@ final class StepUpCompletionCredit
         if ($challenge->targetPseudonym !== null) {
             $this->reporter->report(
                 Outcome::StepUpCompleted,
-                OutcomeHandle::target($challenge->targetPseudonym),
+                OutcomeHandle::target(TargetMarkKey::of($challenge->targetPseudonym)),
                 $this->idempotencyKey('target', $challengeId),
             );
             $creditedTarget = true;

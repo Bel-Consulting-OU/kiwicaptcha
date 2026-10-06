@@ -75,20 +75,23 @@ final class AgentsSignatureStructureTest extends TestCase
 
     /**
      * The signature base of a bodyless request: no content-length
-     * line, and the parameter order of the input is preserved in the
-     * re-serialization (a reordering verifier would rebuild a
-     * different base and reject every signature).
+     * line, the content-digest of the empty body (the digest is
+     * required even when nothing is uploaded), and the parameter
+     * order of the input is preserved in the re-serialization (a
+     * reordering verifier would rebuild a different base and reject
+     * every signature).
      */
     public function testSignatureBasePreservesParameterOrderWithoutBody(): void
     {
+        $digest = AgentSigner::contentDigest('');
         $header = 'sig1=("@method" "@target-uri" "content-digest");tag="kiwi-agents-v1";nonce="zz";keyid="k";alg="ed25519";created=1770000000;expires=1770000300';
         $input = (new StructuredFieldsSubsetParser())->parseSignatureInput($header);
-        $request = self::bodyRequest('', null, ['HTTP_SIGNATURE_INPUT' => $header]);
+        $request = self::bodyRequest('', $digest, ['HTTP_SIGNATURE_INPUT' => $header]);
 
         $expected = ''
             .'"@method" POST'."\n"
             .'"@target-uri" http://localhost/kiwi/challenge'."\n"
-            .'"content-digest" '."\n"
+            .'"content-digest" '.$digest."\n"
             .'"@signature-params" ("@method" "@target-uri" "content-digest");tag="kiwi-agents-v1";nonce="zz";keyid="k";alg="ed25519";created=1770000000;expires=1770000300'."\n";
         $verifier = self::verifier(new FakePredisClient());
         self::assertSame($expected, $verifier->signatureBase($request, $input, ''));
@@ -123,6 +126,10 @@ final class AgentsSignatureStructureTest extends TestCase
             'sig1=("@method"), sig2=("@method")',
             'sig1=(token1 "x")',
             'sig1=("@method");flag=?1',
+            // A bare parameter is RFC 8941 boolean true: refused,
+            // never coerced to the empty string.
+            'sig1=("@method");flag',
+            'sig1=("@method");flag;',
             'sig1=("@method");weight=1.5',
             'sig1=("@method");key=:AAAA:',
             'sig1=("@method");a=1;a=2',
@@ -145,16 +152,30 @@ final class AgentsSignatureStructureTest extends TestCase
     }
 
     /**
-     * The Signature member must be a labeled byte sequence; anything
-     * else is refused.
+     * The Signature member must be a labeled byte sequence decoding
+     * to exactly one Ed25519 signature (64 bytes); anything else —
+     * including a well-formed base64 of the wrong length — is
+     * refused before any sodium call.
      */
     public function testSignatureMemberParsing(): void
     {
         $parser = new StructuredFieldsSubsetParser();
-        [$label, $bytes] = $parser->parseSignature('sig1=:AAEC:');
+        $sixtyFourBytes = base64_encode(str_repeat("\x01", 64));
+        [$label, $bytes] = $parser->parseSignature('sig1=:'.$sixtyFourBytes.':');
         self::assertSame('sig1', $label);
-        self::assertSame("\x00\x01\x02", $bytes);
-        foreach (['sig1="not-bytes"', 'sig1=token', 'sig1=:AAEC', 'sig1=:A A EC:, sig2=:AAEC:'] as $header) {
+        self::assertSame(64, \strlen($bytes));
+        self::assertSame(str_repeat("\x01", 64), $bytes);
+        foreach ([
+            'sig1="not-bytes"',
+            'sig1=token',
+            'sig1=:AAEC',
+            'sig1=:A A EC:, sig2=:AAEC:',
+            // 3 bytes: valid base64, wrong signature length.
+            'sig1=:AAEC:',
+            // Empty and 32-byte sequences: the same length refusal.
+            'sig1=::',
+            'sig1=:'.base64_encode(str_repeat("\0", 32)).':',
+        ] as $header) {
             try {
                 $parser->parseSignature($header);
                 self::fail(sprintf('the signature header must be refused: %s', $header));
@@ -305,6 +326,9 @@ final class AgentsSignatureStructureTest extends TestCase
             new AgentNonceStore($redis, '{kiwi:test}:'),
             300,
             $now,
+            // @target-uri derives from the configured public origin,
+            // never the request Host header.
+            'http://localhost',
         );
     }
 }

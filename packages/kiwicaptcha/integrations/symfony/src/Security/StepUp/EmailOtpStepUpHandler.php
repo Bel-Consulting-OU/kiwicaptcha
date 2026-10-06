@@ -51,6 +51,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         private readonly int $beginWindowSecs = 900,
         private readonly string $completePath = '/kiwi/step-up/complete',
         private readonly ?\Closure $now = null,
+        private readonly ?StepUpLockoutGuard $lockout = null,
     ) {
         if ($digits !== 6 && $digits !== 8) {
             throw new \InvalidArgumentException('The one-time passcode length must be 6 or 8 digits');
@@ -65,6 +66,20 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     public function begin(Request $request, StepUpContext $context): Response
     {
         $now = $this->now();
+        // The cross-challenge brute-force budget: while the principal
+        // or the target is locked out, no fresh challenge is minted
+        // (the budget is what keeps the per-challenge attempt cap from
+        // being farmed across challenges).
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_locked_out',
+                'Too many failed verification attempts; retry after the lockout window.',
+                ['Retry-After' => (string) $retryAfter],
+            );
+        }
         $admissions = $this->store->countBegin($context->principalPseudonym, $this->beginWindowSecs);
         if ($admissions > $this->maxBegins) {
             return $this->refusal(
@@ -130,6 +145,16 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         if ($challenge->kind !== StepUpChallengeKind::EmailOtp) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
+        // The completion is bound to the session that began the
+        // challenge: a ticket presented under another principal is
+        // refused before any code is compared.
+        if (!StepUpSessionBinding::matches($request, $challenge)) {
+            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
+        }
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        if ($retryAfter > 0) {
+            return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
+        }
         if ($challenge->expired($now)) {
             $this->store->consume($challenge->id);
 
@@ -147,6 +172,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
 
         return $this->credit($challenge);
     }
@@ -158,6 +184,9 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
      */
     private function failedAttempt(StepUpChallenge $challenge): StepUpResult
     {
+        // Every rejected code feeds the cross-challenge brute-force
+        // budget before the per-challenge attempt cap.
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);

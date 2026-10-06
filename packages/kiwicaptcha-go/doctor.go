@@ -45,6 +45,11 @@ func DoctorCheckSettings(secret, profile string) DoctorCheck {
 	if !ProfileKnown(profile) {
 		return DoctorCheck{Name: "settings", Detail: "the profile must be one of standard, argon16, argon32, argon64"}
 	}
+	if rung, ok := ProfileArgonParams[profile]; ok && !RungVerifiable(rung[0], rung[1], rung[2]) {
+		return DoctorCheck{Name: "settings", Detail: fmt.Sprintf(
+			"the profile %s issues an argon2id rung this verifier cannot verify (m_kib=%d t=%d p=%d); never silently downgraded",
+			profile, rung[0], rung[1], rung[2])}
+	}
 	return DoctorCheck{Name: "settings", OK: true, Detail: "the settings shape is valid"}
 }
 

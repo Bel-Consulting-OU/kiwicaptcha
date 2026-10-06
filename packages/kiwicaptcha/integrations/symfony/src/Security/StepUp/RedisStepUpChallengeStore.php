@@ -84,6 +84,22 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return 1
         LUA;
 
+    /**
+     * The lockout-arm script: extend the deadline to at least the
+     * requested one (a shorter request never shortens a live lock),
+     * with a TTL matching the deadline. The key-level TTL also bounds
+     * the ledger: an abandoned budget key expires with its lockout.
+     */
+    private const LOCK_ARM_SCRIPT = <<<'LUA'
+        -- Step-up lockout: arm-or-extend the deadline.
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        local until_ms = tonumber(ARGV[1])
+        if until_ms > current then
+          redis.call('SET', KEYS[1], tostring(until_ms), 'PX', tonumber(ARGV[2]))
+        end
+        return 1
+        LUA;
+
     public function __construct(
         private readonly ClientInterface $redis,
         private readonly string $prefix,
@@ -216,5 +232,66 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         $value = $this->redis->get($this->prefix.'stepup-done:'.$principalPseudonym);
 
         return \is_string($value) && $value !== '' && ($now - (int) $value) <= $withinSecs;
+    }
+
+    public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
+    {
+        $answer = $this->redis->eval(
+            self::BEGIN_SCRIPT,
+            1,
+            $this->lockoutKey('fails', $dimension, $pseudonym),
+            (string) max(1, $windowSecs),
+        );
+
+        return (int) $answer;
+    }
+
+    public function lockoutUntil(string $dimension, string $pseudonym, int $now): int
+    {
+        $value = $this->redis->get($this->lockoutKey('lock', $dimension, $pseudonym));
+        if (!\is_string($value) || $value === '') {
+            return 0;
+        }
+        $until = (int) $value;
+
+        return $until > $now ? $until : 0;
+    }
+
+    public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void
+    {
+        $ttlSecs = max(1, $ttlSecs);
+        $this->redis->eval(
+            self::LOCK_ARM_SCRIPT,
+            1,
+            $this->lockoutKey('lock', $dimension, $pseudonym),
+            (string) (($now + $ttlSecs) * 1000),
+            (string) ($ttlSecs * 1000 + 60_000),
+        );
+    }
+
+    public function clearLockout(string $dimension, string $pseudonym): void
+    {
+        $this->redis->del(
+            $this->lockoutKey('fails', $dimension, $pseudonym),
+            $this->lockoutKey('lock', $dimension, $pseudonym),
+        );
+    }
+
+    /**
+     * The budget key of one (dimension, pseudonym) pair. The dimension
+     * is a fixed short token ("principal" / "target") and the
+     * pseudonym is the canonical hex form, so the key is as safe as
+     * every other step-up key family.
+     */
+    private function lockoutKey(string $kind, string $dimension, string $pseudonym): string
+    {
+        if (preg_match('/^[a-z_]{1,16}$/D', $dimension) !== 1) {
+            throw new \InvalidArgumentException('The lockout dimension must be 1-16 lowercase letters');
+        }
+        if (preg_match('/^[0-9a-f]{32}([0-9a-f]{32})?$/D', $pseudonym) !== 1) {
+            throw new \InvalidArgumentException('The lockout pseudonym must be the canonical lowercase hex form');
+        }
+
+        return $this->prefix.'lockout:'.$kind.':'.$dimension.':'.$pseudonym;
     }
 }

@@ -66,6 +66,7 @@ $compat = client::build_request(
 check('compat request encodes the incumbent shape', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=s') !== false && strpos($compat['body'], 'remoteip=203.0.113.8') !== false);
 check('untrusted peer ignores xff', client::client_ip(['REMOTE_ADDR' => '192.0.2.5', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.5');
 check('trusted lb takes next left', client::client_ip(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.8, 10.0.0.1'], '10.0.0.0/8') === '203.0.113.8');
+check('client-supplied leftmost entry is ignored', client::client_ip(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 203.0.113.8, 10.0.0.1'], '10.0.0.0/8') === '203.0.113.8');
 check('garbage hop fails closed', client::client_ip(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.1'], '10.0.0.0/8') === '10.0.0.1');
 
 // The decision table.

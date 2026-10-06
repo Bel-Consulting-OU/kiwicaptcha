@@ -1020,9 +1020,10 @@ defmodule Kiwicaptcha.Verify do
   @doc """
   The deterministic proof verdict of a presented token against a
   record. SHA-256 re-derives the hash and compares leading zero bits;
-  rsw compares the trapdoor expectation; an argon2id record is
-  authentic but unrepresentable by this runtime and fails closed with
-  the cores' unsupported mapping (:unsupported).
+  rsw compares the trapdoor expectation; an argon2id record derives
+  through the native binding when argon2_elixir is present and fails
+  closed with the cores' unsupported mapping (:unsupported) when it is
+  not — never a silent downgrade.
   """
   @spec recompute_valid_proof(rsw_config() | nil, Kiwicaptcha.Record.t(), Kiwicaptcha.Token.t()) ::
           :unsupported | boolean()
@@ -1052,13 +1053,42 @@ defmodule Kiwicaptcha.Verify do
         false
 
       record.algorithm == "argon2id" ->
-        :unsupported
+        recompute_argon2id(record, token)
 
       true ->
         case Kiwicaptcha.B64.decode_std(record.salt) do
           {:ok, salt_bytes} ->
             hash = Kiwicaptcha.Pow.derive_sha256_hash(record.prefix, token.counter, salt_bytes)
             Kiwicaptcha.Pow.meets_target?(hash, record.target_bits)
+
+          :error ->
+            :unsupported
+        end
+    end
+  end
+
+  # The argon2id recompute: the protocol profile is p == 1 and t >= 3,
+  # and the native binding carries the derivation. An absent binding or
+  # an unrepresentable profile refuses with :unsupported.
+  defp recompute_argon2id(record, token) do
+    cond do
+      record.p != 1 or record.t < 3 ->
+        :unsupported
+
+      true ->
+        case Kiwicaptcha.B64.decode_std(record.salt) do
+          {:ok, salt_bytes} ->
+            hash =
+              Kiwicaptcha.Pow.derive_argon2id_hash(
+                record.prefix <> Integer.to_string(token.counter),
+                salt_bytes,
+                record.t,
+                record.m_kib,
+                record.p,
+                32
+              )
+
+            if hash == nil, do: :unsupported, else: Kiwicaptcha.Pow.meets_target?(hash, record.target_bits)
 
           :error ->
             :unsupported

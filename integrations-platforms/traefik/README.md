@@ -5,8 +5,9 @@ Gates arbitrary Traefik routers on a KiwiCaptcha token with the
 
 ## Pieces
 
-- `kiwi-verify.php`: the companion endpoint (byte-identical with the
-  top-level copy). Run it on `127.0.0.1:8788`.
+- `kiwi-verify.php`: a shim to the canonical endpoint at
+  `../kiwi-verify.php` (one shared endpoint, no per-gateway drift).
+  Deploy the canonical file. Run it on `127.0.0.1:8788`.
 - `kiwi-forwardauth.yml`: the dynamic configuration with the
   `kiwi-captcha` middleware and one gated router.
 

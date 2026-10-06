@@ -18,16 +18,44 @@ defmodule Kiwicaptcha.Doctor do
     rsw = Keyword.get(opts, :rsw)
     region = Keyword.get(opts, :region)
     issuer = Keyword.get(opts, :issuer)
+    profile = Keyword.get(opts, :profile)
 
     checks =
       [
         secret_check(secret),
         identifier_check("region", region),
         identifier_check("issuer", issuer),
+        argon2_check(profile),
         store_check(store)
       ] ++ if(rsw, do: [rsw_check(rsw)], else: [])
 
     %{ok: Enum.all?(checks, & &1.ok), checks: checks}
+  end
+
+  # The argon2id capability flag: a priced ladder that issues Argon
+  # rungs fails the check when the native binding is absent; the
+  # refusal is loud and typed, never a silent downgrade.
+  defp argon2_check(profile) do
+    available = Kiwicaptcha.Pow.argon2_available?()
+    required = profile == nil or profile in ["argon16", "argon32", "argon64", "abuse_first", "high_abuse"]
+
+    ok = available or not required
+
+    detail =
+      cond do
+        available ->
+          "native Argon2id binding present (argon2_elixir); argon rungs verify"
+
+        required ->
+          "native Argon2id binding missing: the priced ladder issues argon2id rungs " <>
+            "that refuse with unsupported_argon2_params (add the optional " <>
+            "argon2_elixir dependency or choose a sha-only profile); never silently downgraded"
+
+        true ->
+          "native Argon2id binding missing (this profile prices no argon rungs)"
+      end
+
+    %{name: "argon2", ok: ok, detail: detail}
   end
 
   defp secret_check(secret) do

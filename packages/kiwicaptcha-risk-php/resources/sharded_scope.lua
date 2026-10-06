@@ -152,8 +152,14 @@ local function ttl_out_of_bounds(value)
     return value ~= math.floor(value)
 end
 
-local has_write = tonumber(ARGV[3]) == 1
+local has_write_arg = ARGV[3]
 local dedupe_ttl = tonumber(ARGV[4])
+-- Fail closed on a malformed has_write: a garbage flag that silently
+-- coerced to read-only would drop the event instead of refusing it.
+if has_write_arg ~= '0' and has_write_arg ~= '1' then
+    return redis.error_reply('risk-v1-sharded: has_write must be 0 or 1')
+end
+local has_write = has_write_arg == '1'
 if ttl_out_of_bounds(dedupe_ttl) then
     return redis.error_reply('risk-v1-sharded: dedupe_ttl_s must be a positive integer no greater than 2147483647')
 end
@@ -163,12 +169,16 @@ end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
+if event ~= math.floor(event) or event < 1 or event > 21 then
+    return redis.error_reply('risk-v1-sharded: event must be an integer within 1..21')
+end
 
 -- ── Per-shard dedupe: the marker is SET NX inside this script, so the
 -- shard increment is exactly once per event id even when the assessment
 -- batch is retried after a dropped reply.
 local is_duplicate = false
-if has_write and ARGV[5] ~= nil and ARGV[5] ~= '' then
+local event_id = ARGV[5] or ''
+if has_write and event_id ~= '' then
     if redis.call('GET', KEYS[2]) then
         is_duplicate = true
     else

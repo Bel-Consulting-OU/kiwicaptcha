@@ -34,7 +34,8 @@ report = KiwiCaptcha::Doctor.run(
   store: store,
   rsw: rsw,
   region: ENV['KIWI_REGION'],
-  issuer: ENV['KIWI_ISSUER']
+  issuer: ENV['KIWI_ISSUER'],
+  profile: ENV['KIWI_PROFILE']
 )
 
 report.checks.each do |check|

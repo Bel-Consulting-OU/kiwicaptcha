@@ -48,13 +48,20 @@ function rawHeaderLines(req: FastifyRequest, name: string): string[] {
 /** The canonical client IP of one request per the shared contract. */
 export function clientIpFromRequestFastify(req: FastifyRequest, trustedProxies: string[] = []): string {
   const socket = req.socket as { remoteAddress?: string } | undefined;
+  const peer = socket?.remoteAddress ?? '';
   const lines = rawHeaderLines(req, 'x-forwarded-for');
   const realIpLines = rawHeaderLines(req, 'x-real-ip');
-  const realIp = realIpLines.length > 0 ? realIpLines[0] : null;
+  // A repeated forwarding header is parser ambiguity (one intermediary
+  // reads the first line, another the last): no header-derived identity
+  // is trustworthy, so the peer wins. Never pick a line of a repeated
+  // X-Real-IP, matching the shared resolver contract.
+  if (lines.length > 1 || realIpLines.length > 1) {
+    return peer;
+  }
   return resolveClientIp({
-    peer: socket?.remoteAddress ?? '',
+    peer,
     xffLines: lines,
-    realIp: realIp ?? null,
+    realIp: realIpLines[0] ?? null,
     trustedProxies,
   });
 }

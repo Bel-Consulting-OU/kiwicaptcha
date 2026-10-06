@@ -113,6 +113,7 @@ final class KiwiCaptchaDoctorCommand extends Command
 
         $checks = [
             'Storage atomicity' => $this->checkStorage(),
+            'APCu SAPI' => $this->checkApcuSapi(),
             'Redis reachability' => $this->checkRedis($this->redis, 'storage/limiter Redis'),
             'Replication topology' => $this->checkReplicationTopology(),
             'HA authority' => $this->checkHaAuthority(),
@@ -187,6 +188,30 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['PASS', sprintf('atomic storage (%s)', $class)];
+    }
+
+    /**
+     * The APCu segment hazard flag: the adapter refuses construction
+     * under the cli SAPI outside tests, and this check names the same
+     * boundary when the adapter is reachable here (a test-runner
+     * process, or a web-SAPI doctor run).
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkApcuSapi(): array
+    {
+        if (!$this->storage instanceof \KiwiCaptcha\Storage\ApcuStorage) {
+            return ['PASS', 'not the APCu adapter; the per-process cli segment hazard does not apply'];
+        }
+        if (\PHP_SAPI !== 'cli') {
+            return ['PASS', sprintf('APCu storage under the %s SAPI: one shared segment per host', \PHP_SAPI)];
+        }
+        $detail = 'APCu storage under the cli SAPI: every worker process owns a private APCu '
+            . 'segment, so a RoadRunner/queue worker stores records the web tier can never read '
+            . '(or the reverse). The adapter refuses construction under cli outside tests; '
+            . 'select the Redis/SQLite store for CLI hosts.';
+
+        return [\in_array($this->environment, ['test', 'dev'], true) ? 'WARN' : 'FAIL', $detail];
     }
 
     /**

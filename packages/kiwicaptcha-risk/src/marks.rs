@@ -70,6 +70,11 @@ pub const DEFAULT_MARK_TTL_MS: u64 = crate::redis::DEFAULT_MARK_TTL_SECS * 1000;
 /// evidence.
 pub const CORROBORATION_FLOOR: u16 = 300;
 
+/// The D3.5 target-attack threshold: a target whose live failure count
+/// reaches this many spread failures is under attack, and the next
+/// login claiming it sees the interactive step-up (never a lockout).
+pub const TARGET_ATTACK_THRESHOLD: u32 = 5;
+
 /// Below this argon capacity the strongest rung re-escalates to StepUp
 /// (the policy's own capacity check, applied to the mark rung too).
 const ARGON_CAPACITY_FLOOR: u16 = 300;
@@ -104,7 +109,13 @@ impl MarksView {
 
     /// Reads the view from a marks store: one lookup per own dimension
     /// (absent marks simply drop out) plus the target lookup when the
-    /// request presents a target pseudonym.
+    /// request presents a target pseudonym. The target record is the
+    /// written mark when one exists; otherwise it is COMPILED from the
+    /// live engine state (the target-failure counter the outcome bridge
+    /// maintains): a count at or above [`TARGET_ATTACK_THRESHOLD`]
+    /// produces the `targetUnderAttack` record the stage maps to exactly
+    /// the interactive step-up. Callers never inject this record — the
+    /// engine's own failure state is the sole source.
     ///
     /// # Errors
     ///
@@ -122,8 +133,20 @@ impl MarksView {
             }
         }
         let target = match target {
-            Some(id) => store.read_mark(MarkDimension::Target.key(), id)?,
             None => None,
+            Some(id) => match store.read_mark(MarkDimension::Target.key(), id)? {
+                Some(record) => Some(record),
+                None => {
+                    let state = store.read_target_state(id)?;
+                    (state.fails >= TARGET_ATTACK_THRESHOLD).then(|| MarkRecord {
+                        kind: "targetUnderAttack".to_string(),
+                        last_kind: "targetUnderAttack".to_string(),
+                        count: state.fails as i64,
+                        first_ms: state.first_ms,
+                        last_ms: state.last_ms,
+                    })
+                }
+            },
         };
         Ok(MarksView { own: marks, target })
     }
@@ -372,6 +395,7 @@ pub fn apply_unreadable(
 ) -> RiskDecision {
     let marked = MarkRecord {
         kind: "unreadable".to_string(),
+        last_kind: "unreadable".to_string(),
         count: 1,
         first_ms: now_ms as i64,
         last_ms: now_ms as i64,
@@ -419,6 +443,7 @@ mod tests {
     fn mark(kind: &str, last_ms: i64) -> MarkRecord {
         MarkRecord {
             kind: kind.to_string(),
+            last_kind: kind.to_string(),
             count: 1,
             first_ms: last_ms,
             last_ms,
@@ -807,10 +832,13 @@ mod tests {
     }
 
     /// The in-memory marks store twin of the PHP stub: reads and writes
-    /// keyed by dimension and identifier.
+    /// keyed by dimension and identifier, with the marks.lua write
+    /// semantics (max-severity kind, separate latest kind, event-id
+    /// idempotency).
     #[derive(Default)]
     struct MapStore {
         marks: Mutex<HashMap<(String, String), MarkRecord>>,
+        seen_events: Mutex<std::collections::HashSet<String>>,
     }
 
     impl OutcomeMarksStore for MapStore {
@@ -823,17 +851,37 @@ mod tests {
             id: &str,
             kind: &str,
             now_ms: u64,
+            event_id: &str,
         ) -> Result<i64, RiskError> {
+            if !event_id.is_empty()
+                && !self
+                    .seen_events
+                    .lock()
+                    .unwrap()
+                    .insert(format!("{dimension}:{id}:{event_id}"))
+            {
+                let marks = self.marks.lock().unwrap();
+                return Ok(marks
+                    .get(&(dimension.to_string(), id.to_string()))
+                    .map(|m| m.count)
+                    .unwrap_or(0));
+            }
             let mut marks = self.marks.lock().unwrap();
             let entry = marks
                 .entry((dimension.to_string(), id.to_string()))
                 .or_insert(MarkRecord {
                     kind: kind.to_string(),
+                    last_kind: kind.to_string(),
                     count: 0,
                     first_ms: now_ms as i64,
                     last_ms: now_ms as i64,
                 });
-            entry.kind = kind.to_string();
+            if crate::outcomes::mark_kind_severity(kind)
+                > crate::outcomes::mark_kind_severity(&entry.kind)
+            {
+                entry.kind = kind.to_string();
+            }
+            entry.last_kind = kind.to_string();
             entry.count += 1;
             entry.last_ms = now_ms as i64;
             Ok(entry.count)
@@ -860,10 +908,10 @@ mod tests {
     fn read_drops_absent_dimensions_and_resolves_the_target() {
         let store = MapStore::default();
         store
-            .write_mark("session", SESSION, "accountBanned", T0)
+            .write_mark("session", SESSION, "accountBanned", T0, "")
             .unwrap();
         store
-            .write_mark("target", TARGET, "fraudConfirmed", T0)
+            .write_mark("target", TARGET, "fraudConfirmed", T0, "")
             .unwrap();
         let view = MarksView::read(
             &store,
@@ -891,10 +939,10 @@ mod tests {
     fn store_reader_addresses_session_principal_agent_and_asn() {
         let store = Arc::new(MapStore::default());
         store
-            .write_mark("session", SESSION, "accountBanned", T0)
+            .write_mark("session", SESSION, "accountBanned", T0, "")
             .unwrap();
         store
-            .write_mark("asn", "a64496", "fraudConfirmed", T0)
+            .write_mark("asn", "a64496", "fraudConfirmed", T0, "")
             .unwrap();
         let mut reader = StoreMarksReader::new(store).with_agent("backfill-bot");
         reader = reader.with_mark_ttl_ms(60_000);
@@ -1010,8 +1058,14 @@ mod tests {
     }
 
     fn record_from_json(record: &serde_json::Value) -> MarkRecord {
+        let kind = record["kind"].as_str().expect("kind").to_string();
         MarkRecord {
-            kind: record["kind"].as_str().expect("kind").to_string(),
+            last_kind: record
+                .get("last_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&kind)
+                .to_string(),
+            kind,
             count: record["count"].as_i64().expect("count"),
             first_ms: record["first_ms"].as_i64().expect("first"),
             last_ms: record["last_ms"].as_i64().expect("last"),

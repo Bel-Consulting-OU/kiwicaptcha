@@ -27,7 +27,7 @@ public static class Kiwi
     public const int RswIdentityProtocolVersion = 5;
     public const int MaxProtocolVersion = 5;
 
-    public const int MaxExecutionVersion = 5;
+    public const int MaxExecutionVersion = 6;
     public const int MaxClockSkew = 60;
     public const long SkewToleranceUs = 5_000_000;
 

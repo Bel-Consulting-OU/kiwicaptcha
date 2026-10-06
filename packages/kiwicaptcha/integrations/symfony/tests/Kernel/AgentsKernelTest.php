@@ -138,9 +138,13 @@ final class AgentsKernelTest extends TestCase
             'alg' => 'ed25519',
             'tag' => 'kiwi-agents-v1',
         ];
+        // @target-uri derives from the configured public_base_url
+        // (https://captcha.example.com), never the request Host: the
+        // request below is created against localhost on purpose, and
+        // only a signature over the configured origin verifies.
         $base = AgentSigner::signatureBase($covered, $parameters, [
             '@method' => 'POST',
-            '@target-uri' => self::URI,
+            '@target-uri' => 'https://captcha.example.com/kiwi/challenge',
             'content-digest' => $digest,
             'content-length' => (string) \strlen($body),
         ]);

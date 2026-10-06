@@ -21,9 +21,11 @@ armed record must never pass without it.
 import base64
 import hashlib
 import hmac
+import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from . import argon2 as argon2_backend
 from .argon2 import derive as argon2id_derive
 from .canonical import (
     ServerStateMac,
@@ -34,6 +36,8 @@ from .canonical import (
     verify_record_signature,
 )
 from .constants import (
+    MAX_ARGON_MEMORY_KIB,
+    MAX_ARGON_TIME,
     MAX_DIFFICULTY,
     MAX_PROTOCOL_VERSION,
     MAX_TTL_SECS,
@@ -42,7 +46,7 @@ from .constants import (
     MAX_RSW_T,
 )
 from .errors import VerifyError, VerifyOutcome
-from .execution import execution_commitment, is_valid_program
+from .execution import MAX_EXECUTION_VERSION, execution_commitment, is_valid_program
 from .sidecar import ExecutionPolicy, delegate_to_sidecar, delegation_enabled
 from .records import (
     ChallengeRecord,
@@ -169,8 +173,10 @@ class AdmissionGate:
     ``acquire`` returns a lease object when a slot was granted, or None
     on exhaustion. ``release`` returns the lease; a failing release must
     never break the verification (the challenge is already consumed).
-    Subclass or duck-type to bind a semaphore, a token bucket or any
-    bounded pool.
+    ``admits`` answers whether the gate's budget covers a record's
+    signed parameters at all — the hard refuse for absurd profiles,
+    checked before any slot is taken. Subclass or duck-type to bind a
+    semaphore, a token bucket or any bounded pool.
     """
 
     def acquire(self) -> Optional[object]:  # pragma: no cover - seam
@@ -179,11 +185,91 @@ class AdmissionGate:
     def release(self, lease: object) -> None:  # pragma: no cover - seam
         return None
 
+    def admits(self, record: object) -> bool:  # pragma: no cover - seam
+        return True
+
+
+class ArgonAdmissionGate(AdmissionGate):
+    """The shipped default: bounded concurrency plus a hard params budget.
+
+    Pure-Python derivation of a 16-64 MiB rung costs seconds of CPU per
+    request, so the default refuses any profile whose memory or time
+    cost leaves the configured budget before a slot is handed out
+    (``admits`` is False; the verifier answers
+    ``unsupported_argon2_params``, never a silent downgrade). With the
+    native binding the budget is the protocol's process ceiling; the
+    pure last-resort backend gets a deliberately tight budget whose
+    worst-case derivation stays under about a second. Exhaustion of the
+    bounded pool answers ``capacity_exceeded`` and the record stays
+    retryable.
+    """
+
+    #: Worst-case pure-Python admission budget (8 MiB, t=3): about a
+    #: second of interpreted block compression on commodity hardware.
+    PURE_MAX_MEMORY_KIB = 8_192
+    PURE_MAX_TIME = 3
+
+    def __init__(
+        self,
+        max_concurrent: int = 2,
+        max_memory_kib: Optional[int] = None,
+        max_time_cost: Optional[int] = None,
+    ) -> None:
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+        if max_memory_kib is None or max_time_cost is None:
+            if argon2_backend.native_available():
+                budget_memory = MAX_ARGON_MEMORY_KIB
+                budget_time = MAX_ARGON_TIME
+            else:
+                budget_memory = self.PURE_MAX_MEMORY_KIB
+                budget_time = self.PURE_MAX_TIME
+        else:
+            budget_memory = max_memory_kib
+            budget_time = max_time_cost
+        if budget_memory < 1 or budget_time < 1:
+            raise ValueError("the argon gate budget must be positive")
+        self.max_concurrent = max_concurrent
+        self.max_memory_kib = budget_memory
+        self.max_time_cost = budget_time
+        self._slots = threading.Semaphore(max_concurrent)
+
+    def admits(self, record: object) -> bool:
+        return self.admits_params(
+            getattr(record, "m_kib", 0) or 0, getattr(record, "t", 0) or 0
+        )
+
+    def admits_params(self, m_kib: int, t_cost: int) -> bool:
+        return m_kib <= self.max_memory_kib and t_cost <= self.max_time_cost
+
+    def acquire(self) -> Optional[object]:
+        if not self._slots.acquire(blocking=False):
+            return None
+        return object()
+
+    def release(self, lease: object) -> None:
+        try:
+            self._slots.release()
+        except ValueError:
+            pass
+
+
+def _gate_admits(gate: Any, record: Any) -> bool:
+    """The additive params-admission check; a gate without the method
+    admits everything (the pure acquire/release seam stays intact)."""
+    admits = getattr(gate, "admits", None)
+    if admits is None:
+        return True
+    return bool(admits(record))
+
 
 class VerifierConfig:
     """The verifier construction options, mirroring the PHP constructor.
 
-    ``now_provider`` returns epoch seconds (float or int) and stands in
+    ``argon_gate`` admits argon2id derivations; ``None`` installs the
+    shipped :class:`ArgonAdmissionGate` (a hard params budget plus
+    bounded concurrency — never an ungated derivation). ``now_provider``
+    returns epoch seconds (float or int) and stands in
     for the wall clock in tests. ``secrets_by_kid`` maps positive integer
     kid values to secrets of at least 32 bytes; an empty map keeps the
     legacy single-secret path. ``rsw_modulus_n`` and ``rsw_lambda`` must
@@ -232,7 +318,7 @@ class VerifierConfig:
             raise ValueError(
                 "tenant_id must be 1-64 characters of [A-Za-z0-9._:-] when set"
             )
-        self.argon_gate = argon_gate
+        self.argon_gate: AdmissionGate = argon_gate if argon_gate is not None else ArgonAdmissionGate()
         self.now_provider = now_provider
         self.accept_legacy_v1 = accept_legacy_v1
         self.region = region
@@ -373,7 +459,7 @@ class Verifier:
             if (
                 record.execution_version is None
                 or record.execution_version < 1
-                or record.execution_version > 5
+                or record.execution_version > MAX_EXECUTION_VERSION
                 or record.execution_commitment is None
             ):
                 return False
@@ -992,7 +1078,12 @@ class Verifier:
                         )
 
         lease = None
-        if peek.algorithm == "argon2id" and self.config.argon_gate is not None:
+        if peek.algorithm == "argon2id":
+            if not _gate_admits(self.config.argon_gate, peek):
+                # The record's signed parameters leave the gate's
+                # budget: refuse loudly, never derive and never
+                # silently downgrade the rung.
+                return VerifyOutcome.invalid(VerifyError.UNSUPPORTED_ARGON2_PARAMS)
             try:
                 lease = self.config.argon_gate.acquire()
             except Exception:
@@ -1087,7 +1178,7 @@ class Verifier:
                 decoy_field=record.decoy_field,
             )
         finally:
-            if lease is not None and self.config.argon_gate is not None:
+            if lease is not None:
                 try:
                     self.config.argon_gate.release(lease)
                 except Exception:

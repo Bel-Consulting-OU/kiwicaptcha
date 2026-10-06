@@ -20,9 +20,13 @@
 #   verified-agents     100% within quota, 0% after revocation (D3.8)
 #   model-checking      TLC over the consume/commit spec, zero
 #                       violations (the vendored tla2tools)
-#   fuzz-crashes        zero crashes or divergences: the bounded fuzz
-#                       corpora, 3 passes each (N=3 stated; the 24h
-#                       budget is the CI job's)
+#   fuzz-crashes        zero crashes or divergences: the bounded
+#                       mutation corpora, 3 passes each (N=3 stated)
+#   coverage-fuzz       the D4.1 coverage-guided fuzzing row: cargo-fuzz
+#                       targets present and run without crashes. When
+#                       the targets are missing this row is RED with the
+#                       blocker, never omitted and never folded into
+#                       fuzz-crashes
 #   b7.2-cluster        the scale targets on a real three-primary
 #                       cluster (tools/redteam/cluster.sh suites)
 #   d3.14-privacy       the privacy campaign row
@@ -35,15 +39,20 @@
 #                       the gate; there is no repo excuse)
 #   contract            the release asset contract gate
 #   regression-corpus   the committed findings replayed
-#   campaigns           the full 17-slot battery (KIWI_EC_CAMPAIGNS
-#                       may name a subset; a missing slot is printed)
+#   campaigns           one row per documented campaign slot (17);
+#                       a missing slot is printed as RED / MISSING,
+#                       never silently omitted (KIWI_EC_CAMPAIGNS may
+#                       name a subset; the uncovered slots stay RED)
 #   engine-loop         the synthesis corpus consumed end to end by
 #                       triage through the harness library
 #   escalation-ledger   the self-escalation record exists and provably
 #                       carries the raised budget knobs
 #
 # KIWI_EC_SKIP_* skips a row and the row prints SKIP; the exit is
-# red unless KIWI_EC_ALLOW_SKIP=1 (a skipped row is never green).
+# red unless KIWI_EC_ALLOW_SKIP=1 accepts SKIP rows (and only SKIP
+# rows). A skipped row is never green — it prints as SKIP even when
+# the operator accepts it — and a RED or TOOLCHAIN-ABSENT row can
+# never be excused by any knob.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -60,9 +69,12 @@ START_TS=$(date +%s)
 
 ROWS=()
 # record <name> <kind> <verdict> <measured-value>
+# Only an explicit GREEN is non-failing. RED, SKIP, TOOLCHAIN-ABSENT
+# and any unexpected verdict all close the gate: there is no verdict
+# string that downgrades a failure into a non-gating note.
 record() {
     ROWS+=("$1|$2|$3|$4")
-    if [ "$3" = RED ] || [ "$3" = TOOLCHAIN-ABSENT ] || [ "$3" = SKIP ]; then
+    if [ "$3" != "GREEN" ]; then
         RESULT=1
     fi
 }
@@ -76,40 +88,60 @@ fi
 export KIWI_RT_KEEP_TARGET=1
 
 # ---------- the full campaign battery (the gate's foundation) ----------
+# One row per documented campaign slot (17). A slot the configured
+# subset does not name, or whose script is absent, is printed as
+# RED / MISSING — never silently omitted. Coverage-guided fuzzing,
+# TLA+ model checking and Cluster are separate rows below.
 CAMPAIGNS_EXPECTED="d3.1-commodity-nojs d3.2-stealth-headless d3.3-pow-economics d3.4-proxy-pools d3.5-credential-stuffing d3.6-token-brokering d3.7-solver-farms d3.8-ai-agents d3.9-risk-gaming d3.10-infrastructure d3.11-dos d3.12-protocol-parser d3.13-supply-chain d3.14-privacy d3.15-multi-tenant d3.16-accessibility d3.17-cross-sdk-parity"
 CAMPAIGNS=${KIWI_EC_CAMPAIGNS:-$CAMPAIGNS_EXPECTED}
-if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
-    record campaigns battery SKIP "skipped by KIWI_EC_SKIP_CAMPAIGNS"
-else
-    battery_rc=0
-    passed=0
-    failed_slots=""
-    for campaign in $CAMPAIGNS; do
-        log="$GATE_DIR/$campaign.log"
-        printf 'exit-criteria: campaign %s\n' "$campaign" >&2
-        if KIWI_RT_PROFILE="$KIWI_RT_PROFILE" bash "$RT_DIR/campaigns/$campaign.sh" >"$log" 2>&1; then
-            passed=$((passed + 1))
-        else
-            battery_rc=1
-            failed_slots="$failed_slots $campaign"
-            echo "exit-criteria: campaign $campaign FAILED (see $log)" >&2
-        fi
-    done
-    # The slots of the 9.3 list that the configured subset does not
-    # name are printed, never silently absent.
-    missing=""
-    for expected in $CAMPAIGNS_EXPECTED; do
-        case " $CAMPAIGNS " in
-            *" $expected "*) ;;
-            *) missing="$missing $expected" ;;
-        esac
-    done
-    if [ "$battery_rc" = 0 ]; then
-        record campaigns battery GREEN "$passed/$passed ran green${missing:+ (subset: not run:$missing)}"
-    else
-        record campaigns battery RED "passed=$passed failed:$failed_slots"
+battery_passed=0
+battery_failed=""
+battery_missing=""
+# Campaigns actually executed in THIS invocation. A 9.5 clause that
+# reads a campaign artifact must refuse to trust a leftover file when
+# the campaign did not run this time.
+RAN_THIS_INVOCATION=""
+for campaign in $CAMPAIGNS_EXPECTED; do
+    log="$GATE_DIR/$campaign.log"
+    if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
+        record "$campaign" campaign SKIP "skipped by KIWI_EC_SKIP_CAMPAIGNS"
+        continue
     fi
-fi
+    case " $CAMPAIGNS " in
+        *" $campaign "*) ;;
+        *)
+            battery_missing="$battery_missing $campaign"
+            record "$campaign" campaign RED "MISSING: not in the configured battery (KIWI_EC_CAMPAIGNS); the default battery names it"
+            continue
+            ;;
+    esac
+    if [ ! -f "$RT_DIR/campaigns/$campaign.sh" ]; then
+        battery_missing="$battery_missing $campaign"
+        record "$campaign" campaign RED "MISSING: no campaign script at tools/redteam/campaigns/$campaign.sh"
+        continue
+    fi
+    printf 'exit-criteria: campaign %s\n' "$campaign" >&2
+    RAN_THIS_INVOCATION="$RAN_THIS_INVOCATION $campaign"
+    if KIWI_RT_PROFILE="$KIWI_RT_PROFILE" bash "$RT_DIR/campaigns/$campaign.sh" >"$log" 2>&1; then
+        battery_passed=$((battery_passed + 1))
+        detail=$(grep '^RESULT: PASS' "$log" | tail -n 1 | cut -d' ' -f5-)
+        record "$campaign" campaign GREEN "${detail:-campaign green}"
+    else
+        battery_failed="$battery_failed $campaign"
+        detail=$(grep '^RESULT: FAIL' "$log" | tail -n 1 | cut -d' ' -f5-)
+        record "$campaign" campaign RED "${detail:-campaign failed (see $log)}"
+        echo "exit-criteria: campaign $campaign FAILED (see $log)" >&2
+    fi
+done
+
+# did_run_this_invocation <campaign> — true only when this gate process
+# actually executed the campaign script (a stale log is not evidence).
+did_run_this_invocation() {
+    case " $RAN_THIS_INVOCATION " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # ---------- 9.5: zero open findings >= medium ----------
 open_count=0
@@ -129,6 +161,8 @@ fi
 D33_JSON="$RT_DIR/runs/env/d33-economics-$KIWI_RT_PROFILE.json"
 if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record value-class-costs d3.3 SKIP "skipped with the battery"
+elif ! did_run_this_invocation d3.3-pow-economics; then
+    record value-class-costs d3.3 RED "MISSING: d3.3-pow-economics did not run this invocation; a leftover economics table is not evidence"
 elif [ -f "$D33_JSON" ]; then
     fails=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(",".join(d["fail_rows"]) or "-")' "$D33_JSON")
     complete=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["table_complete"]).lower())' "$D33_JSON")
@@ -147,6 +181,8 @@ fi
 D35_SUMMARY="$RT_DIR/runs/env/d35-summary-$KIWI_RT_PROFILE.json"
 if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record d3.5-targets d3.5 SKIP "skipped with the battery"
+elif ! did_run_this_invocation d3.5-credential-stuffing; then
+    record d3.5-targets d3.5 RED "MISSING: d3.5-credential-stuffing did not run this invocation; a leftover summary is not evidence"
 elif [ -f "$D35_SUMMARY" ]; then
     python3 - "$D35_SUMMARY" <<'PYD35' >"$GATE_DIR/d35-verdict.txt" 2>&1
 import json, sys
@@ -162,7 +198,10 @@ ok = (doc["lockouts"] == 0
 print(("GREEN" if ok else "RED")
       + f" lockouts={doc['lockouts']} stepped_up={doc['victims_stepped_up']}/{doc['hot_victims']}"
       + f" max_spread={doc['max_spread_failures_before_step_up']} denied_within_n={str(doc['denied_within_n']).lower()}"
-      + f" blocked_valid={doc['blocked_valid']} corpus_residual={doc['corpus_residual_compromised']}")
+      + f" blocked_valid={doc['blocked_valid']} corpus_residual={doc['corpus_residual_compromised']}"
+      + f" scale=rows:{doc.get('rows', '?')} (spec list 1000000, stated downscale) sha16_us:{doc.get('sha16_us', '?')}"
+      + f" spend_usd={doc.get('spend_usd', '?')} attacker_sessions={doc.get('attacker_sessions', '?')}"
+      + f" (compromised=0 at this scale would be implausible; corpus_residual is the measured compromise count)")
 PYD35
     verdict=$(cat "$GATE_DIR/d35-verdict.txt")
     record d3.5-targets d3.5 "${verdict%% *}" "${verdict#* }"
@@ -262,6 +301,8 @@ fi
 D38_LOG="$GATE_DIR/d3.8-ai-agents.log"
 if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record verified-agents d3.8 SKIP "skipped with the battery"
+elif ! did_run_this_invocation d3.8-ai-agents; then
+    record verified-agents d3.8 RED "MISSING: d3.8-ai-agents did not run this invocation; a leftover log is not evidence"
 elif grep -q "verified_in_quota" "$D38_LOG" 2>/dev/null; then
     in_quota=$(grep -o 'verified_in_quota=[0-9]*' "$D38_LOG" | head -1 | cut -d= -f2)
     revoked=$(grep -o 'revoked_accepted=[0-9]*' "$D38_LOG" | head -1 | cut -d= -f2)
@@ -315,9 +356,45 @@ else
         fi
     done
     if [ "$fuzz_ok" = 1 ]; then
-        record fuzz-crashes fuzz GREEN "0 crashes or divergences: the bounded corpora, N=$FUZZ_N passes per suite, 3 suites (the 24h budget is the CI job's)"
+        record fuzz-crashes fuzz GREEN "0 crashes or divergences: the bounded mutation corpora, N=$FUZZ_N passes per suite (the 24h coverage-guided budget is its own row)"
     else
         record fuzz-crashes fuzz RED "$fuzz_detail (see $GATE_DIR)"
+    fi
+fi
+
+# ---------- 9.5 / D4.1: coverage-guided fuzzing ----------
+# This is a SEPARATE row from the bounded mutation corpora above. The
+# 9.5 clause names 24h coverage-guided fuzzing; when the cargo-fuzz
+# targets are not in the tree the row is RED with the exact blocker and
+# is never silently omitted or folded into the mutation-fuzz row.
+if [ "${KIWI_EC_SKIP_COVERAGE_FUZZ:-0}" = 1 ]; then
+    record coverage-fuzz fuzz SKIP "skipped by KIWI_EC_SKIP_COVERAGE_FUZZ"
+else
+    coverage_targets=""
+    for fuzzdir in packages/kiwicaptcha/fuzz packages/kiwicaptcha-risk/fuzz packages/kiwicaptcha-php/fuzz; do
+        if [ -d "$fuzzdir/fuzz_targets" ] || [ -d "$fuzzdir/fuzzers" ] || ls "$fuzzdir"/fuzz_*.rs >/dev/null 2>&1; then
+            coverage_targets="$coverage_targets $fuzzdir"
+        fi
+    done
+    if [ -z "$coverage_targets" ]; then
+        record coverage-fuzz fuzz RED "NOT RUN: no cargo-fuzz targets in the tree (expected packages/*/fuzz/fuzz_targets); the 24h coverage-guided campaign cannot be claimed"
+    elif ! command -v cargo-fuzz >/dev/null 2>&1; then
+        record coverage-fuzz fuzz TOOLCHAIN-ABSENT "cargo-fuzz is not installed; targets present:$coverage_targets"
+    else
+        cov_ok=1
+        cov_detail=""
+        for fuzzdir in $coverage_targets; do
+            if ! (cd "$fuzzdir" && cargo fuzz run --sanitizer none -- -runs="${KIWI_EC_COVERAGE_FUZZ_RUNS:-10000}" >"$GATE_DIR/coverage-fuzz.log" 2>&1); then
+                cov_ok=0
+                cov_detail="coverage-guided fuzz crashed in $fuzzdir (see $GATE_DIR/coverage-fuzz.log)"
+                break
+            fi
+        done
+        if [ "$cov_ok" = 1 ]; then
+            record coverage-fuzz fuzz GREEN "0 crashes: coverage-guided run, targets:$coverage_targets runs=${KIWI_EC_COVERAGE_FUZZ_RUNS:-10000} (the 24h budget is the CI job's)"
+        else
+            record coverage-fuzz fuzz RED "$cov_detail"
+        fi
     fi
 fi
 
@@ -346,6 +423,8 @@ for pair in "d3.14-privacy:d3.14-privacy:privacy" "d3.17-cross-sdk-parity:d3.17-
     log="$GATE_DIR/$campaign.log"
     if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
         record "$name" "$kind" SKIP "skipped with the battery"
+    elif ! did_run_this_invocation "$campaign"; then
+        record "$name" "$kind" RED "MISSING: $campaign did not run this invocation; a stale log cannot prove the 9.5 clause"
     elif [ -f "$log" ] && grep -q "RESULT: FAIL" "$log"; then
         record "$name" "$kind" RED "$(grep 'RESULT: FAIL' "$log" | tail -1 | cut -d' ' -f5-)"
     elif [ -f "$log" ]; then
@@ -384,12 +463,22 @@ else
 fi
 
 # ---------- docs lint (any failure fails the gate) ----------
+DOCS_BASELINE="packages/kiwicaptcha/tools/docs-lint-baseline.txt"
 if [ "${KIWI_EC_SKIP_LINT:-0}" = 1 ]; then
     record docs-lint prose SKIP "skipped"
+elif [ ! -f "$DOCS_BASELINE" ]; then
+    record docs-lint prose RED "the enforcing baseline is missing at $DOCS_BASELINE (docs-lint would run advisory and exit 0)"
 else
-    if sh packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt >"$GATE_DIR/docs-lint.log" 2>&1; then
+    if sh packages/kiwicaptcha/tools/docs-lint.sh --source --baseline "$DOCS_BASELINE" >"$GATE_DIR/docs-lint.log" 2>&1; then
         total=$(grep -o 'TOTAL: [0-9]*' "$GATE_DIR/docs-lint.log" | tail -n 1 | grep -o '[0-9]*')
-        record docs-lint prose GREEN "total ${total:-0} violations at the baseline"
+        # An enforcing run must say so; an advisory run (exit 0 with no
+        # baseline enforcement) must never be recorded as GREEN.
+        if grep -q 'docs-lint.sh: OK:' "$GATE_DIR/docs-lint.log" \
+            && ! grep -q 'advisory: total' "$GATE_DIR/docs-lint.log"; then
+            record docs-lint prose GREEN "total ${total:-0} violations at the baseline (enforcing)"
+        else
+            record docs-lint prose RED "docs-lint exited 0 without enforcing the baseline (advisory or unexpected output; see $GATE_DIR/docs-lint.log)"
+        fi
     else
         total=$(grep -o 'TOTAL: [0-9]*' "$GATE_DIR/docs-lint.log" | tail -n 1 | grep -o '[0-9]*')
         record docs-lint prose RED "docs-lint failed (total ${total:-unknown}; see $GATE_DIR/docs-lint.log)"
@@ -437,16 +526,20 @@ if [ -f "$TRIAGE_JSON" ]; then
     t_line=$(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print("candidates=%d refuted=%d findings=%d unstable=%d noharness=%d"
-      % (d["candidates"], d["refuted"], d["findingsFiled"], d["unstable"], d["noHarness"]))' "$TRIAGE_JSON")
+print("candidates=%d refuted=%d findings=%d unstable=%d inconclusive=%d harness_error=%d noharness=%d"
+      % (d["candidates"], d["refuted"], d["findingsFiled"], d["unstable"],
+         d.get("inconclusive", 0), d.get("harnessError", 0), d["noHarness"]))' "$TRIAGE_JSON")
     noharness=$(printf '%s' "$t_line" | sed -n 's/.*noharness=\([0-9]*\).*/\1/p')
     unstable=$(printf '%s' "$t_line" | sed -n 's/.*unstable=\([0-9]*\).*/\1/p')
+    inconclusive=$(printf '%s' "$t_line" | sed -n 's/.*inconclusive=\([0-9]*\).*/\1/p')
+    harness_error=$(printf '%s' "$t_line" | sed -n 's/.*harness_error=\([0-9]*\).*/\1/p')
     if [ -z "$t_line" ]; then
         record engine-loop engine RED "the triage report is unreadable at $TRIAGE_JSON"
-    elif [ "${noharness:-0}" = "0" ] && [ "${unstable:-0}" = "0" ]; then
+    elif [ "${noharness:-0}" = "0" ] && [ "${unstable:-0}" = "0" ] \
+        && [ "${inconclusive:-0}" = "0" ] && [ "${harness_error:-0}" = "0" ]; then
         record engine-loop engine GREEN "$t_line (every candidate mapped and settled by the two-run gate)"
     else
-        record engine-loop engine RED "$t_line"
+        record engine-loop engine RED "$t_line (unstable, inconclusive, harness-error and no-harness rows must all be zero)"
     fi
 else
     record engine-loop engine RED "no triage report for seed $SEED_HEX (run the orchestrator with --synth)"
@@ -494,18 +587,29 @@ for row in "${ROWS[@]}"; do
         RED) red_count=$((red_count + 1)) ;;
         TOOLCHAIN-ABSENT) absent_count=$((absent_count + 1)) ;;
         SKIP) skip_count=$((skip_count + 1)) ;;
-        *) green_count=$((green_count + 1)) ;;
+        GREEN) green_count=$((green_count + 1)) ;;
+        *) red_count=$((red_count + 1)) ;;
     esac
 done
 printf '  green=%d red=%d toolchain-absent=%d skip=%d (wall %ds)\n' "$green_count" "$red_count" "$absent_count" "$skip_count" "$ELAPSED"
 
-if [ "$RESULT" -eq 0 ]; then
+# The gate verdict is derived only from the row counts, never from a
+# separate flag: ANY red, absent, skip or unknown verdict is non-green,
+# and the string "ALL GREEN" is unobtainable while one exists.
+if [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -eq 0 ] && [ "$RESULT" -eq 0 ]; then
     printf 'exit-criteria: ALL GREEN; the release gate is open\n'
-else
-    printf 'exit-criteria: non-green rows present; the release gate is closed\n'
-fi
-if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$RESULT" = 1 ] && [ "$skip_count" -gt 0 ] && [ "$red_count" = 0 ] && [ "$absent_count" = 0 ]; then
-    printf 'exit-criteria: skips accepted by KIWI_EC_ALLOW_SKIP=1\n'
     exit 0
 fi
-exit $RESULT
+
+printf 'exit-criteria: non-green rows present (red=%d toolchain-absent=%d skip=%d); the release gate is closed\n' \
+    "$red_count" "$absent_count" "$skip_count"
+
+# KIWI_EC_ALLOW_SKIP=1 may accept SKIP rows only: a red or
+# toolchain-absent row is never excused. Skipped rows stay non-green
+# in the table above even when the operator accepts them.
+if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -gt 0 ]; then
+    printf 'exit-criteria: gate open ONLY because KIWI_EC_ALLOW_SKIP=1 accepted %d skip row(s); those rows remain non-green and were not measured\n' \
+        "$skip_count"
+    exit 0
+fi
+exit 1

@@ -28,10 +28,12 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpOwnerNotifier;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnCredentialRegistry;
@@ -1831,6 +1833,26 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $stepUpMaster,
                 ]))->setPublic(true));
 
+                // The cross-challenge brute-force budget: escalating
+                // lockouts per principal and target, with the owner
+                // notified through the logging hook (replace the
+                // service to page a human). The ladder and window are
+                // the documented defaults of StepUpLockoutGuard.
+                $container->setDefinition(LoggingStepUpOwnerNotifier::class, (new Definition(LoggingStepUpOwnerNotifier::class, [
+                    $loggerRef,
+                ]))->setPublic(true));
+                $container->setDefinition(StepUpLockoutGuard::class, (new Definition(StepUpLockoutGuard::class, [
+                    new Reference('kiwi_captcha.step_up.store'),
+                ]))
+                    ->setArgument('$notifyOwner', new Reference(LoggingStepUpOwnerNotifier::class))
+                    ->setPublic(true));
+
+                // The passcode-length policy default: 8 digits on a
+                // high-value scope (value class high or critical), 6
+                // otherwise. An explicit handlers.*.digits always wins.
+                $stepUpValueClass = (string) ($riskConfig['scopes'][$stepUpScope]['value_class'] ?? 'standard');
+                $policyDigits = \in_array($stepUpValueClass, ['high', 'critical'], true) ? 8 : 6;
+
                 $stepUpHandlers = [];
                 $stepUpHandlerConfig = $stepUpConfig['handlers'];
                 if ($stepUpHandlerConfig['email_otp']['enabled']) {
@@ -1846,11 +1868,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpMaster,
                         $stepUpConfig['challenge_ttl_secs'],
                         $stepUpConfig['max_attempts'],
-                        $stepUpHandlerConfig['email_otp']['digits'],
+                        $stepUpHandlerConfig['email_otp']['digits'] ?? $policyDigits,
                         $stepUpConfig['rate_limit']['max_begins'],
                         $stepUpConfig['rate_limit']['window_secs'],
                         $stepUpConfig['complete_path'],
-                    ]))->setPublic(true));
+                    ]))
+                        ->setArgument('$lockout', new Reference(StepUpLockoutGuard::class))
+                        ->setPublic(true));
                     $stepUpHandlers['email_otp'] = new Reference(EmailOtpStepUpHandler::class);
                 }
                 if ($stepUpHandlerConfig['totp']['enabled']) {
@@ -1859,7 +1883,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         new Reference(StepUpTicket::class),
                         new Reference(StepUpCompletionCredit::class),
                         $stepUpHandlerConfig['totp']['algorithm'],
-                        $stepUpHandlerConfig['totp']['digits'],
+                        $stepUpHandlerConfig['totp']['digits'] ?? $policyDigits,
                         $stepUpHandlerConfig['totp']['window'],
                         $stepUpConfig['challenge_ttl_secs'],
                         $stepUpConfig['max_attempts'],
@@ -1868,7 +1892,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpConfig['complete_path'],
                         null,
                         $stepUpMaster,
-                    ]))->setPublic(true));
+                    ]))
+                        ->setArgument('$lockout', new Reference(StepUpLockoutGuard::class))
+                        ->setPublic(true));
                     $stepUpHandlers['totp'] = new Reference(TotpStepUpHandler::class);
                 }
                 if ($stepUpHandlerConfig['webauthn']['enabled']) {
@@ -1904,7 +1930,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         null,
                         (string) ($stepUpConfig['handlers']['webauthn']['rp_id'] ?? ''),
                         \array_values($stepUpConfig['handlers']['webauthn']['allowed_origins'] ?? []),
-                    ]))->setPublic(true));
+                    ]))
+                        ->setArgument('$lockout', new Reference(StepUpLockoutGuard::class))
+                        ->setPublic(true));
                     $stepUpHandlers['webauthn'] = new Reference(WebAuthnStepUpHandler::class);
                 }
                 foreach ($stepUpHandlerConfig['custom'] as $customName => $customServiceId) {
@@ -1966,7 +1994,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     new Reference('kiwi_captcha.agents.registry'),
                     new Reference('kiwi_captcha.agents.nonce_store'),
                     $riskConfig['agents_clock_skew_secs'],
-                ]))->setPublic(true));
+                ]))
+                    // @target-uri is derived from the configured public
+                    // origin, never the request Host header: the agent
+                    // plane signs for this deployment's canonical origin.
+                    // Unset fails closed at verify() time (every signed
+                    // request is refused) — the same posture as the
+                    // same-origin check.
+                    ->setArgument('$publicOrigin', $config['public_base_url'] ?? null)
+                    ->setPublic(true));
                 $container->setDefinition('kiwi_captcha.agents.quota', (new Definition(AgentQuota::class, [
                     $riskRedis,
                     sprintf('{kiwi:%s}:', $namespace),

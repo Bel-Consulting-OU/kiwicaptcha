@@ -10,6 +10,13 @@ group :stores do
   gem 'redis', require: false
 end
 
+group :argon2 do
+  # The optional native Argon2id binding (libargon2 through FFI). The
+  # verifier recomputes argon2id rungs through it when present and
+  # refuses them loudly when it is not — never silently downgraded.
+  gem 'argon2', require: false
+end
+
 group :integrations do
   # The optional web integrations under test.
   gem 'rack', require: false

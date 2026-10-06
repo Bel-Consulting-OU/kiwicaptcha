@@ -77,10 +77,27 @@ final class MarksView
             }
         }
 
-        return new self(
-            $marks,
-            $target !== null ? $store->readMark('target', $target) : null,
-        );
+        $targetMark = null;
+        if ($target !== null) {
+            $targetMark = $store->readMark('target', $target);
+            if ($targetMark === null && $store instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface) {
+                // The engine compiles the attacked-target record from its
+                // own failure state (the counter the outcome bridge
+                // maintains); callers never inject it.
+                $state = $store->readTargetState($target);
+                if ($state['fails'] >= MarksEscalation::TARGET_ATTACK_THRESHOLD) {
+                    $targetMark = [
+                        'kind' => 'targetUnderAttack',
+                        'last_kind' => 'targetUnderAttack',
+                        'count' => $state['fails'],
+                        'first_ms' => $state['first_ms'],
+                        'last_ms' => $state['last_ms'],
+                    ];
+                }
+            }
+        }
+
+        return new self($marks, $targetMark);
     }
 
     /**

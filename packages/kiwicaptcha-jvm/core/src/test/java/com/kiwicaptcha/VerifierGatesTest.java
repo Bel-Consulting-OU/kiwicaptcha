@@ -659,4 +659,76 @@ class VerifierGatesTest {
         assertEquals(Decision.DISPOSITION_RETRY, retry.disposition);
         assertNull(valid.error);
     }
+
+    private static String buildProgramB64(int opVersion, int[] opcodes, int[][] operands) {
+        java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        body.write(1); // format version
+        body.write(5);
+        body.write("login".getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, 5);
+        body.write(3);
+        body.write("act".getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, 3);
+        body.write(opVersion);
+        body.write(opcodes.length);
+        for (int i = 0; i < opcodes.length; i++) {
+            body.write(opcodes[i]);
+            for (int b : operands[i]) {
+                body.write(b);
+            }
+        }
+        return java.util.Base64.getEncoder().encodeToString(body.toByteArray());
+    }
+
+    private static int[] idOperand() {
+        return new int[] {4, 'a', 'b', 'c', 'd'};
+    }
+
+    private static int[] concat(int[] a, int... rest) {
+        int[] out = java.util.Arrays.copyOf(a, a.length + rest.length);
+        System.arraycopy(rest, 0, out, a.length, rest.length);
+        return out;
+    }
+
+    @Test
+    void versionSixProbeOperandsParseAndVersionFiveRefusesThem() {
+        int[] add = new int[] {1, 0, 0, 0, 1, 0, 0, 0};
+        int[] css = concat(idOperand(), 7, 3);
+        int[] mut = concat(idOperand(), 1, 2, 5);
+        int[] evp = concat(idOperand(), 9);
+        int[] rng = concat(idOperand(), 4, 5, 6);
+        int[] iob = concat(idOperand(), 8, 1);
+        int[] opcodes = {45, 46, 47, 48, 49, 0, 0, 0};
+        int[][] operands = {css, mut, evp, rng, iob, add, add, add};
+        String program = buildProgramB64(6, opcodes, operands);
+        org.junit.jupiter.api.Assertions.assertTrue(
+                com.kiwicaptcha.ExecutionProgram.isValidExecutionProgram(program),
+                "the version-6 probe program must parse");
+        org.junit.jupiter.api.Assertions.assertFalse(
+                com.kiwicaptcha.ExecutionProgram.isValidExecutionProgram(buildProgramB64(5, opcodes, operands)),
+                "the version-5 ceiling must refuse the version-6 probes");
+        // A truncated probe operand is refused.
+        org.junit.jupiter.api.Assertions.assertFalse(
+                com.kiwicaptcha.ExecutionProgram.isValidExecutionProgram(buildProgramB64(
+                        6,
+                        new int[] {45, 0, 0, 0, 0, 0, 0, 0},
+                        new int[][] {idOperand(), add, add, add, add, add, add, add})),
+                "a truncated version-6 probe operand must be refused");
+    }
+
+    @Test
+    void issuerGuardRefusesUnverifiableRungs() {
+        org.junit.jupiter.api.Assertions.assertTrue(Settings.rungVerifiable(16 * 1024, 3, 1));
+        org.junit.jupiter.api.Assertions.assertTrue(Settings.rungVerifiable(64 * 1024, 3, 1));
+        org.junit.jupiter.api.Assertions.assertFalse(Settings.rungVerifiable(64 * 1024, 2, 1));
+        org.junit.jupiter.api.Assertions.assertFalse(Settings.rungVerifiable(64 * 1024, 3, 2));
+        Settings bad = new Settings();
+        bad.secret = "0123456789abcdef0123456789abcdef";
+        bad.profile = "argon128";
+        bad.store = "memory://";
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, bad::buildVerifier);
+        Settings good = new Settings();
+        good.secret = "0123456789abcdef0123456789abcdef";
+        good.profile = "argon64";
+        good.store = "memory://";
+        org.junit.jupiter.api.Assertions.assertNotNull(good.buildVerifier());
+    }
 }

@@ -43,6 +43,14 @@ public class PrimitivesTests
             Canonical.Hex(one));
     }
 
+    // Differential-testing status: the hand-written Argon2id is pinned
+    // by the RFC 9106 input set above and the reference-build
+    // differential tags below (captured from the C reference and
+    // re-verified against libsodium). Full differential fuzzing over a
+    // random parameter sweep against the reference CLI is NOT wired in
+    // this suite (no reference binary is guaranteed present on CI);
+    // the recorded vectors cover the entire protocol-issued parameter
+    // space (m_kib 64..65536, t 3..16, p == 1).
     [Fact]
     public void Argon2IdReferenceInputVector()
     {
@@ -497,5 +505,59 @@ public class RecordTests
         record.Prefix = record.Challenge + "|" + record.Salt + "|";
         Assert.True(Canonical.VerifyRecordSignature(record, Support.TestSecret, ""));
         Assert.False(Canonical.VerifyRecordSignature(record, "other-secret-other-secret-other-3", ""));
+    }
+
+    private static string BuildProgramB64(byte opVersion, params (byte Op, byte[] Operand)[] ops)
+    {
+        var body = new List<byte> { ExecutionProgram.ExecutionFormatVersion };
+        body.Add(5);
+        body.AddRange(System.Text.Encoding.ASCII.GetBytes("login"));
+        body.Add(3);
+        body.AddRange(System.Text.Encoding.ASCII.GetBytes("act"));
+        body.Add(opVersion);
+        body.Add((byte)ops.Length);
+        foreach (var (op, operand) in ops)
+        {
+            body.Add(op);
+            body.AddRange(operand);
+        }
+        return Convert.ToBase64String(body.ToArray());
+    }
+
+    private static byte[] IdOperand() => new byte[] { 4, (byte)'a', (byte)'b', (byte)'c', (byte)'d' };
+
+    [Fact]
+    public void VersionSixProbeOperandsParseAndVersionFiveRefusesThem()
+    {
+        var add = new byte[] { 1, 0, 0, 0, 1, 0, 0, 0 };
+        var css = IdOperand().Concat(new byte[] { 7, 3 }).ToArray();
+        var mut = IdOperand().Concat(new byte[] { 1, 2, 5 }).ToArray();
+        var evp = IdOperand().Concat(new byte[] { 9 }).ToArray();
+        var rng = IdOperand().Concat(new byte[] { 4, 5, 6 }).ToArray();
+        var iob = IdOperand().Concat(new byte[] { 8, 1 }).ToArray();
+        Assert.True(ExecutionProgram.IsValidExecutionProgram(BuildProgramB64(6,
+            ((byte)45, css), ((byte)46, mut), ((byte)47, evp), ((byte)48, rng), ((byte)49, iob),
+            ((byte)0, add), ((byte)0, add), ((byte)0, add))));
+        Assert.False(ExecutionProgram.IsValidExecutionProgram(BuildProgramB64(5,
+            ((byte)45, css), ((byte)46, mut), ((byte)47, evp), ((byte)48, rng), ((byte)49, iob),
+            ((byte)0, add), ((byte)0, add), ((byte)0, add))));
+        // A truncated probe operand is refused.
+        Assert.False(ExecutionProgram.IsValidExecutionProgram(BuildProgramB64(6,
+            ((byte)45, IdOperand()),
+            ((byte)0, add), ((byte)0, add), ((byte)0, add), ((byte)0, add),
+            ((byte)0, add), ((byte)0, add), ((byte)0, add))));
+    }
+
+    [Fact]
+    public void IssuerGuardRefusesUnverifiableRungs()
+    {
+        Assert.True(Settings.RungVerifiable(16 * 1024, 3, 1));
+        Assert.True(Settings.RungVerifiable(64 * 1024, 3, 1));
+        Assert.False(Settings.RungVerifiable(64 * 1024, 2, 1));
+        Assert.False(Settings.RungVerifiable(64 * 1024, 3, 2));
+        var bad = new Settings { Secret = "0123456789abcdef0123456789abcdef", Profile = "argon128", StoreUrl = "memory://" };
+        Assert.ThrowsAny<ArgumentException>(() => bad.BuildVerifier());
+        var good = new Settings { Secret = "0123456789abcdef0123456789abcdef", Profile = "argon64", StoreUrl = "memory://" };
+        Assert.NotNull(good.BuildVerifier());
     }
 }

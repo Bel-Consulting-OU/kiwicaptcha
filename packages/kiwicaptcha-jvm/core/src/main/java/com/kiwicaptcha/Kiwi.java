@@ -57,7 +57,7 @@ public final class Kiwi {
     public static final int MAX_PROTOCOL_VERSION = 5;
 
     /** Execution-dimension grammar ceiling. */
-    public static final int MAX_EXECUTION_VERSION = 5;
+    public static final int MAX_EXECUTION_VERSION = 6;
 
     /** Maximum tolerated future issuance skew, in seconds. */
     public static final int MAX_CLOCK_SKEW = 60;

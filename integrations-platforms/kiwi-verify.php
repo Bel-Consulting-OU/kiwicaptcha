@@ -38,9 +38,12 @@
  * Token sources, in order: the X-Kiwi-Token header, any incumbent
  * form field (kiwi__token, g-recaptcha-response, h-captcha-response,
  * cf-turnstile-response, frc-captcha-solution, altcha) on a form POST,
- * a JSON body {"token": ...}, and the kiwi_token cookie. Note the
- * nginx auth_request subrequest carries headers and cookies only; the
- * body sources exist for Traefik forwardAuth, which forwards them.
+ * a JSON body under a NAMESPACED key (kiwi_token or captcha_response —
+ * never the bare "token" key, which is the application's own wire field
+ * and would forward app secrets into the verify call), and the
+ * kiwi_token cookie. Note the nginx auth_request subrequest carries
+ * headers and cookies only; the body sources exist for Traefik
+ * forwardAuth, which forwards them.
  */
 
 declare(strict_types=1);
@@ -52,6 +55,17 @@ const KIWI_VERIFY_TOKEN_FIELDS = [
     'cf-turnstile-response',
     'frc-captcha-solution',
     'altcha',
+];
+
+/**
+ * The namespaced JSON body keys. The bare "token" key is deliberately
+ * absent: an application POSTing its own {"token": ...} API credential
+ * must never have that value consumed (and forwarded) as a captcha
+ * token.
+ */
+const KIWI_VERIFY_JSON_TOKEN_FIELDS = [
+    'kiwi_token',
+    'captcha_response',
 ];
 
 /**
@@ -122,9 +136,12 @@ function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?s
         && is_string($server['CONTENT_TYPE'] ?? null)
         && str_contains((string) $server['CONTENT_TYPE'], 'application/json')) {
         $parsed = json_decode($rawBody, true);
-        $value = is_array($parsed) ? ($parsed['token'] ?? null) : null;
-        if (is_string($value) && trim($value) !== '') {
-            $candidates[] = trim($value);
+        foreach (KIWI_VERIFY_JSON_TOKEN_FIELDS as $field) {
+            $value = is_array($parsed) ? ($parsed[$field] ?? null) : null;
+            if (is_string($value) && trim($value) !== '') {
+                $candidates[] = trim($value);
+                break;
+            }
         }
     }
     $cookieToken = $cookie['kiwi_token'] ?? null;

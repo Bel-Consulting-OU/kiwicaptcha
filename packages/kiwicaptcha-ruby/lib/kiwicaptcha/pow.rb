@@ -34,6 +34,43 @@ module KiwiCaptcha
       Digest::SHA256.digest("#{prefix}#{counter}".b + salt_bytes)
     end
 
+    # Whether the native Argon2id binding (the argon2 gem) is loaded.
+    # The gem vendors libargon2 behind FFI; nothing else in this SDK
+    # requires it.
+    def argon2_available?
+      return @argon2_available unless @argon2_available.nil?
+
+      @argon2_available = begin
+        require 'argon2'
+        defined?(::Argon2::Ext) ? true : false
+      rescue LoadError, StandardError
+        false
+      end
+    end
+
+    # Derive the Argon2id proof hash of a record at one counter value
+    # through the native binding. Returns nil when the binding is
+    # absent (the caller refuses the rung loudly, never downgrades) or
+    # the parameters leave the implementable space.
+    def derive_argon2id_hash(password, salt_bytes, t_cost, m_kib, lanes, out_len = 32)
+      return nil unless argon2_available?
+      return nil if t_cost < 1 || lanes < 1 || m_kib < 8 * lanes
+      return nil if out_len < 4
+
+      out = ::FFI::MemoryPointer.new(:char, out_len)
+      ret = ::Argon2::Ext.argon2id_hash_raw(
+        t_cost, m_kib, lanes,
+        password.b, password.b.bytesize,
+        salt_bytes.b, salt_bytes.b.bytesize,
+        out, out_len
+      )
+      return nil unless ret.zero?
+
+      out.read_string(out_len)
+    rescue StandardError, ::FFI::NotFoundError
+      nil
+    end
+
     # Whether a derived hash meets the record's difficulty target.
     def meets_target?(hash, target_bits)
       leading_zero_bits(hash) >= target_bits

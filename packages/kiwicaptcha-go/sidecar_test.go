@@ -201,6 +201,34 @@ func TestSidecarPolicyRequiresBearerWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestSidecarSuccessCarriesNonceAndRequestBinding(t *testing.T) {
+	// The delegated success is an ordinary fresh acceptance: the
+	// decision handle must be the verified nonce and the record's
+	// application-transaction binding must ride the outcome, never be
+	// dropped or swapped with the nonce.
+	server := newUnauthedSidecarDouble(t)
+	defer func() { server.Close() }()
+	policy := &ExecutionPolicy{SidecarURL: server.URL, BearerToken: "right"}
+	record := &ChallengeRecord{
+		Nonce:          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		RequestBinding: "checkout:order-42",
+		DecoyField:     "website",
+	}
+	outcome := delegateExecutionVerify("tok", record, VerifyOptions{ExpectedScope: "login"}, policy)
+	if !outcome.Valid {
+		t.Fatalf("an accepted sidecar verdict must accept: %+v", outcome)
+	}
+	if outcome.Nonce != record.Nonce {
+		t.Fatalf("the decision handle must be the verified nonce: got %q", outcome.Nonce)
+	}
+	if outcome.RequestBinding != record.RequestBinding {
+		t.Fatalf("the record's request binding must ride the outcome: got %q", outcome.RequestBinding)
+	}
+	if outcome.DecoyField != record.DecoyField {
+		t.Fatalf("the decoy field must ride the outcome: got %q", outcome.DecoyField)
+	}
+}
+
 // newUnauthedSidecarDouble is a minimal 401 endpoint standing in for
 // the bearer gate of the real sidecar's HTTP surface.
 func newUnauthedSidecarDouble(t *testing.T) *httptest.Server {

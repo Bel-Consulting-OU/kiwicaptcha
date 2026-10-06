@@ -17,6 +17,18 @@ http:
       forwardAuth:
         address: http://127.0.0.1:8788/kiwi-verify.php
         trustForwardHeader: true
+        # Client-IP contract: Traefik is a forwarding proxy — its
+        # forwarded-header middleware APPENDS the real client to
+        # X-Forwarded-For after whatever the client sent. The endpoint
+        # walks that chain right to left through KIWI_TRUSTED_PROXIES
+        # (which must cover only the PHP peer, e.g. 127.0.0.0/8) and
+        # takes the first hop outside it, so a forged leftmost entry is
+        # ignored. This holds only while Traefik keeps appending: if
+        # the forwarded-header middleware is disabled or the chain is
+        # passed through raw, the header becomes client-controlled and
+        # the gate must not trust it (empty KIWI_TRUSTED_PROXIES). With
+        # an intermediate proxy in front of Traefik, name only that
+        # proxy in KIWI_TRUSTED_PROXIES — never the client's own range.
         # authResponseHeaders stays empty: nothing is copied back to
         # the app on success.
 

@@ -74,29 +74,27 @@ public final class KiwiVerifyClient {
 
     /**
      * Whether the provider siteverify JSON body carries success true.
-     * A tiny scanner, not a full parser: enough for the one field,
-     * tolerant of whitespace and field order.
+     * A real (strict, recursive-descent) JSON parser: the whole body
+     * must parse as one JSON object and its top-level "success" member
+     * must be the JSON boolean {@code true}. A substring scanner would
+     * accept bodies a JSON parser rejects (truncated documents,
+     * trailing garbage, {@code "success":"true"} string lookalikes),
+     * and a non-JSON body is a refusal, never a pass.
      */
     public static boolean responseBodyHasSuccess(String body) {
         if (body == null) {
             return false;
         }
-        int idx = body.indexOf("\"success\"");
-        if (idx < 0) {
+        Object parsed;
+        try {
+            parsed = Json.parse(body);
+        } catch (IllegalArgumentException e) {
             return false;
         }
-        int i = idx + "\"success\"".length();
-        while (i < body.length() && Character.isWhitespace(body.charAt(i))) {
-            i++;
-        }
-        if (i >= body.length() || body.charAt(i) != ':') {
+        if (!(parsed instanceof java.util.Map<?, ?> object)) {
             return false;
         }
-        i++;
-        while (i < body.length() && Character.isWhitespace(body.charAt(i))) {
-            i++;
-        }
-        return body.startsWith("true", i);
+        return Boolean.TRUE.equals(object.get("success"));
     }
 
 

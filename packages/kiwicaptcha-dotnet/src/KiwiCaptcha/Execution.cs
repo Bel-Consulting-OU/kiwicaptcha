@@ -22,7 +22,7 @@ public static class ExecutionProgram
     public const int ExecutionMinOps = 8;
     public const int ExecutionMaxOps = 24;
     public const int MaxProgramBase64 = 4096;
-    private const int ExecutionOpcodeCount = 45;
+    private const int ExecutionOpcodeCount = 50;
 
     // Execution opcodes, in vocabulary order.
     private const int OpAdd = 0;
@@ -70,6 +70,11 @@ public static class ExecutionProgram
     private const int OpDomUrlCanon = 42;
     private const int OpDomTextMutate = 43;
     private const int OpDomSelectDep = 44;
+    private const int OpCssGeom = 45;
+    private const int OpMutOrder = 46;
+    private const int OpEvPhaseFull = 47;
+    private const int OpRangeOrder = 48;
+    private const int OpIntObs = 49;
 
     /// <summary>Per-version opcode ceilings of the execution grammar.</summary>
     private static int MaxOpcodeByVersion(int version) => version switch
@@ -78,7 +83,8 @@ public static class ExecutionProgram
         2 => 34,
         3 => 35,
         4 => 37,
-        5 => ExecutionOpcodeCount,
+        5 => 45,
+        6 => ExecutionOpcodeCount,
         _ => -1,
     };
 
@@ -303,6 +309,16 @@ public static class ExecutionProgram
                     return ReadValue() && SkipByte();
                 case OpDomSelectDep:
                     return Read(3) != null;
+                case OpCssGeom:
+                case OpIntObs:
+                    // Version-6 real-platform probes: the probed id
+                    // plus one raw seed byte and one raw dst cell.
+                    return ReadId() && Read(2) != null;
+                case OpMutOrder:
+                case OpRangeOrder:
+                    return ReadId() && Read(3) != null;
+                case OpEvPhaseFull:
+                    return ReadId() && SkipByte();
                 default:
                     return false;
             }

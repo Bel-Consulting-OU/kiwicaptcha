@@ -21,19 +21,21 @@ interface OutcomeMarksStoreInterface
     public function markKey(string $dimension, string $id): string;
 
     /**
-     * Writes one mark atomically (kind, count increment, first/last
-     * timestamps, refreshed whole-key TTL) and returns the mark's new
-     * total count.
+     * Writes one mark atomically (max-severity kind, latest kind, count
+     * increment, first/last timestamps, refreshed whole-key TTL) and
+     * returns the mark's new total count. \$eventId dedupes the write
+     * ('' disables dedupe): a retried report with the same id returns
+     * the count unchanged. The clock is the server's TIME.
      *
      * @throws RiskStoreException when the underlying state backend fails
      */
-    public function writeMark(string $dimension, string $id, string $kind, int $nowMs): int;
+    public function writeMark(string $dimension, string $id, string $kind, int $nowMs, string $eventId = ''): int;
 
     /**
      * The current mark of one dimension and identifier, or null when
      * no mark exists (never written, expired or forgotten).
      *
-     * @return null|array{kind: string, count: int, first_ms: int, last_ms: int}
+     * @return null|array{kind: string, last_kind: string, count: int, first_ms: int, last_ms: int}
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function readMark(string $dimension, string $id): ?array;

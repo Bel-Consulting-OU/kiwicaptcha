@@ -334,6 +334,37 @@ final class OutcomesTest extends TestCase
         self::assertNull($store->readMark('session', self::SESSION), 'authenticationFailure writes no mark');
     }
 
+    public function testTargetHandleStoresFailuresInTheEngineState(): void
+    {
+        $store = new class extends RiskStateStoreStub {
+            public ?RiskObservation $observed = null;
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                $this->observed = $observation;
+
+                return SignalVector::zero();
+            }
+        };
+        $outcomes = new KiwiOutcomes($this->engine($store), $store);
+        $target = '5e2a9b4c1d7f38e6a0b5c9d2e4f6a813';
+
+        // The ENGINE stores each authentication failure against the
+        // target — the test injects no record.
+        for ($i = 0; $i < 5; $i++) {
+            $outcomes->report(Outcome::AuthenticationFailure, OutcomeHandle::target($target), "fail-$i", $this->context());
+        }
+        self::assertSame(5, $store->readTargetState($target)['fails']);
+        // MarksView compiles the attacked-target record from the engine
+        // state once the count reaches the threshold.
+        $view = \KiwiCaptcha\Risk\Marks\MarksView::read($store, [], $target);
+        $now = (int) floor(microtime(true) * 1000);
+        self::assertNotNull($view->targetInTtl($now, \KiwiCaptcha\Risk\Marks\MarksEscalation::DEFAULT_MARK_TTL_MS));
+        // The step-up completion clears the counter (change.md 3.4.2).
+        $outcomes->report(Outcome::StepUpCompleted, OutcomeHandle::target($target), 'cleared', $this->context());
+        self::assertSame(0, $store->readTargetState($target)['fails']);
+    }
+
     public function testReportRejectsUnmappedHandleDimensions(): void
     {
         $store = new class extends RiskStateStoreStub {

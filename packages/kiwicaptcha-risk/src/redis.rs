@@ -77,6 +77,11 @@ pub const ASSESS_V2_LUA: &str = include_str!("../resources/assess_v2.lua");
 /// whole-key TTL land in a single invocation.
 pub const MARKS_LUA: &str = include_str!("../resources/marks.lua");
 
+/// The canonical target-failure state script (shared verbatim with PHP
+/// `protocol/risk-v1/target_failure.lua`): the leaky-bucket failure
+/// counter and the source/asn spread HLLs of the target dimension.
+pub const TARGET_FAILURE_LUA: &str = include_str!("../resources/target_failure.lua");
+
 /// The canonical context-bound session-trust script (shared verbatim
 /// with PHP `protocol/risk-v1/trust.lua`): one atomic bucket-record
 /// read, credit or decay — the decay anchor, the clamped fixed-point
@@ -156,6 +161,7 @@ pub struct RedisRiskStateStore {
     outcome_confirm_script: Arc<redis_crate::Script>,
     outcome_correct_script: Arc<redis_crate::Script>,
     marks_script: Arc<redis_crate::Script>,
+    target_failure_script: Arc<redis_crate::Script>,
     trust_script: Arc<redis_crate::Script>,
     pool: ConnectionPool,
     connection_timeout_ms: u64,
@@ -346,6 +352,7 @@ impl RedisRiskStateStore {
             outcome_confirm_script: Arc::new(redis_crate::Script::new(OUTCOME_CONFIRM_LUA)),
             outcome_correct_script: Arc::new(redis_crate::Script::new(OUTCOME_CORRECT_LUA)),
             marks_script: Arc::new(redis_crate::Script::new(MARKS_LUA)),
+            target_failure_script: Arc::new(redis_crate::Script::new(TARGET_FAILURE_LUA)),
             trust_script: Arc::new(redis_crate::Script::new(TRUST_LUA)),
             pool: ConnectionPool::new(
                 DEFAULT_POOL_SIZE,
@@ -971,6 +978,61 @@ impl RedisRiskStateStore {
         format!("{{kiwi:{}}}:outcome:{decision_id}", self.namespace)
     }
 
+    /// The target-dimension state keys of one target pseudonym: the
+    /// failure hash plus the source/asn spread HLLs, byte-identical with
+    /// the keys assess_v2.lua maintains (KEYS[14..16]).
+    fn target_state_keys(&self, target_id: &str) -> [String; 3] {
+        [
+            format!("{{kiwi:{}}}:risk:tgt:{target_id}", self.namespace),
+            format!("{{kiwi:{}}}:risk:tgt:src:{target_id}", self.namespace),
+            format!("{{kiwi:{}}}:risk:tgt:asn:{target_id}", self.namespace),
+        ]
+    }
+
+    /// One target_failure.lua op, returning {fails, spread}.
+    fn run_target_op(
+        &self,
+        op: &str,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
+        if !Self::valid_key_component(target_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "target_id is not a safe Redis key component (got 0x{})",
+                hex::encode(target_id)
+            )));
+        }
+        let keys = self.target_state_keys(target_id);
+        // The target dimension's window is the principal retention (the
+        // 24h default change.md assigns it); a dedicated knob would
+        // only duplicate that contract.
+        let ttl: i64 = self.principal_ttl_secs.try_into().unwrap_or(i64::MAX);
+        let mut invocation = self.target_failure_script.prepare_invoke();
+        for key in &keys {
+            invocation.key(key.as_str());
+        }
+        invocation.arg(op);
+        invocation.arg(source);
+        invocation.arg(asn);
+        invocation.arg(ttl);
+        let reply: Vec<i64> = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
+        if reply.len() < 4 {
+            return Err(RiskStoreError::ScriptError(format!(
+                "target_failure script returned {} values",
+                reply.len()
+            )));
+        }
+        Ok(crate::store::TargetState {
+            fails: reply[0].clamp(0, i64::from(u32::MAX)) as u32,
+            spread: reply[1].clamp(0, i64::from(u32::MAX)) as u32,
+            first_ms: reply[2],
+            last_ms: reply[3],
+        })
+    }
+
     /// The long-memory mark key of one dimension and identifier:
     /// `mark:{kiwi:<ns>}:<dim>:<id>`. The hash tag keeps every mark in
     /// the risk keyspace's cluster slot; the dimension is one of the
@@ -998,9 +1060,12 @@ impl RedisRiskStateStore {
     }
 
     /// Writes one long-memory mark atomically through the canonical
-    /// marks.lua: the kind (the outcome name), the count increment, the
-    /// first/last timestamps and the refreshed whole-key TTL land in one
-    /// script call. Returns the mark's new total count.
+    /// marks.lua: the max-severity kind, the latest kind, the count
+    /// increment, the first/last timestamps and the refreshed whole-key
+    /// TTL land in one script call. The clock is the server's TIME; the
+    /// `now_ms` argument is kept for wire compatibility and ignored.
+    /// `event_id` dedupes the write (`''` disables dedupe): a retried
+    /// report returns the count unchanged.
     ///
     /// # Errors
     ///
@@ -1012,6 +1077,7 @@ impl RedisRiskStateStore {
         id: &str,
         kind: &str,
         now_ms: u64,
+        event_id: &str,
     ) -> Result<i64, RiskStoreError> {
         let key = self.mark_key(dimension, id)?;
         if kind.is_empty() || kind.len() > MAX_MARK_KIND_BYTES {
@@ -1022,9 +1088,18 @@ impl RedisRiskStateStore {
         let ttl_ms: i64 = (self.mark_ttl_secs * 1000).try_into().unwrap_or(i64::MAX);
         let mut invocation = self.marks_script.prepare_invoke();
         invocation.key(key.as_str());
+        if event_id.is_empty() {
+            // The script's KEYS[2] is the dedupe marker: with dedupe
+            // disabled the marker is the mark key itself (never read on
+            // this path, never written beyond the marker slot).
+            invocation.key(key.as_str());
+        } else {
+            invocation.key(format!("mark:{{kiwi:{}}}:dd:{event_id}", self.namespace));
+        }
         invocation.arg(kind);
         invocation.arg(now_ms);
         invocation.arg(ttl_ms);
+        invocation.arg(event_id);
         let count: i64 = self
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
@@ -1032,9 +1107,11 @@ impl RedisRiskStateStore {
     }
 
     /// The current mark of one dimension and identifier: the hash fields
-    /// kind, count, first_ms and last_ms, or `None` when no mark exists.
-    /// A corrupt or truncated hash fails closed instead of decoding as a
-    /// zeroed mark.
+    /// kind (max severity), last_kind, count, first_ms and last_ms, or
+    /// `None` when no mark exists. A corrupt or truncated hash fails
+    /// closed instead of decoding as a zeroed mark. A hash written by a
+    /// pre-severity writer has no `last_kind`; its `kind` was the latest
+    /// write, so it doubles as the latest.
     ///
     /// # Errors
     ///
@@ -1054,22 +1131,26 @@ impl RedisRiskStateStore {
             return Ok(None);
         }
         let mut kind: Option<String> = None;
+        let mut last_kind: Option<String> = None;
         let mut count: Option<i64> = None;
         let mut first_ms: Option<i64> = None;
         let mut last_ms: Option<i64> = None;
         for (field, value) in fields {
             match field.as_str() {
                 "kind" => kind = Some(value),
+                "last_kind" => last_kind = Some(value),
                 "count" => count = value.parse().ok(),
                 "first_ms" => first_ms = value.parse().ok(),
                 "last_ms" => last_ms = value.parse().ok(),
                 _ => {}
             }
         }
+        let kind = kind.ok_or_else(|| {
+            RiskStoreError::ScriptError("risk mark hash is missing its kind field".to_string())
+        })?;
         let mark = crate::outcomes::MarkRecord {
-            kind: kind.ok_or_else(|| {
-                RiskStoreError::ScriptError("risk mark hash is missing its kind field".to_string())
-            })?,
+            last_kind: last_kind.unwrap_or_else(|| kind.clone()),
+            kind,
             count: count.ok_or_else(|| {
                 RiskStoreError::ScriptError("risk mark hash is missing its count field".to_string())
             })?,
@@ -1422,6 +1503,24 @@ impl RiskStateStore for RedisRiskStateStore {
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
         Ok(applied != 0)
+    }
+
+    fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
+        self.run_target_op("fail", target_id, source, asn)
+    }
+
+    fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
+        self.run_target_op("clear", target_id, "", "")?;
+        Ok(())
+    }
+
+    fn read_target_state(&self, target_id: &str) -> Result<crate::store::TargetState, RiskStoreError> {
+        self.run_target_op("read", target_id, "", "")
     }
 
     fn last_global_level(&self) -> u8 {

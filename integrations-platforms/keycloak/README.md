@@ -20,8 +20,10 @@ is missing or failed. An unreachable deployment fails the flow closed.
   with the flow-editor config: verify URL, bearer, scope,
   trust-proxy switch.
 - `KiwiVerifyClient.java` is the dependency-free client (java.net.http
-  plus a hand-rolled JSON encoder and body scanner), so the decision
-  surface compiles and tests with the JDK alone.
+  plus a hand-rolled JSON encoder) and `Json.java` is its strict
+  RFC 8259 parser: the verify response is parsed as real JSON and
+  `success` must be the JSON boolean `true`, so the decision surface
+  compiles and tests with the JDK alone without a substring scanner.
 - The service entry `META-INF/services/org.keycloak.authentication.AuthenticatorFactory`
   makes the factory discoverable.
 
@@ -33,7 +35,8 @@ is missing or failed. An unreachable deployment fails the flow closed.
    `bin/kc.sh build && bin/kc.sh start` (or restart the container).
 3. Admin console, Authentication, Flows: copy the browser flow, add
    the "KiwiCaptcha" execution where the protection belongs
-   (registration path or login), set it REQUIRED, and configure the
+   (registration path or login), set it REQUIRED (ALTERNATIVE is also
+   safe: `action()` never continues the flow unverified), and configure the
    verify URL (default `http://127.0.0.1:7371/verify`), the bearer
    and the scope.
 4. Bind the flow to the relevant action (browser or direct grant).
@@ -46,17 +49,20 @@ is missing or failed. An unreachable deployment fails the flow closed.
 
 ## Test status
 
-`KiwiVerifyClientTest.java` (18 checks) is a plain-JDK test compiled
+`KiwiVerifyClientTest.java` (25 checks) is a plain-JDK test compiled
 and run here:
 
 ```
 javac -d /tmp/kiwi-kc-classes src/main/java/ee/bel/kiwi/keycloak/KiwiVerifyClient.java \
+  src/main/java/ee/bel/kiwi/keycloak/Json.java \
   src/test/java/ee/bel/kiwi/keycloak/KiwiVerifyClientTest.java
 java -cp /tmp/kiwi-kc-classes ee.bel.kiwi.keycloak.KiwiVerifyClientTest
 ```
 
-It covers the decision surface (status mapping, body scanning), token
-extraction, the no-forwarding-parser pin, JSON escaping and live round trips against a
+It covers the decision surface (status mapping, real-JSON body
+parsing — truncated documents, trailing garbage, string lookalikes and
+duplicate keys all fail closed), token extraction, the
+no-forwarding-parser pin, JSON escaping and live round trips against a
 local HTTP stub (success, failure, 5xx fail closed, unreachable fail
 closed). `mvn package` was run on this host (Java 17, Keycloak 23
 artifacts from Central) and produces the jar; exercising the

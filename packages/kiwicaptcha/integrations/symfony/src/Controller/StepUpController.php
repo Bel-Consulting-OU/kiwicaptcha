@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -99,6 +100,21 @@ final class StepUpController
         } catch (\InvalidArgumentException $e) {
             return self::plain($e->getMessage(), Response::HTTP_UNPROCESSABLE_ENTITY);
         }
+        // The completion is bound to the session that began the
+        // challenge: the principal is re-resolved here, exactly like
+        // at begin(), and the handler refuses a challenge that belongs
+        // to anyone else. A request with no resolvable principal can
+        // complete nothing.
+        $rawPrincipal = $this->principalResolver?->resolve($request, $this->scope);
+        if ($rawPrincipal === null || $rawPrincipal === '') {
+            return self::plain('No principal is resolvable for this request; step-up completion is refused.', Response::HTTP_FORBIDDEN);
+        }
+        try {
+            $boundPrincipal = $this->identityFactory->principalId($rawPrincipal);
+        } catch (\Throwable) {
+            return self::plain('No principal is resolvable for this request; step-up completion is refused.', Response::HTTP_FORBIDDEN);
+        }
+        StepUpSessionBinding::bind($request, $boundPrincipal);
         $result = $handler->complete($request);
 
         if ($this->mode($request) === StepUpContext::MODE_JSON) {
@@ -157,7 +173,10 @@ final class StepUpController
      * The server-owned target pseudonym: the application sets the
      * request attribute when the flow addresses a target identity (for
      * example the claimed username of a login step-up). Only the exact
-     * pseudonym shape is accepted; anything else is refused.
+     * pseudonym shape is accepted — the canonical 64-char lowercase
+     * hex digest the engine derives
+     * ({@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()}); a
+     * truncated or raw value is refused.
      */
     private function targetPseudonym(Request $request): ?string
     {
@@ -165,8 +184,8 @@ final class StepUpController
         if ($target === null) {
             return null;
         }
-        if (!\is_string($target) || preg_match('/^[0-9a-f]{32}$/D', $target) !== 1) {
-            throw new \InvalidArgumentException('The _kiwi_step_up_target attribute must be the 32 lowercase hex pseudonym, never a raw identifier');
+        if (!\is_string($target) || preg_match('/^[0-9a-f]{64}$/D', $target) !== 1) {
+            throw new \InvalidArgumentException('The _kiwi_step_up_target attribute must be the 64 lowercase hex target pseudonym, never a raw identifier');
         }
 
         return $target;

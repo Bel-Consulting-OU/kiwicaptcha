@@ -71,8 +71,7 @@ class VerifyGatesTest < Minitest::Test
   end
 
   def test_the_golden_negative_records_answer_their_pinned_codes
-    { 'argon2id' => KiwiCaptcha::VerifyError::UNSUPPORTED_ARGON2_PARAMS,
-      'tampered_signature' => KiwiCaptcha::VerifyError::BAD_SIGNATURE }.each do |name, code|
+    { 'tampered_signature' => KiwiCaptcha::VerifyError::BAD_SIGNATURE }.each do |name, code|
       storage, record, row = store_of(name)
       result = KiwiCaptcha.verify(TestSupport.golden_record(name)['token_b64'], options_for(record, row, storage))
       refute result.ok, name
@@ -81,6 +80,49 @@ class VerifyGatesTest < Minitest::Test
       assert_nil result.decision_handle
       assert_nil result.price
     end
+  end
+
+  def test_an_argon2id_rung_verifies_through_the_native_binding
+    skip 'the argon2 gem is not installed' unless KiwiCaptcha::Pow.argon2_available?
+
+    storage, record, row = store_of('argon2id')
+    result = KiwiCaptcha.verify(row['token_b64'], options_for(record, row, storage))
+    assert result.ok, result.code
+    assert_equal 'allow', result.disposition
+    assert_equal KiwiCaptcha::Verify.ladder_rung(record), result.price
+  end
+
+  def test_an_argon2id_rung_refuses_loudly_without_the_binding
+    storage, record, row = store_of('argon2id')
+    original = KiwiCaptcha::Pow.method(:derive_argon2id_hash)
+    begin
+      KiwiCaptcha::Pow.define_singleton_method(:derive_argon2id_hash) { |*| nil }
+      result = KiwiCaptcha.verify(row['token_b64'], options_for(record, row, storage))
+      refute result.ok
+      assert_equal KiwiCaptcha::VerifyError::UNSUPPORTED_ARGON2_PARAMS, result.code
+    ensure
+      KiwiCaptcha::Pow.define_singleton_method(:derive_argon2id_hash, original)
+    end
+  end
+
+  def test_secret_for_key_resolves_a_nil_kid_to_unknown_kid
+    secrets = { by_kid: { 1 => 'k' * 32 }, revoked: Set.new, newest: 1 }
+    record = TestSupport.record_from_row(TestSupport.golden_record('sha_plain'))
+    record.kid = nil
+    assert_nil KiwiCaptcha::Verify.secret_for_key(secrets, record, 'legacy')
+  end
+
+  def test_resolve_trapdoor_caches_the_built_trapdoor_per_process
+    pair = TestSupport.golden_record('rsw')['verify_opts']['rsw']
+    config = {
+      modulus_n: pair['modulus_n'], lambda: pair['lambda'],
+      verification_keys: {}, allow_legacy_identity: false
+    }
+    record = TestSupport.record_from_row(TestSupport.golden_record('rsw'))
+    first = KiwiCaptcha::Verify.resolve_trapdoor(config, record)
+    refute_nil first
+    second = KiwiCaptcha::Verify.resolve_trapdoor(config, record)
+    assert_same first, second, 'the trapdoor object must be cached per process'
   end
 
   def test_an_unknown_token_answers_record_not_found

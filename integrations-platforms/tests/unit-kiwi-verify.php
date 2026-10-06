@@ -35,7 +35,9 @@ $post = ['kiwi__token' => 'native-token', 'g-recaptcha-response' => 'incumbent-t
 check('native field outranks incumbent aliases', kiwi_verify_extract_token([], $post, [], null) === 'native-token');
 
 $server = ['CONTENT_TYPE' => 'application/json'];
-check('json body token', kiwi_verify_extract_token($server, [], [], '{"token":"json-token","scope":"login"}') === 'json-token');
+check('json body namespaced token', kiwi_verify_extract_token($server, [], [], '{"kiwi_token":"json-token","scope":"login"}') === 'json-token');
+check('json body captcha_response token', kiwi_verify_extract_token($server, [], [], '{"captcha_response":"cr-token"}') === 'cr-token');
+check('json body bare token field is ignored', kiwi_verify_extract_token($server, [], [], '{"token":"app-secret"}') === null);
 check('cookie token', kiwi_verify_extract_token([], [], ['kiwi_token' => 'cookie-token'], null) === 'cookie-token');
 check('missing token is null', kiwi_verify_extract_token([], [], [], null) === null);
 check('whitespace token is null', kiwi_verify_extract_token([], ['kiwi__token' => '   '], [], null) === null);
@@ -45,6 +47,8 @@ check('whitespace token is null', kiwi_verify_extract_token([], ['kiwi__token' =
 $server = ['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, 10.0.0.2'];
 check('untrusted proxy uses the peer', kiwi_verify_client_ip($server, []) === '10.0.0.9');
 check('trusted lb takes next left', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, 10.0.0.9'], ['10.0.0.0/24']) === '203.0.113.7');
+check('client-supplied leftmost entry is ignored', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 203.0.113.7, 10.0.0.9'], ['10.0.0.0/24']) === '203.0.113.7');
+check('forged leftmost never wins on an untrusted peer', kiwi_verify_client_ip(['REMOTE_ADDR' => '203.0.113.7', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 203.0.113.7'], ['10.0.0.0/24']) === '203.0.113.7');
 check('garbage hop fails closed', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, garbage!!, 10.0.0.9'], ['10.0.0.0/24']) === '10.0.0.9');
 check('real ip when trusted and no xff', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_REAL_IP' => '198.51.100.4'], ['10.0.0.0/24']) === '198.51.100.4');
 check('ipv6 chain through the trusted hop', kiwi_verify_client_ip(['REMOTE_ADDR' => '2001:db8::9', 'HTTP_X_FORWARDED_FOR' => '2001:db8:1::50, 2001:db8::9'], ['2001:db8::/64']) === '2001:db8:1::50');

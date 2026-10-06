@@ -19,7 +19,7 @@ const (
 	ExecutionMinOps        = 8
 	ExecutionMaxOps        = 24
 	MaxProgramBase64       = 4096
-	executionOpcodeCount   = 45
+	executionOpcodeCount   = 50
 )
 
 // Execution opcodes, in vocabulary order.
@@ -69,6 +69,11 @@ const (
 	opDomURLCanon
 	opDomTextMutate
 	opDomSelectDep
+	opCssGeom
+	opMutOrder
+	opEvPhaseFull
+	opRangeOrder
+	opIntObs
 )
 
 // Per-version opcode ceilings of the execution grammar.
@@ -77,7 +82,8 @@ var executionMaxOpcodeByVersion = map[byte]int{
 	2: 34,
 	3: 35,
 	4: 37,
-	5: executionOpcodeCount,
+	5: 45,
+	6: executionOpcodeCount,
 }
 
 type programCursor struct {
@@ -217,6 +223,23 @@ func (c *programCursor) readOperands(opcode int) bool {
 	case opDomSelectDep:
 		_, ok := c.read(3)
 		return ok
+	case opCssGeom, opIntObs:
+		// Version-6 real-platform probes: the probed id plus one raw
+		// seed byte and one raw dst cell byte.
+		if !c.readID() {
+			return false
+		}
+		_, ok := c.read(2)
+		return ok
+	case opMutOrder, opRangeOrder:
+		// Two raw bytes and the dst cell after the probed id.
+		if !c.readID() {
+			return false
+		}
+		_, ok := c.read(3)
+		return ok
+	case opEvPhaseFull:
+		return c.readID() && c.skipByte()
 	default:
 		return false
 	}

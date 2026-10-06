@@ -32,6 +32,7 @@ defmodule Kiwicaptcha.MixProject do
       {:redix, "~> 1.5", optional: true},
       {:plug, "~> 1.16", optional: true},
       {:exqlite, "~> 0.27", optional: true},
+      {:argon2_elixir, "~> 4.0", optional: true},
       {:jason, "~> 1.4", only: [:dev, :test], optional: true}
     ]
   end

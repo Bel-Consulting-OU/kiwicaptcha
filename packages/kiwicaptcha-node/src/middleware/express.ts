@@ -35,10 +35,20 @@ export interface ExpressVerifyOptions {
 
 /** The canonical client IP of one request per the shared contract. */
 export function clientIpFromRequest(req: Request, trustedProxies: string[] = []): string {
+  const peer = req.socket?.remoteAddress ?? '';
+  const xffLines = rawHeaderLines(req, 'x-forwarded-for');
+  const realIpLines = rawHeaderLines(req, 'x-real-ip');
+  // A repeated forwarding header is parser ambiguity (one intermediary
+  // reads the first line, another the last): no header-derived identity
+  // is trustworthy, so the peer wins. Never pick a line of a repeated
+  // X-Real-IP, matching the shared resolver contract.
+  if (xffLines.length > 1 || realIpLines.length > 1) {
+    return peer;
+  }
   return resolveClientIp({
-    peer: req.socket?.remoteAddress ?? '',
-    xffLines: rawHeaderLines(req, 'x-forwarded-for'),
-    realIp: singleHeader(req, 'x-real-ip'),
+    peer,
+    xffLines,
+    realIp: realIpLines[0] ?? null,
     trustedProxies,
   });
 }
@@ -55,12 +65,6 @@ function rawHeaderLines(req: Request, name: string): string[] {
     }
   }
   return lines;
-}
-
-function singleHeader(req: Request, name: string): string | null {
-  const lines = rawHeaderLines(req, name);
-  const first = lines[0];
-  return lines.length > 0 && first !== undefined ? first : null;
 }
 
 function readToken(req: Request, field: string): string | null {

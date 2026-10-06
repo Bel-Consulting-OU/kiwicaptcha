@@ -89,6 +89,7 @@ check('cookie token', KiwiVerifier::extractToken('', [], ['kiwi_token' => 'ck'])
 check('missing token', KiwiVerifier::extractToken('', [], []) === null);
 check('untrusted peer ignores xff', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, 10.0.0.9']) === '10.0.0.1');
 check('trusted lb takes next left', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, 10.0.0.9'], '10.0.0.0/24') === '203.0.113.2');
+check('client-supplied leftmost entry is ignored', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '6.6.6.6, 203.0.113.2, 10.0.0.9'], '10.0.0.0/24') === '203.0.113.2');
 check('garbage hop fails closed', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, garbage!!, 10.0.0.9'], '10.0.0.0/24') === '10.0.0.9');
 
 // The middleware over stubs.

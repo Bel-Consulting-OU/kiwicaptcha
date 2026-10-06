@@ -18,7 +18,7 @@ module KiwiCaptcha
     # Maximum byte length of any wire string (the serde parse ceiling).
     MAX_STRING_BYTES = 4096
 
-    MAX_EXECUTION_VERSION = 5
+    MAX_EXECUTION_VERSION = 6
     MAX_PROGRAM_BASE64 = 4096
 
     U32_MAX = 4_294_967_295

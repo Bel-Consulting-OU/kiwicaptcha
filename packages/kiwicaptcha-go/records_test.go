@@ -329,3 +329,80 @@ func TestExecutionProgramLanguage(t *testing.T) {
 		t.Fatalf("an opcode beyond the version ceiling must be rejected")
 	}
 }
+
+func buildProgramB64(opVersion byte, ops [][2]interface{}) string {
+	// ops entries are (opcode byte, operand payload bytes).
+	body := []byte{ExecutionFormatVersion}
+	body = append(body, byte(len("login")))
+	body = append(body, []byte("login")...)
+	body = append(body, byte(len("act")))
+	body = append(body, []byte("act")...)
+	body = append(body, opVersion, byte(len(ops)))
+	for _, op := range ops {
+		body = append(body, op[0].(byte))
+		body = append(body, op[1].([]byte)...)
+	}
+	return base64EncodeBytes(body)
+}
+
+func TestExecutionVersionSixGrammar(t *testing.T) {
+	idOperand := []byte{4, 'a', 'b', 'c', 'd'}
+	addOperand := []byte{1, 0, 0, 0, 1, 0, 0, 0}
+	css := append(append([]byte{}, idOperand...), 7, 3)
+	mut := append(append([]byte{}, idOperand...), 1, 2, 5)
+	evp := append(append([]byte{}, idOperand...), 9)
+	rng := append(append([]byte{}, idOperand...), 4, 5, 6)
+	iob := append(append(append([]byte{}, idOperand...), 8), 1)
+	ops := [][2]interface{}{
+		{byte(opCssGeom), css},
+		{byte(opMutOrder), mut},
+		{byte(opEvPhaseFull), evp},
+		{byte(opRangeOrder), rng},
+		{byte(opIntObs), iob},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+	}
+	program := buildProgramB64(6, ops)
+	if !IsValidExecutionProgram(program) {
+		t.Fatalf("the version-6 probe program must parse")
+	}
+	// The same opcodes under the version-5 ceiling are refused.
+	if IsValidExecutionProgram(buildProgramB64(5, ops)) {
+		t.Fatalf("the version-5 opcode ceiling must refuse the version-6 probes")
+	}
+	// A truncated probe operand is refused.
+	broken := [][2]interface{}{
+		{byte(opCssGeom), idOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+		{byte(opAdd), addOperand},
+	}
+	if IsValidExecutionProgram(buildProgramB64(6, broken)) {
+		t.Fatalf("a truncated version-6 probe operand must be refused")
+	}
+}
+
+func TestIssuerGuardRefusesUnverifiableRungs(t *testing.T) {
+	if !RungVerifiable(16*1024, 3, 1) || !RungVerifiable(64*1024, 3, 1) {
+		t.Fatalf("the argon profile rungs must be verifiable in this runtime")
+	}
+	if RungVerifiable(64*1024, 2, 1) {
+		t.Fatalf("a time cost below the derivation profile must refuse")
+	}
+	if RungVerifiable(64*1024, 3, 2) {
+		t.Fatalf("parallelism outside the protocol profile must refuse")
+	}
+	settings := Settings{Secret: "0123456789abcdef0123456789abcdef", Profile: "argon128", Store: "memory://"}
+	if _, err := settings.BuildVerifier(); err == nil {
+		t.Fatalf("an unknown profile must be a loud configuration error")
+	}
+	good := Settings{Secret: "0123456789abcdef0123456789abcdef", Profile: "argon64", Store: "memory://"}
+	if _, err := good.BuildVerifier(); err != nil {
+		t.Fatalf("a verifiable rung must boot: %v", err)
+	}
+}

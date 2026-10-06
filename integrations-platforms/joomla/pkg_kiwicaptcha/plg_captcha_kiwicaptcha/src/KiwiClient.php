@@ -35,6 +35,17 @@ final class KiwiClient
     ];
 
     /**
+     * The namespaced JSON body keys. The bare "token" key is
+     * deliberately absent: an application POSTing its own {"token":…}
+     * API credential must never have that value consumed (and
+     * forwarded) as a captcha token.
+     */
+    public const JSON_TOKEN_FIELDS = [
+        'kiwi_token',
+        'captcha_response',
+    ];
+
+    /**
      * The first present token: header, form values, explicit answer,
      * JSON body, cookie.
      *
@@ -60,9 +71,11 @@ final class KiwiClient
         if (is_string($server['CONTENT_TYPE'] ?? null) && strpos((string) $server['CONTENT_TYPE'], 'application/json') !== false) {
             $raw = file_get_contents('php://input');
             $parsed = is_string($raw) ? json_decode($raw, true) : null;
-            $value = is_array($parsed) ? ($parsed['token'] ?? null) : null;
-            if (is_string($value) && trim($value) !== '') {
-                return trim($value);
+            foreach (self::JSON_TOKEN_FIELDS as $field) {
+                $value = is_array($parsed) ? ($parsed[$field] ?? null) : null;
+                if (is_string($value) && trim($value) !== '') {
+                    return trim($value);
+                }
             }
         }
         $cookieToken = $cookie['kiwi_token'] ?? null;

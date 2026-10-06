@@ -12,11 +12,14 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     13 (KEYS[1..13])
---   max Redis calls:      26 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
---                           3 GET + 4 SET — every
---                           call is fixed-cost; no KEYS/SCAN/EVAL nesting,
---                           no iteration over attacker-sized collections)
+--   max keys touched:     16 (KEYS[1..16])
+--   max Redis calls:      32 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
+--                           3 GET + 4 SET + 2 PFADD + 2 PFCOUNT +
+--                           1 PEXPIRE — every call is fixed-cost; no
+--                           KEYS/SCAN/EVAL nesting, no iteration over
+--                           attacker-sized collections; the HLL
+--                           cardinality is bounded by Redis' sparse
+--                           representation and the target TTL)
 --   max collection cardinality: 12 flat fields per state hash (the
 --                           HMGET reply of STATE_FIELDS); the sum3/max3/
 --                           max4 aggregation touches at most 4 elements.
@@ -42,6 +45,13 @@
 --   KEYS[13] outcome-ledger entry (string, JSON) — SET NX EX when
 --            ARGV[25] is non-empty (the pending entry mirrors
 --            outcome_register.lua byte-for-byte)
+--   KEYS[14] target failure state (hash: ts, fails, first_ms, last_ms) —
+--            the leaky-bucket auth-failure counter of the target
+--            dimension (change.md 3.2.1), touched when ARGV[48]=1
+--   KEYS[15] target source-spread HyperLogLog — PFADD of the failing
+--            source on a target failure
+--   KEYS[16] target asn-spread HyperLogLog — PFADD of the failing asn
+--            bucket on a target failure
 --
 -- ARGV:
 --   [1]  event             RiskEventKind int (1..21)
@@ -95,6 +105,14 @@
 --        network_risk, trust_credit, principal_credit)
 --   [45..47] the 3 risk-v2 weights in RiskV2Weights order (honeypot,
 --        session_inconsistency, tls)
+--   [48] has_target       0/1 — when 1 the target dimension (KEYS[14..16])
+--        is maintained and reported for this assessment
+--   [49] spread source element ('' = none; PFADDed to KEYS[15] on a
+--        target failure)
+--   [50] spread asn element ('' = none; PFADDed to KEYS[16] on a
+--        target failure)
+--   [51] target_ttl_s     the target-dimension retention (24h default;
+--        required when has_target = 1)
 --
 -- Returns (SignalVector order + extras):
 --   source_fast, source_slow, subnet_fast, issue_debt, bad_proof, malformed,
@@ -102,7 +120,10 @@
 --   trust_credit, principal_credit, global_level(0..4), cooldown_until_ms,
 --   is_duplicate (0/1), existing_context_tag ('' when none), existing_tls_tag
 --   ('' when none), registration_status (0/1; 0 when no registration
---   requested or the decision is already registered)
+--   requested or the decision is already registered), target_failures
+--   (the decayed failure count of the target dimension; 0 without a
+--   target), target_spread (the distinct source+asn spread of the
+--   target dimension; 0 without a target)
 --
 -- Event semantics (risk-v1 v3):
 --   PreIssue (1)            → request velocity + scope-hopping
@@ -214,6 +235,14 @@ for _, i in ipairs({26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 
 end
 if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
     return redis.error_reply('assess_v2: outcome_ttl_s must be a positive integer no greater than 2147483647 (a persistent outcome ledger is not admissible)')
+end
+local has_target_arg = ARGV[48] or '0'
+if has_target_arg ~= '0' and has_target_arg ~= '1' then
+    return redis.error_reply('assess_v2: has_target must be 0 or 1')
+end
+local has_target = has_target_arg == '1'
+if has_target and ttl_out_of_bounds(tonumber(ARGV[51])) then
+    return redis.error_reply('assess_v2: target_ttl_s must be a positive integer no greater than 2147483647 (a persistent target record is not admissible)')
 end
 
 -- Distributed clock authority: Redis TIME, not the application clock.
@@ -616,6 +645,46 @@ if ARGV[25] ~= '' then
     end
 end
 
+-- ── Target-account protection (change.md 3.2.1 / 3.3.3): the failure
+-- counter and the source/asn spread HLLs of the target dimension. An
+-- AuthenticationFailure (11) reported against the target increments the
+-- leaky bucket and PFADDs the failing source/asn; the assessment reply
+-- carries the decayed failure pressure and the spread so the decision
+-- path can protect the account (the marks stage maps an attacked target
+-- to exactly the interactive step-up). Failures are stored by THIS
+-- engine state, never by callers: a denied attempt never reaches
+-- authentication and so never writes here.
+local target_failures = 0
+local target_spread = 0
+if has_target then
+    local LEAK_MS = 60000
+    local v = redis.call('HMGET', KEYS[14], 'ts', 'fails')
+    local ts = tonumber(v[1]) or 0
+    local fails = tonumber(v[2]) or 0
+    if ts > 0 then
+        local elapsed = now - ts
+        if elapsed < 0 then elapsed = 0 end
+        fails = fails - math.floor(elapsed / LEAK_MS)
+        if fails < 0 then fails = 0 end
+    end
+    if event == 11 and not is_duplicate then
+        fails = fails + 1
+        redis.call('HSET', KEYS[14], 'ts', now, 'fails', fails, 'last_ms', now)
+        redis.call('HSETNX', KEYS[14], 'first_ms', now)
+        redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
+        if ARGV[49] and ARGV[49] ~= '' then
+            redis.call('PFADD', KEYS[15], ARGV[49])
+            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
+        end
+        if ARGV[50] and ARGV[50] ~= '' then
+            redis.call('PFADD', KEYS[16], ARGV[50])
+            redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
+        end
+    end
+    target_failures = fails
+    target_spread = redis.call('PFCOUNT', KEYS[15]) + redis.call('PFCOUNT', KEYS[16])
+end
+
 return {
     sig_src_fast,
     sig_src_slow,
@@ -635,5 +704,7 @@ return {
     is_duplicate and 1 or 0,
     existing_ctx,
     existing_tls,
-    registration_status
+    registration_status,
+    target_failures,
+    target_spread
 }

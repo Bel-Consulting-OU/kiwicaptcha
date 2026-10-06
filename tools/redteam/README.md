@@ -20,11 +20,12 @@ assertion and an economic metric against the real repo surfaces.
                                drivers, the supply-chain legs, the
                                step-up and verified-agent drivers
     engine/orchestrator.sh     the Part 10 controller (allowlist, budget,
-                               escalation, triage)
+                               escalation, triage, agent loop)
     engine/recon.mjs           deterministic attack-surface enumeration
     engine/synth.mjs           seeded grammar synthesis, offline first
-    engine/model-adapter.mjs   the local-model contract plus the
-                               documented CI no-op novelty scorer
+    engine/model-adapter.mjs   the local-model contract, the constrained
+                               agent loop (plan -> actions -> triage),
+                               and the documented CI no-op novelty scorer
     engine/harness-library.mjs the candidate class to harness mapping
     engine/repros/             the deterministic repro harnesses the
                                triage gate drives twice per candidate
@@ -34,13 +35,16 @@ assertion and an economic metric against the real repo surfaces.
                                consumed candidate corpus
     engine/regression.mjs      the nightly replay of committed findings
     engine/prompts/            pinned prompts (committed, never inline)
+    engine/test/               node --test suites for the adapter, the
+                               ledger honesty contract and the gate
     engine/runs/               the runs ledger (one json per run), the
                                triage reports, the escalation ledger
     findings/                  committed reproducible findings as tests
     tla/                       the PlusCal-checked consume/commit spec,
                                the vendored tla2tools, the TLC runner
     exit-criteria.sh           the 9.5 gate: every criterion measured,
-                               the honest table, no excuse rows
+                               one row per campaign slot, the honest
+                               table, no excuse rows
 
 ## The target environment
 
@@ -111,16 +115,39 @@ adapter (engine/model-adapter.mjs) speaks four shapes:
 `KIWI_RT_LOCAL_LLM_MODEL` names the local model where the runtime
 needs one. Temperature is pinned to 0 and the seed to the run seed;
 the prompt is the pinned file under engine/prompts/ with the seed
-substituted. The adapter resolves the host and refuses anything
-outside the loopback and private ranges, as does the orchestrator
-before it starts anything. Model output is parsed as candidate
-descriptions and never executed; the deterministic triage gate still
-decides what becomes a finding.
+substituted.
+
+Guardrails (enforced in code, not policy):
+
+- The host must resolve ONLY to loopback or private-range addresses.
+  Every resolved address is checked — one public answer refuses the
+  URL. The address is resolved once and pinned: the socket connects to
+  that IP with the original Host header (and SNI when TLS), so a later
+  DNS-rebinding answer cannot redirect the connection.
+- Off-host redirects are rejected.
+- Timeouts and a max-action cap bound every request.
+
+### The agent loop
+
+When a model URL is configured, `engine/model-adapter.mjs` runs a
+small agent loop: it requests a plan from the pinned
+`engine/prompts/agent.prompt.md`, parses it into a constrained action
+list (`ACTION: METHOD|path|json-body` with only `/healthz`,
+`/challenge`, `/verify` allowed), executes those actions ONLY against
+the configured staging/local target base URL
+(`KIWI_RT_TARGET_BASE_URL`, or the `BASE_URL` of the current profile),
+and triages the results deterministically — the same action and
+response always yield the same verdict. Model output is never executed
+as a command. Run it directly:
+
+    KIWI_RT_LOCAL_LLM_URL=http://127.0.0.1:8080 \
+        node tools/redteam/engine/model-adapter.mjs
 
 In CI mode (no `KIWI_RT_LOCAL_LLM_URL`) the adapter is the documented
 no-op: candidate novelty is scored deterministically from the surface
-map and the run history, the orchestrator logs that no model is
-configured, and THREATS.md's method note carries the same honest line.
+map and the run history, the agent loop does not enter, the
+orchestrator logs that no model is configured, and THREATS.md's method
+note carries the same honest line.
 
 ## The closed synthesis loop
 
@@ -149,10 +176,28 @@ ledger at engine/runs/escalations.json makes the mandate provable.
 ## The honest gate
 
 exit-criteria.sh fails on any red, including the repository's own
-gates; there are no RED-REPO excuse rows. A criterion the toolchain
+gates; there are no RED-REPO excuse rows. One row per documented
+campaign slot (17) plus coverage-guided fuzzing, TLA+ model checking
+and Cluster: a slot the configured subset does not name prints
+RED / MISSING and is never silently omitted. A criterion the toolchain
 cannot run prints TOOLCHAIN-ABSENT with the exact blocker and closes
-the gate (that is non-green by default). The table it prints carries
-the measured values: the value-class verdicts, the D3.5 outcomes, the
-live confirmed-legitimate probe (100 honest solves), the verified
-agent facts, the TLC model-checking result, the bounded fuzz passes
-(N stated), the real cluster leg, and the campaign battery results.
+the gate (that is non-green by default). A 9.5 clause that reads a
+campaign artifact refuses to trust a leftover file when the campaign
+did not run this invocation. The table it prints carries the measured
+values: the value-class verdicts, the D3.5 outcomes, the live
+confirmed-legitimate probe (100 honest solves), the verified agent
+facts, the TLC model-checking result, the bounded fuzz passes
+(N stated), the real cluster leg, and the per-campaign battery
+results.
+
+`KIWI_EC_ALLOW_SKIP=1` may accept SKIP rows only. Skipped rows stay
+non-green in the table even when accepted, and a RED or
+TOOLCHAIN-ABSENT row is never excused.
+
+## Tests
+
+    node --test tools/redteam/engine/test/
+
+Offline by default (no live model required). The gate skip-mode suite
+boots the redis target profile when available and skips cleanly when
+it is not.

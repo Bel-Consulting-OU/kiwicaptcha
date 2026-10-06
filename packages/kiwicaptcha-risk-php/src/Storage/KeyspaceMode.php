@@ -17,18 +17,22 @@ use Predis\Client;
  * exactly one family slot. The identity state lives at
  * `{kiwi:<ns>:<dim>:<hex2>}:risk:<dim>[:<epoch>]:<id>`. Its
  * per-dimension dedupe marker lives at
- * `{kiwi:<ns>:<dim>:<hex2>}:risk:dd:<event_id>`. The nonce dedupe key
- * lives at `{kiwi:<ns>:n:<hex2>}:risk:dedupe:<event_id>`. The scope
- * aggregate shard lives at
- * `{kiwi:<ns>:s:<id>:<shard>}:scope:<id>:<shard>`, with its marker at
- * `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`. The hysteresis state is
- * `{kiwi:<ns>}:risk:hyst` and the mode marker is `{kiwi:<ns>}:mode`.
+ * `{kiwi:<ns>:<dim>:<hex2>}:risk:dd:<event_id>`. The session tag
+ * records live at `{kiwi:<ns>:session:<hex2>}:risk:ctx|tls:<session>`.
+ * The nonce dedupe key lives at
+ * `{kiwi:<ns>:n:<hex2>}:risk:dedupe:<event_id>`. The scope aggregate
+ * shard lives at `{kiwi:<ns>:s:<id>:<shard>}:scope:<id>:<shard>`, with
+ * its marker at `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`. The outcome
+ * ledger lives at `{kiwi:<ns>:o:<hex2>}:outcome:<decision_id>`. The
+ * hysteresis state is `{kiwi:<ns>}:risk:hyst` and the mode marker is
+ * `{kiwi:<ns>}:mode`.
  *
- * <dim> names a source, net, session or principal family. <hex2> is the
- * two hex characters of the family identifier's first byte. <shard> is
- * fnv1a32(event_id) mod 16. The aggregate is merged on read with a
- * staleness contract of at most one second: the stores refresh their
- * merge at most once per second.
+ * <dim> names a source, net, session, principal, asn, target or agent
+ * family. <hex2> is the two hex characters of the family identifier's
+ * first byte. <shard> is fnv1a32(event_id) mod 16 (or the caller's
+ * stable fallback hash for an empty event id). The aggregate is merged
+ * on read with a staleness contract of at most one second: the stores
+ * refresh their merge at most once per second.
  */
 enum KeyspaceMode: string
 {
@@ -160,16 +164,27 @@ enum KeyspaceMode: string
 
     /**
      * The scope shard an event id increments: fnv1a32(event_id) mod 16,
-     * 0..15. The empty event id (dedupe disabled) maps deterministically
-     * to fnv1a32('') mod 16 = 5.
+     * 0..15. The empty event id (dedupe disabled) has no id bytes to
+     * hash, so the caller's stable fallback (the assessment's source
+     * pseudonym) is hashed instead: routing every dedupe-less write to
+     * the single fnv1a32('') shard would put all of that traffic on one
+     * slot.
      */
-    public static function scopeShard(string $eventId): int
+    public static function scopeShard(string $eventId, string $fallback = ''): int
     {
-        return self::fnv1a32($eventId) % self::SCOPE_SHARDS;
+        return self::fnv1a32($eventId === '' ? $fallback : $eventId) % self::SCOPE_SHARDS;
     }
 
     /** The Lua dimension argument of each identity family name. */
-    public const DIMENSION_LUA_IDS = ['src' => 1, 'net' => 2, 'session' => 3, 'principal' => 4];
+    public const DIMENSION_LUA_IDS = [
+        'src' => 1,
+        'net' => 2,
+        'session' => 3,
+        'principal' => 4,
+        'asn' => 5,
+        'target' => 6,
+        'agent' => 7,
+    ];
 
     /**
      * The identity state key of one pseudonym. Source and subnet keys
@@ -246,5 +261,44 @@ enum KeyspaceMode: string
             $shard,
             $eventId,
         );
+    }
+
+    /**
+     * The session-family first-seen tag record ('ctx' or 'tls'). The
+     * record lives on the session pseudonym's own family slot instead of
+     * the shared namespace tag, so first-seen writes disperse with the
+     * session dimension.
+     */
+    public static function sessionTagKey(string $encodedNamespace, string $kind, string $sessionHex): string
+    {
+        return sprintf(
+            '{kiwi:%s:session:%s}:risk:%s:%s',
+            $encodedNamespace,
+            self::idPrefix($sessionHex),
+            $kind,
+            $sessionHex,
+        );
+    }
+
+    /**
+     * The decision-id-family outcome ledger key. The ledger of one
+     * decision lives on the decision id's own family slot instead of the
+     * shared namespace tag, so registration writes disperse instead of
+     * funneling through one slot.
+     */
+    public static function outcomeLedgerKey(string $encodedNamespace, string $decisionId): string
+    {
+        return sprintf(
+            '{kiwi:%s:o:%s}:outcome:%s',
+            $encodedNamespace,
+            self::idPrefix($decisionId),
+            $decisionId,
+        );
+    }
+
+    /** The event-id dedupe marker of one long-memory mark write, on the same slot as the mark hash. */
+    public static function markDedupeKey(string $encodedNamespace, string $eventId): string
+    {
+        return "mark:{kiwi:{$encodedNamespace}}:dd:{$eventId}";
     }
 }

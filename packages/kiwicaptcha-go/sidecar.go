@@ -119,8 +119,10 @@ func delegateExecutionVerify(rawToken string, record *ChallengeRecord, options V
 	if decoded.Success {
 		// The record's application-transaction binding rides the
 		// outcome: the sidecar verified the proof, the local record
-		// supplies the binding the application re-checks.
-		return ValidOutcome(record.RequestBinding, "", true, 0, false, record.DecoyField)
+		// supplies the binding the application re-checks. The nonce is
+		// the decision handle the outcomes ledger addresses, so it must
+		// be the verified nonce, never the binding.
+		return ValidOutcome(record.Nonce, record.RequestBinding, true, 0, false, record.DecoyField)
 	}
 	// The sidecar's kiwi-code IS the shared wire vocabulary; a code
 	// this SDK does not know stays a deny with the code carried

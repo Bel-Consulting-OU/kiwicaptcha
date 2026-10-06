@@ -7,9 +7,11 @@ file), and only a 204 lets the request through.
 
 ## Pieces
 
-- `kiwi-verify.php`: the companion endpoint. Copy it to the web root
-  that PHP serves (outside any public document root when you can; the
-  location below reaches it through FPM directly).
+- `kiwi-verify.php`: a shim to the canonical endpoint at
+  `../kiwi-verify.php`. In a deployment, copy the CANONICAL
+  `../kiwi-verify.php` to the web root that PHP serves (outside any
+  public document root when you can; the location below reaches it
+  through FPM directly) — do not copy the shim alone.
 - `kiwi-gate.conf.example`: a complete, lintable config with the three
   pieces marked: the auth location, the `auth_request` + `error_page`
   pair, and the deny/fault outcomes.

@@ -70,18 +70,54 @@ final class OutcomeMarksRedisTest extends TestCase
             self::assertSame(2, $store->writeMark('principal', self::PRINCIPAL, 'chargeback', self::T0 + 5_000));
 
             $mark = $store->readMark('principal', self::PRINCIPAL);
-            self::assertSame([
-                'kind' => 'chargeback',
-                'count' => 2,
-                'first_ms' => self::T0,
-                'last_ms' => self::T0 + 5_000,
-            ], $mark);
+            self::assertSame('chargeback', $mark['kind'], 'the max-severity kind is kept');
+            self::assertSame('chargeback', $mark['last_kind']);
+            self::assertSame(2, $mark['count']);
+            // The mark clock is the server's TIME (marks.lua ignores the
+            // caller timestamp), so the stamps are wall-clock, not T0.
+            $now = (int) floor(microtime(true) * 1000);
+            self::assertGreaterThan($now - 60_000, $mark['first_ms']);
+            self::assertLessThanOrEqual($now + 1_000, $mark['first_ms']);
+            self::assertGreaterThanOrEqual($mark['first_ms'], $mark['last_ms']);
+            self::assertLessThanOrEqual($now + 1_000, $mark['last_ms']);
 
             $pttl = (int) $this->client->pttl($key);
             self::assertGreaterThan(RedisRiskStateStore::DEFAULT_MARK_TTL_SECS * 1000 - 10_000, $pttl);
             self::assertLessThanOrEqual(RedisRiskStateStore::DEFAULT_MARK_TTL_SECS * 1000, $pttl);
         } finally {
             $this->client->del([$key]);
+        }
+    }
+
+    public function testMarkSeverityNeverDowngradesAndLatestIsKeptSeparately(): void
+    {
+        $store = $this->store();
+        $key = $store->markKey('principal', self::PRINCIPAL);
+        try {
+            $store->writeMark('principal', self::PRINCIPAL, 'chargeback', self::T0);
+            $store->writeMark('principal', self::PRINCIPAL, 'spamReported', self::T0 + 1_000);
+            $mark = $store->readMark('principal', self::PRINCIPAL);
+            self::assertSame('chargeback', $mark['kind'], 'a mild report after a chargeback must never downgrade the kind');
+            self::assertSame('spamReported', $mark['last_kind'], 'the latest kind is recorded separately');
+            self::assertSame(2, $mark['count']);
+        } finally {
+            $this->client->del([$key]);
+        }
+    }
+
+    public function testMarkWritesDedupeByEventId(): void
+    {
+        $store = $this->store();
+        $key = $store->markKey('session', self::SESSION);
+        $event = hash('sha256', 'retried-report');
+        try {
+            self::assertSame(1, $store->writeMark('session', self::SESSION, 'accountBanned', self::T0, $event));
+            self::assertSame(1, $store->writeMark('session', self::SESSION, 'accountBanned', self::T0 + 5, $event), 'a retried report must not double-count');
+            self::assertSame(2, $store->writeMark('session', self::SESSION, 'accountBanned', self::T0 + 5, hash('sha256', 'another-event')));
+            $mark = $store->readMark('session', self::SESSION);
+            self::assertSame(2, $mark['count']);
+        } finally {
+            $this->client->del([$key, "mark:{kiwi:{$store->namespace()}}:dd:{$event}"]);
         }
     }
 
