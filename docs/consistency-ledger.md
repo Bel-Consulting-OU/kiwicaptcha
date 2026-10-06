@@ -4,8 +4,9 @@ The zero-contradiction cross-check of change.md (Part 12). Every row
 resolves one potential tension: the claim, where the repo enforces it
 (file and line, verified against the working tree at the time of
 writing), and the check that keeps it true. A row whose reference
-cannot be verified is worse than no row; the one spec-only row is
-labelled as such instead of pointing at code that does not exist.
+cannot be verified is worse than no row; a row with no enforcement
+point is labelled spec-only instead of pointing at code that does not
+exist. No such row remains: every claim below is enforced in the tree.
 
 Line references were verified on this tree on 2026-10-04; the keeping
 checks (tests, parity suites, lint gates, and since this week the
