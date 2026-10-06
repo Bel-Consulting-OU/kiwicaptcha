@@ -85,8 +85,8 @@ async function verify(url, bearer, token, scope, ip) {
  *
  * The context shape is defensive on purpose: the payload rides
  * ctx.request or ctx.payload depending on the trigger, and the abort
- * uses api.abort when present so a mis-binding logs instead of
- * throwing inside the runtime.
+ * uses api.abort when present, throwing otherwise, so every non-OK
+ * result blocks creation on either runtime shape.
  */
 async function guardPreCreation(ctx, api) {
   const payload = (ctx && (ctx.request || ctx.payload)) || {};
@@ -104,11 +104,16 @@ async function guardPreCreation(ctx, api) {
     result.code === "verify_unavailable"
       ? "The security service is unavailable. Try again shortly."
       : "The security check did not pass. Solve the challenge and try again.";
+  // Fail closed on every non-OK result: the action runtime aborts
+  // through api.abort when it offers one, and otherwise by throwing
+  // (the documented PreCreation abort), so a missing token, a failed
+  // challenge or an unreachable verifier can never let user creation
+  // continue.
   if (api && typeof api.abort === "function") {
     api.abort(message);
-  } else {
-    console.log("kiwi-captcha guard:", result.code, message);
+    return;
   }
+  throw new Error("kiwi-captcha guard: " + result.code + " " + message);
 }
 
 module.exports = {

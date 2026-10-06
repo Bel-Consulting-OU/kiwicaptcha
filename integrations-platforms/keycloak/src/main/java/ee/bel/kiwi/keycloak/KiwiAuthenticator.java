@@ -26,7 +26,6 @@ public class KiwiAuthenticator implements Authenticator {
     public static final String CONFIG_VERIFY_URL = "kiwi.verify.url";
     public static final String CONFIG_BEARER = "kiwi.bearer";
     public static final String CONFIG_SCOPE = "kiwi.scope";
-    public static final String CONFIG_TRUSTED_PROXIES = "kiwi.trusted.proxies";
 
     public static final String VERIFY_URL_DEFAULT = "http://127.0.0.1:7371/verify";
 
@@ -65,17 +64,15 @@ public class KiwiAuthenticator implements Authenticator {
         String verifyUrl = configValue(configModel, CONFIG_VERIFY_URL, VERIFY_URL_DEFAULT);
         String bearer = configValue(configModel, CONFIG_BEARER, "");
         String scope = configValue(configModel, CONFIG_SCOPE, "login");
-        String trustedProxies = configValue(configModel, CONFIG_TRUSTED_PROXIES, "");
-
-        var headers = request.getHttpHeaders();
-        String forwarded = headers == null ? null : headers.getRequestHeaders().getFirst("X-Forwarded-For");
-        String realIp = headers == null ? null : headers.getRequestHeaders().getFirst("X-Real-IP");
-        String ip = KiwiVerifyClient.clientIp(
-                context.getConnection() == null ? null : context.getConnection().getRemoteAddr(),
-                forwarded,
-                realIp,
-                trustedProxies
-        );
+        // The socket peer only: Keycloak's own proxy configuration
+        // (KC_PROXY) rewrites the connection's remote address, so the
+        // authenticator must never parse forwarding headers itself —
+        // a client-supplied X-Forwarded-For would otherwise choose the
+        // bound IP with one header.
+        String ip = context.getConnection() == null ? "127.0.0.1" : context.getConnection().getRemoteAddr();
+        if (ip == null || ip.isBlank()) {
+            ip = "127.0.0.1";
+        }
 
         KiwiVerifyClient.Result result = client.verify(verifyUrl, bearer, token, scope, ip);
         if (result.ok()) {

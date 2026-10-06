@@ -227,7 +227,7 @@ final class StepUpConfigurationTest extends TestCase
             'default_handler' => 'webauthn',
             'handlers' => [
                 'email_otp' => ['enabled' => true],
-                'webauthn' => ['enabled' => true],
+                'webauthn' => ['enabled' => true, 'rp_id' => 'login.example.com', 'allowed_origins' => ['https://login.example.com']],
             ],
         ]));
         self::assertTrue($container->hasDefinition(WebAuthnStepUpHandler::class));

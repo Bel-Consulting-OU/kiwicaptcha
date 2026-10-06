@@ -204,4 +204,17 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
 
         return StepUpChallenge::fromJson($raw);
     }
+    public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void
+    {
+        // The marker's own TTL is the window: a completed step-up
+        // gates enrollment for exactly that long.
+        $this->redis->set($this->prefix.'stepup-done:'.$principalPseudonym, (string) $now, 'EX', max(1, $ttlSecs));
+    }
+
+    public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
+    {
+        $value = $this->redis->get($this->prefix.'stepup-done:'.$principalPseudonym);
+
+        return \is_string($value) && $value !== '' && ($now - (int) $value) <= $withinSecs;
+    }
 }

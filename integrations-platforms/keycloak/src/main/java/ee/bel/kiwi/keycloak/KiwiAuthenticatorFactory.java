@@ -88,10 +88,6 @@ public class KiwiAuthenticatorFactory implements AuthenticatorFactory {
                 KiwiAuthenticator.CONFIG_SCOPE, "Scope",
                 "The challenge scope this flow sends.",
                 ProviderConfigProperty.STRING_TYPE, "login"));
-        properties.add(new ProviderConfigProperty(
-                KiwiAuthenticator.CONFIG_TRUSTED_PROXIES, "Trusted proxies",
-                "Comma-separated trusted-proxy CIDRs (IPv4 or IPv6). Empty (the default) never trusts a forwarded header: the socket peer is the client ip.",
-                ProviderConfigProperty.STRING_TYPE, ""));
         return properties;
     }
 

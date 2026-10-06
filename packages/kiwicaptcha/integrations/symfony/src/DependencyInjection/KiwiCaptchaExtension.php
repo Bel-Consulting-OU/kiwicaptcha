@@ -1841,6 +1841,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpConfig['rate_limit']['max_begins'],
                         $stepUpConfig['rate_limit']['window_secs'],
                         $stepUpConfig['complete_path'],
+                        null,
+                        $stepUpMaster,
                     ]))->setPublic(true));
                     $stepUpHandlers['totp'] = new Reference(TotpStepUpHandler::class);
                 }
@@ -1873,6 +1875,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpConfig['rate_limit']['max_begins'],
                         $stepUpConfig['rate_limit']['window_secs'],
                         $stepUpConfig['complete_path'],
+                        null,
+                        null,
+                        (string) ($stepUpConfig['handlers']['webauthn']['rp_id'] ?? ''),
+                        \array_values($stepUpConfig['handlers']['webauthn']['allowed_origins'] ?? []),
                     ]))->setPublic(true));
                     $stepUpHandlers['webauthn'] = new Reference(WebAuthnStepUpHandler::class);
                 }

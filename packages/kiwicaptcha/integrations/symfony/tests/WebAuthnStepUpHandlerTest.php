@@ -16,6 +16,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
 use Cose\Algorithm\Signature\ECDSA\ECSignature;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
  * The WebAuthn step-up handler against the in-memory store and a
@@ -70,10 +71,24 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         }
     }
 
-    public function testTheRegistrationCeremonyCompletesAndEnrolls(): void
+    public function testStepUpRefusesTheUnenrolledPrincipal(): void
     {
+        // The critical property: step-up never hands a registration
+        // ceremony to a principal without a key, because an attacker
+        // holding stolen credentials is exactly that principal.
         $handler = $this->handler();
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        self::assertSame(Response::HTTP_FORBIDDEN, $begin->getStatusCode());
+        self::assertStringContainsString('step_up_enrollment_required', (string) $begin->getContent());
+        self::assertStringNotContainsString('creation', (string) $begin->getContent());
+        self::assertSame(1, $this->store->countBegin(self::PRINCIPAL, 3600), 'the probe is the only admission: a refused begin consumes no rate budget');
+    }
+
+    public function testTheEnrollmentEntryPointCompletesAndEnrolls(): void
+    {
+        $handler = $this->handler();
+        $this->store->markStepUpSuccess(self::PRINCIPAL, 900, $this->now);
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
         self::assertSame('webauthn', $document['handler']);
         self::assertSame('creation', $document['ceremony']);
@@ -81,10 +96,10 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
         $credentialId = 'test-credential-id-bytes-01';
         $attestation = $this->attestation($document['public_key']['challenge'], $credentialId);
-        $result = $handler->complete($this->completeRequest($document['challenge'], $attestation));
+        $result = $handler->enrollComplete($this->completeRequest($document['challenge'], $attestation));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, (string) json_encode($result->toArray()));
-        self::assertTrue($result->creditedPrincipal);
-        self::assertCount(2, $this->reporter->reports, 'the principal and the target are credited');
+        self::assertFalse($result->creditedPrincipal, 'enrollment credits nothing');
+        self::assertCount(0, $this->reporter->reports, 'enrollment is not a step-up completion');
 
         // The validated credential is enrolled: the next begin answers
         // the assertion ceremony over it.
@@ -92,6 +107,92 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $document2 = $this->documentOf($second);
         self::assertSame('assertion', $document2['ceremony']);
         self::assertSame(WebAuthnTestVectors::base64Url($credentialId), $document2['public_key']['allowCredentials'][0]['id']);
+        self::assertSame('required', $document2['public_key']['userVerification'], 'user verification is required, never preferred');
+    }
+
+    public function testEnrollmentDemandsACompletedStepUpFirst(): void
+    {
+        $handler = $this->handler();
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        self::assertSame(Response::HTTP_FORBIDDEN, $begin->getStatusCode());
+        self::assertStringContainsString('step_up_enrollment_requires_step_up', (string) $begin->getContent());
+    }
+
+    public function testTheOptionsNeverHonorTheHostHeader(): void
+    {
+        $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
+        $hostile = Request::create('https://'.self::HOST.'/kiwi/step-up/begin');
+        $hostile->server->set('HTTP_HOST', 'evil.test');
+        $begin = $handler->begin($hostile, $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+        self::assertSame(self::HOST, $document['public_key']['rpId'], 'the rp id comes from configuration, never the Host header');
+        self::assertStringNotContainsString('evil.test', (string) json_encode($document), 'a forged host never reaches the options');
+    }
+
+    public function testATicketOrCredentialInTheQueryStringIsIgnored(): void
+    {
+        $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
+        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+
+        $queryOnly = Request::create(
+            'https://'.self::HOST.'/kiwi/step-up/complete?'.http_build_query([
+                WebAuthnStepUpHandler::TICKET_FIELD => $document['challenge'],
+                WebAuthnStepUpHandler::CREDENTIAL_FIELD => $this->assertion($document['public_key']['challenge'], 'cred-A', 1),
+            ]),
+        );
+        $result = $handler->complete($queryOnly);
+        self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $result->failureCode, 'secrets ride the POST body only');
+    }
+
+    public function testAnAssertionWithoutUserVerificationIsRefused(): void
+    {
+        $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 4);
+        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+
+        $noUv = $this->assertion($document['public_key']['challenge'], 'cred-A', 5, noUserVerification: true);
+        $result = $handler->complete($this->completeRequest($document['challenge'], $noUv));
+        self::assertSame(StepUpResultStatus::Pending, $result->status, 'a UV-less assertion spends an attempt, never completes');
+    }
+
+    public function testTheWebAuthnHandlerRefusesAHalfConfiguredRelyingParty(): void
+    {
+        try {
+            new WebAuthnStepUpHandler(
+                $this->store,
+                new StepUpTicket(self::MASTER),
+                new StepUpCompletionCredit($this->reporter, self::MASTER),
+                $this->registry(),
+                self::MASTER,
+                300,
+                5,
+                3,
+                900,
+                '/kiwi/step-up/complete',
+                $this->clock(),
+                true,
+                self::HOST,
+                [],
+            );
+            self::fail('an origin-less relying party configuration must refuse');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('allowed_origins', $e->getMessage());
+        }
+    }
+
+    public function testTheHtmlPageCarriesTheTicketAndTheNavigatorCall(): void
+    {
+        $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
+        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_HTML));
+        $html = (string) $begin->getContent();
+        self::assertStringContainsString('navigator.credentials.get', $html, 'the html mode drives the ceremony');
+        self::assertStringContainsString('name="kiwi_step_up_ticket"', $html, 'the form carries the ticket');
+        self::assertStringContainsString('id="kiwi-webauthn-credential"', $html, 'the form carries the credential');
     }
 
     public function testTheAssertionCeremonyCompletesAndAdvancesTheCounter(): void
@@ -138,6 +239,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testABadOriginIsRefusedAsABadAttempt(): void
     {
         $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
 
@@ -152,6 +254,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testAWrongRpIdHashIsRefusedAsABadAttempt(): void
     {
         $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
 
@@ -182,6 +285,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testAForeignCeremonyChallengeIsRefused(): void
     {
         $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
 
@@ -195,6 +299,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testTheAttemptCapTerminalizesTheChallenge(): void
     {
         $handler = $this->handler(maxAttempts: 2);
+        $this->enroll($handler, 'cred-A', 0);
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
 
@@ -209,6 +314,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testAnUnknownOrExpiredChallengeAnswersItsOwnCodes(): void
     {
         $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
         $result = $handler->complete($this->completeRequest('not-a-ticket', '{}'));
         self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $result->failureCode);
 
@@ -236,17 +342,22 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
     {
-        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        // The enrollment precondition: a completed step-up for the same
+        // principal within the lookback. A fresh principal earns it the
+        // way every other handler grants it, through a completion.
+        $this->store->markStepUpSuccess(self::PRINCIPAL, 900, $this->now);
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
-        self::assertSame('creation', $document['ceremony'], 'enrollment needs an unenrolled principal');
+        self::assertSame('creation', $document['ceremony'], 'the enrollment entry point issues the creation ceremony');
         $attestation = $this->attestation($document['public_key']['challenge'], $credentialId);
-        $result = $handler->complete($this->completeRequest($document['challenge'], $attestation));
+        $result = $handler->enrollComplete($this->completeRequest($document['challenge'], $attestation));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, (string) json_encode($result->toArray()));
+        self::assertFalse($result->creditedPrincipal, 'enrollment never credits a step-up completion');
         if ($counter > 0) {
             $source = $this->registry()->findOneByCredentialId($credentialId);
             self::assertNotNull($source);
             $source->counter = $counter;
-            $this->registry()->saveCredentialSource($source);
+            $this->registry->saveCredentialSource($source);
         }
     }
 
@@ -265,6 +376,8 @@ final class WebAuthnStepUpHandlerTest extends TestCase
             '/kiwi/step-up/complete',
             $this->clock(),
             $libPresent,
+            self::HOST,
+            ['https://'.self::HOST],
         );
     }
 
@@ -333,10 +446,10 @@ final class WebAuthnStepUpHandlerTest extends TestCase
      * The software authenticator's assertion (webauthn.get): the ES256
      * signature over authenticator data and the client data hash.
      */
-    private function assertion(string $challengeB64, string $credentialId, int $signCount, string $origin = 'https://'.self::HOST, string $rpId = self::HOST): string
+    private function assertion(string $challengeB64, string $credentialId, int $signCount, string $origin = 'https://'.self::HOST, string $rpId = self::HOST, bool $noUserVerification = false): string
     {
         $clientDataJson = WebAuthnTestVectors::clientDataJson('webauthn.get', $challengeB64, $origin);
-        $authData = WebAuthnTestVectors::authDataForAssertion($rpId, $signCount);
+        $authData = WebAuthnTestVectors::authDataForAssertion($rpId, $signCount, $noUserVerification);
         $signature = WebAuthnTestVectors::es256Sign($authData.hash('sha256', $clientDataJson, true));
 
         return WebAuthnTestVectors::publicKeyJson($credentialId, $clientDataJson, null, $authData, $signature);
@@ -385,9 +498,11 @@ final class WebAuthnTestVectors
         return $authData;
     }
 
-    public static function authDataForAssertion(string $rpId, int $signCount): string
+    public static function authDataForAssertion(string $rpId, int $signCount, bool $noUserVerification = false): string
     {
-        return hash('sha256', $rpId, true)."\x05".pack('N', $signCount);
+        $flags = $noUserVerification ? "\x01" : "\x05";
+
+        return hash('sha256', $rpId, true).$flags.pack('N', $signCount);
     }
 
     public static function cborBytes(string $bytes): string

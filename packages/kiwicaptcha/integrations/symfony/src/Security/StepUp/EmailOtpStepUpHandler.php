@@ -135,7 +135,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        $code = (string) $request->request->get(self::CODE_FIELD, $request->query->get(self::CODE_FIELD, ''));
+        $code = (string) $request->request->get(self::CODE_FIELD, '');
         if (!preg_match('/^[0-9]{6,8}$/D', $code) || !hash_equals((string) $challenge->codeHash, $this->codeHash($code))) {
             return $this->failedAttempt($challenge);
         }
@@ -177,7 +177,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
      */
     private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
     {
-        $ticket = (string) $request->request->get(self::TICKET_FIELD, $request->query->get(self::TICKET_FIELD, ''));
+        $ticket = (string) $request->request->get(self::TICKET_FIELD, '');
         if ($ticket === '') {
             return null;
         }
@@ -195,6 +195,16 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     }
 
     private function credit(StepUpChallenge $challenge): StepUpResult
+    {
+        $result = $this->creditOnce($challenge);
+        if ($result->status === StepUpResultStatus::Succeeded) {
+            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
+        }
+
+        return $result;
+    }
+
+    private function creditOnce(StepUpChallenge $challenge): StepUpResult
     {
         try {
             return $this->credit->credit($challenge->id, $challenge);

@@ -131,4 +131,15 @@ check("guard aborts on a missing token", async () => {
   assert.equal(aborts.length, 1);
 });
 
+check("guard fails closed by throwing when the runtime offers no abort", async () => {
+  let threw = false;
+  try {
+    await guard.guardPreCreation({ request: {} }, {});
+  } catch (e) {
+    threw = true;
+    assert.match(String(e && e.message), /kiwi-captcha guard/);
+  }
+  assert.ok(threw, "without api.abort the action must throw so user creation never continues");
+});
+
 console.log(`${checks} checks${process.exitCode ? ", failures above" : ", all green"}`);

@@ -153,6 +153,16 @@ final class StepUpHandlersTest extends TestCase
                 return $this->inner->markTotpStep($principalPseudonym, $step, $ttlSecs);
             }
 
+            public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void
+            {
+                $this->inner->markStepUpSuccess($principalPseudonym, $ttlSecs, $now);
+            }
+
+            public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
+            {
+                return $this->inner->recentStepUpSuccess($principalPseudonym, $withinSecs, $now);
+            }
+
             /** @return list<string> */
             public function recorded(): array
             {
@@ -366,6 +376,7 @@ final class StepUpHandlersTest extends TestCase
             900,
             '/kiwi/step-up/complete',
             $this->clock(),
+            self::MASTER,
         );
     }
 

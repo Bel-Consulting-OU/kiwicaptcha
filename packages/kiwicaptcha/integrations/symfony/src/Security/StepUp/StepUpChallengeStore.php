@@ -87,4 +87,18 @@ interface StepUpChallengeStore
      * already used, so the same code can never verify twice.
      */
     public function markTotpStep(string $principalPseudonym, int $step, int $ttlSecs): bool;
+
+    /**
+     * Record that the principal just completed a step-up (any handler):
+     * the marker lives for $ttlSecs and gates the WebAuthn enrollment
+     * precondition, so stolen credentials can never mint a first
+     * credential on a victim's account.
+     */
+    public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void;
+
+    /**
+     * Whether the same principal completed a step-up within the last
+     * $withinSecs (a caller-supplied $now keeps the clock testable).
+     */
+    public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool;
 }

@@ -46,7 +46,11 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         private readonly int $beginWindowSecs = 900,
         private readonly string $completePath = '/kiwi/step-up/complete',
         private readonly ?\Closure $now = null,
+        private readonly string $master = '',
     ) {
+        if ($master === '') {
+            throw new \InvalidArgumentException('The time-based handler needs the step-up master so enrollment secrets are sealed at rest; pass the same master the ticket service uses');
+        }
         if (!\in_array($this->algo, ['sha1', 'sha256'], true)) {
             throw new \InvalidArgumentException('The RFC 6238 algorithm must be sha1 or sha256');
         }
@@ -63,13 +67,54 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
      * generated, stored keyed by the principal pseudonym and answered
      * in base32 for the application's provisioning surface (a QR code,
      * a manual-entry block). Re-enrollment overwrites the stored
-     * secret; the replay guard is left untouched.
+     * secret, sealed at rest; the replay guard is left untouched.
      */
+    /** The at-rest seal key: HKDF over the step-up master, purpose-separated. */
+    private function sealKey(): string
+    {
+        return hash_hkdf('sha256', $this->master, 32, 'kiwi/v2/totp-seal', 'kiwicaptcha/deploy-salt/v1');
+    }
+
+    /** Seal a fresh secret: base64(nonce || ciphertext), never plaintext at rest. */
+    private function seal(string $secret): string
+    {
+        $nonce = random_bytes(\SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        return base64_encode($nonce.sodium_crypto_secretbox($secret, $nonce, $this->sealKey()));
+    }
+
+    /**
+     * Unseal a stored secret. A value this key cannot open (data
+     * written before sealing existed, or a tampered store) fails
+     * loudly: the operator re-enrolls the account rather than the
+     * deployment silently downgrading to plaintext.
+     */
+    private function unseal(string $sealed): string
+    {
+        $blob = base64_decode($sealed, true);
+        if (\is_string($blob) && \strlen($blob) > \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) {
+            $nonce = substr($blob, 0, \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+            $plain = sodium_crypto_secretbox_open(substr($blob, \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), $nonce, $this->sealKey());
+            if ($plain !== false) {
+                return $plain;
+            }
+        }
+
+        throw new \RuntimeException('The stored time-based secret could not be decrypted; the account must re-enroll its passcode (legacy plaintext data predates the at-rest seal)');
+    }
+
     public function enroll(string $principalPseudonym): string
     {
         self::assertPseudonym($principalPseudonym);
+        if ($this->store->findTotpSecret($principalPseudonym) !== null
+            && !$this->store->recentStepUpSuccess($principalPseudonym, 900, $this->now())) {
+            // Re-enrollment swaps the victim's second factor, so it
+            // demands a step-up completed against the current factor
+            // first; an attacker with stolen credentials never has one.
+            throw new \RuntimeException('Re-enrolling the time-based passcode needs a completed step-up for this account first; verify with the current factor before replacing it.');
+        }
         $secret = random_bytes(self::SECRET_BYTES);
-        $this->store->saveTotpSecret($principalPseudonym, $secret);
+        $this->store->saveTotpSecret($principalPseudonym, $this->seal($secret));
 
         return TotpCode::base32Encode($secret);
     }
@@ -141,13 +186,14 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        $secret = $this->store->findTotpSecret($challenge->principalPseudonym);
-        if ($secret === null) {
+        $stored = $this->store->findTotpSecret($challenge->principalPseudonym);
+        if ($stored === null) {
             $this->store->consume($challenge->id);
 
             return StepUpResult::failed(StepUpResult::FAIL_NOT_ENROLLED, $challenge->id);
         }
-        $code = (string) $request->request->get(self::CODE_FIELD, $request->query->get(self::CODE_FIELD, ''));
+        $secret = $this->unseal($stored);
+        $code = (string) $request->request->get(self::CODE_FIELD, '');
         $step = $this->matchingStep($secret, $code, TotpCode::stepOf($now));
         if ($step === null) {
             return $this->failedAttempt($challenge);
@@ -217,7 +263,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
      */
     private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
     {
-        $ticket = (string) $request->request->get(self::TICKET_FIELD, $request->query->get(self::TICKET_FIELD, ''));
+        $ticket = (string) $request->request->get(self::TICKET_FIELD, '');
         if ($ticket === '') {
             return null;
         }
@@ -235,6 +281,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     }
 
     private function credit(StepUpChallenge $challenge): StepUpResult
+    {
+        $result = $this->creditOnce($challenge);
+        if ($result->status === StepUpResultStatus::Succeeded) {
+            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
+        }
+
+        return $result;
+    }
+
+    private function creditOnce(StepUpChallenge $challenge): StepUpResult
     {
         try {
             return $this->credit->credit($challenge->id, $challenge);

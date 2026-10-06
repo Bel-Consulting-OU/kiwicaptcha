@@ -44,6 +44,14 @@ http {
             fastcgi_param HTTP_X_KIWI_TOKEN $http_x_kiwi_token;
             fastcgi_param HTTP_COOKIE $http_cookie;
             fastcgi_param REMOTE_ADDR $remote_addr;
+            # The trust chain, spelled out: $proxy_add_x_forwarded_for
+            # APPENDS the real client ip ($remote_addr) after whatever
+            # the client sent, and the endpoint walks the chain from the
+            # right. With KIWI_TRUSTED_PROXIES covering only the local
+            # FPM peer (127.0.0.0/8), the first untrusted entry from the
+            # right is nginx's own append, never a forged leftmost hop.
+            # Never pass $http_x_forwarded_for raw here: the client
+            # would then pick the bound ip with one header.
             fastcgi_param HTTP_X_FORWARDED_FOR $proxy_add_x_forwarded_for;
             # The gate knobs (kiwi-verify.php reads them from $_SERVER).
             fastcgi_param KIWI_VERIFY_URL http://127.0.0.1:7371/verify;
@@ -63,6 +71,8 @@ http {
             error_page 403 = @kiwi_denied;
             error_page 500 502 503 504 = @kiwi_gate_fault;
             proxy_pass http://127.0.0.1:3000;
+            # The same append rule as the fastcgi leg: nginx adds the
+            # real client ip to the end of the chain the client sent.
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         }
 

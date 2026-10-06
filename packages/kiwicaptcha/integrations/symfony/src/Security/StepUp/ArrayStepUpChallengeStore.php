@@ -30,6 +30,9 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
     /** @var array<string, int> */
     private array $totpSteps = [];
 
+    /** @var array<string, array{at: int, expires: int}> principal -> completion marker */
+    private array $stepUpSuccess = [];
+
     public function __construct(
         private readonly ?\Closure $now = null,
     ) {
@@ -122,5 +125,19 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
 
         return $entry['record'];
+    }
+    public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void
+    {
+        $this->stepUpSuccess[$principalPseudonym] = ['at' => $now, 'expires' => $now + $ttlSecs];
+    }
+
+    public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
+    {
+        $marker = $this->stepUpSuccess[$principalPseudonym] ?? null;
+        if ($marker === null || $marker['expires'] <= $now) {
+            return false;
+        }
+
+        return ($now - $marker['at']) <= $withinSecs;
     }
 }

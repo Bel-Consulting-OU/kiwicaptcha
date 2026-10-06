@@ -46,7 +46,7 @@ is missing or failed. An unreachable deployment fails the flow closed.
 
 ## Test status
 
-`KiwiVerifyClientTest.java` (20 checks) is a plain-JDK test compiled
+`KiwiVerifyClientTest.java` (18 checks) is a plain-JDK test compiled
 and run here:
 
 ```
@@ -56,7 +56,7 @@ java -cp /tmp/kiwi-kc-classes ee.bel.kiwi.keycloak.KiwiVerifyClientTest
 ```
 
 It covers the decision surface (status mapping, body scanning), token
-extraction, ip binding, JSON escaping and live round trips against a
+extraction, the no-forwarding-parser pin, JSON escaping and live round trips against a
 local HTTP stub (success, failure, 5xx fail closed, unreachable fail
 closed). `mvn package` was run on this host (Java 17, Keycloak 23
 artifacts from Central) and produces the jar; exercising the

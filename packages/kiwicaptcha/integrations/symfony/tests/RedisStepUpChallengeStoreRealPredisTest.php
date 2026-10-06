@@ -65,6 +65,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             'sha1', 6, 1, 300, 5, 100, 900, '/kiwi/step-up/complete',
             static fn (): int => self::NOW,
+            self::MASTER,
         );
     }
 
