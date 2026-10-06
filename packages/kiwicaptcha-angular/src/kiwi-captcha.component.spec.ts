@@ -25,6 +25,7 @@ describe("KiwiCaptcha", () => {
   it("renders the widget markup into the host", async () => {
     fixture.componentRef.setInput("scope", "login");
     fixture.componentRef.setInput("sitekey", "pk-ng");
+    fixture.detectChanges();
     await fixture.whenStable();
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector("input[data-kiwi-token]")).not.toBeNull();
@@ -41,6 +42,7 @@ describe("KiwiCaptcha", () => {
       seen.push({ token: d.token, nonce: d.nonce }),
     );
     fixture.componentRef.setInput("scope", "login");
+    fixture.detectChanges();
     await fixture.whenStable();
     const id = [...driver.records.keys()][0] as string;
     driver.simulateVerified(id, "tok-ng", "nonce-ng");
@@ -53,6 +55,7 @@ describe("KiwiCaptcha", () => {
     fixture.componentInstance.failed.subscribe((m) => events.push(`failed:${m}`));
     fixture.componentInstance.expired.subscribe(() => events.push("expired"));
     fixture.componentRef.setInput("scope", "login");
+    fixture.detectChanges();
     await fixture.whenStable();
     const id = [...driver.records.keys()][0] as string;
     driver.simulateError(id, "boom");
@@ -62,6 +65,7 @@ describe("KiwiCaptcha", () => {
 
   it("destroys the driver record on component destroy", async () => {
     fixture.componentRef.setInput("scope", "login");
+    fixture.detectChanges();
     await fixture.whenStable();
     expect(driver.records.size).toBe(1);
     fixture.destroy();
@@ -70,6 +74,7 @@ describe("KiwiCaptcha", () => {
 
   it("exposes reset and execute through the component", async () => {
     fixture.componentRef.setInput("scope", "login");
+    fixture.detectChanges();
     await fixture.whenStable();
     const id = [...driver.records.keys()][0] as string;
     driver.simulateVerified(id, "tok-exec");
