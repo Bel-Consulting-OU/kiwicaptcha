@@ -262,6 +262,13 @@ public final class Verifier {
         public String operationIdentity = "";
         public String expectedRequestBinding = "";
         public RequestBindingExpectation bindingExpectation;
+        /**
+         * The execution-armed dimension policy: null (the default)
+         * fails every armed record closed; the sidecar policy
+         * delegates that single verification to a co-located
+         * kiwicaptcha-verifier sidecar.
+         */
+        public ExecutionPolicy executionPolicy;
     }
 
     /**
@@ -450,10 +457,18 @@ public final class Verifier {
         return VerifyError.REQUEST_BINDING;
     }
 
-    /** The scope validation and the expected request binding, in cheap-phase order. */
+    /**
+     * The scope validation and the expected request binding, in
+     * cheap-phase order. The expected scope is REQUIRED: an empty
+     * scope option answers the typed required_scope failure instead of
+     * silently accepting a token minted for any scope.
+     */
     private VerifyError checkScopeAndBinding(ChallengeRecord record, String expectedScope,
                                              RequestBindingExpectation expectation) {
-        if (!expectedScope.isEmpty() && !record.scope.equals(expectedScope)) {
+        if (expectedScope.isEmpty()) {
+            return VerifyError.REQUIRED_SCOPE;
+        }
+        if (!record.scope.equals(expectedScope)) {
             return VerifyError.WRONG_SCOPE;
         }
         return checkRequestBinding(record, expectation);
@@ -605,7 +620,7 @@ public final class Verifier {
     private VerifyError cheapPhaseCheck(ChallengeRecord record, String tokenNonce, String secretKey,
                                         String expectedScope, String clientIp, boolean checkTiming,
                                         long nowNs, boolean nowNsSet,
-                                        RequestBindingExpectation expectation, ExecutionEvidence evidence) {
+                                        RequestBindingExpectation expectation, ExecutionEvidence evidence, boolean delegateExecution) {
         if (!record.nonce.equals(tokenNonce)) {
             return VerifyError.MALFORMED_RECORD;
         }
@@ -632,9 +647,13 @@ public final class Verifier {
         if (err != null) {
             return err;
         }
-        err = checkExecutionBinding(record, evidence);
-        if (err != null) {
-            return err;
+        if (!delegateExecution) {
+            // The delegation path leaves the execution gate to the
+            // sidecar's full-core pass; every other gate stays local.
+            err = checkExecutionBinding(record, evidence);
+            if (err != null) {
+                return err;
+            }
         }
         if (checkTiming) {
             err = checkMinDuration(record, nowNs, nowNsSet);
@@ -921,8 +940,25 @@ public final class Verifier {
             }
         }
 
+        // The execution delegation plane: an armed record under a
+        // sidecar policy delegates the execution dimension after the
+        // cheap phase proved everything the SDK checks locally.
+        boolean delegateExecution = !peek.executionProgram.isEmpty()
+                && options.executionPolicy != null && options.executionPolicy.enabled();
         VerifyError failure = cheapPhaseCheck(peek, token.nonce, secretKey, options.expectedScope,
-                options.clientIp, true, receiptNs, receiptSet, expectation, evidence);
+                options.clientIp, true, receiptNs, receiptSet, expectation, evidence, delegateExecution);
+        if (failure == null && delegateExecution) {
+            String[] delegated = options.executionPolicy.delegate(rawToken, options.expectedScope,
+                    options.clientIp);
+            if ("ok".equals(delegated[0])) {
+                return VerifyOutcome.valid(peek.nonce, peek.requestBinding, true, 0L, false,
+                        peek.decoyField);
+            }
+            VerifyError mapped = VerifyError.fromCodeOrNull(delegated[1]);
+            // A code outside the vocabulary stays the deterministic
+            // deny, never widened into an acceptance.
+            return VerifyOutcome.invalid(mapped != null ? mapped : VerifyError.EXECUTION_MISMATCH);
+        }
         if (failure != null) {
             if (storage instanceof Store.AtomicDeleteIfPending cleanup && failure != VerifyError.MISSING_CLIENT_IP) {
                 Store.DeleteIfPendingResult cleanupResult;

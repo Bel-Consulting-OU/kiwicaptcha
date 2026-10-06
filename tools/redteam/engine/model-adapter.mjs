@@ -50,6 +50,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
+import { createHash } from "node:crypto";
 import dns from "node:dns";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -178,4 +179,36 @@ export async function optionalCompletion({ seed }) {
     const prompt = pinnedPrompt(promptName, { seed: seed.toString(16) });
     const text = await complete({ url, kind, model, prompt, seed });
     return { consulted: true, text };
+}
+
+/**
+ * The novelty scorer of the aggressiveness mandate (change.md 10.2).
+ *
+ * With a configured model, the model's completion would rank the
+ * candidate lineages. In CI mode (KIWI_RT_LOCAL_LLM_URL unset) this is
+ * the documented no-op adapter: a deterministic hash of the candidate
+ * class against the surface map and the run history, so a candidate
+ * aimed at a surface the ledger has never recorded scores highest and
+ * the allocation stays reproducible. The score is honest about what it
+ * is: a stable ordering function, not a model judgment.
+ */
+export function scoreNovelty({ candidate, surface, runHistory }) {
+    const digest = createHash("sha256")
+        .update(`${candidate.class}|${candidate.mutation}|${candidate.target}`)
+        .digest();
+    const seen = runHistory.filter(
+        (run) => run.campaign && candidate.target && run.campaign.includes(candidate.class),
+    ).length;
+    // 0..999: the hash gives the stable base, unseen surfaces bump up.
+    const base = digest.readUInt16BE(0) % 1000;
+    return { score: Math.min(999, base + (seen === 0 ? 100 : 0)), seenInHistory: seen };
+}
+
+/** The honest method note the outputs carry in CI mode. */
+export function methodNote() {
+    if (process.env.KIWI_RT_LOCAL_LLM_URL) {
+        const kind = process.env.KIWI_RT_LOCAL_LLM_KIND ?? "openai";
+        return `local model configured (kind=${kind}); candidates from its completions pass the same deterministic triage gate`;
+    }
+    return "no local model is configured (KIWI_RT_LOCAL_LLM_URL unset); the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer";
 }

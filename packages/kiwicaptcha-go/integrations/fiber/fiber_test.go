@@ -23,7 +23,7 @@ func TestFiberGuard(t *testing.T) {
 			t.Errorf("the decision must ride the fiber locals")
 		}
 		return ctx.SendStatus(http.StatusOK)
-	}, Middleware(verifier, testSecret, WithExpectedScope("login")))
+	}, Middleware(verifier, testSecret, "login"))
 	// No token: the framework idiomatic denial. fiber.Test drives the
 	// app directly and returns the response.
 	response, err := app.Test(httptest.NewRequest(http.MethodPost, "/api/submit", nil))

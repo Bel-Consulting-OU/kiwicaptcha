@@ -43,6 +43,7 @@ from .constants import (
 )
 from .errors import VerifyError, VerifyOutcome
 from .execution import execution_commitment, is_valid_program
+from .sidecar import ExecutionPolicy, delegate_to_sidecar, delegation_enabled
 from .records import (
     ChallengeRecord,
     is_valid_decoy_field_name,
@@ -303,18 +304,20 @@ class VerifyOptions:
         "operation_identity",
         "expected_request_binding",
         "binding_expectation",
+        "execution_policy",
     )
 
     def __init__(
         self,
         secret_key: str,
-        expected_scope: Optional[str] = None,
+        expected_scope: str,
         client_ip: Optional[str] = None,
         now_ns: Optional[int] = None,
         enforce_telemetry: bool = False,
         operation_identity: Optional[str] = None,
         expected_request_binding: Optional[str] = None,
         binding_expectation: Optional[RequestBindingExpectation] = None,
+        execution_policy: Optional["ExecutionPolicy"] = None,
     ) -> None:
         self.secret_key = secret_key
         self.expected_scope = expected_scope
@@ -324,6 +327,11 @@ class VerifyOptions:
         self.operation_identity = operation_identity
         self.expected_request_binding = expected_request_binding
         self.binding_expectation = binding_expectation
+        # The execution-armed dimension policy: None (the default)
+        # fails every armed record closed; the sidecar policy delegates
+        # that single verification to a co-located kiwicaptcha-verifier
+        # sidecar (see kiwicaptcha.sidecar).
+        self.execution_policy = execution_policy
 
 
 class Verifier:
@@ -486,7 +494,11 @@ class Verifier:
         expected_scope: Optional[str],
         expectation: RequestBindingExpectation,
     ) -> Optional[VerifyError]:
-        if expected_scope is not None and record.scope != expected_scope:
+        # The scope option is required: an empty option refuses with
+        # the typed code instead of accepting any scope.
+        if not expected_scope:
+            return VerifyError.REQUIRED_SCOPE
+        if record.scope != expected_scope:
             return VerifyError.WRONG_SCOPE
         return self.check_request_binding(record, expectation)
 
@@ -590,6 +602,7 @@ class Verifier:
         now_ns: Optional[int],
         expectation: RequestBindingExpectation,
         evidence: ExecutionEvidence,
+        delegate_execution: bool = False,
     ) -> Optional[VerifyError]:
         if record.nonce != token_nonce:
             return VerifyError.MALFORMED_RECORD
@@ -610,9 +623,12 @@ class Verifier:
         error = self.check_deployment_expectations(record)
         if error is not None:
             return error
-        error = self.check_execution_binding(record, evidence)
-        if error is not None:
-            return error
+        if not delegate_execution:
+            # The delegation path leaves the execution gate to the
+            # sidecar's full-core pass; every other gate stays local.
+            error = self.check_execution_binding(record, evidence)
+            if error is not None:
+                return error
         if check_timing:
             error = self.check_min_duration(record, now_ns)
             if error is not None:
@@ -855,6 +871,10 @@ class Verifier:
             if peek is None:
                 return VerifyOutcome.invalid(VerifyError.RECORD_NOT_FOUND)
 
+        # The execution delegation plane: an armed record under a
+        # sidecar policy delegates the execution dimension after the
+        # cheap phase proved everything the SDK checks locally.
+        delegate_execution = delegation_enabled(peek, options.execution_policy)
         failure = self.cheap_phase_check(
             peek,
             token.nonce,
@@ -865,7 +885,28 @@ class Verifier:
             receipt_ns,
             expectation,
             evidence,
+            delegate_execution,
         )
+        if failure is None and delegate_execution:
+            ok, code = delegate_to_sidecar(
+                raw_token, options.expected_scope, options.client_ip, options.execution_policy
+            )
+            if ok:
+                return VerifyOutcome.valid_outcome(
+                    nonce=token.nonce,
+                    request_binding=peek.request_binding,
+                    from_stored_result=True,
+                    solve_duration_ms=None,
+                    decoy_field=peek.decoy_field,
+                )
+            # The sidecar's kiwi-code is the shared wire vocabulary: a
+            # known code maps onto the enum, an unknown one stays the
+            # deterministic execution_mismatch deny (never widened).
+            try:
+                mapped = VerifyError(code)
+            except ValueError:
+                mapped = VerifyError.EXECUTION_MISMATCH
+            return VerifyOutcome.invalid(mapped)
         if failure is not None:
             if isinstance(self.storage, AtomicDeleteIfPendingStorage) and failure != VerifyError.MISSING_CLIENT_IP:
                 try:

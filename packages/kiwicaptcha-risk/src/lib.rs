@@ -641,6 +641,12 @@ pub struct RiskEngine<
     /// by one rung. Absent by default so the decision path is
     /// byte-identical for existing consumers.
     decoy_escalation: Option<Arc<dyn crate::escalation::DecoyEscalationReader>>,
+    /// Optional context-bound trust source: when attached and the
+    /// request carries a session, the request's session-trust channel
+    /// input is the bucket-local credit ([`crate::trust::ContextBoundTrust`])
+    /// instead of the aggregate channel. Absent by default so the
+    /// decision path is byte-identical for existing consumers.
+    context_trust: Option<Arc<dyn crate::trust::ContextTrustSource>>,
 }
 
 impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
@@ -676,6 +682,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             marks_reader: None,
             price_context: None,
             decoy_escalation: None,
+            context_trust: None,
         }
     }
 
@@ -776,6 +783,22 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         source: Arc<dyn crate::pricing::PriceContextSource>,
     ) -> RiskEngine<S, N> {
         self.price_context = Some(source);
+        self
+    }
+
+    /// Attaches the context-bound trust source of the trust stage: on
+    /// every assessment whose request carries a session, the request's
+    /// session-trust channel input is the session's bucket-local credit
+    /// (the ASN bucket resolved from the source IP through the source's
+    /// dataset) instead of the aggregate trust channel. A foreign
+    /// bucket earns nothing: the stolen-cookie fleet replaying a home
+    /// session from a thousand foreign networks reads zero credit
+    /// there, while the home record is never reduced. A read failure
+    /// floors the channel at zero, fail closed (never the aggregate).
+    /// Without a source the assessment path is byte-identical to the
+    /// unwired engine.
+    pub fn with_context_trust(mut self, source: Arc<dyn crate::trust::ContextTrustSource>) -> Self {
+        self.context_trust = Some(source);
         self
     }
 
@@ -1153,6 +1176,21 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // cooldown-deny check: the global channel is inert (the
         // per-source signals keep flowing).
         let mut vector = observed.vector;
+        // The context-bound trust stage: when the engine is wired with
+        // a trust source and the request carries a session, the
+        // request's session-trust channel input is the bucket-local
+        // credit instead of the aggregate. An unwired engine or a
+        // sessionless request keeps the aggregate; a failed read floors
+        // the channel at zero, fail closed.
+        if let Some(source) = &self.context_trust {
+            vector.trust_credit = match observation.session_id {
+                Some(session) => source
+                    .credit_for(&hex::encode(session), ctx.source_ip)
+                    .map(|credit| credit.credit)
+                    .unwrap_or(0),
+                None => 0,
+            };
+        }
         let global_level;
         let cooldown_until_ms;
         if self.enable_global_pressure {

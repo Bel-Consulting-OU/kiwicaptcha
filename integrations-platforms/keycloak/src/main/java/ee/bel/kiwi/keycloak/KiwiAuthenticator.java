@@ -26,7 +26,7 @@ public class KiwiAuthenticator implements Authenticator {
     public static final String CONFIG_VERIFY_URL = "kiwi.verify.url";
     public static final String CONFIG_BEARER = "kiwi.bearer";
     public static final String CONFIG_SCOPE = "kiwi.scope";
-    public static final String CONFIG_TRUST_PROXY = "kiwi.trust.proxy";
+    public static final String CONFIG_TRUSTED_PROXIES = "kiwi.trusted.proxies";
 
     public static final String VERIFY_URL_DEFAULT = "http://127.0.0.1:7371/verify";
 
@@ -65,14 +65,16 @@ public class KiwiAuthenticator implements Authenticator {
         String verifyUrl = configValue(configModel, CONFIG_VERIFY_URL, VERIFY_URL_DEFAULT);
         String bearer = configValue(configModel, CONFIG_BEARER, "");
         String scope = configValue(configModel, CONFIG_SCOPE, "login");
-        boolean trustProxy = Boolean.parseBoolean(configValue(configModel, CONFIG_TRUST_PROXY, "false"));
+        String trustedProxies = configValue(configModel, CONFIG_TRUSTED_PROXIES, "");
 
         var headers = request.getHttpHeaders();
         String forwarded = headers == null ? null : headers.getRequestHeaders().getFirst("X-Forwarded-For");
+        String realIp = headers == null ? null : headers.getRequestHeaders().getFirst("X-Real-IP");
         String ip = KiwiVerifyClient.clientIp(
                 context.getConnection() == null ? null : context.getConnection().getRemoteAddr(),
                 forwarded,
-                trustProxy
+                realIp,
+                trustedProxies
         );
 
         KiwiVerifyClient.Result result = client.verify(verifyUrl, bearer, token, scope, ip);

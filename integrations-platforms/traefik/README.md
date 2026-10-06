@@ -20,13 +20,16 @@ Gates arbitrary Traefik routers on a KiwiCaptcha token with the
    ```
    KIWI_VERIFY_URL=http://127.0.0.1:7371/verify \
    KIWI_SCOPE=signup \
-   KIWI_TRUST_PROXY=1 \
+   KIWI_TRUSTED_PROXIES=127.0.0.0/8 \
    KIWI_BEARER=$(cat /etc/kiwi/bearer) \
    php -S 127.0.0.1:8788 /srv/kiwi/kiwi-verify.php
    ```
 
-   Set `KIWI_TRUST_PROXY=1` when Traefik is the only thing that can
-   set X-Forwarded-For on this hop (the default entryPoint behavior).
+   Set `KIWI_TRUSTED_PROXIES=127.0.0.0/8` when Traefik is the only
+   thing that can set X-Forwarded-For on this hop (the default
+   entryPoint behavior). With the default empty value the gate binds
+   the socket peer, so a client-supplied forwarding header can never
+   move the binding.
 
 3. Drop `kiwi-forwardauth.yml` into the directory your static config
    watches:

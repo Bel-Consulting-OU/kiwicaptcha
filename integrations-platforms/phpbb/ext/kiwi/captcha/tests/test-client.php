@@ -58,12 +58,15 @@ $body = json_decode($json['body'], true);
 check('json request shape', ($body['token'] ?? '') === 't' && ($body['scope'] ?? '') === 'signup' && ($body['remoteip'] ?? '') === '192.0.2.5');
 check('json bearer header', ($json['headers']['Authorization'] ?? '') === 'Bearer b');
 $compat = client::build_request(
-    ['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 's', 'trust_proxy' => true],
+    ['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 's', 'trusted_proxies' => '10.0.0.0/8'],
     't2',
     'login',
     ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.8, 10.0.0.2']
 );
 check('compat request encodes the incumbent shape', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=s') !== false && strpos($compat['body'], 'remoteip=203.0.113.8') !== false);
+check('untrusted peer ignores xff', client::client_ip(['REMOTE_ADDR' => '192.0.2.5', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.5');
+check('trusted lb takes next left', client::client_ip(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.8, 10.0.0.1'], '10.0.0.0/8') === '203.0.113.8');
+check('garbage hop fails closed', client::client_ip(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.1'], '10.0.0.0/8') === '10.0.0.1');
 
 // The decision table.
 check('success verifies', client::decide(200, '{"success":true}') === ['ok' => true, 'code' => 'verified']);

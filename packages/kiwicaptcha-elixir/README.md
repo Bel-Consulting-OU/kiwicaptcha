@@ -47,6 +47,29 @@ result.price             # => the paid work-ladder rung, e.g. "sha16bit"
 result.code              # => "" on success, a typed wire code on failure
 ```
 
+The scope option is REQUIRED: an empty `expected_scope` answers the
+typed `required_scope` refusal instead of silently accepting a token
+minted for any scope.
+
+## Execution-armed records: the ExecutionPolicy
+
+An execution-armed record demands the browser-trace walker, an oracle
+this SDK does not carry: the default policy fails every armed record
+closed (`:execution_mismatch`, documented). A deployment that issues
+armed challenges verifies them either through the bundle or through
+the sidecar: pass `execution_policy: %Kiwicaptcha.ExecutionPolicy{
+sidecar_url: "http://127.0.0.1:7371"}` on the verify options and the
+armed record's single verification delegates to a co-located
+kiwicaptcha-verifier over HTTP, whose verdict merges into this SDK's
+result.
+
+Single-use semantics are preserved: the sidecar consumes the record
+(point the sidecar at the same store), and this SDK never
+double-consumes. Trust boundary: the sidecar decides acceptances, so
+it must be co-located and trusted like the verifier itself. An
+unreachable sidecar answers `:storage_unavailable` (the retry
+disposition) with the record intact; a refused bearer denies.
+
 The cheap-gate order mirrors the PHP Verifier exactly: structure,
 protocol gate, kid revocation and resolution, HMAC signature, Argon2id
 ceilings, rsw bounds, TTL, scope, request binding, IP binding, region,

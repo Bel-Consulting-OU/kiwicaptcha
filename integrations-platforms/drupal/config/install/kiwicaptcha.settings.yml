@@ -2,7 +2,7 @@ verify_url: 'http://127.0.0.1:7371/verify'
 shim_url: ''
 bearer: ''
 mode: json
-trust_proxy: false
+trusted_proxies: ''
 enabled_login: true
 enabled_signup: true
 enabled_comment: false

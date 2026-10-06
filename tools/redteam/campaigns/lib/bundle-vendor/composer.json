@@ -1,0 +1,14 @@
+{
+  "require": {
+    "php": ">=8.1",
+    "symfony/http-foundation": "^6.4",
+    "web-auth/webauthn-lib": "^4.7"
+  },
+  "config": {
+    "policy": {
+      "advisories": {
+        "block": false
+      }
+    }
+  }
+}

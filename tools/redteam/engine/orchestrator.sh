@@ -76,17 +76,42 @@ RESULT=0
 
 log() { printf 'orchestrator: %s\n' "$*" >&2; }
 
-# ---------- the recon and synthesis agents ----------
+# ---------- the recon, escalation and synthesis agents ----------
 log "recon agent: enumerating the attack surface"
 node "$RT_DIR/engine/recon.mjs" >&2 || RESULT=1
 
-if [ "${1:-}" = "--synth" ] || [ "${KIWI_RT_SYNTH:-0}" = "1" ]; then
+# The self-escalation decision runs on every invocation and writes its
+# provable record to engine/runs/escalations.json; when it escalates,
+# the synthesis corpus is generated with the combined lineage and the
+# raised budget the escalation document carries.
+node "$RT_DIR/engine/escalate.mjs" >&2 || log "escalation agent failed; the corpus runs unescalated"
+ESCALATION_ENV=$(node -e '
+const fs = require("fs");
+const p = process.argv[1];
+try {
+    const doc = JSON.parse(fs.readFileSync(p, "utf8"));
+    const last = doc.escalations.at(-1);
+    if (last && last.combinedLabels) {
+        console.log(last.combinedLabels.join("+") + " " + last.raisedSynthCount);
+    }
+} catch {}
+' "$RUNS_DIR/escalations.json" 2>/dev/null)
+if [ -n "$ESCALATION_ENV" ]; then
+    COMBINE=${ESCALATION_ENV%% *}
+    COUNT=${ESCALATION_ENV##* }
+    export KIWI_RT_SYNTH_COMBINE="$COMBINE" KIWI_RT_SYNTH_COUNT="$COUNT"
+    log "synthesis escalation: combine=$COMBINE synth_count=$COUNT"
+fi
+
+if [ "${1:-}" = "--synth" ] || [ "${KIWI_RT_SYNTH:-0}" = "1" ] || [ -n "$ESCALATION_ENV" ]; then
     log "synthesis agent: generating the candidate corpus"
     node "$RT_DIR/engine/synth.mjs" >&2 || log "synthesis agent failed; continuing with the campaign battery"
+    log "triage agent: consuming the candidate corpus through the harness library"
+    node "$RT_DIR/engine/triage.mjs" >&2 || log "triage agent failed; the run continues with the campaign battery"
 fi
 
 # ---------- the campaign battery ----------
-CAMPAIGNS=${KIWI_RT_CAMPAIGNS:-"d3.1-commodity-nojs d3.5-credential-stuffing d3.10-infrastructure d3.12-protocol-parser d3.14-privacy d3.17-cross-sdk-parity"}
+CAMPAIGNS=${KIWI_RT_CAMPAIGNS:-"d3.1-commodity-nojs d3.2-stealth-headless d3.3-pow-economics d3.4-proxy-pools d3.5-credential-stuffing d3.6-token-brokering d3.7-solver-farms d3.8-ai-agents d3.9-risk-gaming d3.10-infrastructure d3.11-dos d3.12-protocol-parser d3.13-supply-chain d3.14-privacy d3.15-multi-tenant d3.16-accessibility d3.17-cross-sdk-parity"}
 
 # The campaign name maps to its spec class for the ledger.
 class_of() {
@@ -97,6 +122,16 @@ class_of() {
         d3.16*) echo "D3.16 accessibility and compatibility" ;;
         d3.17*) echo "D3.17 cross-SDK parity attack" ;;
         d3.5*) echo "D3.5 credential stuffing" ;;
+        d3.2*) echo "D3.2 stealth headless" ;;
+        d3.3*) echo "D3.3 PoW farm economics" ;;
+        d3.4*) echo "D3.4 proxy pools" ;;
+        d3.6*) echo "D3.6 token brokering" ;;
+        d3.7*) echo "D3.7 human solver farms" ;;
+        d3.8*) echo "D3.8 AI agents" ;;
+        d3.9*) echo "D3.9 risk-engine gaming" ;;
+        d3.11*) echo "D3.11 denial of service" ;;
+        d3.13*) echo "D3.13 supply chain" ;;
+        d3.15*) echo "D3.15 multi-tenant" ;;
         d3.1*) echo "D3.1 commodity no-JS bots" ;;
         *) echo "unclassified" ;;
     esac

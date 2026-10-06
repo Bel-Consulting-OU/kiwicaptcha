@@ -11,12 +11,16 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 
 use kiwicaptcha::challenge::{issue_challenge, now_epoch_micros, BindingMode, ChallengeConfig};
-use kiwicaptcha::{now_epoch_micros as core_now, Issued, PoWAlgorithm};
-use kiwicaptcha_verifier::{parse_listen, serve_http, SidecarState};
+use kiwicaptcha::{Issued, PoWAlgorithm};
+use kiwicaptcha_verifier::{
+    parse_listen, serve_http_with, ServerOptions, SidecarConfig, SidecarState,
+};
 
-const SECRET: &str = "0123456789abcdef0123456789abcdef";
+const SECRET: &str = "a-locally-generated-secret-of-48-bytes!!";
+const CLIENT_IP: &str = "198.51.100.7";
 
 /// The std-only test HTTP client: one request per connection, read to
 /// the server's close, exactly like the sidecar's contract.
@@ -82,7 +86,7 @@ fn sha_config() -> ChallengeConfig {
         target_bits: 8,
         argon2_target_bits: 2,
         ttl_secs: 300,
-        min_duration_ms: Some(0),
+        min_duration_ms: None,
         auto_tune: false,
         auto_tune_min_bits: 8,
         auto_tune_max_bits: 8,
@@ -99,39 +103,22 @@ fn sha_config() -> ChallengeConfig {
     }
 }
 
-/// The provider challenge wire (the camelCase key set the solver
-/// parses), spelled the same way the sidecar's /issue endpoint emits.
-fn wire_of(issued: &Issued) -> String {
-    let c = &issued.challenge;
-    serde_json::json!({
-        "nonce": c.nonce,
-        "challenge": c.challenge,
-        "salt": c.salt,
-        "algorithm": c.algorithm.as_str(),
-        "mKib": c.m_kib,
-        "t": c.t,
-        "p": c.p,
-        "targetBits": c.target_bits,
-        "ttlSecs": c.ttl_secs,
-        "minDurationMs": c.min_duration_ms,
-        "prefix": c.prefix,
-    })
-    .to_string()
-}
-
-/// Mint through the workspace issuer under the sidecar's secret.
+/// Mint through the workspace issuer under the sidecar's secret, and
+/// wait out the rung's timing floor so the solve is redeemable.
 fn mint(scope: &str) -> Issued {
-    let now_ns = core_now();
-    issue_challenge(
+    let now_ns = now_epoch_micros();
+    let issued = issue_challenge(
         &sha_config(),
         scope,
-        "198.51.100.7",
+        CLIENT_IP,
         now_ns / 1_000_000,
         now_ns,
         0,
         None,
     )
-    .expect("issuance succeeds")
+    .expect("issuance succeeds");
+    std::thread::sleep(Duration::from_millis(10));
+    issued
 }
 
 struct Server {
@@ -139,13 +126,17 @@ struct Server {
     state: Arc<SidecarState>,
 }
 
-fn spawn(state: SidecarState) -> Server {
+fn spawn_with(state: SidecarState, options: ServerOptions) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral loopback bind");
     let addr = listener.local_addr().expect("local addr");
     let state = Arc::new(state);
     let loop_state = Arc::clone(&state);
-    std::thread::spawn(move || serve_http(listener, loop_state));
+    std::thread::spawn(move || serve_http_with(listener, loop_state, options));
     Server { addr, state }
+}
+
+fn spawn(state: SidecarState) -> Server {
+    spawn_with(state, ServerOptions::default())
 }
 
 fn solve_token(wire: &str) -> String {
@@ -166,7 +157,7 @@ fn solve_verify_replay_and_scope_end_to_end() {
 
     // A real challenge from the workspace issuer lands in the store.
     let issued = mint("login");
-    let wire = wire_of(&issued);
+    let wire = kiwicaptcha_verifier::issue_wire_of(&issued);
     server.state.inject_record(
         issued.record,
         Some("checkout".to_string()),
@@ -179,7 +170,7 @@ fn solve_verify_replay_and_scope_end_to_end() {
     let (status, body) = post_json(
         server.addr,
         "/verify",
-        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"198.51.100.7\"}}"),
+        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
     );
     assert_eq!(status, 200, "{body}");
     let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
@@ -194,7 +185,7 @@ fn solve_verify_replay_and_scope_end_to_end() {
     let (_, replay) = post_json(
         server.addr,
         "/verify",
-        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"198.51.100.7\"}}"),
+        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
     );
     let replay_payload: serde_json::Value = serde_json::from_str(&replay).expect("json body");
     assert_eq!(replay_payload["success"], serde_json::Value::Bool(false));
@@ -205,16 +196,18 @@ fn solve_verify_replay_and_scope_end_to_end() {
     assert_eq!(replay_payload["kiwi-code"], "already_consumed");
 
     // A fresh challenge under the wrong scope carries the precise core
-    // code beside the collapsed provider code.
+    // code beside the collapsed provider code. The failed candidate
+    // burns the record (one-shot), so both verifications land in the
+    // consumed tombstone.
     let other = mint("login");
-    let other_wire = wire_of(&other);
+    let other_wire = kiwicaptcha_verifier::issue_wire_of(&other);
     server.state.inject_record(other.record, None, None);
     let other_token = solve_token(&other_wire);
     let (_, wrong) = post_json(
         server.addr,
         "/verify",
         &format!(
-            "{{\"token\":\"{other_token}\",\"scope\":\"signup\",\"remoteip\":\"198.51.100.7\"}}"
+            "{{\"token\":\"{other_token}\",\"scope\":\"signup\",\"remoteip\":\"{CLIENT_IP}\"}}"
         ),
     );
     let wrong_payload: serde_json::Value = serde_json::from_str(&wrong).expect("json body");
@@ -233,10 +226,10 @@ fn solve_verify_replay_and_scope_end_to_end() {
     assert!(metrics.contains("kiwicaptcha_verifier_verifies_total{outcome=\"already_consumed\"} 1"));
     assert!(metrics.contains("kiwicaptcha_verifier_verifies_total{outcome=\"wrong_scope\"} 1"));
     assert!(metrics.contains("kiwicaptcha_exporter_scrapes_total 1"));
-    // One consumed tombstone (the success) and one pending record (the
-    // wrong-scope candidate stays redeemable under its own scope).
-    assert!(metrics.contains("kiwicaptcha_verifier_records{state=\"consumed\"} 1"));
-    assert!(metrics.contains("kiwicaptcha_verifier_records{state=\"pending\"} 1"));
+    // Both records are burned: the success and the wrong-scope
+    // candidate (the one-shot consume has no retry window).
+    assert!(metrics.contains("kiwicaptcha_verifier_records{state=\"consumed\"} 2"));
+    assert!(metrics.contains("kiwicaptcha_verifier_records{state=\"pending\"} 0"));
 
     // The doctor summary and the always-open health probe.
     let (doctor_status, doctor) = get(server.addr, "/doctor");
@@ -249,7 +242,7 @@ fn solve_verify_replay_and_scope_end_to_end() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    for name in ["secret", "store", "auth", "listen"] {
+    for name in ["secret", "store", "auth", "listen", "binding", "risk"] {
         assert!(names.contains(&name), "doctor must check {name}: {doctor}");
     }
     let (health_status, health) = get(server.addr, "/healthz");
@@ -264,33 +257,40 @@ fn issue_endpoint_mints_and_redeems() {
         vec!["login".to_string()],
         "http://127.0.0.1:0",
     ));
-    let (status, wire) = post_json(server.addr, "/issue", "{\"scope\":\"login\",\"remoteip\":\"198.51.100.7\",\"action\":\"login\",\"cdata\":\"seed-7\"}");
+    let (status, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!(
+            "{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"action\":\"login\",\"cdata\":\"seed-7\"}}"
+        ),
+    );
     assert_eq!(status, 200, "{wire}");
     let token = solve_token(wire.trim_end());
     let (_, body) = post_json(
         server.addr,
         "/verify",
-        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"198.51.100.7\"}}"),
+        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
     );
     let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
     assert_eq!(payload["success"], serde_json::Value::Bool(true));
     assert_eq!(payload["action"], "login");
     assert_eq!(payload["cdata"], "seed-7");
 
-    // A scope outside the configured list is refused at issuance.
-    let (bad_status, bad) = post_json(server.addr, "/issue", "{\"scope\":\"admin\"}");
-    assert_eq!(bad_status, 200);
-    assert!(bad.contains("scope not allowed"), "{bad}");
+    // A scope outside the configured plan is a typed 400 at issuance.
+    let (bad_status, bad) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"admin\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(bad_status, 400);
+    assert!(bad.contains("scope_not_allowed"), "{bad}");
 }
 
 #[test]
 fn bearer_authentication_gates_the_sensitive_routes() {
-    let server = spawn(SidecarState::new(
-        SECRET.to_string(),
-        Some("sidecar-credential".to_string()),
-        vec![],
-        "http://127.0.0.1:0",
-    ));
+    let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+    config.bearer = Some("sidecar-credential".to_string());
+    let server = spawn(SidecarState::build(config));
     // Without the credential every sensitive route refuses; healthz
     // stays open for the process manager.
     assert_eq!(post_json(server.addr, "/verify", "{}").0, 401);
@@ -303,15 +303,16 @@ fn bearer_authentication_gates_the_sensitive_routes() {
         post_json_bearer(server.addr, "/verify", "{}", "wrong").0,
         401
     );
-    // The right credential reaches the handler.
+    // The right credential reaches the handler (the typed remoteip
+    // refusal proves the route, not the auth, rejected it).
     let (status, body) = post_json_bearer(
         server.addr,
         "/verify",
         "{\"token\":\"x\",\"scope\":\"login\"}",
         "sidecar-credential",
     );
-    assert_eq!(status, 200);
-    assert!(body.contains("\"success\":false"));
+    assert_eq!(status, 400);
+    assert!(body.contains("remoteip_required"), "{body}");
     let (metrics_status, _) = get_bearer(server.addr, "/metrics", "sidecar-credential");
     assert_eq!(metrics_status, 200);
 }
@@ -340,7 +341,7 @@ fn the_unix_socket_surface_serves_the_same_handler() {
             ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(ready, "the unix socket never appeared");
     let mut stream = UnixStream::connect(&path).expect("unix socket connect");
@@ -359,8 +360,8 @@ fn the_unix_socket_surface_serves_the_same_handler() {
 #[test]
 fn the_server_refuses_bindings_off_loopback() {
     // The no-outbound-calls property is structural: the only socket the
-    // process opens is its listener, and a listener off loopback can
-    // not even be configured.
+    // process opens is its listener (plus an operator-selected store
+    // backend), and a listener off loopback can not even be configured.
     assert!(parse_listen("http://127.0.0.1:7371").is_ok());
     assert!(parse_listen("http://0.0.0.0:7371").is_err());
     assert!(parse_listen("http://203.0.113.9:7371").is_err());

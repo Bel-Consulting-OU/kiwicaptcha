@@ -6,7 +6,8 @@ kiwi-flarum-captcha:
       verify_url_help: The deployment endpoint, e.g. http://127.0.0.1:7371/verify
       bearer: Bearer secret
       scope: Sign-up scope
-      trust_proxy: Honor X-Forwarded-For as the client ip
+      trusted_proxies: Trusted proxy CIDRs
+      trusted_proxies_help: Comma-separated trusted-proxy CIDRs (IPv4 or IPv6). Empty (the default) never trusts a forwarded header: the socket peer is the client ip.
       enabled: Protect registrations
   lib:
     error:

@@ -98,11 +98,11 @@ for (const factory of factories) {
       const { record, token } = goldenSha();
       await store.store(record);
       const clock = frozenClock(record);
-      const first = await verify(token, { storage: store, secretKey: SECRET, ...clock });
+      const first = await verify(token, { storage: store, secretKey: SECRET, expectedScope: 'login', ...clock });
       assert.equal(first.ok, true);
-      const replay = await verify(token, { storage: store, secretKey: SECRET, ...clock });
+      const replay = await verify(token, { storage: store, secretKey: SECRET, expectedScope: 'login', ...clock });
       assert.equal(replay.code, 'already_consumed');
-      const idem = await verify(token, { storage: store, secretKey: SECRET, ...clock, operationIdentity: 'op-1' });
+      const idem = await verify(token, { storage: store, secretKey: SECRET, expectedScope: 'login', ...clock, operationIdentity: 'op-1' });
       assert.equal(idem.code, 'already_consumed');
     } finally {
       await factory.dispose?.(store);
@@ -128,7 +128,7 @@ for (const factory of factories) {
       }
       assert.notEqual(await store.find(record.nonce), null);
       // A resultless consumed record is the ambiguous recovery state.
-      const result = await verify(token, { storage: store, secretKey: SECRET, ...frozenClock(record), operationIdentity: 'op-2' });
+      const result = await verify(token, { storage: store, secretKey: SECRET, expectedScope: 'login', ...frozenClock(record), operationIdentity: 'op-2' });
       assert.equal(result.code, 'consume_indeterminate');
     } finally {
       await factory.dispose?.(store);
@@ -210,7 +210,7 @@ for (const factory of factories) {
         await storage.store(record);
         const clock = frozenClock(record);
         const results = await Promise.all(
-          Array.from({ length: 8 }, () => verify(token, { storage, secretKey: SECRET, ...clock })),
+          Array.from({ length: 8 }, () => verify(token, { storage, secretKey: SECRET, expectedScope: 'login', ...clock })),
         );
         const okCount = results.filter((entry) => entry.ok).length;
         assert.ok(okCount >= 1);

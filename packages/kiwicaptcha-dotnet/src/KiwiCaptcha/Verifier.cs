@@ -230,7 +230,14 @@ public sealed class Verifier
     public sealed class Options
     {
         public string SecretKey { get; set; } = "";
-        public string ExpectedScope { get; set; } = "";
+        /// <summary>The required scope: the typed required_scope refusal
+        /// answers an empty option, never an any-scope acceptance.</summary>
+        public required string ExpectedScope { get; set; }
+        /// <summary>The execution-armed dimension policy: null (the
+        /// default) fails every armed record closed; the sidecar policy
+        /// delegates that single verification to a co-located
+        /// kiwicaptcha-verifier sidecar.</summary>
+        public ExecutionPolicy? ExecutionPolicy { get; set; }
         public string ClientIp { get; set; } = "";
         public long NowNs { get; set; }
         public bool NowNsSet { get; set; }
@@ -465,11 +472,20 @@ public sealed class Verifier
         return VerifyError.RequestBinding;
     }
 
-    /// <summary>The scope validation and the expected request binding.</summary>
+    /// <summary>
+    /// The scope validation and the expected request binding. The
+    /// expected scope is REQUIRED: an empty scope option answers the
+    /// typed required_scope failure instead of silently accepting a
+    /// token minted for any scope.
+    /// </summary>
     private VerifyError? CheckScopeAndBinding(ChallengeRecord record, string expectedScope,
         RequestBindingExpectation expectation)
     {
-        if (expectedScope.Length > 0 && record.Scope != expectedScope)
+        if (expectedScope.Length == 0)
+        {
+            return VerifyError.RequiredScope;
+        }
+        if (record.Scope != expectedScope)
         {
             return VerifyError.WrongScope;
         }
@@ -641,7 +657,7 @@ public sealed class Verifier
     /// </summary>
     private VerifyError? CheapPhaseCheck(ChallengeRecord record, string tokenNonce, string secretKey,
         string expectedScope, string? clientIp, bool checkTiming, long nowNs, bool nowNsSet,
-        RequestBindingExpectation expectation, ExecutionEvidence evidence)
+        RequestBindingExpectation expectation, ExecutionEvidence evidence, bool delegateExecution)
     {
         if (record.Nonce != tokenNonce)
         {
@@ -675,10 +691,15 @@ public sealed class Verifier
         {
             return err;
         }
-        err = CheckExecutionBinding(record, evidence);
-        if (err != null)
+        if (!delegateExecution)
         {
-            return err;
+            // The delegation path leaves the execution gate to the
+            // sidecar's full-core pass; every other gate stays local.
+            err = CheckExecutionBinding(record, evidence);
+            if (err != null)
+            {
+                return err;
+            }
         }
         if (checkTiming)
         {
@@ -1068,8 +1089,27 @@ public sealed class Verifier
             }
         }
 
+        // The execution delegation plane: an armed record under a
+        // sidecar policy delegates the execution dimension after the
+        // cheap phase proved everything the SDK checks locally.
+        var delegateExecution = peek.ExecutionProgram.Length > 0
+            && options.ExecutionPolicy is { } policy && policy.Enabled();
         var failure = CheapPhaseCheck(peek, token.Nonce, secretKey, options.ExpectedScope,
-            options.ClientIp, true, receiptNs, receiptSet, expectation, evidence);
+            options.ClientIp, true, receiptNs, receiptSet, expectation, evidence, delegateExecution);
+        if (failure == null && delegateExecution)
+        {
+            var delegated = options.ExecutionPolicy!.Delegate(rawToken, options.ExpectedScope,
+                options.ClientIp);
+            if (delegated.Ok)
+            {
+                return VerifyOutcome.ValidOutcome(peek.Nonce, peek.RequestBinding, true, 0, false,
+                    peek.DecoyField);
+            }
+            var mapped = VerifyErrorExtensions.FromCodeOrNull(delegated.Code);
+            // A code outside the vocabulary stays the deterministic
+            // deny, never widened into an acceptance.
+            return VerifyOutcome.InvalidOutcome(mapped ?? VerifyError.ExecutionMismatch);
+        }
         if (failure != null)
         {
             if (_storage is Store.IAtomicDeleteIfPending cleanup && failure != VerifyError.MissingClientIp)

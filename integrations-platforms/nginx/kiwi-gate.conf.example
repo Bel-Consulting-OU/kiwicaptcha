@@ -48,7 +48,7 @@ http {
             # The gate knobs (kiwi-verify.php reads them from $_SERVER).
             fastcgi_param KIWI_VERIFY_URL http://127.0.0.1:7371/verify;
             fastcgi_param KIWI_SCOPE login;
-            fastcgi_param KIWI_TRUST_PROXY 1;
+            fastcgi_param KIWI_TRUSTED_PROXIES 127.0.0.0/8;
             fastcgi_param KIWI_DENY 403;
             # KIWI_BEARER rides the FPM pool env, never the config file.
         }

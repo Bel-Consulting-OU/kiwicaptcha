@@ -15,7 +15,7 @@ the same mechanism official plugins use for request-level work
   503 (fail closed).
 - `config/settings.yml` adds the site settings: `kiwi_captcha_enabled`,
   `kiwi_verify_url`, `kiwi_bearer` (secret), `kiwi_signup_scope`,
-  `kiwi_signup_paths`, `kiwi_trust_proxy`.
+  `kiwi_signup_paths`, `kiwi_trusted_proxies` (comma-separated trusted-proxy CIDRs; the default empty list never trusts a forwarded header, so the socket peer is the client ip).
 - `lib/kiwi_captcha/verifier.rb` is the framework-free client (pure,
   injected transport).
 - `assets/javascripts/kiwi-signup-header.js` adds the `X-Kiwi-Token`

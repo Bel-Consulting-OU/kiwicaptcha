@@ -9,6 +9,7 @@ module KiwiCaptcha
     BAD_SIGNATURE = 'bad_signature'
     EXPIRED = 'expired'
     WRONG_SCOPE = 'wrong_scope'
+    REQUIRED_SCOPE = 'required_scope'
     IP_MISMATCH = 'ip_mismatch'
     MISSING_CLIENT_IP = 'missing_client_ip'
     WRONG_REGION = 'wrong_region'
@@ -33,7 +34,7 @@ module KiwiCaptcha
     UNSUPPORTED_RSW_PARAMS = 'unsupported_rsw_params'
 
     ALL = [
-      BAD_SIGNATURE, EXPIRED, WRONG_SCOPE, IP_MISMATCH, MISSING_CLIENT_IP,
+      BAD_SIGNATURE, EXPIRED, WRONG_SCOPE, REQUIRED_SCOPE, IP_MISMATCH, MISSING_CLIENT_IP,
       WRONG_REGION, WRONG_ISSUER, WRONG_POLICY_VERSION, UNKNOWN_KID, TOO_FAST,
       INSUFFICIENT_WORK, MALFORMED_RECORD, RECORD_NOT_FOUND, MALFORMED_TOKEN,
       UNSUPPORTED_ARGON2_PARAMS, TOO_MANY_ATTEMPTS, TELEMETRY_REJECTED,
@@ -46,6 +47,7 @@ module KiwiCaptcha
       BAD_SIGNATURE => 'challenge signature is invalid',
       EXPIRED => 'challenge has expired',
       WRONG_SCOPE => 'challenge was issued for a different scope',
+      REQUIRED_SCOPE => 'the scope option is required: verify refuses to accept a token for any scope',
       IP_MISMATCH => 'challenge was issued to a different client IP',
       MISSING_CLIENT_IP => 'challenge is IP-bound but no client IP was supplied',
       WRONG_REGION => 'challenge was issued for a different region',

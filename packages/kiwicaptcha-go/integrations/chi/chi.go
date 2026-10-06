@@ -11,11 +11,12 @@ import (
 	kiwi "kiwicaptcha/kiwicaptcha-go"
 )
 
-// Middleware wraps the router with token verification. The options
-// are the net/http ones; see the core package for the token source
-// order and the denial rendering.
-func Middleware(verifier *kiwi.Verifier, options kiwi.MiddlewareOptions) func(http.Handler) http.Handler {
-	return kiwi.Middleware(verifier, options)
+// Middleware wraps the router with token verification. The expected
+// scope is a required parameter (the compile-time-safe spelling of the
+// required_scope contract); the options are the net/http ones; see the
+// core package for the token source order and the denial rendering.
+func Middleware(verifier *kiwi.Verifier, expectedScope string, options kiwi.MiddlewareOptions) func(http.Handler) http.Handler {
+	return kiwi.Middleware(verifier, expectedScope, options)
 }
 
 // RouteScopePredicate builds a scope predicate from chi style route

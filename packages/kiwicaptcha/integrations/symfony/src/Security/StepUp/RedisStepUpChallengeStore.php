@@ -100,11 +100,31 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         // NX: a minted id colliding with a live record refuses rather
         // than overwriting it; the caller mints a fresh id and retries.
         $stored = $this->redis->set($key, $json, 'EX', max(1, $ttlSecs), 'NX');
-        if ($stored !== 'OK' && $stored !== true) {
+        if (!$this->isAffirmativeSetReply($stored)) {
             throw new \RuntimeException('The step-up challenge record could not be persisted (id collision or backend refusal)');
         }
 
         return $challenge->id;
+    }
+
+    /**
+     * Whether a SET reply affirms the write. The reply shape is
+     * client-specific: a real Predis client answers a
+     * {@see \Predis\Response\Status} object whose string form is 'OK'.
+     * phpredis answers a boolean and some proxies the bare string.
+     * The comparison normalizes all three shapes and fails closed on
+     * everything else; a nil answer is a refused NX, never a success.
+     */
+    private function isAffirmativeSetReply(mixed $reply): bool
+    {
+        if ($reply instanceof \Stringable) {
+            return (string) $reply === 'OK';
+        }
+        if (\is_bool($reply)) {
+            return $reply;
+        }
+
+        return \is_string($reply) && ($reply === 'OK' || $reply === '1');
     }
 
     public function read(string $challengeId): ?StepUpChallenge

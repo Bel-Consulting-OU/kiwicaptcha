@@ -72,7 +72,7 @@ class KiwiSignupGate
     {
       verify_url: SiteSetting.kiwi_verify_url,
       bearer: SiteSetting.kiwi_bearer.to_s,
-      trust_proxy: SiteSetting.kiwi_trust_proxy,
+      trusted_proxies: SiteSetting.kiwi_trusted_proxies,
     }
   end
 

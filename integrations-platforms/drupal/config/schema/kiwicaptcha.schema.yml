@@ -14,9 +14,9 @@ kiwicaptcha.settings:
     mode:
       type: string
       label: 'Wire format'
-    trust_proxy:
-      type: boolean
-      label: 'Honor X-Forwarded-For'
+    trusted_proxies:
+      type: string
+      label: 'Trusted proxy CIDRs'
     enabled_login:
       type: boolean
       label: 'Protect login'

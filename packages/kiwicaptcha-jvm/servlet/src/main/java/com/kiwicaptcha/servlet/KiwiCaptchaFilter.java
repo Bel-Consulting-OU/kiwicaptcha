@@ -48,7 +48,7 @@ public class KiwiCaptchaFilter implements Filter {
     private final String secretKey;
     private final String expectedScope;
     private final PathPredicate pathPredicate;
-    private final boolean realIp;
+    private final java.util.List<String> trustedProxies;
     private final DeniedRenderer denied;
 
     /** Answers whether the route, named by its path, needs a token. */
@@ -64,18 +64,22 @@ public class KiwiCaptchaFilter implements Filter {
 
     /** Builds the filter over a verifier and the middleware options. */
     public KiwiCaptchaFilter(Verifier verifier, String secretKey, String expectedScope,
-                             PathPredicate pathPredicate, boolean realIp, DeniedRenderer denied) {
+                             PathPredicate pathPredicate, java.util.List<String> trustedProxies,
+                             DeniedRenderer denied) {
         this.verifier = verifier;
         this.secretKey = secretKey;
-        this.expectedScope = expectedScope == null ? "" : expectedScope;
+        // The scope is a required constructor parameter: a null scope
+        // is a wiring error at construction, an empty one answers the
+        // verifier's typed required_scope refusal at verify time.
+        this.expectedScope = java.util.Objects.requireNonNull(expectedScope, "expectedScope is required");
         this.pathPredicate = pathPredicate;
-        this.realIp = realIp;
+        this.trustedProxies = trustedProxies == null ? java.util.List.of() : trustedProxies;
         this.denied = denied;
     }
 
     /** Builds the filter with the default denial renderer and no path predicate. */
     public KiwiCaptchaFilter(Verifier verifier, String secretKey, String expectedScope) {
-        this(verifier, secretKey, expectedScope, null, false, null);
+        this(verifier, secretKey, expectedScope, null, java.util.List.of(), null);
     }
 
     @Override
@@ -135,7 +139,7 @@ public class KiwiCaptchaFilter implements Filter {
         Verifier.Options options = new Verifier.Options();
         options.secretKey = secretKey;
         options.expectedScope = expectedScope;
-        options.clientIp = clientIpFromRequest(request, realIp);
+        options.clientIp = clientIpFromRequest(request, trustedProxies);
         return options;
     }
 
@@ -152,19 +156,36 @@ public class KiwiCaptchaFilter implements Filter {
     }
 
     /**
-     * Resolves the client ip: the forwarded header's first hop when
-     * trusted, else the remote address.
+     * Resolves the canonical client IP of a request against the
+     * trusted-proxy CIDR list. An empty list (the default) trusts
+     * nobody: forwarding headers are ignored and the socket peer is
+     * the answer, so a client-supplied X-Forwarded-For can never move
+     * the binding. The shared resolver in {@link ClientIpResolver}
+     * owns the walk; this wrapper only lifts the servlet view (the
+     * peer, every X-Forwarded-For line, the X-Real-IP value) into it.
      */
-    public static String clientIpFromRequest(HttpServletRequest request, boolean trustForwarded) {
-        if (trustForwarded) {
-            String forwarded = request.getHeader("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isEmpty()) {
-                String first = forwarded.split(",")[0].trim();
-                if (!first.isEmpty()) {
-                    return first;
-                }
-            }
+    public static String clientIpFromRequest(HttpServletRequest request, java.util.List<String> trustedProxies) {
+        String peer = remotePeerText(request);
+        java.util.List<String> xffLines = java.util.Collections.list(request.getHeaders("X-Forwarded-For"));
+        String realIp = firstHeaderValue(request, "X-Real-IP");
+        if ((xffLines == null || xffLines.isEmpty())
+                && (realIp == null || realIp.isEmpty())) {
+            // No forwarding signal anywhere: skip the resolver and
+            // answer the peer directly, preserving the legacy shape.
+            return peer;
         }
+        return ClientIpResolver.resolve(peer, xffLines, realIp, trustedProxies);
+    }
+
+    private static String firstHeaderValue(HttpServletRequest request, String name) {
+        java.util.Enumeration<String> values = request.getHeaders(name);
+        if (values != null && values.hasMoreElements()) {
+            return values.nextElement();
+        }
+        return null;
+    }
+
+    private static String remotePeerText(HttpServletRequest request) {
         String remote = request.getRemoteAddr();
         if (remote == null) {
             return "";

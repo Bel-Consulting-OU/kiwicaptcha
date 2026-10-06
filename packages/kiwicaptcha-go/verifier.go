@@ -249,6 +249,11 @@ type VerifyOptions struct {
 	OperationIdentity      string
 	ExpectedRequestBinding string
 	BindingExpectation     *RequestBindingExpectation
+	// ExecutionPolicy shapes the execution-armed dimension: nil (the
+	// default) fails every armed record closed; the sidecar policy
+	// delegates that single verification to a co-located
+	// kiwicaptcha-verifier sidecar (see sidecar.go).
+	ExecutionPolicy *ExecutionPolicy
 }
 
 // ValidateRecord is the structural validation of a stored record
@@ -436,8 +441,14 @@ func (v *Verifier) checkRequestBinding(record *ChallengeRecord, expectation Requ
 
 // checkScopeAndBinding runs the scope validation and the expected
 // request binding, hard authorization invariants in cheap-phase order.
+// The expected scope is REQUIRED: an empty scope option answers the
+// typed required_scope failure instead of silently accepting a token
+// minted for any scope the issuer serves.
 func (v *Verifier) checkScopeAndBinding(record *ChallengeRecord, expectedScope string, expectation RequestBindingExpectation) VerifyError {
-	if expectedScope != "" && record.Scope != expectedScope {
+	if expectedScope == "" {
+		return ErrCodeRequiredScope
+	}
+	if record.Scope != expectedScope {
 		return ErrCodeWrongScope
 	}
 	return v.checkRequestBinding(record, expectation)
@@ -589,6 +600,7 @@ func (v *Verifier) cheapPhaseCheck(
 	nowNs int64, nowNsSet bool,
 	expectation RequestBindingExpectation,
 	evidence ExecutionEvidence,
+	delegateExecution bool,
 ) VerifyError {
 	if record.Nonce != tokenNonce {
 		return ErrCodeMalformedRecord
@@ -612,8 +624,12 @@ func (v *Verifier) cheapPhaseCheck(
 	if err := v.checkDeploymentExpectations(record); err != "" {
 		return err
 	}
-	if err := v.checkExecutionBinding(record, evidence); err != "" {
-		return err
+	if !delegateExecution {
+		// The delegation path leaves the execution gate to the
+		// sidecar's full-core pass; every other gate stays local.
+		if err := v.checkExecutionBinding(record, evidence); err != "" {
+			return err
+		}
 	}
 	if checkTiming {
 		if err := v.checkMinDuration(record, nowNs, nowNsSet); err != "" {
@@ -899,7 +915,16 @@ func (v *Verifier) Verify(rawToken string, options VerifyOptions) VerifyOutcome 
 		}
 	}
 
-	failure := v.cheapPhaseCheck(peek, token.Nonce, secretKey, options.ExpectedScope, options.ClientIP, true, receiptNs, receiptSet, expectation, evidence)
+	// The execution delegation plane: an armed record under a sidecar
+	// policy delegates the execution dimension to the sidecar instead
+	// of failing closed, after the cheap phase proved everything the
+	// SDK checks locally. The cheap phase skips its own execution gate
+	// on this path: the sidecar's full-core pass is the gate.
+	delegateExecution := delegateExecutionFor(peek, options)
+	failure := v.cheapPhaseCheck(peek, token.Nonce, secretKey, options.ExpectedScope, options.ClientIP, true, receiptNs, receiptSet, expectation, evidence, delegateExecution)
+	if failure == "" && delegateExecution {
+		return delegateExecutionVerify(rawToken, peek, options, options.ExecutionPolicy)
+	}
 	if failure != "" {
 		if cleanup, capable := v.Storage.(AtomicDeleteIfPending); capable && failure != ErrCodeMissingClientIP {
 			cleanupResult, err := cleanup.DeleteIfPending(token.Nonce)

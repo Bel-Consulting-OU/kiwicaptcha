@@ -52,13 +52,113 @@ def extract_token(
     return None
 
 
-def client_ip(remote_addr: Optional[str], forwarded_for: Optional[str], trust_proxy: bool) -> str:
-    """The client ip bound into the verify call."""
-    if trust_proxy and forwarded_for:
-        first = forwarded_for.split(",")[0].strip()
-        if first:
-            return first
-    return (remote_addr or "127.0.0.1").strip() or "127.0.0.1"
+def client_ip(
+    remote_addr: Optional[str],
+    forwarded_for: Optional[str],
+    trusted_proxies: str = "",
+    real_ip: Optional[str] = None,
+) -> str:
+    """The client ip bound into the verify call, resolved through the
+    shared trusted-proxy walk: the socket peer wins unless the peer
+    sits inside the trusted proxy CIDR list (the default empty list
+    trusts nobody, so a forged X-Forwarded-For never moves the
+    binding). The chain is walked right to left through the trusted
+    hops and X-Real-IP is honored when no chain exists."""
+    import ipaddress
+    import re
+
+    peer = (remote_addr or "127.0.0.1").strip() or "127.0.0.1"
+    cidrs = [c.strip() for c in (trusted_proxies or "").split(",") if c.strip()]
+    if not cidrs:
+        return peer
+
+    control = re.compile(r"[\x00-\x1F\x7F]")
+
+    def canonical(text: str) -> Optional[str]:
+        value = text.strip()
+        if value == "" or value == "unknown" or value.startswith("_"):
+            return None
+        candidate = value
+        if candidate.startswith("["):
+            closing = candidate.find("]")
+            if closing == -1:
+                return None
+            suffix = candidate[closing + 1:]
+            if suffix != "" and not _valid_port(suffix):
+                return None
+            candidate = candidate[1:closing]
+        elif candidate.count(":") == 1:
+            left, _, right = candidate.partition(":")
+            if _strict_ipv4(left) and _valid_port(":" + right):
+                candidate = left
+        if ":" in candidate and candidate.count(":") < 2:
+            parts = candidate.split(":")
+            if _strict_ipv4(parts[-1]):
+                candidate = ":".join(parts[:-1])
+        try:
+            addr = ipaddress.ip_address(candidate)
+        except ValueError:
+            return None
+        mapped = getattr(addr, "ipv4_mapped", None)
+        return str(mapped) if mapped is not None else str(addr)
+
+    def in_trusted(ip_text: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip_text)
+        except ValueError:
+            return False
+        mapped = getattr(addr, "ipv4_mapped", None)
+        if mapped is not None:
+            addr = mapped
+        for cidr in cidrs:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+            if network.version == addr.version and addr in network:
+                return True
+        return False
+
+    peer_canonical = canonical(peer)
+    peer_trusted = peer_canonical is not None and in_trusted(peer_canonical)
+    forwarded = (forwarded_for or "").strip()
+    if forwarded == "":
+        if not peer_trusted:
+            return peer
+        candidate = (real_ip or "").strip()
+        if candidate == "" or control.search(candidate):
+            return peer
+        return canonical(candidate) or peer
+    if control.search(forwarded) or not peer_trusted:
+        return peer
+    for hop in reversed([part.strip() for part in forwarded.split(",")]):
+        canonical_text = canonical(hop)
+        if canonical_text is None:
+            # An unparsable hop terminates the trust chain: who lies
+            # beyond it cannot be established, so the peer falls back.
+            return peer
+        if not in_trusted(canonical_text):
+            return canonical_text
+    return peer
+
+
+def _valid_port(suffix: str) -> bool:
+    if not suffix.startswith(":"):
+        return False
+    digits = suffix[1:]
+    return digits.isdigit() and len(digits) <= 5 and 1 <= int(digits) <= 65535
+
+
+def _strict_ipv4(text: str) -> bool:
+    import re
+
+    return (
+        re.match(
+            r"^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$",
+            text or "",
+        )
+        is not None
+    )
 
 
 def build_request(
@@ -102,6 +202,7 @@ def verify(
     remote_addr: Optional[str],
     forwarded_for: Optional[str],
     transport: Transport,
+    real_ip: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One verify call end to end. The transport answers
     {status: int, body: str} and may raise for a connection failure
@@ -110,7 +211,12 @@ def verify(
         verify_url=str(settings.get("verify_url") or VERIFY_URL_DEFAULT),
         token=token,
         scope=scope,
-        ip=client_ip(remote_addr, forwarded_for, bool(settings.get("trust_proxy"))),
+        ip=client_ip(
+            remote_addr,
+            forwarded_for,
+            str(settings.get("trusted_proxies") or ""),
+            real_ip,
+        ),
         bearer=str(settings.get("bearer") or ""),
     )
     try:

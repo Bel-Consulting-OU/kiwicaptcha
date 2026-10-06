@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hostile embed: the token broker</title>
+</head>
+<body>
+<h1>The broker's page</h1>
+<!-- The hostile embed: the widget page lives on ANOTHER loopback port,
+     which is a genuinely different web origin. The broker's plan: embed
+     the victim site's widget, harvest the solved token out of the frame,
+     relay it to the farm. -->
+<iframe id="victim" src="__VICTIM_URL__" width="420" height="240"></iframe>
+<pre id="loot">none</pre>
+<script>
+  // The harvest attempts, all of them, the broker's full toolkit:
+  // same-origin reach into the frame, postMessage probing, and the
+  // opener chain for popups. Every read lands in #loot either way.
+  const loot = document.getElementById('loot');
+  const stolen = [];
+  function tryReach() {
+    try {
+      const frame = document.getElementById('victim');
+      stolen.push('reached:' + String(frame.contentDocument !== null));
+      const input = frame.contentDocument && frame.contentDocument.querySelector('input[data-kiwi-token]');
+      stolen.push('token:' + (input && input.value ? input.value : 'none'));
+    } catch (err) {
+      stolen.push('blocked:' + err.name);
+    }
+    try {
+      document.getElementById('victim').contentWindow.postMessage('give-token', '*');
+      stolen.push('posted:probe');
+    } catch (err) {
+      stolen.push('postfail:' + err.name);
+    }
+    loot.textContent = stolen.join('\n');
+    window.__brokerLoot = stolen.join('|');
+  }
+  setInterval(tryReach, 1000);
+  window.addEventListener('message', (event) => {
+    stolen.push('msg:' + String(event.data).slice(0, 60));
+    loot.textContent = stolen.join('\n');
+    window.__brokerLoot = stolen.join('|');
+  });
+</script>
+</body>
+</html>

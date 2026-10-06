@@ -16,7 +16,7 @@ func TestGinGuard(t *testing.T) {
 	verifier := newVerifier(t)
 	record := goldenRecordInto(t, verifier)
 	router := gin.New()
-	router.POST("/api/submit", Middleware(verifier, testSecret, WithExpectedScope("login")), func(ctx *gin.Context) {
+	router.POST("/api/submit", Middleware(verifier, testSecret, "login"), func(ctx *gin.Context) {
 		decision, ok := DecisionFrom(ctx)
 		if !ok || !decision.OK {
 			t.Errorf("the decision must ride the gin context")

@@ -59,17 +59,9 @@
     },
     {
       "surface": "rust-sidecar",
-      "route": "/metrics",
+      "route": "/verify",
       "methods": [
-        "GET"
-      ],
-      "notes": "in-process store; loopback only"
-    },
-    {
-      "surface": "rust-sidecar",
-      "route": "/doctor",
-      "methods": [
-        "GET"
+        "POST"
       ],
       "notes": "in-process store; loopback only"
     },
@@ -91,14 +83,6 @@
     },
     {
       "surface": "rust-sidecar",
-      "route": "/healthz",
-      "methods": [
-        "GET"
-      ],
-      "notes": "in-process store; loopback only"
-    },
-    {
-      "surface": "rust-sidecar",
       "route": "/verify",
       "methods": [
         "POST"
@@ -107,7 +91,23 @@
     },
     {
       "surface": "rust-sidecar",
-      "route": "/verify",
+      "route": "/issue",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/issue",
+      "methods": [
+        "POST"
+      ],
+      "notes": "in-process store; loopback only"
+    },
+    {
+      "surface": "rust-sidecar",
+      "route": "/issue",
       "methods": [
         "POST"
       ],
@@ -175,6 +175,7 @@
     "protocol/risk-v1/hysteresis-vectors.json",
     "protocol/risk-v1/outcomes-vectors.json",
     "protocol/risk-v1/pricing-vectors.json",
+    "protocol/risk-v1/quarantine-vectors.json",
     "protocol/risk-v1/target-vectors.json",
     "protocol/risk-v1/trust-vectors.json",
     "protocol/risk-v2/identity-fixtures.json",

@@ -46,16 +46,21 @@ module TestSupport
     KiwiCaptcha::Record.from_json(row['record'])
   end
 
-  def self.token_for(nonce, counter, duration_ms, telemetry)
+  def self.token_for(nonce, counter, duration_ms, telemetry = {},
+                     execution_digest: nil, execution_trace: nil)
     KiwiCaptcha::Token::SolutionToken.new(
       nonce: nonce, counter: counter, duration_ms: duration_ms, telemetry: telemetry,
-      execution_digest: nil, execution_trace: nil, rsw_proof: nil
+      execution_digest: execution_digest, execution_trace: execution_trace, rsw_proof: nil
     ).encode
+  end
+
+  def self.solve_sha(prefix, salt_b64, target_bits)
+    KiwiCaptcha::Pow.solve_sha256(prefix, salt_b64, target_bits)
   end
 
   def self.verify_options(over = {})
     defaults = {
-      storage: nil, secret_key: SECRET, expected_scope: nil, client_ip: nil,
+      storage: nil, secret_key: SECRET, expected_scope: 'login', client_ip: nil,
       now_ns: nil, now: nil, enforce_telemetry: false, operation_identity: nil,
       expected_request_binding: nil, binding_expectation: :exact,
       expected_policy_version: nil, policy_version_floor: nil,

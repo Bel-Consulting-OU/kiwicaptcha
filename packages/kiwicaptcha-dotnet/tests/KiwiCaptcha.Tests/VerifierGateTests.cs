@@ -104,6 +104,19 @@ public class VerifierGateTests
     }
 
     [Fact]
+    public void MissingScopeOptionIsTheTypedRequiredScopeRefusal()
+    {
+        var record = Support.MintRecord(new Support.MintOptions());
+        var verifier = Support.NewTestVerifier(new Verifier.Config(), Support.TestNow);
+        Support.StoreRecord(verifier.Storage(), record);
+        // The empty scope option accepts nothing: the typed refusal
+        // replaces the lax any-scope acceptance.
+        Support.RequireCode(
+            verifier.Verify(TokenForRecord(record), Options("", Support.TestClientIp)),
+            VerifyError.RequiredScope);
+    }
+
+    [Fact]
     public void MissingClientIp()
     {
         var mint = new Support.MintOptions { BindingIp = Support.TestClientIp };

@@ -73,9 +73,9 @@ test('redis: the consume script is exactly once and replays deterministically', 
     try {
       await storage2.store.store(record);
       const clock = frozenClock(record);
-      const ok = await verify(token, { storage: storage2.store, secretKey: SECRET, ...clock });
+      const ok = await verify(token, { storage: storage2.store, secretKey: SECRET, expectedScope: 'login', ...clock });
       assert.equal(ok.ok, true);
-      const replayVerify = await verify(token, { storage: storage2.store, secretKey: SECRET, ...clock });
+      const replayVerify = await verify(token, { storage: storage2.store, secretKey: SECRET, expectedScope: 'login', ...clock });
       assert.equal(replayVerify.code, 'already_consumed');
     } finally {
       storage2.client.disconnect();
@@ -138,6 +138,7 @@ test('redis: deleteIfPending keeps consumed evidence and deletes only pending', 
     const result = await verify(token, {
       storage: store,
       secretKey: SECRET,
+      expectedScope: 'login',
       ...frozenClock(record),
       operationIdentity: 'op-redis',
     });

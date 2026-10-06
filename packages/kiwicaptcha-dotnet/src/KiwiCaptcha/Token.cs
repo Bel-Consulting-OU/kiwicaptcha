@@ -10,6 +10,7 @@ public enum VerifyError
     BadSignature,
     Expired,
     WrongScope,
+    RequiredScope,
     IpMismatch,
     MissingClientIp,
     WrongRegion,
@@ -37,12 +38,27 @@ public enum VerifyError
 /// <summary>Extensions over the failure vocabulary: codes and polarity.</summary>
 public static class VerifyErrorExtensions
 {
+    /// <summary>The enum member of one wire code, or null outside the
+    /// vocabulary.</summary>
+    public static VerifyError? FromCodeOrNull(this string code)
+    {
+        foreach (VerifyError candidate in System.Enum.GetValues<VerifyError>())
+        {
+            if (candidate.Code() == code)
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     /// <summary>The stable snake_case wire code of this failure.</summary>
     public static string Code(this VerifyError error) => error switch
     {
         VerifyError.BadSignature => "bad_signature",
         VerifyError.Expired => "expired",
         VerifyError.WrongScope => "wrong_scope",
+        VerifyError.RequiredScope => "required_scope",
         VerifyError.IpMismatch => "ip_mismatch",
         VerifyError.MissingClientIp => "missing_client_ip",
         VerifyError.WrongRegion => "wrong_region",
@@ -74,6 +90,7 @@ public static class VerifyErrorExtensions
         VerifyError.BadSignature => "challenge signature is invalid",
         VerifyError.Expired => "challenge has expired",
         VerifyError.WrongScope => "challenge was issued for a different scope",
+        VerifyError.RequiredScope => "the scope option is required: verify refuses to accept a token for any scope",
         VerifyError.IpMismatch => "challenge was issued to a different client ip",
         VerifyError.MissingClientIp => "challenge is ip-bound but no client ip was supplied",
         VerifyError.WrongRegion => "challenge was issued for a different region",

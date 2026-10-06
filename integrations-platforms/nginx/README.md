@@ -37,7 +37,9 @@ file), and only a 204 lets the request through.
 3. Copy the marked pieces of `kiwi-gate.conf.example` into your
    server block. Point `fastcgi_pass` at your FPM socket and
    `SCRIPT_FILENAME` at the copied `kiwi-verify.php`. Set the knobs
-   (`KIWI_VERIFY_URL`, `KIWI_SCOPE`, `KIWI_TRUST_PROXY`). Keep
+   (`KIWI_VERIFY_URL`, `KIWI_SCOPE`, `KIWI_TRUSTED_PROXIES`, a
+   comma-separated trusted-proxy CIDR list whose default empty value
+   never trusts a forwarded header). Keep
    `KIWI_BEARER` in the FPM pool environment, never in the config.
 
 4. The redirect knob: nginx `auth_request` passes only 2xx, so keep

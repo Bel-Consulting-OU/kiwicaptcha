@@ -171,7 +171,7 @@ class KiwiCaptchaFilterTest {
     @Test
     void pathPredicateSkipsUnprotectedRoutes() throws Exception {
         KiwiCaptchaFilter filter = new KiwiCaptchaFilter(newVerifier(ISSUED_AT), SECRET, "login",
-                path -> path.startsWith("api/protected"), false, null);
+                path -> path.startsWith("api/protected"), java.util.List.of(), null);
         Result result = run(filter, new MockHttp.Request("GET", "/api/open"));
         assertTrue(result.proceeded());
         assertEquals(200, result.status());
@@ -180,7 +180,7 @@ class KiwiCaptchaFilterTest {
     @Test
     void customDenialRendererWins() throws Exception {
         KiwiCaptchaFilter filter = new KiwiCaptchaFilter(newVerifier(ISSUED_AT), SECRET, "login",
-                null, false, (request, response, decision) -> response.sendRedirect("/login"));
+                null, java.util.List.of(), (request, response, decision) -> response.sendRedirect("/login"));
         MockHttp.Response response = new MockHttp.Response();
         filter.doFilter(new MockHttp.Request("POST", "/api/submit"), response, (req, res) -> {});
         assertEquals(302, response.status());
@@ -208,10 +208,16 @@ class KiwiCaptchaFilterTest {
     @Test
     void clientIpResolution() {
         MockHttp.Request direct = new MockHttp.Request("POST", "/x");
-        assertEquals("127.0.0.1", KiwiCaptchaFilter.clientIpFromRequest(direct, false));
+        assertEquals("127.0.0.1", KiwiCaptchaFilter.clientIpFromRequest(direct, java.util.List.of()));
         MockHttp.Request forwarded = new MockHttp.Request("POST", "/x")
                 .header("X-Forwarded-For", "203.0.113.9, 10.0.0.1");
-        assertEquals("203.0.113.9", KiwiCaptchaFilter.clientIpFromRequest(forwarded, true));
-        assertEquals("127.0.0.1", KiwiCaptchaFilter.clientIpFromRequest(forwarded, false));
+        // The peer must sit inside the trust list before any
+        // forwarded header is read at all.
+        assertEquals("127.0.0.1", KiwiCaptchaFilter.clientIpFromRequest(forwarded, java.util.List.of("10.0.0.0/24")));
+        MockHttp.Request trusted = new MockHttp.Request("POST", "/x")
+                .remoteAddr("10.0.0.9")
+                .header("X-Forwarded-For", "203.0.113.9, 10.0.0.9");
+        assertEquals("203.0.113.9", KiwiCaptchaFilter.clientIpFromRequest(trusted, java.util.List.of("10.0.0.0/24")));
+        assertEquals("10.0.0.9", KiwiCaptchaFilter.clientIpFromRequest(trusted, java.util.List.of()));
     }
 }

@@ -59,9 +59,16 @@ check('json mode url', $json['url'] === 'http://127.0.0.1:7371/verify');
 check('json mode body', ($body['token'] ?? '') === 't1' && ($body['scope'] ?? '') === 'login' && ($body['remoteip'] ?? '') === '192.0.2.9');
 check('json mode bearer header', ($json['headers']['Authorization'] ?? '') === 'Bearer b');
 
-$compat = KiwiVerifyLogic::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 'sec', 'trust_proxy' => true], 't2', 'signup', ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '198.51.100.4, 10.0.0.2']);
+$compat = KiwiVerifyLogic::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 'sec', 'trusted_proxies' => '10.0.0.0/24'], 't2', 'signup', ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '198.51.100.4, 10.0.0.2']);
 check('compat mode encodes response and secret', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=sec') !== false && strpos($compat['body'], 'remoteip=198.51.100.4') !== false);
 check('compat mode omits the bearer header', !isset($compat['headers']['Authorization']));
+
+// The client-ip trust boundary: a forged forwarding header never
+// moves the binding without a trusted peer.
+check('untrusted peer ignores xff', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '192.0.2.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.9');
+check('trusted lb takes next left', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '198.51.100.4, 10.0.0.9'], ['trusted_proxies' => '10.0.0.0/24']) === '198.51.100.4');
+check('garbage hop fails closed', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.9'], ['trusted_proxies' => '10.0.0.0/24']) === '10.0.0.9');
+check('real ip when trusted and no xff', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_REAL_IP' => '198.51.100.7'], ['trusted_proxies' => '10.0.0.0/24']) === '198.51.100.7');
 
 // The decision table over a fake transport.
 $ok = ['status' => 200, 'body' => json_encode(['success' => true])];

@@ -54,7 +54,7 @@ class PlgCaptchaKiwicaptcha extends CMSPlugin
             'verify_url' => (string) $this->params->get('verify_url', 'http://127.0.0.1:7371/verify'),
             'bearer' => (string) $this->params->get('bearer', ''),
             'mode' => $this->params->get('mode', 'json') === 'compat' ? 'compat' : 'json',
-            'trust_proxy' => (string) $this->params->get('trust_proxy', '0') === '1',
+            'trusted_proxies' => (string) $this->params->get('trusted_proxies', ''),
         ];
     }
 

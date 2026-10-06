@@ -87,7 +87,7 @@ public class MiddlewareTests
         {
             proceeded = true;
             return Task.CompletedTask;
-        }, verifier ?? NewVerifier(), Secret, expectedScope, pathPredicate, false, denied);
+        }, verifier ?? NewVerifier(), Secret, expectedScope, pathPredicate, null, denied);
         await middleware.InvokeAsync(context);
         context.Response.Body.Seek(0, SeekOrigin.Begin);
         using var reader = new StreamReader(context.Response.Body);
@@ -224,12 +224,15 @@ public class MiddlewareTests
     {
         var direct = new DefaultHttpContext();
         direct.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
-        Assert.Equal("127.0.0.1", KiwiCaptchaMiddleware.ClientIpFromRequest(direct, false));
+        Assert.Equal("127.0.0.1", KiwiCaptchaMiddleware.ClientIpFromRequest(direct, null));
         var forwarded = new DefaultHttpContext();
         forwarded.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.1");
-        forwarded.Request.Headers["X-Forwarded-For"] = "203.0.113.9, 10.0.0.1";
-        Assert.Equal("203.0.113.9", KiwiCaptchaMiddleware.ClientIpFromRequest(forwarded, true));
-        Assert.Equal("10.0.0.1", KiwiCaptchaMiddleware.ClientIpFromRequest(forwarded, false));
+        forwarded.Request.Headers["X-Forwarded-For"] = "203.0.113.9, 10.0.0.9";
+        // The peer must sit inside the trust list before any
+        // forwarded header is read at all.
+        Assert.Equal("10.0.0.1", KiwiCaptchaMiddleware.ClientIpFromRequest(forwarded, null));
+        Assert.Equal("203.0.113.9",
+            KiwiCaptchaMiddleware.ClientIpFromRequest(forwarded, new[] { "10.0.0.0/24" }));
     }
 
     [Fact]

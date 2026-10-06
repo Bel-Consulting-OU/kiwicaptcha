@@ -15,6 +15,6 @@ plugins:
   kiwi_signup_paths:
     default: '/u|/u.json|/users'
     client: false
-  kiwi_trust_proxy:
-    default: false
+  kiwi_trusted_proxies:
+    default: ''
     client: false

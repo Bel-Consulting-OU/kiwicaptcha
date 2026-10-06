@@ -20,6 +20,7 @@ token source order is the ``x-kiwi-token`` header, then the
 import json
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
+from .clientip import resolve_client_ip
 from .decision import VerifyDecision
 from .verify import VerifyOptions, Verifier
 
@@ -53,16 +54,24 @@ def _pick_token(
     return None
 
 
-def _client_ip(remote_addr: Optional[str], forwarded_for: Optional[str]) -> Optional[str]:
-    if forwarded_for:
-        first = forwarded_for.split(",")[0].strip()
-        if first:
-            return first
-    return remote_addr
+def _client_ip(
+    remote_addr: Optional[str],
+    forwarded_for: Optional[str],
+    trusted_proxies: Optional[Sequence[str]] = None,
+    real_ip: Optional[str] = None,
+) -> Optional[str]:
+    """The canonical client IP per the shared trusted-proxy contract.
+
+    The socket peer wins unless the peer is trusted; the forwarded
+    chain is then walked right to left through the trusted hops (see
+    :mod:`kiwicaptcha.clientip`). An empty trust list never honors a
+    forwarding header.
+    """
+    return resolve_client_ip(remote_addr, forwarded_for, real_ip, trusted_proxies)
 
 
 def _verify_once(
-    verifier: Verifier, secret_key: str, token: str, expected_scope: Optional[str],
+    verifier: Verifier, secret_key: str, token: str, expected_scope: str,
     client_ip: Optional[str],
 ) -> VerifyDecision:
     outcome = verifier.verify(
@@ -82,7 +91,9 @@ class WsgiKiwiCaptcha:
     ``scope_predicate`` receives the request path (stripped of its
     leading slash) and answers whether the path needs a captcha; paths
     that fail the predicate pass through untouched. Without a predicate
-    every request must carry a token.
+    every request must carry a token. ``trusted_proxies`` is the
+    trusted-proxy CIDR list: empty (the default) means forwarding
+    headers are ignored and the socket peer is the client IP.
     """
 
     def __init__(
@@ -90,14 +101,16 @@ class WsgiKiwiCaptcha:
         app: Callable,
         verifier: Verifier,
         secret_key: str,
+        expected_scope: str,
         scope_predicate: Optional[Callable[[str], bool]] = None,
-        expected_scope: Optional[str] = None,
+        trusted_proxies: Optional[Sequence[str]] = None,
     ) -> None:
         self.app = app
         self.verifier = verifier
         self.secret_key = secret_key
         self.scope_predicate = scope_predicate
         self.expected_scope = expected_scope
+        self.trusted_proxies = tuple(trusted_proxies or ())
 
     @staticmethod
     def _form_field(environ: Dict[str, Any]) -> Optional[str]:
@@ -149,7 +162,10 @@ class WsgiKiwiCaptcha:
         if token is None:
             return self._respond(start_response, 403, "malformed_token")
         client_ip = _client_ip(
-            environ.get("REMOTE_ADDR"), environ.get("HTTP_X_FORWARDED_FOR")
+            environ.get("REMOTE_ADDR"),
+            environ.get("HTTP_X_FORWARDED_FOR"),
+            self.trusted_proxies,
+            environ.get("HTTP_X_REAL_IP"),
         )
         decision = _verify_once(
             self.verifier, self.secret_key, token, self.expected_scope, client_ip
@@ -177,7 +193,8 @@ class KiwiCaptchaMiddleware:
     verifier: Verifier
     secret_key: str = ""
     protected_scopes: Tuple[str, ...] = ()
-    expected_scope: Optional[str] = None
+    expected_scope: str = ""
+    trusted_proxies: Tuple[str, ...] = ()
 
     def __init__(self, get_response: Callable) -> None:
         self.get_response = get_response
@@ -188,14 +205,16 @@ class KiwiCaptchaMiddleware:
         get_response: Callable,
         verifier: Verifier,
         secret_key: str,
+        expected_scope: str,
         protected_scopes: Sequence[str] = (),
-        expected_scope: Optional[str] = None,
+        trusted_proxies: Sequence[str] = (),
     ) -> "KiwiCaptchaMiddleware":
         middleware = cls(get_response)
         middleware.verifier = verifier
         middleware.secret_key = secret_key
         middleware.protected_scopes = tuple(protected_scopes)
         middleware.expected_scope = expected_scope
+        middleware.trusted_proxies = tuple(trusted_proxies)
         return middleware
 
     def __call__(self, request: Any) -> Any:
@@ -218,6 +237,8 @@ class KiwiCaptchaMiddleware:
         client_ip = _client_ip(
             request.META.get("REMOTE_ADDR"),
             request.META.get("HTTP_X_FORWARDED_FOR"),
+            self.trusted_proxies,
+            request.META.get("HTTP_X_REAL_IP"),
         )
         decision = _verify_once(
             self.verifier, self.secret_key, token, self.expected_scope, client_ip
@@ -271,13 +292,15 @@ class FlaskKiwiCaptcha:
         app: Any = None,
         verifier: Optional[Verifier] = None,
         secret_key: str = "",
-        expected_scope: Optional[str] = None,
+        expected_scope: str = "",
         request_getter: Optional[Callable[[], Any]] = None,
         jsonify_factory: Optional[Callable[..., Any]] = None,
+        trusted_proxies: Optional[Sequence[str]] = None,
     ) -> None:
         self.verifier = verifier
         self.secret_key = secret_key
         self.expected_scope = expected_scope
+        self.trusted_proxies = tuple(trusted_proxies or ())
         self._protected: Dict[str, Optional[str]] = {}
         self._request_getter = request_getter
         self._jsonify_factory = jsonify_factory
@@ -291,11 +314,14 @@ class FlaskKiwiCaptcha:
         app: Any,
         verifier: Verifier,
         secret_key: str,
-        expected_scope: Optional[str] = None,
+        expected_scope: str = "",
+        trusted_proxies: Optional[Sequence[str]] = None,
     ) -> None:
         self.verifier = verifier
         self.secret_key = secret_key
         self.expected_scope = expected_scope
+        if trusted_proxies is not None:
+            self.trusted_proxies = tuple(trusted_proxies)
         app.before_request(self._guard)
 
     def protected(self, endpoint_scope: Optional[str] = None) -> Callable:
@@ -339,7 +365,12 @@ class FlaskKiwiCaptcha:
             self.secret_key,
             token,
             self._protected.get(name) or self.expected_scope,
-            request.remote_addr,
+            _client_ip(
+                request.remote_addr,
+                request.headers.get("x-forwarded-for"),
+                self.trusted_proxies,
+                request.headers.get("x-real-ip"),
+            ),
         )
         if decision.ok:
             request.kiwi_decision = decision
@@ -390,12 +421,14 @@ class FastApiKiwiDependency:
         self,
         verifier: Verifier,
         secret_key: str,
-        expected_scope: Optional[str] = None,
+        expected_scope: str,
         on_failure: Optional[Callable[[int, str], Exception]] = None,
+        trusted_proxies: Optional[Sequence[str]] = None,
     ) -> None:
         self.verifier = verifier
         self.secret_key = secret_key
         self.expected_scope = expected_scope
+        self.trusted_proxies = tuple(trusted_proxies or ())
         self.on_failure = on_failure or self._default_failure
 
     @staticmethod
@@ -422,10 +455,11 @@ class FastApiKiwiDependency:
             raise self.on_failure(403, "malformed_token")
         client_ip = None
         if request is not None:
-            forwarded = request.headers.get("x-forwarded-for")
             client_ip = _client_ip(
                 request.client.host if request.client is not None else None,
-                forwarded,
+                request.headers.get("x-forwarded-for"),
+                self.trusted_proxies,
+                request.headers.get("x-real-ip"),
             )
         decision = _verify_once(
             self.verifier, self.secret_key, token, self.expected_scope, client_ip

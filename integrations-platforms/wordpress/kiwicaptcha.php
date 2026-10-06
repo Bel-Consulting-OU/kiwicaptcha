@@ -28,6 +28,7 @@ if (!defined('KIWICAPTCHA_DIR')) {
 }
 
 require_once KIWICAPTCHA_DIR.'includes/class-kiwicaptcha-settings.php';
+require_once KIWICAPTCHA_DIR.'includes/class-kiwicaptcha-clientip.php';
 require_once KIWICAPTCHA_DIR.'includes/class-kiwicaptcha-client.php';
 require_once KIWICAPTCHA_DIR.'includes/class-kiwicaptcha-form.php';
 require_once KIWICAPTCHA_DIR.'includes/class-kiwicaptcha-controller.php';

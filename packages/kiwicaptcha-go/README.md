@@ -55,9 +55,47 @@ if decision.OK {
 `Verify` resolves to a `VerifyDecision` with `OK`, `Disposition`
 (`allow`, `deny` or `retry`), `DecisionHandle` and `Price`. A `deny`
 answers the failure code (`expired`, `bad_signature`, `wrong_scope`,
-`already_consumed`, and so on). A `retry` disposition covers storage
-outages and admission exhaustion, where the challenge stays intact and
-the same token may be resubmitted once the backend recovers.
+`required_scope`, `already_consumed`, and so on). A `retry`
+disposition covers storage outages and admission exhaustion, where the
+challenge stays intact and the same token may be resubmitted once the
+backend recovers.
+
+The scope option is REQUIRED. Verify with an empty `ExpectedScope`
+answers the typed `required_scope` failure instead of silently
+accepting a token minted for any scope; every framework middleware
+takes the scope as a required constructor parameter, so the loose
+default is unrepresentable.
+
+## Execution-armed records: the ExecutionPolicy
+
+An execution-armed record demands the browser-trace walker, an oracle
+this SDK does not carry. The default policy is fail-closed: every
+armed record answers `execution_mismatch`, documented. A deployment
+that issues execution-armed challenges verifies them either through
+the bundle or through the sidecar: set the `ExecutionPolicy` on
+`VerifyOptions` (and on the middleware options) to delegate that
+single verification to a co-located `kiwicaptcha-verifier` sidecar
+over HTTP.
+
+```go
+policy := &kiwi.ExecutionPolicy{
+    SidecarURL:  "http://127.0.0.1:7371",
+    BearerToken: os.Getenv("KIWI_SIDECAR_BEARER"),
+}
+decision := kiwi.DecisionFromOutcome(verifier.Verify(rawToken, kiwi.VerifyOptions{
+    SecretKey:       settings.Secret,
+    ExpectedScope:   "login",
+    ExecutionPolicy: policy,
+}), kiwi.PriceRung("sha256", 8, 0))
+```
+
+Single-use semantics are preserved: the sidecar consumes the record
+(the deployment points the sidecar at the same store), and this SDK
+never double-consumes. Trust boundary: the sidecar decides
+acceptances, so it must be co-located and trusted like the verifier
+itself; the bearer credential is verified per request, and a refused
+credential denies instead of retrying. An unreachable sidecar answers
+the `retry` disposition with the record intact.
 
 ## Store adapters
 
@@ -92,9 +130,8 @@ deployment that never opens a sqlite:// url exercises none of it.
 
 ```go
 // net/http, the framework-neutral core
-guard := kiwi.Middleware(verifier, kiwi.MiddlewareOptions{
+guard := kiwi.Middleware(verifier, "login", kiwi.MiddlewareOptions{
     SecretKey:     settings.Secret,
-    ExpectedScope: "login",
     ScopePredicate: func(path string) bool {
         return strings.HasPrefix(path, "api/protected")
     },
@@ -108,19 +145,19 @@ framework so the core never pulls a framework dependency:
 ```go
 // gin
 import kin "kiwicaptcha/kiwicaptcha-go/integrations/gin"
-router.Post("/api/submit", finalHandler, kin.Middleware(verifier, secret, kin.WithExpectedScope("login")))
+router.Post("/api/submit", finalHandler, kin.Middleware(verifier, secret, "login"))
 
 // echo
 import kie "kiwicaptcha/kiwicaptcha-go/integrations/echo"
-router.Post("/api/submit", handler, kie.Middleware(verifier, secret, kie.WithExpectedScope("login")))
+router.Post("/api/submit", handler, kie.Middleware(verifier, secret, "login"))
 
 // chi
 import kic "kiwicaptcha/kiwicaptcha-go/integrations/chi"
-router.Use(kic.Middleware(verifier, kiwi.MiddlewareOptions{SecretKey: secret, ExpectedScope: "login"}))
+router.Use(kic.Middleware(verifier, "login", kiwi.MiddlewareOptions{SecretKey: secret}))
 
 // fiber
 import kif "kiwicaptcha/kiwicaptcha-go/integrations/fiber"
-app.Post("/api/submit", handler, kif.Middleware(verifier, secret, kif.WithExpectedScope("login")))
+app.Post("/api/submit", handler, kif.Middleware(verifier, secret, "login"))
 ```
 
 Every shell reads the token from the `x-kiwi-token` header, then the

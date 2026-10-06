@@ -17,7 +17,8 @@ Fields consumed from the stage instance config:
   kiwi_verify_url   default http://127.0.0.1:7371/verify
   kiwi_bearer       optional bearer credential
   kiwi_scope        default "login"
-  kiwi_trust_proxy  honor X-Forwarded-For
+  kiwi_trusted_proxies  comma-separated trusted-proxy CIDRs; the
+                    default empty list never trusts a forwarded header
   kiwi_shim_url     the deployment's shim script url, rendered into
                     the challenge so the flow shell loads it
 """
@@ -84,17 +85,19 @@ class KiwiCaptchaStageView(ChallengeStageView):
 
         remote_addr = request.META.get("REMOTE_ADDR")
         forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+        real_ip = request.META.get("HTTP_X_REAL_IP")
         result = kiwi_verify.verify(
             settings={
                 "verify_url": config.get("kiwi_verify_url"),
                 "bearer": config.get("kiwi_bearer", ""),
                 "scope": str(config.get("kiwi_scope") or "login"),
-                "trust_proxy": bool(config.get("kiwi_trust_proxy")),
+                "trusted_proxies": str(config.get("kiwi_trusted_proxies") or ""),
             },
             token=token,
             scope=str(config.get("kiwi_scope") or "login"),
             remote_addr=remote_addr,
             forwarded_for=forwarded,
+            real_ip=real_ip,
             transport=kiwi_verify.requests_transport,
         )
         if result["ok"]:

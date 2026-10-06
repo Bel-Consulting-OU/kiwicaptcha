@@ -94,6 +94,18 @@ class ParityVectorTest(unittest.TestCase):
         )
         self.assertEqual(VerifyError.WRONG_SCOPE, outcome.error)
 
+    def test_missing_scope_option_is_the_typed_required_scope_refusal(self):
+        storage = MemoryStorage(now=lambda: NOW)
+        storage.store(record_from_vector(SHA_VECTOR))
+        verifier = make_verifier(storage)
+        # The empty scope option accepts nothing: the typed refusal
+        # replaces the lax any-scope acceptance.
+        outcome = verifier.verify(
+            token_for(SHA_VECTOR),
+            VerifyOptions(secret_key=SECRET, expected_scope="", client_ip=CLIENT_IP),
+        )
+        self.assertEqual(VerifyError.REQUIRED_SCOPE, outcome.error)
+
     def test_ip_mismatch_rejected(self):
         storage = MemoryStorage(now=lambda: NOW)
         storage.store(record_from_vector(SHA_VECTOR))
@@ -176,6 +188,7 @@ class V2GateTest(unittest.TestCase):
         token = SolutionToken.create(record.nonce, counter, 5000, {}).encode()
         defaults = {"secret_key": SECRET, "client_ip": CLIENT_IP}
         defaults.update(options)
+        defaults.setdefault("expected_scope", "login")
         return verifier.verify(token, VerifyOptions(**defaults))
 
     def test_v2_full_pass(self):
@@ -306,7 +319,7 @@ class V2GateTest(unittest.TestCase):
         receipt = (ISSUED_AT + 1) * 1_000_000  # 1s after issuance < 5s floor
         outcome = verifier.verify(
             token,
-            VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
         )
         self.assertEqual(VerifyError.MALFORMED_RECORD, outcome.error)
         # The MAC-carrying record evaluates the floor exactly.
@@ -320,7 +333,7 @@ class V2GateTest(unittest.TestCase):
         token_mac = SolutionToken.create(record_mac.nonce, counter_mac, 10, {}).encode()
         outcome_mac = verifier_mac.verify(
             token_mac,
-            VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
         )
         self.assertEqual(VerifyError.TOO_FAST, outcome_mac.error)
         # A receipt past the floor passes. A fresh store: the TOO_FAST
@@ -334,7 +347,7 @@ class V2GateTest(unittest.TestCase):
         receipt2 = (ISSUED_AT + 6) * 1_000_000
         outcome2 = verifier2.verify(
             token2,
-            VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt2),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt2),
         )
         self.assertTrue(outcome2.is_ok(), outcome2.code)
         self.assertEqual(outcome2.solve_duration_ms, 6000)
@@ -350,7 +363,7 @@ class V2GateTest(unittest.TestCase):
         receipt = (ISSUED_AT - 10) * 1_000_000
         outcome = verifier.verify(
             token,
-            VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt),
         )
         self.assertEqual(VerifyError.TOO_FAST, outcome.error)
         # Within the bound the floor check is skipped. A fresh store:
@@ -364,7 +377,7 @@ class V2GateTest(unittest.TestCase):
         receipt_within = (ISSUED_AT - 2) * 1_000_000
         outcome2 = verifier2.verify(
             token2,
-            VerifyOptions(
+            VerifyOptions(expected_scope="login", 
                 secret_key=SECRET, client_ip=CLIENT_IP, now_ns=receipt_within
             ),
         )
@@ -448,7 +461,7 @@ class V2GateTest(unittest.TestCase):
         ).encode()
         outcome = verifier.verify(
             bot_token,
-            VerifyOptions(
+            VerifyOptions(expected_scope="login", 
                 secret_key=SECRET, client_ip=CLIENT_IP, enforce_telemetry=True
             ),
         )
@@ -464,7 +477,7 @@ class V2GateTest(unittest.TestCase):
         ).encode()
         outcome2 = verifier2.verify(
             bot_token2,
-            VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP),
         )
         self.assertTrue(outcome2.is_ok(), outcome2.code)
 
@@ -476,7 +489,7 @@ class V2GateTest(unittest.TestCase):
         verifier = make_verifier(storage)
         token = SolutionToken.create(record.nonce, 0, 5000, {}).encode()
         outcome = verifier.verify(
-            token, VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP)
+            token, VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP)
         )
         self.assertEqual(VerifyError.UNSUPPORTED_ARGON2_PARAMS, outcome.error)
 
@@ -564,9 +577,9 @@ class ConsumedResolutionTest(unittest.TestCase):
     def test_stored_invalid_replays_to_any_caller(self):
         record, verifier, counter = self._prepare()
         token = SolutionToken.create(record.nonce, counter + 1, 5000, {}).encode()
-        first = verifier.verify(token, VerifyOptions(secret_key=SECRET))
+        first = verifier.verify(token, VerifyOptions(expected_scope="login", secret_key=SECRET))
         self.assertEqual(VerifyError.INSUFFICIENT_WORK, first.error)
-        again = verifier.verify(token, VerifyOptions(secret_key=SECRET))
+        again = verifier.verify(token, VerifyOptions(expected_scope="login", secret_key=SECRET))
         self.assertEqual(VerifyError.INSUFFICIENT_WORK, again.error)
 
     def test_identity_gated_replay(self):
@@ -575,14 +588,14 @@ class ConsumedResolutionTest(unittest.TestCase):
         identity = "order-123"
         first = verifier.verify(
             good,
-            VerifyOptions(secret_key=SECRET, operation_identity=identity),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, operation_identity=identity),
         )
         self.assertTrue(first.is_ok(), first.code)
         self.assertTrue(first.from_stored_result is False)
         # The same identity replays the stored success.
         replay = verifier.verify(
             good,
-            VerifyOptions(secret_key=SECRET, operation_identity=identity),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, operation_identity=identity),
         )
         self.assertTrue(replay.is_ok(), replay.code)
         self.assertTrue(replay.from_stored_result)
@@ -590,38 +603,38 @@ class ConsumedResolutionTest(unittest.TestCase):
         # A different identity is refused.
         other = verifier.verify(
             good,
-            VerifyOptions(secret_key=SECRET, operation_identity="order-456"),
+            VerifyOptions(expected_scope="login", secret_key=SECRET, operation_identity="order-456"),
         )
         self.assertEqual(VerifyError.ALREADY_CONSUMED, other.error)
         # A null identity is refused.
         null_identity = verifier.verify(
-            good, VerifyOptions(secret_key=SECRET)
+            good, VerifyOptions(expected_scope="login", secret_key=SECRET)
         )
         self.assertEqual(VerifyError.ALREADY_CONSUMED, null_identity.error)
 
     def test_crash_window_is_indeterminate(self):
         record, verifier, counter = self._prepare()
         good = SolutionToken.create(record.nonce, counter, 5000, {}).encode()
-        first = verifier.verify(good, VerifyOptions(secret_key=SECRET))
+        first = verifier.verify(good, VerifyOptions(expected_scope="login", secret_key=SECRET))
         self.assertTrue(first.is_ok())
         # Simulate the crash between consume and commit: strip the result.
         entry = verifier.storage._records[record.nonce]
         entry.result = None
-        outcome = verifier.verify(good, VerifyOptions(secret_key=SECRET))
+        outcome = verifier.verify(good, VerifyOptions(expected_scope="login", secret_key=SECRET))
         self.assertEqual(VerifyError.CONSUME_INDETERMINATE, outcome.error)
 
     def test_exempt_failure_on_consumed_record_resolves_stored(self):
         record, verifier, counter = self._prepare()
         good = SolutionToken.create(record.nonce, counter, 5000, {}).encode()
         first = verifier.verify(
-            good, VerifyOptions(secret_key=SECRET, client_ip=CLIENT_IP)
+            good, VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip=CLIENT_IP)
         )
         self.assertTrue(first.is_ok())
         # A replay whose client IP no longer matches: ip_mismatch is
         # replay-exempt, so the compositional gate passes and the stored
         # success answers (already consumed, null identity).
         outcome = verifier.verify(
-            good, VerifyOptions(secret_key=SECRET, client_ip="198.51.100.7")
+            good, VerifyOptions(expected_scope="login", secret_key=SECRET, client_ip="198.51.100.7")
         )
         self.assertEqual(VerifyError.ALREADY_CONSUMED, outcome.error)
 
@@ -655,7 +668,7 @@ class ConsumedResolutionTest(unittest.TestCase):
         record, verifier, counter = self._prepare()
         verifier.storage.cancel(record.nonce)
         token = SolutionToken.create(record.nonce, counter, 5000, {}).encode()
-        outcome = verifier.verify(token, VerifyOptions(secret_key=SECRET))
+        outcome = verifier.verify(token, VerifyOptions(expected_scope="login", secret_key=SECRET))
         self.assertEqual(VerifyError.RECORD_NOT_FOUND, outcome.error)
 
 
@@ -664,7 +677,7 @@ class MalformedTokenTest(unittest.TestCase):
         storage = MemoryStorage(now=lambda: NOW)
         verifier = make_verifier(storage)
         outcome = verifier.verify(
-            "!!!not-base64!!!", VerifyOptions(secret_key=SECRET)
+            "!!!not-base64!!!", VerifyOptions(expected_scope="login", secret_key=SECRET)
         )
         self.assertEqual(VerifyError.MALFORMED_TOKEN, outcome.error)
         self.assertTrue(outcome.detail)

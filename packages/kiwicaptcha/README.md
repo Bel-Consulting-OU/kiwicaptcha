@@ -361,8 +361,10 @@ works. The SHA-256 mode has no such ceiling.
 
 Rust and PHP also share a language-neutral JSON record schema (the serde
 JSON of `ChallengeRecord`; same keys as PHP's `ChallengeRecord::toArray()`)
-and epoch-microsecond timing (`issued_at_ns` is epoch microseconds in
-both languages, despite the historical `_ns` name). A record persisted by PHP
+and epoch-microsecond timing. **`issued_at_ns` carries epoch `MICROSECONDS`**,
+not nanoseconds, despite the `_ns` suffix; the wire field keeps its
+historical name on every surface. Renaming the field is deferred to the
+next protocol revision. A record persisted by PHP
 can be verified by Rust and vice versa.
 
 ## Regenerating the WASM solver

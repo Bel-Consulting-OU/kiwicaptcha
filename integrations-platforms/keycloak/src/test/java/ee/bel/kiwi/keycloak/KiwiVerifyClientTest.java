@@ -46,9 +46,12 @@ public final class KiwiVerifyClientTest {
         check("missing token is null", KiwiVerifyClient.extractToken("  ", fields, f -> null) == null);
 
         // Ip binding.
-        check("peer ip when untrusted", "10.9.9.9".equals(KiwiVerifyClient.clientIp("10.9.9.9", "1.2.3.4, 10.0.0.1", false)));
-        check("forwarded ip when trusted", "1.2.3.4".equals(KiwiVerifyClient.clientIp("10.9.9.9", "1.2.3.4, 10.0.0.1", true)));
-        check("loopback fallback", "127.0.0.1".equals(KiwiVerifyClient.clientIp(null, null, false)));
+        check("peer ip when untrusted", "10.9.9.9".equals(KiwiVerifyClient.clientIp("10.9.9.9", "1.2.3.4, 10.0.0.1", null, null)));
+        check("peer ip when trust list empty", "10.9.9.9".equals(KiwiVerifyClient.clientIp("10.9.9.9", "1.2.3.4, 10.0.0.1", null, "")));
+        check("forwarded ip when trusted", "1.2.3.4".equals(KiwiVerifyClient.clientIp("10.0.0.1", "1.2.3.4, 10.0.0.1", null, "10.0.0.0/8")));
+        check("garbage hop fails closed", "10.0.0.1".equals(KiwiVerifyClient.clientIp("10.0.0.1", "1.2.3.4, garbage!!, 10.0.0.1", null, "10.0.0.0/8")));
+        check("real ip when trusted and no xff", "198.51.100.7".equals(KiwiVerifyClient.clientIp("10.0.0.1", null, "198.51.100.7", "10.0.0.0/8")));
+        check("loopback fallback", "127.0.0.1".equals(KiwiVerifyClient.clientIp(null, null, null, null)));
 
         // JSON escaping.
         check("quotes escaped", KiwiVerifyClient.jsonEscape("a\"b\\c\nd").equals("a\\\"b\\\\c\\nd"));

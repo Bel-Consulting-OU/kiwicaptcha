@@ -21,7 +21,7 @@ func TestEchoGuard(t *testing.T) {
 			t.Errorf("the decision must ride the echo context")
 		}
 		return ctx.NoContent(http.StatusOK)
-	}, Middleware(verifier, testSecret, WithExpectedScope("login")))
+	}, Middleware(verifier, testSecret, "login"))
 	// No token: the framework idiomatic denial.
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/submit", nil))

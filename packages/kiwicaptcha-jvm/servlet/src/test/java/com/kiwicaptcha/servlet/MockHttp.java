@@ -188,7 +188,11 @@ public final class MockHttp {
         @Override public String getAuthType() { return null; }
         @Override public Cookie[] getCookies() { return new Cookie[0]; }
         @Override public long getDateHeader(String name) { return -1; }
-        @Override public Enumeration<String> getHeaders(String name) { return Collections.emptyEnumeration(); }
+        @Override
+        public Enumeration<String> getHeaders(String name) {
+            String value = headers.get(name.toLowerCase(Locale.ROOT));
+            return value == null ? Collections.emptyEnumeration() : Collections.enumeration(java.util.List.of(value));
+        }
         @Override public int getIntHeader(String name) { return -1; }
         @Override public String getPathInfo() { return null; }
         @Override public String getPathTranslated() { return null; }

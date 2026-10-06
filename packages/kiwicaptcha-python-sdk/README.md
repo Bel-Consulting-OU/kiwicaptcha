@@ -48,8 +48,33 @@ if decision.ok:
 `verify` resolves to a `VerifyDecision` with `ok`, `disposition`
 (`allow`, `deny` or `retry`), `decision_handle` and `price`. A `deny`
 answers the failure code (`expired`, `bad_signature`, `wrong_scope`,
-`already_consumed`, and so on). A `retry` disposition covers storage
-outages and admission exhaustion, where the challenge stays intact.
+`required_scope`, `already_consumed`, and so on). A `retry` disposition
+covers storage outages and admission exhaustion, where the challenge
+stays intact.
+
+The scope option is REQUIRED (`expected_scope` is a positional
+argument of `VerifyOptions`): an empty option answers the typed
+`required_scope` refusal instead of silently accepting a token minted
+for any scope, and every framework middleware takes the scope at
+construction.
+
+## Execution-armed records: the execution policy
+
+An execution-armed record demands the browser-trace walker, an oracle
+this SDK does not carry: the default policy fails every armed record
+closed (`execution_mismatch`, documented). A deployment that issues
+armed challenges verifies them either through the bundle or through
+the sidecar: pass `execution_policy=ExecutionPolicy(sidecar_url=...)`
+on the verify options and the armed record's single verification
+delegates to a co-located `kiwicaptcha-verifier` over HTTP, whose
+verdict merges into this SDK's outcome.
+
+Single-use semantics are preserved: the sidecar consumes the record
+(point the sidecar at the same store), and this SDK never
+double-consumes. Trust boundary: the sidecar decides acceptances, so
+it must be co-located and trusted like the verifier itself. An
+unreachable sidecar answers `storage_unavailable` (the retry
+disposition) with the record intact; a refused bearer denies.
 
 ## Store adapters
 
@@ -76,17 +101,17 @@ recorded with the consume.
 from kiwicaptcha import WsgiKiwiCaptcha, DjangoMiddleware, FlaskKiwiCaptcha, FastApiKiwiDependency
 
 # Any wsgi stack
-app = WsgiKiwiCaptcha(app, verifier, settings.secret,
+app = WsgiKiwiCaptcha(app, verifier, settings.secret, "login",
                       scope_predicate=lambda path: path.startswith("api/submit"))
 
 # Django: add to MIDDLEWARE via from_settings
 middleware = DjangoMiddleware.from_settings(
-    get_response, verifier, settings.secret,
+    get_response, verifier, settings.secret, "login",
     protected_scopes=("api/submit",),
 )
 
 # Flask: install the extension, mark views
-captcha = FlaskKiwiCaptcha(app, verifier, settings.secret)
+captcha = FlaskKiwiCaptcha(app, verifier, settings.secret, "login")
 
 @app.route("/api/submit", methods=["POST"])
 @captcha.protected()

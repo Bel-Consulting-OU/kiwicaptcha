@@ -186,6 +186,9 @@ class VerifyGatesTest < Minitest::Test
       KiwiCaptcha.verify(row['token_b64'], options_for(record, row, storage, extra)).code
     end
     assert_equal KiwiCaptcha::VerifyError::WRONG_SCOPE, expect_code.call(expected_scope: 'other')
+    # The scope option is required: an empty option is the typed
+    # required_scope refusal, never an any-scope acceptance.
+    assert_equal KiwiCaptcha::VerifyError::REQUIRED_SCOPE, expect_code.call(expected_scope: '')
     assert_equal KiwiCaptcha::VerifyError::WRONG_REGION, expect_code.call(region: 'us')
     assert_equal KiwiCaptcha::VerifyError::WRONG_ISSUER, expect_code.call(region: nil, expected_issuer: 'prod')
     assert_equal KiwiCaptcha::VerifyError::WRONG_POLICY_VERSION, expect_code.call(expected_policy_version: 2)
@@ -358,7 +361,7 @@ class VerifyGatesTest < Minitest::Test
     )
     storage = KiwiCaptcha::MemoryStore.new
     storage.store(record)
-    token = TestSupport.token_for(nonce, counter, 1200, 'v' => 1)
+    token = TestSupport.token_for(nonce, counter, 1200, { 'v' => 1 })
     result = KiwiCaptcha.verify(token, TestSupport.verify_options(storage: storage, expected_scope: 'login'))
     assert result.ok, result.code
     assert_equal 'sha8bit', result.price

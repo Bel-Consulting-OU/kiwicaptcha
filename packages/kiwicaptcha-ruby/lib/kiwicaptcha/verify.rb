@@ -68,20 +68,24 @@ module KiwiCaptcha
       :enforce_telemetry, :operation_identity, :expected_request_binding,
       :binding_expectation, :expected_policy_version, :policy_version_floor,
       :region, :expected_issuer, :secrets_by_kid, :revoked_kids,
-      :tenant_id, :accept_legacy_v1, :rsw,
+      :tenant_id, :accept_legacy_v1, :rsw, :execution_policy,
       keyword_init: true
     ) do
-      def initialize(**kwargs)
+      # The scope option is REQUIRED: the keyword has no default, so a
+      # call without it raises at construction (the ruby spelling of
+      # the required_scope contract) instead of defaulting to the lax
+      # any-scope acceptance.
+      def initialize(expected_scope:, **kwargs)
         opts = {
-          expected_scope: nil, client_ip: nil, now_ns: nil, now: nil,
+          client_ip: nil, now_ns: nil, now: nil,
           enforce_telemetry: false, operation_identity: nil,
           expected_request_binding: nil, binding_expectation: :exact,
           expected_policy_version: nil, policy_version_floor: nil,
           region: nil, expected_issuer: nil, secrets_by_kid: {},
           revoked_kids: [].freeze, tenant_id: nil, accept_legacy_v1: false,
-          rsw: nil
+          rsw: nil, execution_policy: nil
         }.merge(kwargs)
-        super(**opts)
+        super(expected_scope: expected_scope, **opts)
       end
     end
 
@@ -180,7 +184,19 @@ module KiwiCaptcha
           return invalid(VerifyError::RECORD_NOT_FOUND) if peek.nil?
         end
 
-        failure = cheap_phase_check(options, secrets, legacy_secret, peek, token, true, receipt_ns)
+        # The execution delegation plane: an armed record under a
+        # sidecar policy delegates the execution dimension after the
+        # cheap phase proved everything the SDK checks locally.
+        policy = options.execution_policy
+        delegate_execution = !policy.nil? && policy.enabled? && peek.execution_program.to_s != ''
+        failure = cheap_phase_check(options, secrets, legacy_secret, peek, token, true, receipt_ns, delegate_execution)
+        if failure.nil? && delegate_execution
+          ok, code = policy.delegate(raw_token, options.expected_scope, options.client_ip)
+          if ok
+            return valid(peek.nonce, ladder_rung(peek), peek.request_binding, true, nil, peek.decoy_field)
+          end
+          return invalid(code)
+        end
         if failure
           if failure != VerifyError::MISSING_CLIENT_IP
             cleanup = begin
@@ -319,7 +335,7 @@ module KiwiCaptcha
         )
       end
 
-      def cheap_phase_check(options, secrets, legacy_secret, record, token, check_timing, now_ns)
+      def cheap_phase_check(options, secrets, legacy_secret, record, token, check_timing, now_ns, delegate_execution = false)
         # 0. The record must carry the nonce it was loaded under.
         return VerifyError::MALFORMED_RECORD if record.nonce != token.nonce
 
@@ -343,9 +359,13 @@ module KiwiCaptcha
         # 5b to 5d. Region, policy epoch, issuer.
         deployment = check_deployment_expectations(options, record)
         return deployment unless deployment.nil?
-        # 5e. The execution binding.
-        execution = check_execution_binding(record, token)
-        return execution unless execution.nil?
+        # 5e. The execution binding. The delegation path leaves this
+        # gate to the sidecar's full-core pass; every other gate stays
+        # local.
+        unless delegate_execution
+          execution = check_execution_binding(record, token)
+          return execution unless execution.nil?
+        end
         # 6. Server-measured minimum duration.
         return nil unless check_timing
 
@@ -389,9 +409,12 @@ module KiwiCaptcha
       end
 
       def check_scope_and_binding(options, record)
-        if !options.expected_scope.nil? && record.scope != options.expected_scope
-          return VerifyError::WRONG_SCOPE
-        end
+        # The scope option is required: an empty option refuses with
+        # the typed code instead of accepting any scope.
+        return VerifyError::REQUIRED_SCOPE if options.expected_scope.nil? || options.expected_scope.empty?
+
+        return VerifyError::WRONG_SCOPE if record.scope != options.expected_scope
+
         # Exact option equality by default: a bound record must present
         # its binding, an unbound record under a presented expectation
         # is refused; the legacy mode permits an unbound record

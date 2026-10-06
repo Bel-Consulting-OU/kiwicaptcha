@@ -58,7 +58,7 @@ const result = await verify(token, {
 
 if (!result.ok) {
   // result.code is the shared snake_case vocabulary:
-  // expired, wrong_scope, ip_mismatch, already_consumed, ...
+  // expired, wrong_scope, required_scope, ip_mismatch, already_consumed, ...
   throw new Error(result.code);
 }
 result.disposition;      // 'allow' on a valid proof, 'deny' on failure
@@ -67,6 +67,35 @@ result.price;            // the paid work-ladder rung, e.g. 'sha20', 'argon64', 
 result.requestBinding;   // the application transaction to re-check
 result.solveDurationMs;  // server-measured, from the authenticated issuance clock
 ```
+
+The scope option is REQUIRED (a compile-time required property on
+`VerifyOptions`): an empty option answers the typed `required_scope`
+refusal instead of silently accepting a token minted for any scope.
+
+## Execution-armed records: the executionPolicy
+
+An execution-armed record demands the browser-trace walker. The node
+surface carries the deterministic simulator, and it fails every record
+whose presented trace does not walk and digest-match. For deployments
+that want the single shared verdict path, set `executionPolicy` on
+`VerifyOptions`: the armed record's verification then delegates to a
+co-located `kiwicaptcha-verifier` sidecar over HTTP (the sidecar
+carries the full Rust core), and the verdict merges into this SDK's
+result shape.
+
+```ts
+const result = await verify(token, {
+  storage, secretKey, expectedScope: 'login',
+  executionPolicy: { sidecarUrl: 'http://127.0.0.1:7371', bearerToken: process.env.KIWI_SIDECAR_BEARER },
+});
+```
+
+Single-use semantics are preserved: the sidecar consumes the record
+(point the sidecar at the same store), and this SDK never
+double-consumes. Trust boundary: the sidecar decides acceptances, so
+it must be co-located and trusted like the verifier itself. An
+unreachable sidecar answers `storage_unavailable` (the retry
+disposition) with the record intact; a refused bearer denies.
 
 The verification order mirrors the cores exactly: token decode, record
 structure, protocol gate, kid gate and secret resolution, the HMAC

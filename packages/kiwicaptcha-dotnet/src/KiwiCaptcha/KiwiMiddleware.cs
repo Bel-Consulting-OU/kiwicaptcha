@@ -37,20 +37,26 @@ public sealed class KiwiCaptchaMiddleware
     private readonly string _secretKey;
     private readonly string _expectedScope;
     private readonly Func<PathString, bool>? _pathPredicate;
-    private readonly bool _realIp;
+    private readonly IReadOnlyList<string>? _trustedProxies;
     private readonly Func<HttpContext, Decision, Task>? _denied;
+    private readonly ExecutionPolicy? _executionPolicy;
 
-    /// <summary>Builds the middleware over a verifier and the options.</summary>
+    /// <summary>Builds the middleware over a verifier and the options.
+    /// The expected scope is a required parameter: the signature makes
+    /// the empty-scope deployment unrepresentable, matching the
+    /// verifier's typed required_scope refusal.</summary>
     public KiwiCaptchaMiddleware(RequestDelegate next, Verifier verifier, string secretKey,
-        string? expectedScope = null, Func<PathString, bool>? pathPredicate = null,
-        bool realIp = false, Func<HttpContext, Decision, Task>? denied = null)
+        string expectedScope, Func<PathString, bool>? pathPredicate = null,
+        IReadOnlyList<string>? trustedProxies = null, Func<HttpContext, Decision, Task>? denied = null,
+        ExecutionPolicy? executionPolicy = null)
     {
         _next = next;
         _verifier = verifier;
         _secretKey = secretKey;
-        _expectedScope = expectedScope ?? "";
+        _expectedScope = expectedScope;
+        _executionPolicy = executionPolicy;
         _pathPredicate = pathPredicate;
-        _realIp = realIp;
+        _trustedProxies = trustedProxies;
         _denied = denied;
     }
 
@@ -91,7 +97,8 @@ public sealed class KiwiCaptchaMiddleware
         {
             SecretKey = _secretKey,
             ExpectedScope = _expectedScope,
-            ClientIp = ClientIpFromRequest(context, _realIp),
+            ExecutionPolicy = _executionPolicy,
+            ClientIp = ClientIpFromRequest(context, _trustedProxies),
         };
         var outcome = _verifier.Verify(token, options);
         var decision = Decision.FromOutcome(outcome, "");
@@ -120,20 +127,36 @@ public sealed class KiwiCaptchaMiddleware
     }
 
     /// <summary>
-    /// Resolves the client ip: the forwarded header's first hop when
-    /// trusted, else the remote address.
+    /// Resolves the canonical client IP of a request against the
+    /// trusted-proxy CIDR list. An empty list (the default) trusts
+    /// nobody: forwarding headers are ignored and the socket peer is
+    /// the answer, so a client-supplied X-Forwarded-For can never move
+    /// the binding. The shared resolver in
+    /// <see cref="ClientIpResolver"/> owns the walk; this wrapper only
+    /// lifts the ASP.NET view (the connection peer, every
+    /// X-Forwarded-For line, the X-Real-IP value) into it. ASP.NET's
+    /// own KnownProxies and ForwardedHeaders middleware are never
+    /// consulted, so the behavior matches every other SDK.
     /// </summary>
-    public static string ClientIpFromRequest(HttpContext context, bool trustForwarded)
+    public static string ClientIpFromRequest(HttpContext context, IReadOnlyList<string>? trustedProxies)
     {
-        if (trustForwarded && context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwarded))
+        var peer = context.Connection.RemoteIpAddress?.ToString() ?? "";
+        List<string> xffLines = new();
+        if (context.Request.Headers.TryGetValue("X-Forwarded-For", out var forwarded))
         {
-            var first = forwarded.ToString().Split(',')[0].Trim();
-            if (first.Length > 0)
+            foreach (var line in forwarded)
             {
-                return first;
+                xffLines.Add(line);
             }
         }
-        return context.Connection.RemoteIpAddress?.ToString() ?? "";
+        string? realIp = context.Request.Headers.TryGetValue("X-Real-IP", out var real)
+            && real.Count > 0 ? real[0] : null;
+        if (xffLines.Count == 0 && realIp == null)
+        {
+            // No forwarding signal anywhere: answer the peer directly.
+            return peer;
+        }
+        return ClientIpResolver.Resolve(peer, xffLines, realIp, trustedProxies);
     }
 }
 
@@ -145,12 +168,14 @@ public static class KiwiCaptchaApplicationBuilderExtensions
     /// before the endpoint handlers it should protect.
     /// </summary>
     public static IApplicationBuilder UseKiwiCaptcha(this IApplicationBuilder app,
-        Verifier verifier, string secretKey, string? expectedScope = null,
-        Func<PathString, bool>? pathPredicate = null, bool realIp = false,
-        Func<HttpContext, Decision, Task>? denied = null)
+        Verifier verifier, string secretKey, string expectedScope,
+        Func<PathString, bool>? pathPredicate = null,
+        IReadOnlyList<string>? trustedProxies = null,
+        Func<HttpContext, Decision, Task>? denied = null,
+        ExecutionPolicy? executionPolicy = null)
     {
         return app.UseMiddleware<KiwiCaptchaMiddleware>(
-            verifier, secretKey, expectedScope, pathPredicate, realIp, denied);
+            verifier, secretKey, expectedScope, pathPredicate, trustedProxies, denied, executionPolicy);
     }
 }
 

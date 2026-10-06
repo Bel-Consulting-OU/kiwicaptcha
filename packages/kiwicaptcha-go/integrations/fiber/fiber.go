@@ -15,7 +15,7 @@ import (
 const DecisionKey = "kiwi.decision"
 
 // Middleware builds the fiber guard middleware.
-func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) fiber.Handler {
+func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, options ...Option) fiber.Handler {
 	config := optionsConfig(options)
 	return func(ctx fiber.Ctx) error {
 		if config.scopePredicate != nil && !config.scopePredicate(ctx.Route().Path) {
@@ -27,7 +27,7 @@ func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) fi
 		}
 		outcome := verifier.Verify(token, kiwi.VerifyOptions{
 			SecretKey:     secretKey,
-			ExpectedScope: config.expectedScope,
+			ExpectedScope: expectedScope,
 			ClientIP:      clientIP(ctx),
 		})
 		decision := kiwi.DecisionFromOutcome(outcome, "")
@@ -51,17 +51,11 @@ func DecisionFrom(ctx fiber.Ctx) (kiwi.VerifyDecision, bool) {
 }
 
 type fiberConfig struct {
-	expectedScope  string
 	scopePredicate func(path string) bool
 }
 
 // Option shapes the fiber guard.
 type Option func(*fiberConfig)
-
-// WithExpectedScope pins one scope for every protected route.
-func WithExpectedScope(scope string) Option {
-	return func(c *fiberConfig) { c.expectedScope = scope }
-}
 
 // WithScopePredicate receives the route pattern and answers whether
 // the route needs a token.

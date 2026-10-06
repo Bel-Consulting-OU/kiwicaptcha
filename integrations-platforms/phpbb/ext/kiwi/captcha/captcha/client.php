@@ -65,7 +65,7 @@ class client
      */
     public static function build_request(array $settings, string $token, string $scope, array $server): array
     {
-        $ip = client::client_ip($server, !empty($settings['trust_proxy']));
+        $ip = client::client_ip($server, (string) ($settings['trusted_proxies'] ?? ''));
         if (($settings['mode'] ?? 'json') === 'compat') {
             $body = http_build_query([
                 'secret' => (string) ($settings['bearer'] ?? ''),
@@ -113,22 +113,189 @@ class client
     }
 
     /**
-     * The client ip bound into the verify call.
+     * The client ip bound into the verify call, resolved through the
+     * shared trusted-proxy walk: the socket peer wins unless the peer
+     * sits inside the trusted proxy CIDR list (the default empty list
+     * trusts nobody, so a forged X-Forwarded-For never moves the
+     * binding). The chain is walked right to left through the trusted
+     * hops and X-Real-IP is honored when no chain exists.
      *
      * @param array<string, mixed> $server
      */
-    public static function client_ip(array $server, bool $trust_proxy): string
+    public static function client_ip(array $server, string $trusted_proxies = ''): string
     {
-        if ($trust_proxy) {
-            $forwarded = $server['HTTP_X_FORWARDED_FOR'] ?? null;
-            if (is_string($forwarded) && $forwarded !== '') {
-                $first = trim(explode(',', $forwarded)[0]);
-                if ($first !== '') {
-                    return $first;
-                }
+        $cidrs = [];
+        foreach (explode(',', $trusted_proxies) as $candidate) {
+            $candidate = trim($candidate);
+            if ($candidate !== '') {
+                $cidrs[] = $candidate;
+            }
+        }
+        $peer = (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
+        if ($cidrs === []) {
+            return $peer;
+        }
+        $peer_canonical = self::canonical_ip($peer);
+        $peer_trusted = $peer_canonical !== null && self::in_trusted($peer_canonical, $cidrs);
+        $forwarded = isset($server['HTTP_X_FORWARDED_FOR']) && is_string($server['HTTP_X_FORWARDED_FOR'])
+            ? trim($server['HTTP_X_FORWARDED_FOR'])
+            : '';
+        if ($forwarded === '') {
+            if (!$peer_trusted) {
+                return $peer;
+            }
+            $real_ip = isset($server['HTTP_X_REAL_IP']) && is_string($server['HTTP_X_REAL_IP'])
+                ? trim($server['HTTP_X_REAL_IP'])
+                : '';
+            if ($real_ip === '' || preg_match('/[\x00-\x1F\x7F]/', $real_ip) === 1) {
+                return $peer;
+            }
+            $canonical = self::canonical_ip($real_ip);
+
+            return $canonical ?? $peer;
+        }
+        if (preg_match('/[\x00-\x1F\x7F]/', $forwarded) === 1 || !$peer_trusted) {
+            return $peer;
+        }
+        foreach (array_reverse(array_map('trim', explode(',', $forwarded))) as $hop) {
+            $canonical = self::canonical_ip($hop);
+            if ($canonical === null) {
+                // An unparsable hop terminates the trust chain: who
+                // lies beyond it cannot be established, so the peer
+                // falls back.
+                return $peer;
+            }
+            if (!self::in_trusted($canonical, $cidrs)) {
+                return $canonical;
             }
         }
 
-        return (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
+        return $peer;
+    }
+
+    /**
+     * The canonical IP text of one forwarded node, or null when it is
+     * not a genuine address: bare IPv4, IPv4 with a port, bracketed
+     * IPv6 with an optional port; unknown, obfuscated tokens and
+     * malformed ports refuse; IPv4-mapped IPv6 normalizes to IPv4.
+     */
+    private static function canonical_ip(string $identifier): ?string
+    {
+        $value = trim($identifier);
+        if ($value === '' || $value === 'unknown' || str_starts_with($value, '_')) {
+            return null;
+        }
+        $candidate = $value;
+        if (str_starts_with($candidate, '[')) {
+            $closing = strpos($candidate, ']');
+            if ($closing === false) {
+                return null;
+            }
+            $suffix = substr($candidate, $closing + 1);
+            if ($suffix !== '' && !self::port_suffix($suffix)) {
+                return null;
+            }
+            $candidate = substr($candidate, 1, $closing - 1);
+        } elseif (substr_count($candidate, ':') === 1) {
+            $parts = explode(':', $candidate);
+            if (count($parts) === 2
+                && filter_var($parts[0], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)
+                && self::port_suffix(':'.$parts[1])) {
+                $candidate = $parts[0];
+            }
+        }
+        if (str_contains($candidate, ':') && substr_count($candidate, ':') < 2) {
+            $parts = explode(':', $candidate);
+            $last = array_pop($parts);
+            if (filter_var($last, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                $candidate = implode(':', $parts);
+            }
+        }
+        if (filter_var($candidate, FILTER_VALIDATE_IP) === false) {
+            return null;
+        }
+        $packed = @inet_pton($candidate);
+        if ($packed === false) {
+            return null;
+        }
+        if (strlen($packed) === 16 && substr($packed, 0, 12) === "\0\0\0\0\0\0\0\0\0\0\xff\xff") {
+            return (string) inet_ntop(substr($packed, 12));
+        }
+
+        return (string) inet_ntop($packed);
+    }
+
+    /**
+     * Exactly ":" plus a decimal port in the 1..65535 range.
+     */
+    private static function port_suffix(string $suffix): bool
+    {
+        if (!str_starts_with($suffix, ':')) {
+            return false;
+        }
+        $digits = substr($suffix, 1);
+
+        return ctype_digit($digits) && strlen($digits) <= 5
+            && (int) $digits >= 1 && (int) $digits <= 65535;
+    }
+
+    /**
+     * Whether one canonical IP text sits inside any trusted CIDR. Host
+     * bits set in a CIDR are masked away, and an IPv4-mapped IPv6
+     * address matches in its IPv4 form.
+     *
+     * @param list<string> $cidrs
+     */
+    private static function in_trusted(string $ip, array $cidrs): bool
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false) {
+            return false;
+        }
+        foreach ($cidrs as $cidr) {
+            $cidr = trim($cidr);
+            if ($cidr === '') {
+                continue;
+            }
+            if (!str_contains($cidr, '/')) {
+                $network = self::canonical_ip($cidr);
+                if ($network !== null && $network === $ip) {
+                    return true;
+                }
+                continue;
+            }
+            [$network_text, $prefix_text] = explode('/', $cidr, 2);
+            if (!ctype_digit($prefix_text)) {
+                continue;
+            }
+            $network_canonical = self::canonical_ip($network_text);
+            if ($network_canonical === null) {
+                continue;
+            }
+            $network = @inet_pton($network_canonical);
+            if ($network === false || strlen($network) !== strlen($packed)) {
+                continue;
+            }
+            $bits = strlen($packed) * 8;
+            $prefix = (int) $prefix_text;
+            if ($prefix < 0 || $prefix > $bits) {
+                continue;
+            }
+            $full_bytes = intdiv($prefix, 8);
+            $remainder = $prefix % 8;
+            if (substr($network, 0, $full_bytes) !== substr($packed, 0, $full_bytes)) {
+                continue;
+            }
+            if ($remainder > 0 && $full_bytes < strlen($packed)) {
+                $mask = chr((0xFF << (8 - $remainder)) & 0xFF);
+                if ((substr($network, $full_bytes, 1) & $mask) !== (substr($packed, $full_bytes, 1) & $mask)) {
+                    continue;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
     }
 }

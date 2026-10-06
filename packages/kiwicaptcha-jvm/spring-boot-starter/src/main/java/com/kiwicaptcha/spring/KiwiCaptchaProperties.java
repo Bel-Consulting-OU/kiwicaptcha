@@ -34,8 +34,8 @@ public class KiwiCaptchaProperties {
     private boolean acceptLegacyV1;
     /** The route scope the middleware pins, empty accepts any. */
     private String expectedScope = "";
-    /** Whether the x-forwarded-for first hop is trusted for the ip binding. */
-    private boolean realIp;
+    /** The trusted-proxy CIDR list; empty (the default) never trusts a forwarded header. */
+    private java.util.List<String> trustedProxies = new java.util.ArrayList<>();
     /** The servlet url patterns the filter protects. */
     private java.util.List<String> urlPatterns = new java.util.ArrayList<>(java.util.List.of("/*"));
 
@@ -127,12 +127,12 @@ public class KiwiCaptchaProperties {
         this.expectedScope = expectedScope;
     }
 
-    public boolean isRealIp() {
-        return realIp;
+    public java.util.List<String> getTrustedProxies() {
+        return trustedProxies;
     }
 
-    public void setRealIp(boolean realIp) {
-        this.realIp = realIp;
+    public void setTrustedProxies(java.util.List<String> trustedProxies) {
+        this.trustedProxies = trustedProxies;
     }
 
     public java.util.List<String> getUrlPatterns() {

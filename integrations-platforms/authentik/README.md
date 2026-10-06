@@ -25,7 +25,7 @@ against the kiwi deployment before the flow continues.
 2. Create the stage through the API (or after a restart it appears in
    the stage list) and set its config keys: `kiwi_verify_url`
    (default `http://127.0.0.1:7371/verify`), `kiwi_bearer`,
-   `kiwi_scope`, `kiwi_trust_proxy`, `kiwi_shim_url` (the
+   `kiwi_scope`, `kiwi_trusted_proxies` (comma-separated trusted-proxy CIDRs; the default empty list never trusts a forwarded header), `kiwi_shim_url` (the
    deployment's compat loader URL, loaded by the flow shell).
 3. Add the stage to a flow (registration or login) at the position
    where the protection belongs.

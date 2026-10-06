@@ -50,7 +50,7 @@ class kiwi
             'verify_url' => (string) ($this->config['kiwi_verify_url'] ?? 'http://127.0.0.1:7371/verify'),
             'bearer' => (string) ($this->config['kiwi_bearer'] ?? ''),
             'mode' => ($this->config['kiwi_mode'] ?? 'json') === 'compat' ? 'compat' : 'json',
-            'trust_proxy' => !empty($this->config['kiwi_trust_proxy']),
+            'trusted_proxies' => (string) ($this->config['kiwi_trusted_proxies'] ?? ''),
             'scope' => kiwi::sanitize_scope((string) ($this->config['kiwi_scope'] ?? 'signup')),
         ];
     }

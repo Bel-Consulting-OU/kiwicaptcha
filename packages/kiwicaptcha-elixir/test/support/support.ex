@@ -69,7 +69,7 @@ defmodule Kiwicaptcha.TestSupport do
       %{
         storage: nil,
         secret_key: @secret,
-        expected_scope: nil,
+        expected_scope: "login",
         client_ip: nil,
         now_ns: nil,
         now: nil,

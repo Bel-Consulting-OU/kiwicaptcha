@@ -40,6 +40,7 @@ test('conformance: every verify error code is in the shared vocabulary', () => {
     'missing_client_ip',
     'record_not_found',
     'request_binding_mismatch',
+    'required_scope',
     'storage_unavailable',
     'telemetry_rejected',
     'too_fast',
@@ -121,8 +122,8 @@ test('conformance: a consumed golden record replays the identical denial code', 
   await storage.store(record);
   const wrongToken = encodeToken({ ...decodeToken(row.token_b64), counter: 12345 });
   const clock = frozenClock(record);
-  const first = await verify(wrongToken, { storage, secretKey: golden.hkdf.secret, ...clock });
+  const first = await verify(wrongToken, { storage, secretKey: golden.hkdf.secret, expectedScope: 'login', ...clock });
   assert.equal(first.code, VerifyErrorCode.InsufficientWork);
-  const second = await verify(wrongToken, { storage, secretKey: golden.hkdf.secret, ...clock });
+  const second = await verify(wrongToken, { storage, secretKey: golden.hkdf.secret, expectedScope: 'login', ...clock });
   assert.equal(second.code, VerifyErrorCode.InsufficientWork);
 });

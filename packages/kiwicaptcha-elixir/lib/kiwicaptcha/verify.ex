@@ -206,15 +206,15 @@ defmodule Kiwicaptcha.Verify do
 
     case Kiwicaptcha.Token.decode(raw_token) do
       {:error, _} -> invalid(:malformed_token)
-      {:ok, token} -> run_verify(token, options, secrets, legacy_secret)
+      {:ok, token} -> run_verify(token, raw_token, options, secrets, legacy_secret)
     end
   end
 
-  defp run_verify(token, options, secrets, legacy_secret) do
+  defp run_verify(token, raw_token, options, secrets, legacy_secret) do
     case snapshot(options.storage, token.nonce) do
       {:error, :storage} -> invalid(:storage_unavailable)
       {:ok, %{kind: :missing}} -> invalid(:record_not_found)
-      {:ok, state} -> peeked(state, token, options, secrets, legacy_secret)
+      {:ok, state} -> peeked(state, token, raw_token, options, secrets, legacy_secret)
     end
   end
 
@@ -245,7 +245,7 @@ defmodule Kiwicaptcha.Verify do
     _ -> {:error, :storage}
   end
 
-  defp peeked(state, token, options, secrets, legacy_secret) do
+  defp peeked(state, token, raw_token, options, secrets, legacy_secret) do
     peek =
       if state.record do
         {:found, state.record}
@@ -256,7 +256,7 @@ defmodule Kiwicaptcha.Verify do
     case peek do
       {:storage_error, _} -> invalid(:storage_unavailable)
       {:missing, _} -> invalid(:record_not_found)
-      {:found, record} -> cheap_phase(state, record, token, options, secrets, legacy_secret)
+      {:found, record} -> cheap_phase(state, record, token, raw_token, options, secrets, legacy_secret)
     end
   end
 
@@ -269,7 +269,13 @@ defmodule Kiwicaptcha.Verify do
     _ -> {:storage_error, nil}
   end
 
-  defp cheap_phase(state, peek, token, options, secrets, legacy_secret) do
+  defp cheap_phase(state, peek, token, raw_token, options, secrets, legacy_secret) do
+    # The execution delegation plane: an armed record under a sidecar
+    # policy delegates the execution dimension after the cheap phase
+    # proved everything the SDK checks locally.
+    policy = if is_map(options), do: Map.get(options, :execution_policy), else: nil
+    delegate_execution = Kiwicaptcha.ExecutionPolicy.enabled?(policy) and peek.execution_program != nil
+
     case cheap_phase_check(
            options,
            secrets,
@@ -277,10 +283,30 @@ defmodule Kiwicaptcha.Verify do
            peek,
            token,
            true,
-           now_micros(options)
+           now_micros(options),
+           delegate_execution
          ) do
-      nil -> telemetry_gate(state, peek, token, options, secrets, legacy_secret)
-      failure -> handle_failure(state, failure, peek, token, options, secrets, legacy_secret)
+      nil ->
+        if delegate_execution do
+          case Kiwicaptcha.ExecutionPolicy.delegate(policy, raw_token, Map.get(options, :expected_scope), Map.get(options, :client_ip)) do
+            {:ok, :ok} ->
+              valid(peek.nonce, ladder_rung(peek), peek.request_binding, true, nil, peek.decoy_field)
+
+            {:deny, code} ->
+              # A known wire code maps onto the vocabulary atoms; an
+              # unknown one stays the deterministic deny (never widened).
+              if is_atom(code) and code != nil do
+                invalid(code)
+              else
+                invalid(:execution_mismatch)
+              end
+          end
+        else
+          telemetry_gate(state, peek, token, options, secrets, legacy_secret)
+        end
+
+      failure ->
+        handle_failure(state, failure, peek, token, options, secrets, legacy_secret)
     end
   end
 
@@ -628,7 +654,7 @@ defmodule Kiwicaptcha.Verify do
     end
   end
 
-  defp cheap_phase_check(options, secrets, legacy_secret, record, token, check_timing, now_ns) do
+  defp cheap_phase_check(options, secrets, legacy_secret, record, token, check_timing, now_ns, delegate_execution \\ false) do
     # 0. The record must carry the nonce it was loaded under. A nil
     # result means every gate passed.
     if record.nonce != token.nonce do
@@ -641,7 +667,7 @@ defmodule Kiwicaptcha.Verify do
              :ok <-
                check_ip_binding(options, record, secret_for_key(secrets, record, legacy_secret)),
              :ok <- check_deployment_expectations(options, record),
-             :ok <- check_execution_binding(record, token) do
+             :ok <- if(delegate_execution, do: :ok, else: check_execution_binding(record, token)) do
           if check_timing, do: check_min_duration(record, now_ns), else: :ok
         end
 
@@ -702,31 +728,42 @@ defmodule Kiwicaptcha.Verify do
   end
 
   defp check_scope_and_binding(options, record) do
-    if options.expected_scope != nil and record.scope != options.expected_scope do
-      :wrong_scope
-    else
-      # Exact option equality by default: a bound record must present
-      # its binding, an unbound record under a presented expectation is
-      # refused; the legacy mode permits an unbound record regardless
-      # of the expectation.
-      cond do
-        record.request_binding == nil and options.binding_expectation == :legacy ->
-          :ok
+    cond do
+      # The scope option is required: an empty option refuses with the
+      # typed code instead of accepting any scope.
+      options.expected_scope in [nil, ""] ->
+        :required_scope
 
-        record.request_binding == nil or options.expected_request_binding == nil ->
-          if record.request_binding == options.expected_request_binding,
-            do: :ok,
-            else: :request_binding_mismatch
+      record.scope != options.expected_scope ->
+        :wrong_scope
 
-        Kiwicaptcha.Mac.timing_safe_equals(
-          record.request_binding,
-          options.expected_request_binding
-        ) ->
-          :ok
+      true ->
+        check_request_binding(options, record)
+    end
+  end
 
-        true ->
-          :request_binding_mismatch
-      end
+  defp check_request_binding(options, record) do
+    # Exact option equality by default: a bound record must present
+    # its binding, an unbound record under a presented expectation is
+    # refused; the legacy mode permits an unbound record regardless
+    # of the expectation.
+    cond do
+      record.request_binding == nil and options.binding_expectation == :legacy ->
+        :ok
+
+      record.request_binding == nil or options.expected_request_binding == nil ->
+        if record.request_binding == options.expected_request_binding,
+          do: :ok,
+          else: :request_binding_mismatch
+
+      Kiwicaptcha.Mac.timing_safe_equals(
+        record.request_binding,
+        options.expected_request_binding
+      ) ->
+        :ok
+
+      true ->
+        :request_binding_mismatch
     end
   end
 

@@ -19,14 +19,15 @@ public final class KiwiTokenInterceptor implements HandlerInterceptor {
     private final Verifier verifier;
     private final String secretKey;
     private final String expectedScope;
-    private final boolean realIp;
+    private final java.util.List<String> trustedProxies;
 
     /** Builds the interceptor over the shared verifier. */
-    public KiwiTokenInterceptor(Verifier verifier, String secretKey, String expectedScope, boolean realIp) {
+    public KiwiTokenInterceptor(Verifier verifier, String secretKey, String expectedScope,
+                                java.util.List<String> trustedProxies) {
         this.verifier = verifier;
         this.secretKey = secretKey;
         this.expectedScope = expectedScope == null ? "" : expectedScope;
-        this.realIp = realIp;
+        this.trustedProxies = trustedProxies == null ? java.util.List.of() : trustedProxies;
     }
 
     @Override
@@ -44,7 +45,7 @@ public final class KiwiTokenInterceptor implements HandlerInterceptor {
         Verifier.Options options = new Verifier.Options();
         options.secretKey = secretKey;
         options.expectedScope = expectedScope;
-        options.clientIp = KiwiCaptchaFilter.clientIpFromRequest(request, realIp);
+        options.clientIp = KiwiCaptchaFilter.clientIpFromRequest(request, trustedProxies);
         Decision decision = Decision.fromOutcome(verifier.verify(token, options), "");
         if (decision.ok) {
             request.setAttribute(KiwiCaptchaFilter.DECISION_ATTRIBUTE, decision);

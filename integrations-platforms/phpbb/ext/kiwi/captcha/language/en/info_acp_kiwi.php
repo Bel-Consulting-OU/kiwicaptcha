@@ -21,5 +21,6 @@ $lang = array_merge($lang ?? [], [
     'KIWI_MODE' => 'Wire format',
     'KIWI_MODE_JSON' => 'json (sidecar /verify)',
     'KIWI_MODE_COMPAT' => 'compat (siteverify: response/secret)',
-    'KIWI_TRUST_PROXY' => 'Trust X-Forwarded-For',
+    'KIWI_TRUSTED_PROXIES' => 'Trusted proxy CIDRs',
+    'KIWI_TRUSTED_PROXIES_EXPLAIN' => 'Comma-separated trusted-proxy CIDRs (IPv4 or IPv6). Empty (the default) never trusts a forwarded header: the socket peer is the client ip.',
 ]);

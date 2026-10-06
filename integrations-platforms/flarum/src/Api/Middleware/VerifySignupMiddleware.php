@@ -30,7 +30,7 @@ class VerifySignupMiddleware implements MiddlewareInterface
 
     public const SCOPE_SETTING = 'kiwi-signup-scope';
 
-    public const TRUST_PROXY_SETTING = 'kiwi-trust-proxy';
+    public const TRUSTED_PROXIES_SETTING = 'kiwi-trusted-proxies';
 
     public const ENABLED_SETTING = 'kiwi-enabled';
 
@@ -56,6 +56,7 @@ class VerifySignupMiddleware implements MiddlewareInterface
         $server = [
             'REMOTE_ADDR' => $serverParams['REMOTE_ADDR'] ?? '127.0.0.1',
             'HTTP_X_FORWARDED_FOR' => $serverParams['HTTP_X_FORWARDED_FOR'] ?? null,
+            'HTTP_X_REAL_IP' => $serverParams['HTTP_X_REAL_IP'] ?? null,
         ];
         $params = (array) ($request->getParsedBody() ?: []);
         $token = KiwiVerifier::extractToken(
@@ -75,7 +76,7 @@ class VerifySignupMiddleware implements MiddlewareInterface
                 'verify_url' => (string) $this->settings->get(self::VERIFY_URL_SETTING),
                 'bearer' => (string) $this->settings->get(self::BEARER_SETTING),
                 'mode' => 'json',
-                'trust_proxy' => !empty($this->settings->get(self::TRUST_PROXY_SETTING)),
+                'trusted_proxies' => (string) $this->settings->get(self::TRUSTED_PROXIES_SETTING),
             ],
             $token,
             (string) ($this->settings->get(self::SCOPE_SETTING) ?: 'signup'),

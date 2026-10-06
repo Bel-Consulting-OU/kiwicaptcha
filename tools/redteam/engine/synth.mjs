@@ -21,10 +21,10 @@
  * KIWI_RT_SEED (default 0x6b776d74).
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { optionalCompletion } from "./model-adapter.mjs";
+import { optionalCompletion, scoreNovelty, methodNote } from "./model-adapter.mjs";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -91,6 +91,29 @@ if (targets.length === 0) {
 
 const rng = new Lcg(seed);
 const candidates = [];
+
+// The self-escalation mandate (change.md 10.2): when the orchestrator
+// hands in KIWI_RT_SYNTH_COMBINE="classA+classB", the first candidates
+// of the corpus ARE the combined lineages (the two prior technique
+// labels crossed), at the raised budget the orchestrator set.
+const combine = (process.env.KIWI_RT_SYNTH_COMBINE ?? "")
+    .split("+")
+    .map((c) => c.trim())
+    .filter(Boolean);
+if (combine.length === 2) {
+    candidates.push({
+        id: "X-001",
+        seed: rng.next(),
+        class: combine[0],
+        mutation: "combined-lineage",
+        target: `${combine[0]} x ${combine[1]} (combined lineage against the newest surfaces)`,
+        corpus: "engine/runs escalation lineage",
+        rationale: `self-escalation: ${combine[0]} combined with ${combine[1]}`,
+        source: "escalation-combine",
+        expected: "rejected-or-refuted",
+    });
+}
+
 for (let i = 0; i < count; i++) {
     const attackClass = rng.pick(CLASSES);
     const mutation = rng.pick(MUTATIONS);
@@ -105,7 +128,7 @@ for (let i = 0; i < count; i++) {
         corpus: source,
         rationale: `${attackClass} via ${mutation} against ${target}, corpus ${source}`,
         source: "deterministic-grammar",
-        expected: "rejected-or-refused",
+        expected: "rejected-or-refuted",
     });
 }
 
@@ -136,14 +159,34 @@ try {
     modelNote = `local model refused: ${err.message}`;
 }
 
+// The novelty ordering: with a configured model its completion feeds
+// the scores; in CI mode the documented no-op scorer orders the corpus
+// deterministically from the surface map and the runs ledger.
+const runsDir = join(ENGINE_DIR, "runs");
+const runHistory = existsSync(runsDir)
+    ? readdirSync(runsDir)
+        .filter((name) => name.endsWith(".json") && !name.startsWith("triage"))
+        .map((name) => {
+            try { return JSON.parse(readFileSync(join(runsDir, name), "utf8")); } catch { return null; }
+        })
+        .filter((doc) => doc !== null)
+    : [];
+for (const candidate of candidates) {
+    const novelty = scoreNovelty({ candidate, surface, runHistory });
+    candidate.novelty = novelty.score;
+    candidate.seen_in_run_history = novelty.seenInHistory;
+}
+candidates.sort((a, b) => b.novelty - a.novelty);
+
 const out = {
     schema: "kiwicaptcha.redteam.candidates/1",
     seed,
     count: candidates.length,
-    modelNote,
+    modelNote: methodNote(),
+    escalation: combine.length === 2 ? { combined: combine } : null,
     candidates,
 };
 const outPath = join(ENGINE_DIR, `candidates-${seed.toString(16)}.json`);
 writeFileSync(outPath, JSON.stringify(out, null, 2) + "\n");
-console.log(`synth: ${candidates.length} candidates (seed ${seed.toString(16)}); ${modelNote}`);
+console.log(`synth: ${candidates.length} candidates (seed ${seed.toString(16)}); ${out.modelNote}`);
 console.log(`synth: candidates written to ${outPath}`);

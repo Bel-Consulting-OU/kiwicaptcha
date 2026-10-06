@@ -10,6 +10,7 @@ defmodule Kiwicaptcha.VerifyError do
     bad_signature: "challenge signature is invalid",
     expired: "challenge has expired",
     wrong_scope: "challenge was issued for a different scope",
+    required_scope: "the scope option is required: verify refuses to accept a token for any scope",
     ip_mismatch: "challenge was issued to a different client IP",
     missing_client_ip: "challenge is IP-bound but no client IP was supplied",
     wrong_region: "challenge was issued for a different region",

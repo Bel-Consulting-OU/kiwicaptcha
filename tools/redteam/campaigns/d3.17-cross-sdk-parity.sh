@@ -113,12 +113,46 @@ run_suite python "cd '$REPO_ROOT/packages/kiwicaptcha-python-sdk' && python3 -m 
 run_suite go "cd '$REPO_ROOT/packages/kiwicaptcha-go' && go test -run 'TestToken|TestVerify' ." || SUITE_FAILURES=$((SUITE_FAILURES + 1))
 run_suite ruby "cd '$REPO_ROOT/packages/kiwicaptcha-ruby' && ruby test/test_token.rb test/test_verify_gates.rb" || SUITE_FAILURES=$((SUITE_FAILURES + 1))
 run_suite elixir "cd '$REPO_ROOT/packages/kiwicaptcha-elixir' && mix test test/token_test.exs test/verify_gates_test.exs" || SUITE_FAILURES=$((SUITE_FAILURES + 1))
-run_suite jvm "cd '$REPO_ROOT/packages/kiwicaptcha-jvm' && mvn -q -pl core test -Dtest=TokenTest -DfailIfNoTests=false" || SUITE_FAILURES=$((SUITE_FAILURES + 1))
+run_suite jvm "cd '$REPO_ROOT/packages/kiwicaptcha-jvm' && mvn -q -pl core test -Dtest='TokenTest,VerifierGatesTest' -DfailIfNoTests=false" || SUITE_FAILURES=$((SUITE_FAILURES + 1))
 run_suite dotnet "cd '$REPO_ROOT/packages/kiwicaptcha-dotnet' && DOTNET_ROLL_FORWARD=LatestMajor dotnet test tests/KiwiCaptcha.Tests --filter 'FullyQualifiedName~TokenRecordTests|FullyQualifiedName~VerifierGateTests'" || SUITE_FAILURES=$((SUITE_FAILURES + 1))
 
 rt_assert_eq "$SUITE_FAILURES" "0" "identical rejection across all seven SDKs"
 rt_assert_eq "$DIRECT_RC" "0" "python direct adversarial drive"
 rt_assert_eq "$NODE_RC" "0" "node direct adversarial drive"
+
+# ---------- leg 3: the execution-armed record through the sidecar ----------
+# The execution delegation plane: every SDK fails an execution-armed
+# record closed by default, and every SDK under the sidecar policy
+# delegates that single verification to the spawned
+# kiwicaptcha-verifier (the full Rust core with the real execution
+# verifier) and accepts the same solve. The row asserts the identical
+# sidecar verdict across all seven.
+DELEGATION_FAILURES=0
+run_delegation_suite() {
+    label=$1
+    script=$2
+    log=$(mktemp)
+    if bash -c "$script" >"$log" 2>&1; then
+        printf 'ASSERT: PASS %s: the execution-armed record accepts through the sidecar path\n' "$label"
+        rm -f "$log"
+        return 0
+    fi
+    printf 'ASSERT: FAIL %s: the sidecar delegation suite failed\n' "$label"
+    cp "$log" "$RT_DIR/runs/env/d317-sidecar-$label.err"
+    rm -f "$log"
+    return 1
+}
+
+run_delegation_suite go "cd '$REPO_ROOT/packages/kiwicaptcha-go' && go test -run 'TestSidecarDelegationForExecutionArmedRecords' ." || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite node "cd '$REPO_ROOT/packages/kiwicaptcha-node' && npm run build >/dev/null && node --test dist/test/sidecar.test.js" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite python "cd '$REPO_ROOT/packages/kiwicaptcha-python-sdk' && python3 -m unittest tests.test_sidecar" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite ruby "cd '$REPO_ROOT/packages/kiwicaptcha-ruby' && ruby test/test_sidecar.rb" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite elixir "cd '$REPO_ROOT/packages/kiwicaptcha-elixir' && mix test test/sidecar_test.exs" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite jvm "cd '$REPO_ROOT/packages/kiwicaptcha-jvm' && mvn -q -pl core test -Dtest=ExecutionPolicyTest -DfailIfNoTests=false" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+run_delegation_suite dotnet "cd '$REPO_ROOT/packages/kiwicaptcha-dotnet' && DOTNET_ROLL_FORWARD=LatestMajor dotnet test tests/KiwiCaptcha.Tests --filter 'FullyQualifiedName~ExecutionPolicyTests'" || DELEGATION_FAILURES=$((DELEGATION_FAILURES + 1))
+
+rt_assert_eq "$DELEGATION_FAILURES" "0" "identical execution-armed verdict through the sidecar across all seven SDKs"
+rt_metric "sidecar_delegation_sdks=$((7 - DELEGATION_FAILURES))"
 
 rt_metric "sdks=7 adversarial_vectors=$(python3 -c 'import json; print(len(json.load(open("'$REPO_ROOT'/protocol/solution-token-v1/fixtures.json")).get("rejected", [])))')"
 printf 'ECONOMIC: %s %s weakest_link=none rejection_divergences=0\n' "$RT_CAMPAIGN" "$RT_PROFILE"

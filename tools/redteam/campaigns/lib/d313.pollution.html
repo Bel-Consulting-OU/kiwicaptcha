@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>red-team widget page</title>
+<script src="/kiwi-captcha/assets/runtime.caaa40d32ceb4b76e45d421ae601d7e95558c52940eecc970e5756a5fa768dc6.js" integrity="sha256-yqpA0yzrS3bkXUIa5gHX6VVYxSlA7syXDldWpfp2jcY=" crossorigin="anonymous"></script>
+<script src="/kiwi-captcha/assets/driver.b0b8d63e78c5be9d0bcff476e9e4874832ffea63e409c76f1e124774dae5e5fc.js" integrity="sha256-sLjWPnjFvp0Lz/R26eSHSDL/6mPkCcdvHhJHdNrl5fw=" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="host">
+<form id="the-form" action="/form-submit" method="post">
+<div class="kiwi-container"
+     data-kiwi-scope="login"
+     data-kiwi-endpoint="/challenge"
+     data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.caaa40d32ceb4b76e45d421ae601d7e95558c52940eecc970e5756a5fa768dc6.js" data-kiwi-runtime-integrity="sha256-yqpA0yzrS3bkXUIa5gHX6VVYxSlA7syXDldWpfp2jcY="
+     data-kiwi-worker-src="/kiwi-captcha/assets/worker.96431251a50a229d46e6b8e736504de7d0076bfa7ba49da75b1e5480fef20c0c.js" data-kiwi-worker-integrity="sha256-lkMSUaUKIp1G5rjnNlBN59AHa/p7pJ2nWx5UgP7yDAw="
+     data-kiwi-risk-src="/kiwi-captcha/assets/risk.ddb62bc0e7d8377e3a4d0e61bf4012c8d08e327211a7f03d5e0d7bfa9badb613.js" data-kiwi-risk-integrity="sha256-3bYrwOfYN346TQ5hv0ASyNCOMnIRp/A9Xg17+putthM="
+     data-kiwi-telemetry-src="/kiwi-captcha/assets/telemetry.cfff540c422b1b1df7a88f6ba5ac03117c23ad81403aafb9b396f4289c9f87af.js" data-kiwi-telemetry-integrity="sha256-z/9UDEIrGx33qI9rpawDEXwjrYFAOq+5s5b0KJyfh68="
+     data-kiwi-execution-src="/kiwi-captcha/assets/execution.f4a5cb6b29b2950f35ce1122db699bc4ee1da5dc24650df38e38b527d446c0f7.js" data-kiwi-execution-integrity="sha256-9KXLaymylQ81zhEi22mbxO4dpdwkZQ3zjji1J9RGwPc="
+     data-kiwi-telemetry="1">
+<input type="hidden" name="kiwi__token" data-kiwi-token value="">
+<div class="kiwi-widget" data-kiwi-widget data-state="idle" role="status" aria-live="polite">
+<div class="kiwi-icon-wrapper"><svg></svg><div class="kiwi-glow"></div></div>
+<div class="kiwi-main">
+<div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span data-kiwi-badge class="kiwi-badge">Idle</span></div>
+<div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>
+<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected</p><span class="kiwi-timer" data-kiwi-timer></span></div>
+</div></div></div></form>
+</div>
+<p id="out"></p>
+
+<script>
+// The hostile host page: prototype pollution lands before and during
+// the widget's work; the DOM clobbering shadows the driver's name
+// spaces. The required result: the driver survives and solves; any
+// observable breakage is reported as a finding.
+try {
+  (Object.prototype).__kiwiPolluted = 'polluted';
+  (Object.prototype).kiwiMode = 'attacker';
+  (Object.prototype).dataState = 'done';
+} catch (e) {}
+window.name = '{"kiwiConfig":{"mode":"attacker"}}';
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    const mk = (tag, id) => { const el = document.createElement(tag); el.id = id; document.body.appendChild(el); return el; };
+    mk('div', 'kiwiWidgets');
+    mk('div', 'kiwiCaptcha');
+    mk('form', 'kiwiForm');
+  } catch (e) {}
+  setInterval(() => {
+    try { (Object.prototype).kiwiMode = 'attacker'; } catch (e) {}
+  }, 500);
+});
+</script>
+</body>
+</html>

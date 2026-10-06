@@ -1,5 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { delegationEnabled, delegateToSidecar, type ExecutionPolicy } from './sidecar.js';
 import {
+  ALL_VERIFY_ERROR_CODES,
   VerifyErrorCode,
   describeVerifyError,
   isReplayExempt,
@@ -63,8 +65,9 @@ export interface VerifyOptions {
   storage: StoreAdapter;
   /** The master secret (or the legacy secret when secretsByKid is set). */
   secretKey: string | Buffer;
-  /** Required challenge scope; null accepts any scope. */
-  expectedScope?: string | null;
+  /** Required challenge scope: the typed required_scope refusal
+    * answers an empty option, never an any-scope acceptance. */
+  expectedScope: string;
   /** The client IP for the optional IP binding. */
   clientIp?: string | null;
   /** Server receipt time in epoch microseconds; a test hook. */
@@ -79,6 +82,12 @@ export interface VerifyOptions {
   expectedRequestBinding?: string | null;
   /** exact (default) requires option equality; legacy permits unbound. */
   bindingExpectation?: 'exact' | 'legacy';
+  /**
+   * The execution-armed dimension policy: absent (the default) fails
+   * every armed record closed; the sidecar policy delegates that
+   * single verification to a co-located kiwicaptcha-verifier sidecar.
+   */
+  executionPolicy?: ExecutionPolicy | null;
   /** The current security-policy epoch; null disables the check. */
   expectedPolicyVersion?: number | null;
   /** The declared rollout-window floor; null keeps strict equality. */
@@ -182,7 +191,7 @@ interface ResolvedSecrets {
 interface VerifierConfigInternal {
   storage: StoreAdapter;
   secretKey: Buffer;
-  expectedScope: string | null;
+  expectedScope: string;
   clientIp: string | null;
   nowNs: number | null;
   now: () => number;
@@ -223,7 +232,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   const config: VerifierConfigInternal = {
     storage: options.storage,
     secretKey: Buffer.isBuffer(options.secretKey) ? options.secretKey : Buffer.from(options.secretKey, 'utf8'),
-    expectedScope: options.expectedScope ?? null,
+    expectedScope: options.expectedScope,
     clientIp: options.clientIp ?? null,
     nowNs: options.nowNs ?? null,
     now: options.now ?? (() => Math.floor(Date.now() / 1000)),
@@ -270,9 +279,26 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     }
   }
 
+  // The execution delegation plane: an armed record under a sidecar
+  // policy delegates the execution dimension after the cheap phase
+  // proved everything the SDK checks locally.
+  const delegateExecution = delegationEnabled(peek, options.executionPolicy);
   // The cheap-phase security checks, in the canonical order; the first
   // failing check decides the outcome.
-  const failure = cheapPhaseCheck(config, secrets, peek, token, evidence, true, receiptNs);
+  const failure = cheapPhaseCheck(config, secrets, peek, token, evidence, true, receiptNs, delegateExecution);
+  if (failure === null && delegateExecution) {
+    const delegated = await delegateToSidecar(rawToken, config.expectedScope, config.clientIp, options.executionPolicy!);
+    if (delegated.ok) {
+      return valid(token.nonce, ladderRung(peek), peek.requestBinding, true, null, peek.decoyField);
+    }
+    // The sidecar's kiwi-code is the shared wire vocabulary: a known
+    // code passes through the deny shape verbatim, an unknown one
+    // stays the deterministic execution_mismatch deny (never widened).
+    const known = (ALL_VERIFY_ERROR_CODES as readonly string[]).includes(delegated.code)
+      ? (delegated.code as VerifyErrorCode)
+      : VerifyErrorCode.ExecutionMismatch;
+    return invalid(known);
+  }
   if (failure !== null) {
     if (failure !== VerifyErrorCode.MissingClientIp) {
       let cleanup: Awaited<ReturnType<StoreAdapter['deleteIfPending']>>;
@@ -472,6 +498,7 @@ function cheapPhaseCheck(
   evidence: { digest: string | null; trace: string | null },
   checkTiming: boolean,
   nowNs: number | null,
+  delegateExecution = false,
 ): CheapCheck {
   // 0. The record must carry the nonce it was loaded under.
   if (record.nonce !== token.nonce) {
@@ -505,10 +532,13 @@ function cheapPhaseCheck(
   if (deployment !== null) {
     return deployment;
   }
-  // 5e. The execution binding.
-  const execution = checkExecutionBinding(record, evidence);
-  if (execution !== null) {
-    return execution;
+  // 5e. The execution binding. The delegation path leaves this gate
+  // to the sidecar's full-core pass; every other gate stays local.
+  if (!delegateExecution) {
+    const execution = checkExecutionBinding(record, evidence);
+    if (execution !== null) {
+      return execution;
+    }
   }
   // 6. Server-measured minimum duration.
   if (checkTiming) {
@@ -590,7 +620,12 @@ function checkTtl(config: VerifierConfigInternal, record: ChallengeRecord): Chea
 }
 
 function checkScopeAndBinding(config: VerifierConfigInternal, record: ChallengeRecord): CheapCheck {
-  if (config.expectedScope !== null && record.scope !== config.expectedScope) {
+  // The scope option is required: an empty option refuses with the
+  // typed code instead of accepting any scope.
+  if (!config.expectedScope) {
+    return VerifyErrorCode.RequiredScope;
+  }
+  if (record.scope !== config.expectedScope) {
     return VerifyErrorCode.WrongScope;
   }
   // Exact option-equality by default: a bound record must present its

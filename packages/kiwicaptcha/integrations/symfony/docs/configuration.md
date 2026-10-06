@@ -251,7 +251,14 @@ The stages and their knobs:
 - `risk.scopes.<name>.value_class` (low, standard, high, critical;
   default standard) is the per-scope worth of the protected action for
   the pricing stage. The class weights are 800, 1000, 1200 and 1400 per
-  mille of the risk score.
+  mille of the risk score. The calibrated declared abuse values (the
+  solver reference table: the measured attacker cost per 1000 solves
+  over the 10x calibration margin) are 0.00005, 0.0001, 0.0001 and
+  0.0002 dollars per 1000. A scope whose real stake exceeds its rung's
+  measured ceiling cannot be priced by raw proof of work. The doctor
+  then advises the escalation answer: set the scope's
+  `risk.scopes.<name>.minimum` to `step_up` or `deny` so the
+  disposition ladder carries what the rung cannot price.
 - `risk.asn.dataset_path` points at a local, versioned IP-to-ASN
   dataset file (the free IPtoASN tsv shapes, one
   `first_ip TAB last_ip TAB asn` row per line, `#` comments). No

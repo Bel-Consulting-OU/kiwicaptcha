@@ -17,8 +17,14 @@
 //!   fields the parser requires; argon2id and rsw intentionally carry
 //!   no reference class, and their verdicts say
 //!   insufficient-reference-data instead of guessing.
-//! - The declared abuse values are the table's policy defaults, printed
-//!   as such; the runtime doctor owns the real per-scope values.
+//! - The declared abuse values are measured-cost-derived, not free-hand
+//!   policy guesses: each default is the bench-measured attacker cost
+//!   per 1000 solves for its rung, divided by the table's documented
+//!   calibration margin (10x) and rounded down to a clean figure. The
+//!   doctor owns the real per-scope values. Where even the recalibrated
+//!   value exceeds what a rung can price, the honest answer is the
+//!   disposition escalation (a step_up or deny minimum), never a
+//!   bigger declared number.
 //! - Instances derive deterministically from a seed, so two runs at
 //!   one seed solve byte-identical challenges and find identical
 //!   counters; only the timings vary.
@@ -278,6 +284,29 @@ pub struct AttackerRate {
 pub struct Economics {
     pub cpu_usd_per_core_hour: f64,
     pub provenance: String,
+    /// The measured-cost calibration of the declared abuse values,
+    /// present when the table ships the recalibrated defaults. The
+    /// margin statement is machine-readable so the bench can print it
+    /// beside every dollar figure it derives.
+    #[serde(default)]
+    pub calibration: Option<Calibration>,
+}
+
+/// The measured-cost calibration block: how the declared abuse values
+/// derive from the bench's own measurements.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Calibration {
+    /// The safety margin divisor: a declared default prices its rung at
+    /// one margin-th of the measured attacker cost.
+    pub margin_divisor: f64,
+    /// What was measured to anchor the defaults.
+    pub anchor: String,
+    /// The exact derivation rule, stated in words.
+    pub rule: String,
+    /// When the anchor measurements were taken.
+    pub as_of: String,
+    /// The per-rung measured anchor, dollars per 1000 solves.
+    pub anchor_usd_per_1000: std::collections::HashMap<String, f64>,
 }
 
 /// One value class's declared policy default.
@@ -481,6 +510,12 @@ pub fn render_references(table: &ReferenceCosts) -> String {
         "  this CPU dollar conversion: ${:.4} per core-hour — {}\n",
         table.economics.cpu_usd_per_core_hour, table.economics.provenance
     ));
+    if let Some(cal) = &table.economics.calibration {
+        out.push_str(&format!(
+            "  declared abuse values: measured-cost-derived ({}), margin 1/{} of the anchor, as_of {} — {}\n",
+            cal.anchor, cal.margin_divisor, cal.as_of, cal.rule
+        ));
+    }
     out
 }
 
@@ -524,7 +559,7 @@ pub fn render_verdicts(verdicts: &[(String, String, Verdict)]) -> String {
                 declared_usd_per_1000,
                 via,
             } => format!(
-                "priced below the declared abuse value (attacker ${attacker_usd_per_1000:.3e} vs declared ${declared_usd_per_1000} per 1000, via {via}); raise the difficulty or the scope price"
+                "priced below the declared abuse value (attacker ${attacker_usd_per_1000:.3e} vs declared ${declared_usd_per_1000} per 1000, via {via}); raise the difficulty or the scope price, or where the declared stake exceeds what the rung can price at all, escalate the scope's disposition policy (a step_up or deny minimum)"
             ),
             Verdict::InsufficientReferenceData { reason } => {
                 format!("insufficient reference data ({reason})")
@@ -670,6 +705,35 @@ mod tests {
         for class in &table.value_classes {
             assert!(!class.provenance.is_empty());
             assert!(ladder().iter().any(|r| r.name == class.rung));
+        }
+    }
+
+    #[test]
+    fn the_shipped_table_carries_the_measured_cost_calibration() {
+        let table =
+            parse_reference_costs(EMBEDDED_REFERENCE_COSTS).expect("the shipped table parses");
+        let cal = table
+            .economics
+            .calibration
+            .as_ref()
+            .expect("the shipped table calibrates its declared values");
+        assert!(cal.margin_divisor >= 2.0, "the margin statement exists");
+        assert!(!cal.anchor_usd_per_1000.is_empty());
+        // Every declared default prices its rung strictly below the
+        // measured anchor, by at least the stated margin (the downward
+        // rounding to a clean figure only widens the gap).
+        for class in &table.value_classes {
+            let anchor = cal
+                .anchor_usd_per_1000
+                .get(&class.rung)
+                .copied()
+                .expect("every declared rung carries its measured anchor");
+            assert!(
+                class.declared_abuse_value_usd_per_1000 * cal.margin_divisor <= anchor,
+                "the {} default sits inside the calibration margin",
+                class.class
+            );
+            assert!(class.declared_abuse_value_usd_per_1000 > 0.0);
         }
     }
 

@@ -54,6 +54,24 @@ const threatRows = latest.map((run) => {
     return `| ${run.attackClass ?? run.campaign} | ${verdict} | ${status} |`;
 });
 
+// The method note and the engine-loop facts (escalations and triage),
+// read from the engine's own ledger documents.
+let methodNote = "the engine ran fully offline: no local model was configured (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer";
+let escalationNote = "no escalation record yet";
+let triageNote = "no triage report yet";
+try {
+    const escalations = JSON.parse(readFileSync(join(RUNS_DIR, "escalations.json"), "utf8"));
+    const last = escalations.escalations.at(-1);
+    if (last) {
+        escalationNote = `run ${last.run}: ${last.trigger}${last.combinedLabels ? ` (combined ${last.combinedLabels.join(" + ")}, synthesis budget raised to ${last.raisedSynthCount})` : ""}`;
+    }
+} catch {}
+try {
+    const triageSeed = String(seedArg).replace(/^0x/, "");
+    const triage = JSON.parse(readFileSync(join(RUNS_DIR, `triage-${triageSeed}.json`), "utf8"));
+    triageNote = `the synthesis corpus was consumed end to end: ${triage.candidates} candidates triaged, ${triage.refuted} refuted deterministically (two-run hash gate), ${triage.findingsFiled} findings filed, ${triage.unstable} unstable harnesses, ${triage.noHarness} classes without a harness`;
+} catch {}
+
 const threats = `# THREATS
 
 The living output of the automated red-team engine (change.md Part 10).
@@ -63,6 +81,14 @@ required result held on the current repo state, RED means it did not,
 NO-DATA means the campaign has not run into this ledger yet.
 
 Seed: \`${seedArg}\` · Ledger entries: ${latest.length}
+
+## Method note
+
+${methodNote}
+
+The self-escalation mandate: ${escalationNote}
+
+The closed synthesis loop: ${triageNote}
 
 | Attack class | Current economic result | Status |
 | --- | --- | --- |

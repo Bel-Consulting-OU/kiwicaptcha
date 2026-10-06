@@ -14,9 +14,8 @@ func TestChiRouterGuard(t *testing.T) {
 	verifier := newVerifier(t)
 	record := goldenRecordInto(t, verifier)
 	router := chi.NewRouter()
-	router.Use(Middleware(verifier, kiwi.MiddlewareOptions{
+	router.Use(Middleware(verifier, "login", kiwi.MiddlewareOptions{
 		SecretKey:      testSecret,
-		ExpectedScope:  "login",
 		ScopePredicate: RouteScopePredicate("/api/submit"),
 	}))
 	router.Get("/public/feed", func(w http.ResponseWriter, r *http.Request) {

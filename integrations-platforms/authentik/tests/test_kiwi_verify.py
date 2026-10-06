@@ -38,9 +38,12 @@ check("cookie token", extract_token(None, {}, {"kiwi_token": "ck"}) == "ck")
 check("missing token is None", extract_token(None, {}, {}) is None)
 
 # Ip binding.
-check("peer ip untrusted", client_ip("10.9.9.9", "1.2.3.4, 10.0.0.1", False) == "10.9.9.9")
-check("forwarded ip trusted", client_ip("10.9.9.9", "1.2.3.4, 10.0.0.1", True) == "1.2.3.4")
-check("loopback fallback", client_ip(None, None, False) == "127.0.0.1")
+check("peer ip untrusted", client_ip("10.9.9.9", "1.2.3.4, 10.0.0.1") == "10.9.9.9")
+check("peer ip trust list empty", client_ip("10.9.9.9", "1.2.3.4, 10.0.0.1", "") == "10.9.9.9")
+check("forwarded ip trusted", client_ip("10.0.0.1", "1.2.3.4, 10.0.0.1", "10.0.0.0/8") == "1.2.3.4")
+check("garbage hop fails closed", client_ip("10.0.0.1", "1.2.3.4, garbage!!, 10.0.0.1", "10.0.0.0/8") == "10.0.0.1")
+check("real ip when trusted and no xff", client_ip("10.0.0.1", None, "10.0.0.0/8", "198.51.100.7") == "198.51.100.7")
+check("loopback fallback", client_ip(None, None) == "127.0.0.1")
 
 # The wire request.
 request = build_request("http://127.0.0.1:7371/verify", "t", "signup", "192.0.2.4", bearer="b")

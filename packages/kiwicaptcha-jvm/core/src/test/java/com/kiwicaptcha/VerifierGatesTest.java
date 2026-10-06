@@ -112,6 +112,18 @@ class VerifierGatesTest {
     }
 
     @Test
+    void missingScopeOptionIsTheTypedRequiredScopeRefusal() {
+        Support.MintOptions mint = new Support.MintOptions();
+        ChallengeRecord record = Support.mintRecord(mint);
+        Verifier verifier = Support.newTestVerifier(new Verifier.Config(), Support.TEST_NOW);
+        Support.storeRecord(verifier.storage(), record);
+        // The empty scope option accepts nothing: the typed refusal
+        // replaces the lax any-scope acceptance.
+        Support.requireCode(verifier.verify(tokenForRecord(record), options("", Support.TEST_CLIENT_IP)),
+                VerifyError.REQUIRED_SCOPE);
+    }
+
+    @Test
     void missingClientIp() {
         Support.MintOptions mint = new Support.MintOptions();
         mint.bindingIp = Support.TEST_CLIENT_IP;

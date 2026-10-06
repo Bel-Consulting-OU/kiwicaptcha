@@ -13,3 +13,9 @@ test-results/
 playwright-report/
 deploy/.env
 tools/rsw-keygen/Cargo.lock
+
+# The interpreted languages' build and cache artifacts stay out of the
+# index: python bytecode caches and the elixir build tree are reproducible
+# from the tracked sources.
+__pycache__/
+*.pyc

@@ -72,6 +72,15 @@ func TestVerifyGateOrderAndCodes(t *testing.T) {
 		storeRecord(t, verifier.Storage, record)
 		requireCode(t, verifier.Verify(tokenForRecord(t, record), VerifyOptions{SecretKey: testSecret, ExpectedScope: "comment", ClientIP: testClientIP}), ErrCodeWrongScope)
 	})
+	t.Run("missing scope option is the typed required_scope refusal", func(t *testing.T) {
+		options := defaultMintOptions()
+		record := mintRecord(t, options)
+		verifier := newTestVerifier(t, VerifierConfig{}, testNow)
+		storeRecord(t, verifier.Storage, record)
+		// The empty scope option accepts nothing: the typed refusal
+		// replaces the lax any-scope acceptance.
+		requireCode(t, verifier.Verify(tokenForRecord(t, record), VerifyOptions{SecretKey: testSecret, ClientIP: testClientIP}), ErrCodeRequiredScope)
+	})
 	t.Run("missing client ip", func(t *testing.T) {
 		options := defaultMintOptions()
 		options.bindingIP = testClientIP

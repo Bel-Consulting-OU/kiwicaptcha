@@ -13,10 +13,33 @@ categories = ["web-programming", "cryptography", "authentication"]
 # response DTO the native paths use, so the sidecar can never drift
 # from the verification semantics it fronts.
 kiwicaptcha = { version = "1.7.0", path = "../kiwicaptcha" }
+# The workspace risk engine: the optional adaptive-risk plane behind
+# --risk / KIWI_RISK=1. Its state store is Redis-backed, so the plane
+# engages only when the operator points it at a Redis URL.
+kiwicaptcha-risk = { version = "0.1.0", path = "../kiwicaptcha-risk" }
 # JSON rendering of the core DTOs (already workspace dependencies; the
 # HTTP surface itself is std-only, no framework).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The evidence helper's trace wire encoding (base64url, unpadded); the
+# core already carries the same crate.
+base64 = "0.22"
+# The Redis client, only for the redis-store build feature (the same
+# crate the workspace core and the risk engine already carry; no new
+# dependency enters the tree).
+redis = { version = "0.27", optional = true }
+
+[features]
+# The multi-node store backend: KIWI_STORE=redis://URL over the core
+# crate's fused Redis verifier store, and the risk plane's Redis state
+# store. The default build stays memory + file only.
+redis-store = ["dep:redis", "kiwicaptcha/redis"]
+# The cross-language test surface: the `exec-evidence` subcommand that
+# mints an armed challenge and prints its browser-equivalent executed
+# trace and digest, so every SDK's sidecar-delegation test drives the
+# same core-fabricated evidence. Test suites and fixtures only, never
+# a production build.
+test-fixtures = ["kiwicaptcha/test-fixtures"]
 
 [dev-dependencies]
 # The end-to-end test solves through the supported native solver, the

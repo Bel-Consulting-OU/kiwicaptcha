@@ -164,12 +164,19 @@ export {
 } from './outcomes.js';
 export {
   kiwiVerifyExpress,
+  clientIpFromRequest,
   DEFAULT_TOKEN_FIELD,
   type ExpressVerifyOptions,
 } from './middleware/express.js';
 export {
   kiwiVerifyFastify,
+  clientIpFromRequestFastify,
   DEFAULT_TOKEN_FIELD_FASTIFY,
   type FastifyVerifyOptions,
 } from './middleware/fastify.js';
+export {
+  resolveClientIp,
+  canonicalIp,
+  type ResolveClientIpInput,
+} from './clientip.js';
 export { runDoctor, type DoctorCheck, type DoctorInput, type DoctorReport } from './doctor.js';

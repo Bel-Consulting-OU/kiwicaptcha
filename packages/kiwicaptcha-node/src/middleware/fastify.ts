@@ -1,11 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { resolveClientIp } from '../clientip.js';
 import { verify, type VerifyOptions } from '../verify.js';
 
 /**
  * The Fastify plugin: a preValidation hook that reads the configured
  * token field, verifies the token locally, and answers 422 with a JSON
  * error body on failure. A verified request exposes request.kiwi for
- * downstream handlers.
+ * downstream handlers. When trustedProxies is configured, the plugin
+ * resolves the canonical client IP itself (the same trusted-proxy walk
+ * every SDK ships) and fills clientIp on the factory's options when
+ * the factory left it unset, so fastify's own trustProxy setting is
+ * never consulted and the behavior matches every other framework.
  */
 
 export const DEFAULT_TOKEN_FIELD_FASTIFY = 'kiwi__token';
@@ -17,6 +22,41 @@ export interface FastifyVerifyOptions {
   tokenField?: string;
   /** Failure status (default 422). */
   failureStatus?: number;
+  /**
+   * The trusted-proxy CIDR list. The default (option absent) leaves
+   * the client-IP choice to the factory; when configured (an empty
+   * list included), the socket peer is the client IP unless a trusted
+   * hop justifies a forwarded entry.
+   */
+  trustedProxies?: string[];
+}
+
+/** Every header line for one name, preserving duplicates. */
+function rawHeaderLines(req: FastifyRequest, name: string): string[] {
+  const raw = (req.raw as { rawHeaders?: string[] }).rawHeaders ?? [];
+  const lines: string[] = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const key = raw[i];
+    const value = raw[i + 1];
+    if (key !== undefined && key.toLowerCase() === name) {
+      lines.push(value ?? '');
+    }
+  }
+  return lines;
+}
+
+/** The canonical client IP of one request per the shared contract. */
+export function clientIpFromRequestFastify(req: FastifyRequest, trustedProxies: string[] = []): string {
+  const socket = req.socket as { remoteAddress?: string } | undefined;
+  const lines = rawHeaderLines(req, 'x-forwarded-for');
+  const realIpLines = rawHeaderLines(req, 'x-real-ip');
+  const realIp = realIpLines.length > 0 ? realIpLines[0] : null;
+  return resolveClientIp({
+    peer: socket?.remoteAddress ?? '',
+    xffLines: lines,
+    realIp: realIp ?? null,
+    trustedProxies,
+  });
 }
 
 function readTokenFastify(req: FastifyRequest, field: string): string | null {
@@ -61,6 +101,13 @@ export async function kiwiVerifyFastify(
       return reply;
     }
     const verifyOptions = await options.verify(req);
+    if (options.trustedProxies !== undefined && (verifyOptions.clientIp === undefined || verifyOptions.clientIp === null)) {
+      // With trustedProxies configured (an empty list included), the
+      // plugin owns the client-IP boundary: it binds the socket peer,
+      // or a forwarded entry when a trusted hop justifies one. A
+      // factory-pinned clientIp always wins.
+      verifyOptions.clientIp = clientIpFromRequestFastify(req, options.trustedProxies);
+    }
     const result = await verify(rawToken, verifyOptions);
     if (!result.ok) {
       await reply.code(status).send({

@@ -85,7 +85,7 @@ pid_stub=$!
 STUB_BEARER=s3cret-1 php -S 127.0.0.1:$stub_bearer_port "$HERE/stub-kiwi-router.php" >/dev/null 2>&1 &
 pid_stub_bearer=$!
 
-KIWI_VERIFY_URL=http://127.0.0.1:$stub_port/verify KIWI_TRUST_PROXY=1 \
+KIWI_VERIFY_URL=http://127.0.0.1:$stub_port/verify KIWI_TRUSTED_PROXIES=127.0.0.0/8 \
   php -S 127.0.0.1:$gate_port "$HERE/endpoint-router.php" >/dev/null 2>&1 &
 pid_gate=$!
 KIWI_VERIFY_URL=http://127.0.0.1:$stub_bearer_port/verify KIWI_BEARER=s3cret-1 \

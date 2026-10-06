@@ -24,7 +24,8 @@ class RackMiddlewareTest < Minitest::Test
     storage = KiwiCaptcha::MemoryStore.new(now: -> { golden[:record].issued_at + 10 })
     storage.store(golden[:record])
     TestSupport.verify_options(
-      { storage: storage, secret_key: SECRET }.merge(TestSupport.frozen_clock(golden[:record]))
+      { storage: storage, secret_key: SECRET, expected_scope: 'login' }
+        .merge(TestSupport.frozen_clock(golden[:record]))
     )
   end
 
@@ -100,7 +101,8 @@ class RackMiddlewareTest < Minitest::Test
     factory = lambda { |_env|
       storage = KiwiCaptcha::MemoryStore.new(now: -> { golden[:record].issued_at + 10 })
       storage.store(golden[:record])
-      { storage: storage, secret_key: SECRET }.merge(TestSupport.frozen_clock(golden[:record]))
+      { storage: storage, secret_key: SECRET, expected_scope: 'login' }
+        .merge(TestSupport.frozen_clock(golden[:record]))
     }
     app = KiwiCaptcha::Rack::Verifier.new(downstream, verify: factory)
     status, = app.call(env_for(params: { 'kiwi__token' => golden[:row]['token_b64'] }))

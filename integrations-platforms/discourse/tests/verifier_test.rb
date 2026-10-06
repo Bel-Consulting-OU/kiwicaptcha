@@ -28,11 +28,17 @@ check("no token is nil", KiwiCaptcha::Verifier.extract_token(headers: {}, cookie
 
 # Client ip.
 check("peer ip untrusted", KiwiCaptcha::Verifier.client_ip(
-  { "REMOTE_ADDR" => "10.9.9.9", "HTTP_X_FORWARDED_FOR" => "1.2.3.4" }, false
+  { "REMOTE_ADDR" => "10.9.9.9", "HTTP_X_FORWARDED_FOR" => "1.2.3.4" }
+) == "10.9.9.9")
+check("peer ip trusted list empty", KiwiCaptcha::Verifier.client_ip(
+  { "REMOTE_ADDR" => "10.9.9.9", "HTTP_X_FORWARDED_FOR" => "1.2.3.4" }, ""
 ) == "10.9.9.9")
 check("forwarded ip trusted", KiwiCaptcha::Verifier.client_ip(
-  { "REMOTE_ADDR" => "10.9.9.9", "HTTP_X_FORWARDED_FOR" => "1.2.3.4, 10.0.0.1" }, true
+  { "REMOTE_ADDR" => "10.0.0.1", "HTTP_X_FORWARDED_FOR" => "1.2.3.4, 10.0.0.1" }, "10.0.0.0/8"
 ) == "1.2.3.4")
+check("garbage hop fails closed", KiwiCaptcha::Verifier.client_ip(
+  { "REMOTE_ADDR" => "10.0.0.1", "HTTP_X_FORWARDED_FOR" => "1.2.3.4, garbage!!, 10.0.0.1" }, "10.0.0.0/8"
+) == "10.0.0.1")
 
 # The wire request.
 request = KiwiCaptcha::Verifier.build_request(
@@ -44,7 +50,7 @@ check("request body shape", body["token"] == "t" && body["scope"] == "signup" &&
 check("bearer header", request[:headers]["Authorization"] == "Bearer b")
 
 # The decision table over a fake transport.
-settings = { verify_url: "http://x", bearer: "", trust_proxy: false }
+settings = { verify_url: "http://x", bearer: "", trusted_proxies: "" }
 check("success verifies", KiwiCaptcha::Verifier.decide(
   token: "t", scope: "login", settings: settings, server: {},
   transport: ->(_r) { { status: 200, body: '{"success":true}' } }

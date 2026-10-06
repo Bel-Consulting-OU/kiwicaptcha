@@ -39,7 +39,7 @@ public class KiwiCaptchaAutoConfiguration {
     public FilterRegistrationBean<KiwiCaptchaFilter> kiwiCaptchaFilter(Verifier verifier,
                                                                        KiwiCaptchaProperties properties) {
         KiwiCaptchaFilter filter = new KiwiCaptchaFilter(verifier, properties.getSecret(),
-                properties.getExpectedScope(), null, properties.isRealIp(), null);
+                properties.getExpectedScope(), null, properties.getTrustedProxies(), null);
         FilterRegistrationBean<KiwiCaptchaFilter> registration = new FilterRegistrationBean<>(filter);
         registration.setUrlPatterns(properties.getUrlPatterns());
         registration.setOrder(1);

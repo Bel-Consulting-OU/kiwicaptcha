@@ -40,11 +40,16 @@ check('cookie token', kiwi_verify_extract_token([], [], ['kiwi_token' => 'cookie
 check('missing token is null', kiwi_verify_extract_token([], [], [], null) === null);
 check('whitespace token is null', kiwi_verify_extract_token([], ['kiwi__token' => '   '], [], null) === null);
 
-// Client ip: trust boundary.
+// Client ip: the trust boundary. A forged forwarding header never
+// moves the binding without a trusted peer.
 $server = ['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, 10.0.0.2'];
-check('untrusted proxy uses the peer', kiwi_verify_client_ip($server, false) === '10.0.0.9');
-check('trusted proxy uses the first hop', kiwi_verify_client_ip($server, true) === '203.0.113.7');
-check('missing peer falls back to loopback', kiwi_verify_client_ip([], false) === '127.0.0.1');
+check('untrusted proxy uses the peer', kiwi_verify_client_ip($server, []) === '10.0.0.9');
+check('trusted lb takes next left', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, 10.0.0.9'], ['10.0.0.0/24']) === '203.0.113.7');
+check('garbage hop fails closed', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, garbage!!, 10.0.0.9'], ['10.0.0.0/24']) === '10.0.0.9');
+check('real ip when trusted and no xff', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_REAL_IP' => '198.51.100.4'], ['10.0.0.0/24']) === '198.51.100.4');
+check('ipv6 chain through the trusted hop', kiwi_verify_client_ip(['REMOTE_ADDR' => '2001:db8::9', 'HTTP_X_FORWARDED_FOR' => '2001:db8:1::50, 2001:db8::9'], ['2001:db8::/64']) === '2001:db8:1::50');
+check('missing peer falls back to loopback', kiwi_verify_client_ip([], []) === '127.0.0.1');
+check('cidr csv parses and drops blanks', kiwi_verify_parse_cidrs(' 10.0.0.0/24 , , 2001:db8::/32 ') === ['10.0.0.0/24', '2001:db8::/32']);
 
 // The gate decision table.
 $cfg = kiwi_verify_config();

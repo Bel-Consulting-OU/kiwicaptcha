@@ -220,6 +220,9 @@ defmodule Kiwicaptcha.VerifyGatesTest do
     end
 
     assert expect_code.(%{expected_scope: "other"}) == :wrong_scope
+    # The scope option is required: an empty option is the typed
+    # required_scope refusal, never an any-scope acceptance.
+    assert expect_code.(%{expected_scope: ""}) == :required_scope
     assert expect_code.(%{region: "us"}) == :wrong_region
     assert expect_code.(%{region: nil, expected_issuer: "prod"}) == :wrong_issuer
     assert expect_code.(%{expected_policy_version: 2}) == :wrong_policy_version

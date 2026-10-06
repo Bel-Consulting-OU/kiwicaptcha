@@ -24,10 +24,8 @@
                 </field>
                 <field name="scope" type="text" label="PLG_CAPTCHA_KIWICAPTCHA_SCOPE"
                        default="login" filter="string"/>
-                <field name="trust_proxy" type="radio" label="PLG_CAPTCHA_KIWICAPTCHA_TRUST_PROXY" default="0">
-                    <option value="0">JNO</option>
-                    <option value="1">JYES</option>
-                </field>
+                <field name="trusted_proxies" type="text" label="PLG_CAPTCHA_KIWICAPTCHA_TRUSTED_PROXIES"
+                       default="" filter="string"/>
             </fieldset>
         </fields>
     </config>

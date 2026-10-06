@@ -15,7 +15,7 @@ import (
 const DecisionKey = "kiwi.decision"
 
 // Middleware builds the gin guard middleware.
-func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) gin.HandlerFunc {
+func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, options ...Option) gin.HandlerFunc {
 	config := optionsConfig(options)
 	return func(ctx *gin.Context) {
 		if config.scopePredicate != nil && !config.scopePredicate(ctx.FullPath()) {
@@ -29,7 +29,7 @@ func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) gi
 		}
 		outcome := verifier.Verify(token, kiwi.VerifyOptions{
 			SecretKey:     secretKey,
-			ExpectedScope: config.expectedScope,
+			ExpectedScope: expectedScope,
 			ClientIP:      ctx.ClientIP(),
 		})
 		decision := kiwi.DecisionFromOutcome(outcome, "")
@@ -54,17 +54,11 @@ func DecisionFrom(ctx *gin.Context) (kiwi.VerifyDecision, bool) {
 }
 
 type ginConfig struct {
-	expectedScope  string
 	scopePredicate func(path string) bool
 }
 
 // Option shapes the gin guard.
 type Option func(*ginConfig)
-
-// WithExpectedScope pins one scope for every protected route.
-func WithExpectedScope(scope string) Option {
-	return func(c *ginConfig) { c.expectedScope = scope }
-}
 
 // WithScopePredicate receives the route pattern and answers whether
 // the route needs a token.

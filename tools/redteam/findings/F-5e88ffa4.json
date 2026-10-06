@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.finding/1",
+  "id": "F-5e88ffa4",
+  "attackClass": "step-up store: strict SET NX reply comparison (D3.7 discovery)",
+  "disposition": "closed",
+  "severity": "medium",
+  "summary": "RedisStepUpChallengeStore.create() accepted only the exact string 'OK' or boolean true from the SET NX reply; a real Predis client answers a Predis\\Response\\Status object whose string form is 'OK', so every challenge create() threw and every step-up begin failed closed on a real deployment client. The bundle's own tests passed only because the fake client returned the literal string. Fixed: the store normalizes the reply (Predis Status via its string form, phpredis boolean, bare 'OK'/'1' strings; everything else, including the nil answer of a lost NX race, stays a refusal, fail-closed) and a real-Predis suite leg walks begin() through complete() against a live redis-server under KC_REDIS_URL. The repro boots a real Predis client, enrolls, and calls begin(); the expected transcript is begin_status 200; the observed transcript is 200 (REFUTED).",
+  "transcriptSha256": "5e88ffa4b52aa1a3f474c08da97eb1dab853705fde5b303846d9a0c4b1285208",
+  "repro": "tools/redteam/findings/F-5e88ffa4.sh",
+  "evidence": [
+    "packages/kiwicaptcha/integrations/symfony/src/Security/StepUp/RedisStepUpChallengeStore.php (the isAffirmativeSetReply normalization)",
+    "packages/kiwicaptcha/integrations/symfony/tests/RedisStepUpChallengeStoreRealPredisTest.php (the real-Predis begin-to-complete leg)"
+  ],
+  "filedBy": "engine/triage.mjs",
+  "gate": "red-until-fixed"
+}

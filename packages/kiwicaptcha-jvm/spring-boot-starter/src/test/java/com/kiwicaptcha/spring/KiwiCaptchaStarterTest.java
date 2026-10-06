@@ -74,7 +74,7 @@ class KiwiCaptchaStarterTest {
         KiwiCaptchaProperties properties = new KiwiCaptchaProperties();
         properties.setSecret(SECRET);
         com.kiwicaptcha.Verifier verifier = properties.buildVerifier();
-        KiwiTokenInterceptor interceptor = new KiwiTokenInterceptor(verifier, SECRET, "login", false);
+        KiwiTokenInterceptor interceptor = new KiwiTokenInterceptor(verifier, SECRET, "login", java.util.List.of());
         MockHttp.Request request = new MockHttp.Request("POST", "/api/submit");
         MockHttp.Response response = new MockHttp.Response();
         boolean proceeded = interceptor.preHandle(request, response, new Object());
@@ -91,7 +91,7 @@ class KiwiCaptchaStarterTest {
         config.nowSecs = () -> ISSUED_AT;
         com.kiwicaptcha.Verifier verifier = new com.kiwicaptcha.Verifier(
                 new com.kiwicaptcha.MemoryStore(), config);
-        KiwiTokenInterceptor interceptor = new KiwiTokenInterceptor(verifier, SECRET, "login", false);
+        KiwiTokenInterceptor interceptor = new KiwiTokenInterceptor(verifier, SECRET, "login", java.util.List.of());
         ChallengeMinter.Minted minted = ChallengeMinter.mint(ISSUED_AT);
         ((com.kiwicaptcha.Store.Storer) verifier.storage()).storeRecord(minted.record());
         MockHttp.Request request = new MockHttp.Request("POST", "/api/submit")

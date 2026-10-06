@@ -364,8 +364,11 @@ dependencies = [
 name = "kiwicaptcha-verifier"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "kiwicaptcha",
+ "kiwicaptcha-risk",
  "kiwicaptcha-solver",
+ "redis",
  "serde",
  "serde_json",
 ]

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Command;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Economics\ValueClassCeiling;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
@@ -122,6 +123,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Continuity cookie' => $this->checkContinuityCookie(),
             'Risk Redis' => $this->checkRiskRedis(),
             'Risk scope policy' => $this->checkScopePolicy(),
+            'Value-class pricing' => $this->checkValueClassPricing(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Execution versioning' => $this->checkExecutionVersioning(),
@@ -665,6 +667,42 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['PASS', sprintf('all %d scope(s) in use are explicitly configured', count($inUse))];
+    }
+
+    /**
+     * The value-class pricing check: every configured scope's declared
+     * stake must price inside its rung's measured ceiling, or the
+     * scope's disposition minimum (risk.scopes.<name>.minimum) must
+     * carry what raw proof of work cannot price. The verdict logic is
+     * the shared {@see ValueClassCeiling::verdict()}, so the doctor and
+     * the D3.3 campaign answer identically.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkValueClassPricing(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk disabled: the value-class pricing is inactive'];
+        }
+        $escalations = [];
+        foreach (($risk['scopes'] ?? []) as $name => $scope) {
+            if (!\is_array($scope)) {
+                continue;
+            }
+            [$status, $detail] = ValueClassCeiling::verdict(
+                (string) ($scope['value_class'] ?? 'standard'),
+                (string) ($scope['minimum'] ?? 'allow'),
+            );
+            if ($status !== 'PASS') {
+                $escalations[] = sprintf('%s: %s', $name, $detail);
+            }
+        }
+        if ($escalations === []) {
+            return ['PASS', sprintf('every configured scope prices inside its rung ceiling or carries a step_up/deny minimum (%d scope(s))', \count($risk['scopes'] ?? []))];
+        }
+
+        return ['WARN', sprintf('%d scope(s) beyond their pricing ceiling: %s', \count($escalations), implode(' | ', $escalations))];
     }
 
     private function checkProtocolFloor(): array

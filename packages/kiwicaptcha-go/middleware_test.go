@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-func newMiddlewareStack(t *testing.T, options MiddlewareOptions) (*Verifier, http.Handler, *int) {
+func newMiddlewareStack(t *testing.T, expectedScope string, options MiddlewareOptions) (*Verifier, http.Handler, *int) {
 	t.Helper()
 	verifier := newTestVerifier(t, VerifierConfig{}, goldenIssuedAt)
 	calls := 0
-	handler := Middleware(verifier, options)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Middleware(verifier, expectedScope, options)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -45,9 +45,8 @@ func TestMiddlewareAllowsValidToken(t *testing.T) {
 	verifier := newTestVerifier(t, VerifierConfig{}, goldenIssuedAt)
 	goldenLiveRecordInto(t, verifier)
 	proceeded := false
-	handler := Middleware(verifier, MiddlewareOptions{
-		SecretKey:     testSecret,
-		ExpectedScope: "login",
+	handler := Middleware(verifier, "login", MiddlewareOptions{
+		SecretKey: testSecret,
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proceeded = true
 		decision, ok := DecisionFromContext(r.Context())
@@ -65,7 +64,7 @@ func TestMiddlewareAllowsValidToken(t *testing.T) {
 }
 
 func TestMiddlewareDeniesWithoutToken(t *testing.T) {
-	_, handler, calls := newMiddlewareStack(t, MiddlewareOptions{SecretKey: testSecret})
+	_, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/submit", nil))
 	if recorder.Code != http.StatusForbidden || *calls != 0 {
@@ -80,7 +79,7 @@ func TestMiddlewareDeniesWithoutToken(t *testing.T) {
 }
 
 func TestMiddlewareDeniesBadToken(t *testing.T) {
-	verifier, handler, calls := newMiddlewareStack(t, MiddlewareOptions{SecretKey: testSecret})
+	verifier, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 	goldenLiveRecordInto(t, verifier)
 	request := goldenIPRequest(http.MethodPost, "/api/submit", nil)
 	request.Header.Set(TokenHeader, goldenLiveToken(t))
@@ -99,9 +98,8 @@ func TestMiddlewareDeniesBadToken(t *testing.T) {
 func TestMiddlewareRetryAnswers503(t *testing.T) {
 	verifier := newTestVerifier(t, VerifierConfig{}, testNow)
 	verifier.Storage = failingStore{}
-	handler := Middleware(verifier, MiddlewareOptions{
-		SecretKey:     testSecret,
-		ExpectedScope: "login",
+	handler := Middleware(verifier, "login", MiddlewareOptions{
+		SecretKey: testSecret,
 	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	// A structurally valid token reaches the store, which is down.
 	wellFormed := CreateToken(goldenRecord(t, "golden_sha256_v2.json").Nonce, 1, 5000, NewJSONObject(), "", "", "").Encode()
@@ -120,7 +118,7 @@ func TestMiddlewareRetryAnswers503(t *testing.T) {
 func TestMiddlewareTokenSources(t *testing.T) {
 	token := goldenLiveToken(t)
 	t.Run("form field", func(t *testing.T) {
-		verifier, handler, calls := newMiddlewareStack(t, MiddlewareOptions{SecretKey: testSecret})
+		verifier, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 		goldenLiveRecordInto(t, verifier)
 		form := url.Values{}
 		form.Set(TokenField, token)
@@ -134,7 +132,7 @@ func TestMiddlewareTokenSources(t *testing.T) {
 		}
 	})
 	t.Run("query parameter", func(t *testing.T) {
-		verifier, handler, calls := newMiddlewareStack(t, MiddlewareOptions{SecretKey: testSecret})
+		verifier, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 		goldenLiveRecordInto(t, verifier)
 		request := goldenIPRequest(http.MethodGet, "/api/submit?"+url.Values{TokenField: {token}}.Encode(), nil)
 		recorder := httptest.NewRecorder()
@@ -144,7 +142,7 @@ func TestMiddlewareTokenSources(t *testing.T) {
 		}
 	})
 	t.Run("header wins", func(t *testing.T) {
-		verifier, handler, _ := newMiddlewareStack(t, MiddlewareOptions{SecretKey: testSecret})
+		verifier, handler, _ := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 		goldenLiveRecordInto(t, verifier)
 		request := goldenIPRequest(http.MethodGet, "/api/submit?"+url.Values{TokenField: {"junk"}}.Encode(), nil)
 		request.Header.Set(TokenHeader, token)
@@ -157,7 +155,7 @@ func TestMiddlewareTokenSources(t *testing.T) {
 }
 
 func TestMiddlewareScopePredicate(t *testing.T) {
-	_, handler, calls := newMiddlewareStack(t, MiddlewareOptions{
+	_, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{
 		SecretKey:      testSecret,
 		ScopePredicate: func(path string) bool { return strings.HasPrefix(path, "api/protected") },
 	})
@@ -174,7 +172,7 @@ func TestMiddlewareScopePredicate(t *testing.T) {
 }
 
 func TestMiddlewareDenialOverride(t *testing.T) {
-	_, handler, _ := newMiddlewareStack(t, MiddlewareOptions{
+	_, handler, _ := newMiddlewareStack(t, "login", MiddlewareOptions{
 		SecretKey: testSecret,
 		Denied: func(w http.ResponseWriter, r *http.Request, decision VerifyDecision) {
 			w.WriteHeader(http.StatusTeapot)
@@ -191,14 +189,20 @@ func TestMiddlewareDenialOverride(t *testing.T) {
 func TestMiddlewareClientIP(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/x", nil)
 	request.RemoteAddr = "198.51.100.7:41234"
-	if got := ClientIPFromRequest(request, false); got != "198.51.100.7" {
+	if got := ClientIPFromRequest(request, nil); got != "198.51.100.7" {
 		t.Fatalf("the remote address is the default source: %s", got)
 	}
 	request.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
-	if got := ClientIPFromRequest(request, false); got != "198.51.100.7" {
+	if got := ClientIPFromRequest(request, nil); got != "198.51.100.7" {
 		t.Fatalf("an untrusted proxy header is ignored: %s", got)
 	}
-	if got := ClientIPFromRequest(request, true); got != "203.0.113.9" {
-		t.Fatalf("a trusted proxy header resolves the first hop: %s", got)
+	// The peer itself must sit inside the trust list before any
+	// forwarded header is read at all.
+	if got := ClientIPFromRequest(request, []string{"10.0.0.0/24"}); got != "198.51.100.7" {
+		t.Fatalf("a header from an untrusted peer is ignored: %s", got)
+	}
+	request.RemoteAddr = "10.0.0.9:41234"
+	if got := ClientIPFromRequest(request, []string{"10.0.0.0/24"}); got != "203.0.113.9" {
+		t.Fatalf("a trusted peer unlocks the forwarded walk: %s", got)
 	}
 }

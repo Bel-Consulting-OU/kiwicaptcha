@@ -15,18 +15,18 @@
 //! trust channel, and the bucket layer is its own store surface the
 //! policy consults when the request context carries an ASN bucket.
 //!
-//! # Wiring point for the next plane
+//! # Engine wiring
 //!
 //! The risk-v1 observation argv is frozen by fixtures and tests, so the
-//! engine-side integration is deliberately left to the next plane: when
-//! an assessment request context carries the session pseudonym plus the
-//! request's ASN bucket (resolved from the source IP through
-//! [`crate::asn::AsnDataset`]), the policy replaces the aggregate
-//! `trust_credit` contribution with [`bucket_trust_credit`] over the
-//! bucket record read through [`SessionBucketTrustStore`]. Until that
-//! plane lands, [`ContextBoundTrust`] is the exact surface a caller
-//! wires: `credit_for` is the read the policy will perform, `earn` is
-//! the write the trust events will perform, in the request's own bucket.
+//! engine takes the optional trust source beside the frozen wire (the
+//! same `with_*` precedent as the marks reader and the price context):
+//! when an assessment request carries the session pseudonym plus a
+//! source IP, the engine replaces the aggregate `trust_credit`
+//! contribution with the bucket-local [`bucket_trust_credit`] over the
+//! record read through [`ContextBoundTrust`]. The engine-facing seam is
+//! [`ContextTrustSource`], and [`RiskEngine::with_context_trust`] is
+//! the wiring point; unwired, the assessment path is byte-identical to
+//! the aggregate channel.
 
 use std::net::IpAddr;
 
@@ -79,7 +79,7 @@ pub fn bucket_trust_credit(bucket: &str, raw_trust: Option<u32>) -> BucketTrustC
 /// `SessionBucketTrustStoreInterface`. The Redis store implements it
 /// with the canonical `trust.lua`; the trait keeps the facade testable
 /// against any trust-capable store.
-pub trait SessionBucketTrustStore {
+pub trait SessionBucketTrustStore: Send + Sync {
     /// The exact record key of one session and bucket.
     fn bucket_trust_key(&self, session_id: &str, bucket: &str) -> Result<String, RiskError>;
     /// The decayed bucket-local trust of the session (0 when no record);
@@ -135,6 +135,34 @@ impl SessionBucketTrustStore for crate::redis::RedisRiskStateStore {
     ) -> Result<u32, RiskError> {
         crate::redis::RedisRiskStateStore::decay_bucket_trust(self, session_id, bucket, delta)
             .map_err(store_err)
+    }
+}
+
+/// The engine-facing seam of the context-bound trust: the exact read
+/// the assessment performs when the engine is wired with a trust
+/// source. `ContextBoundTrust` implements it over one dataset and one
+/// trust-capable store; tests implement it over fixtures.
+pub trait ContextTrustSource: Send + Sync {
+    /// The applied trust credit of one request: the bucket resolved
+    /// from `source_ip` and the session's record in that bucket only.
+    ///
+    /// # Errors
+    ///
+    /// [`RiskError::Store`] when the record read fails.
+    fn credit_for(
+        &self,
+        session_id: &str,
+        source_ip: IpAddr,
+    ) -> Result<BucketTrustCredit, RiskError>;
+}
+
+impl<'a> ContextTrustSource for ContextBoundTrust<'a> {
+    fn credit_for(
+        &self,
+        session_id: &str,
+        source_ip: IpAddr,
+    ) -> Result<BucketTrustCredit, RiskError> {
+        ContextBoundTrust::credit_for(self, session_id, source_ip)
     }
 }
 

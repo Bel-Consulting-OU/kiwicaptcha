@@ -725,3 +725,36 @@ fresh armed version-6 lifecycles end to end through the fixture
 verifier and passes 100 percent of them
 (tests/browser/specs/execution-v6-portable.spec.mjs, 25 solves per
 engine per run plus the envelope pinning test).
+
+
+## The abuse-economics calibration
+
+The value-class table (packages/kiwicaptcha-solver
+reference-costs.json) prices what a solved request is worth per value
+class, and the D3.3 campaign measures every priced rung against its
+declared value. The declared defaults are measured-cost-derived: each
+one is the bench-measured attacker cost per 1000 solves of its rung,
+divided by a documented 10x calibration margin, rounded down to the
+clean money figure at or below it. The margin plus the downward
+rounding keeps ordinary hardware, build-profile and load variance from
+flipping a pricing verdict on a re-measurement.
+
+The calibrated defaults (measured anchor over the margin, as of
+2026-10): low 0.00005, standard 0.0001, high 0.0001 and critical
+0.0002 dollars per 1000 solves, on anchors of 0.000937 (sha16),
+0.001962 (sha18), 0.001225 (argon16) and 0.00421 (argon64). Every
+default prices inside its rung on the honest anchor, so the D3.3 gate
+row measures the margin rather than a wish.
+
+The ceiling statement is the honest finding the calibration makes
+visible: raw proof of work cannot price a stake above its rung's
+measured cost at any difficulty, and the fastest tabled sha256 class
+prices the sha rungs orders of magnitude below the CPU anchor. That is
+why the disposition ladder ends in step_up and deny. A scope whose
+real stake exceeds its rung's ceiling is answered by the doctor with
+exactly that verdict and the enforcement knob: raise the scope's
+disposition minimum (risk.scopes.<name>.minimum) to step_up or deny,
+which the risk stage enforces underneath every signal. The critical
+stakes of the D3.3 demonstration (a 10 dollars-per-1000 scope) draw
+that advice, and the same scope with the step_up minimum set draws the
+verified pass.

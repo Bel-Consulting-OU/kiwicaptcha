@@ -1,0 +1,37 @@
+{
+  "schema": "kiwicaptcha.redteam.escalations/1",
+  "escalations": [
+    {
+      "run": 1,
+      "decidedAt": "2026-10-06T01:09:34Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "scope-confusable",
+        "replay"
+      ],
+      "priorSynthCount": 24,
+      "raisedSynthCount": 30,
+      "ledgerFacts": {
+        "greenRuns": 6,
+        "redRuns": 0,
+        "campaignsInLedger": 6
+      }
+    },
+    {
+      "run": 2,
+      "decidedAt": "2026-10-06T02:07:34Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "forged-token",
+        "framing-ambiguity"
+      ],
+      "priorSynthCount": 30,
+      "raisedSynthCount": 38,
+      "ledgerFacts": {
+        "greenRuns": 6,
+        "redRuns": 0,
+        "campaignsInLedger": 6
+      }
+    }
+  ]
+}

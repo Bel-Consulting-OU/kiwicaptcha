@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.6-token-brokering",
+  "attackClass": "D3.6 token brokering",
+  "seed": "0x6b776d74",
+  "started": "2026-10-06T02:09:04Z",
+  "duration_s": 3,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "metrics": {
+    "raw": "relays_refused=4 stock_issued=30 embed_token_reads=",
+    "sha16_solve_us": null
+  },
+  "economic": "cost_per_accepted_relayed_abuse=unbounded accepted_relays=0 resale_value_of_solved_token=0"
+}

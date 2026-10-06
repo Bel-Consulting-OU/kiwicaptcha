@@ -111,14 +111,14 @@ test('the golden negative records answer their pinned codes', async () => {
 test('an unknown token answers record_not_found without touching storage writes', async () => {
   const storage = frozenStoreForGolden();
   const loaded = load('sha_plain');
-  const result = await verify(loaded.token, { storage, secretKey: SECRET });
+  const result = await verify(loaded.token, { storage, secretKey: SECRET, expectedScope: 'login' });
   assert.equal(result.code, VerifyErrorCode.RecordNotFound);
 });
 
 test('malformed tokens answer malformed_token for every decode failure', async () => {
   const storage = frozenStoreForGolden();
   for (const raw of ['not base64!!!', '', 'QQ==', 'a'.repeat(40_000)]) {
-    const result = await verify(raw, { storage, secretKey: SECRET });
+    const result = await verify(raw, { storage, secretKey: SECRET, expectedScope: 'login' });
     assert.equal(result.code, VerifyErrorCode.MalformedToken);
   }
 });
@@ -230,6 +230,9 @@ test('scope, region, issuer and policy epoch answer their typed codes', async ()
     return result.code;
   };
   assert.equal(await expectCode({ expectedScope: 'other' }), VerifyErrorCode.WrongScope);
+  // The scope option is required: an empty option is the typed
+  // required_scope refusal, never an any-scope acceptance.
+  assert.equal(await expectCode({ expectedScope: '' }), VerifyErrorCode.RequiredScope);
   assert.equal(await expectCode({ region: 'us' }), VerifyErrorCode.WrongRegion);
   assert.equal(await expectCode({ region: null, expectedIssuer: 'prod' }), VerifyErrorCode.WrongIssuer);
   assert.equal(await expectCode({ expectedPolicyVersion: 2 }), VerifyErrorCode.WrongPolicyVersion);
@@ -488,7 +491,7 @@ test('structural tampering fails closed as malformed_record and burns the record
   ]) {
     const storage = frozenStoreForGolden();
     await storage.store(mutate(loaded.record));
-    const result = await verify(loaded.token, { storage, secretKey: SECRET, expectedScope: null });
+    const result = await verify(loaded.token, { storage, secretKey: SECRET, expectedScope: 'login' });
     assert.equal(result.code, VerifyErrorCode.MalformedRecord, `tamper must fail: ${JSON.stringify(mutate(loaded.record).scope)}`);
     // The one-shot cleanup deleted the pending record.
     const state = await storage.runtimeState(loaded.record.nonce);
@@ -497,7 +500,7 @@ test('structural tampering fails closed as malformed_record and burns the record
   // A kid tamper passes structure but breaks the signature re-check.
   const kidStorage = frozenStoreForGolden();
   await kidStorage.store({ ...loaded.record, kid: 0 });
-  const kidResult = await verify(loaded.token, { storage: kidStorage, secretKey: SECRET, expectedScope: null });
+  const kidResult = await verify(loaded.token, { storage: kidStorage, secretKey: SECRET, expectedScope: 'login' });
   assert.equal(kidResult.code, VerifyErrorCode.BadSignature);
 });
 
@@ -627,6 +630,6 @@ test('a store failure answers storage_unavailable, fail closed', async () => {
     commitResult: async () => false,
     deleteIfPending: async () => ({ kind: 'missing' }),
   };
-  const result = await verify(loaded.token, { storage: failing, secretKey: SECRET });
+  const result = await verify(loaded.token, { storage: failing, secretKey: SECRET, expectedScope: 'login' });
   assert.equal(result.code, VerifyErrorCode.StorageUnavailable);
 });

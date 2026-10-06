@@ -26,6 +26,7 @@ class ConformanceTest < Minitest::Test
     expected = %w[
       admission_unavailable already_consumed bad_signature capacity_exceeded
       consume_indeterminate execution_mismatch expired insufficient_work
+      required_scope
       ip_mismatch malformed_record malformed_token missing_client_ip
       record_not_found request_binding_mismatch storage_unavailable
       telemetry_rejected too_fast too_many_attempts unknown_kid

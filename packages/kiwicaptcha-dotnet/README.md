@@ -60,9 +60,34 @@ if (decision.Ok)
 `Decision` is the contract-level answer: `Ok`, `Disposition`
 (`allow`, `deny` or `retry`), `DecisionHandle` and `Price`. A `deny`
 carries the failure code (`expired`, `bad_signature`, `wrong_scope`,
-`already_consumed`, and so on). A `retry` disposition covers storage
-outages and admission exhaustion, where the challenge stays intact
-and the same token may be resubmitted once the backend recovers.
+`required_scope`, `already_consumed`, and so on). A `retry` disposition
+covers storage outages and admission exhaustion, where the challenge
+stays intact and the same token may be resubmitted once the backend
+recovers.
+
+The scope option is REQUIRED (`Options.ExpectedScope` is a `required`
+property): an empty option answers the typed `required_scope` refusal
+instead of silently accepting a token minted for any scope, and the
+middleware takes the scope as a required constructor parameter.
+
+## Execution-armed records: the ExecutionPolicy
+
+An execution-armed record demands the browser-trace walker, an oracle
+this SDK does not carry: the default policy fails every armed record
+closed (`execution_mismatch`, documented). A deployment that issues
+armed challenges verifies them either through the bundle or through
+the sidecar: set `Options.ExecutionPolicy` to
+`new ExecutionPolicy { SidecarUrl = "http://127.0.0.1:7371" }` and the
+armed record's single verification delegates to a co-located
+kiwicaptcha-verifier over HTTP, whose verdict maps back into this
+SDK's vocabulary.
+
+Single-use semantics are preserved: the sidecar consumes the record
+(point the sidecar at the same store), and this SDK never
+double-consumes. Trust boundary: the sidecar decides acceptances, so
+it must be co-located and trusted like the verifier itself. An
+unreachable sidecar answers `storage_unavailable` (the retry
+disposition) with the record intact; a refused bearer denies.
 
 ## Store adapters
 

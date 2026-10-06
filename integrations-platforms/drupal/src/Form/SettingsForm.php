@@ -65,10 +65,12 @@ final class SettingsForm extends ConfigFormBase
             ],
             '#default_value' => $config->get('mode') ?: 'json',
         ];
-        $form['deployment']['trust_proxy'] = [
-            '#type' => 'checkbox',
-            '#title' => $this->t('Honor X-Forwarded-For as the client ip'),
-            '#default_value' => (bool) $config->get('trust_proxy'),
+        $form['deployment']['trusted_proxies'] = [
+            '#type' => 'textfield',
+            '#title' => $this->t('Trusted proxies'),
+            '#description' => $this->t('Comma-separated trusted-proxy CIDRs (IPv4 or IPv6). Empty (the default) never trusts a forwarded header: the socket peer is the client ip.'),
+            '#default_value' => (string) $config->get('trusted_proxies'),
+            '#size' => 64,
         ];
 
         $form['forms'] = [
@@ -105,7 +107,7 @@ final class SettingsForm extends ConfigFormBase
             ->set('shim_url', (string) $form_state->getValue('shim_url'))
             ->set('bearer', (string) $form_state->getValue('bearer'))
             ->set('mode', (string) $form_state->getValue('mode'))
-            ->set('trust_proxy', (bool) $form_state->getValue('trust_proxy'));
+            ->set('trusted_proxies', trim((string) $form_state->getValue('trusted_proxies')));
         foreach (['login', 'signup', 'comment', 'contact'] as $scope) {
             $config
                 ->set('enabled_'.$scope, (bool) $form_state->getValue('enabled_'.$scope))

@@ -63,8 +63,10 @@ check('cookie token', KiwiCaptcha_Client::extractToken([], [], ['kiwi_token' => 
 check('no token is null', KiwiCaptcha_Client::extractToken([], [], []) === null);
 
 // Client ip.
-check('peer ip when proxies untrusted', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.9.9.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'], false) === '10.9.9.9');
-check('forwarded ip when trusted', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.9.9.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, 10.0.0.1'], true) === '1.2.3.4');
+check('peer ip when proxies untrusted', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.9.9.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '10.9.9.9');
+check('trusted lb takes next left', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, 10.0.0.1'], ['trusted_proxies' => '10.0.0.0/8']) === '1.2.3.4');
+check('garbage hop fails closed', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.1'], ['trusted_proxies' => '10.0.0.0/8']) === '10.0.0.1');
+check('real ip when trusted and no xff', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_REAL_IP' => '198.51.100.7'], ['trusted_proxies' => '10.0.0.0/8']) === '198.51.100.7');
 
 // The decision table against a canned deployment.
 resetState();

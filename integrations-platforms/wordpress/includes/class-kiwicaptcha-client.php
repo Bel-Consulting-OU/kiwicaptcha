@@ -113,7 +113,7 @@ final class KiwiCaptcha_Client
      */
     public static function verify(array $settings, string $token, string $scope, array $server = [])
     {
-        $ip = self::clientIp($server, !empty($settings['trust_proxy']));
+        $ip = self::clientIp($server, $settings);
         if (($settings['mode'] ?? 'json') === 'compat') {
             $body = http_build_query([
                 'secret' => (string) ($settings['bearer'] ?? ''),
@@ -138,22 +138,22 @@ final class KiwiCaptcha_Client
     }
 
     /**
-     * The client ip bound into the verify call.
+     * The client ip bound into the verify call, resolved through the
+     * shared trusted-proxy helper: the socket peer wins unless the
+     * peer sits inside the trusted_proxies CIDR list (the default
+     * empty list trusts nobody, so a forged X-Forwarded-For never
+     * moves the binding).
      *
-     * @param array<string, mixed> $server
+     * @param array<string, mixed> $server the server superglobal slice
+     * @param array<string, mixed> $settings the merged options
      */
-    public static function clientIp(array $server, bool $trustProxy): string
+    public static function clientIp(array $server, array $settings = []): string
     {
-        if ($trustProxy) {
-            $forwarded = $server['HTTP_X_FORWARDED_FOR'] ?? null;
-            if (is_string($forwarded) && $forwarded !== '') {
-                $first = trim(explode(',', $forwarded)[0]);
-                if ($first !== '') {
-                    return $first;
-                }
-            }
-        }
-
-        return (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
+        return kiwi_captcha_client_ip(
+            $server['REMOTE_ADDR'] ?? '127.0.0.1',
+            $server['HTTP_X_FORWARDED_FOR'] ?? null,
+            $server['HTTP_X_REAL_IP'] ?? null,
+            kiwi_captcha_parse_cidrs((string) ($settings['trusted_proxies'] ?? '')),
+        );
     }
 }

@@ -56,9 +56,34 @@ if (decision.ok) {
 `Decision` is the contract-level answer: `ok`, `disposition`
 (`allow`, `deny` or `retry`), `decisionHandle` and `price`. A `deny`
 carries the failure code (`expired`, `bad_signature`, `wrong_scope`,
-`already_consumed`, and so on). A `retry` disposition covers storage
-outages and admission exhaustion, where the challenge stays intact and
-the same token may be resubmitted once the backend recovers.
+`required_scope`, `already_consumed`, and so on). A `retry`
+disposition covers storage outages and admission exhaustion, where the
+challenge stays intact and the same token may be resubmitted once the
+backend recovers.
+
+The scope option is REQUIRED (`Options.expectedScope`): an empty
+option answers the typed `required_scope` refusal instead of silently
+accepting a token minted for any scope, and the servlet filter takes
+the scope as a required constructor parameter.
+
+## Execution-armed records: the ExecutionPolicy
+
+An execution-armed record demands the browser-trace walker, an oracle
+this SDK does not carry: the default policy fails every armed record
+closed (`execution_mismatch`, documented). A deployment that issues
+armed challenges verifies them either through the bundle or through
+the sidecar: set `Options.executionPolicy` to
+`new ExecutionPolicy("http://127.0.0.1:7371", bearer, timeoutMs)` and
+the armed record's single verification delegates to a co-located
+kiwicaptcha-verifier over HTTP, whose verdict maps back into this
+SDK's vocabulary.
+
+Single-use semantics are preserved: the sidecar consumes the record
+(point the sidecar at the same store), and this SDK never
+double-consumes. Trust boundary: the sidecar decides acceptances, so
+it must be co-located and trusted like the verifier itself. An
+unreachable sidecar answers `storage_unavailable` (the retry
+disposition) with the record intact; a refused bearer denies.
 
 ## Store adapters
 
@@ -95,9 +120,17 @@ transaction, exactly-once consume). The core's `openStore` refuses a
 ```java
 KiwiCaptchaFilter filter = new KiwiCaptchaFilter(verifier, secret, "login",
         path -> path.startsWith("api/protected"),  // route predicate
-        false,                                     // trust x-forwarded-for
+        List.of("10.0.0.0/8"),                     // trusted proxy CIDRs
         null);                                     // custom denial renderer
 ```
+
+The trusted-proxy list decides the client IP binding: an empty list
+(the default) trusts nobody, so `x-forwarded-for` and `x-real-ip` are
+ignored and the socket peer is the client IP. A peer inside the list
+unlocks the right-to-left forwarded walk (trusted hops skipped, the
+first untrusted entry wins, an unparsable hop falls back to the peer),
+and `x-real-ip` is honored only when the peer is trusted and no
+forwarded chain exists.
 
 Every protected request reads the token from the `x-kiwi-token`
 header, then the `kiwi_token` form field, then the query string.

@@ -91,7 +91,7 @@ class WsgiMiddlewareTest(unittest.TestCase):
 
     def test_missing_token_403(self):
         verifier = make_verifier()
-        app = WsgiKiwiCaptcha(lambda e, s: s("200 OK", []) or [], verifier, SECRET)
+        app = WsgiKiwiCaptcha(lambda e, s: s("200 OK", []) or [], verifier, SECRET, "login")
         harness = WsgiHarness(app)
         harness.request()
         self.assertEqual("403 Forbidden", harness.status)
@@ -103,7 +103,7 @@ class WsgiMiddlewareTest(unittest.TestCase):
         record, token = issue_token()
         verifier.storage.store(record)
         app = WsgiKiwiCaptcha(
-            lambda e, s: s("200 OK", []) or [b""], verifier, SECRET
+            lambda e, s: s("200 OK", []) or [b""], verifier, SECRET, "login"
         )
         harness = WsgiHarness(app)
         harness.request(token=token, query="kiwi_token=" + urllib.parse.quote(token))
@@ -123,6 +123,7 @@ class WsgiMiddlewareTest(unittest.TestCase):
 
         app = WsgiKiwiCaptcha(
             target_app, verifier, SECRET,
+            expected_scope="login",
             scope_predicate=lambda path: path.startswith("api/"),
         )
         harness = WsgiHarness(app)
@@ -138,7 +139,7 @@ class WsgiMiddlewareTest(unittest.TestCase):
         verifier = make_verifier()
         record, token = issue_token(binding_ip="203.0.113.7")
         verifier.storage.store(record)
-        app = WsgiKiwiCaptcha(lambda e, s: s("200 OK", []) or [b""], verifier, SECRET)
+        app = WsgiKiwiCaptcha(lambda e, s: s("200 OK", []) or [b""], verifier, SECRET, "login")
         harness = WsgiHarness(app)
         harness.request(token=token, remote_addr="198.51.100.1")
         self.assertEqual("403 Forbidden", harness.status)
@@ -282,7 +283,7 @@ class FastApiDependencyTest(unittest.TestCase):
             self.assertEqual("malformed_token", exc.code)
 
     def test_default_failure_factory_without_fastapi(self):
-        guard = FastApiKiwiDependency(make_verifier(), SECRET)
+        guard = FastApiKiwiDependency(make_verifier(), SECRET, "login")
         error = guard._default_failure(403, "malformed_token")
         self.assertIsInstance(error, RuntimeError)
 

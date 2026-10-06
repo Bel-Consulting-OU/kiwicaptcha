@@ -10,6 +10,7 @@ public enum VerifyError {
     BAD_SIGNATURE("bad_signature", "challenge signature is invalid"),
     EXPIRED("expired", "challenge has expired"),
     WRONG_SCOPE("wrong_scope", "challenge was issued for a different scope"),
+    REQUIRED_SCOPE("required_scope", "the scope option is required: verify refuses to accept a token for any scope"),
     IP_MISMATCH("ip_mismatch", "challenge was issued to a different client ip"),
     MISSING_CLIENT_IP("missing_client_ip", "challenge is ip-bound but no client ip was supplied"),
     WRONG_REGION("wrong_region", "challenge was issued for a different region"),
@@ -42,6 +43,16 @@ public enum VerifyError {
     }
 
     /** The wire code of this failure. */
+    /** The enum member of one wire code, or null outside the vocabulary. */
+    public static VerifyError fromCodeOrNull(String code) {
+        for (VerifyError candidate : values()) {
+            if (candidate.code.equals(code)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     public String code() {
         return code;
     }

@@ -87,7 +87,9 @@ check('header token', KiwiVerifier::extractToken(' hdr ', [], []) === 'hdr');
 check('form token', KiwiVerifier::extractToken('', ['cf-turnstile-response' => 'cf'], []) === 'cf');
 check('cookie token', KiwiVerifier::extractToken('', [], ['kiwi_token' => 'ck']) === 'ck');
 check('missing token', KiwiVerifier::extractToken('', [], []) === null);
-check('trusted proxy ip', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, 10.0.0.9'], true) === '203.0.113.2');
+check('untrusted peer ignores xff', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, 10.0.0.9']) === '10.0.0.1');
+check('trusted lb takes next left', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, 10.0.0.9'], '10.0.0.0/24') === '203.0.113.2');
+check('garbage hop fails closed', KiwiVerifier::clientIp(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.2, garbage!!, 10.0.0.9'], '10.0.0.0/24') === '10.0.0.9');
 
 // The middleware over stubs.
 class TestSettings implements \Flarum\Settings\SettingsRepositoryInterface

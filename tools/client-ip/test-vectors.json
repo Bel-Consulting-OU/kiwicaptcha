@@ -1,0 +1,309 @@
+{
+  "algorithm": "kiwi-trusted-proxy-walk v1",
+  "reference": "packages/kiwicaptcha/integrations/symfony/src/Risk/ClientIpResolver.php",
+  "contract": [
+    "The socket peer is the canonical client IP unless the peer is within the trusted CIDR list.",
+    "An empty trusted list means trust nobody: X-Forwarded-For and X-Real-IP are ignored.",
+    "The X-Forwarded-For walk starts at the rightmost entry and moves left: an entry that fails strict IP parsing terminates the chain and the walk falls back to the peer; an entry inside the trusted list is skipped; the first untrusted entry wins.",
+    "A chain whose every entry is trusted falls back to the peer.",
+    "X-Real-IP is honored only when the peer is trusted and no non-empty X-Forwarded-For chain exists; an unparseable X-Real-IP falls back to the peer.",
+    "Raw control bytes anywhere in a forwarding header refuse that header.",
+    "IPv4-mapped IPv6 normalizes to its IPv4 form before trust comparisons.",
+    "A peer carrying an IPv4-mapped IPv6 address is compared in its IPv4 form."
+  ],
+  "cidr_cases": [
+    { "cidr": "10.0.0.5/32", "ip": "10.0.0.5", "matches": true },
+    { "cidr": "10.0.0.5/32", "ip": "10.0.0.6", "matches": false },
+    { "cidr": "0.0.0.0/0", "ip": "203.0.113.9", "matches": true },
+    { "cidr": "0.0.0.0/0", "ip": "2001:db8::1", "matches": false },
+    { "cidr": "10.0.0.1/24", "ip": "10.0.0.250", "matches": true, "note": "host bits set in the CIDR are masked away" },
+    { "cidr": "10.0.0.1/24", "ip": "10.0.1.250", "matches": false },
+    { "cidr": "10.0.0.0/24", "ip": "::ffff:10.0.0.9", "matches": true, "note": "an IPv4-mapped IPv6 peer matches in its IPv4 form" },
+    { "cidr": "10.0.0.0/24", "ip": "2001:db8::9", "matches": false },
+    { "cidr": "2001:db8::/32", "ip": "2001:db8::9", "matches": true },
+    { "cidr": "2001:db8::/32", "ip": "2001:db9::9", "matches": false },
+    { "cidr": "2001:db8::5/128", "ip": "2001:db8::5", "matches": true },
+    { "cidr": "2001:db8::5/128", "ip": "2001:db8::6", "matches": false },
+    { "cidr": "::/0", "ip": "2001:db8::9", "matches": true },
+    { "cidr": "::/0", "ip": "10.0.0.9", "matches": false },
+    { "cidr": "10.0.0.0/24", "ip": "not-an-ip", "matches": false }
+  ],
+  "scenarios": [
+    {
+      "id": "direct-peer-no-headers",
+      "peer": "203.0.113.50",
+      "xff_lines": null,
+      "real_ip": null,
+      "trusted": [],
+      "expected": "203.0.113.50"
+    },
+    {
+      "id": "security-untrusted-peer-xff-ignored",
+      "description": "a client sending X-Forwarded-For: 1.2.3.4 with no trusted proxies resolves to its socket peer",
+      "peer": "203.0.113.50",
+      "xff_lines": ["1.2.3.4"],
+      "real_ip": null,
+      "trusted": [],
+      "expected": "203.0.113.50"
+    },
+    {
+      "id": "security-untrusted-peer-xff-chain-ignored",
+      "peer": "203.0.113.50",
+      "xff_lines": ["10.0.0.9, 1.2.3.4"],
+      "real_ip": null,
+      "trusted": [],
+      "expected": "203.0.113.50"
+    },
+    {
+      "id": "security-untrusted-peer-real-ip-ignored",
+      "peer": "203.0.113.50",
+      "xff_lines": null,
+      "real_ip": "1.2.3.4",
+      "trusted": [],
+      "expected": "203.0.113.50"
+    },
+    {
+      "id": "security-untrusted-peer-single-hop-xff-ignored",
+      "description": "single-hop XFF from an untrusted peer is ignored even when the list would trust other ranges",
+      "peer": "203.0.113.50",
+      "xff_lines": ["1.2.3.4"],
+      "real_ip": null,
+      "trusted": ["198.51.100.0/24"],
+      "expected": "203.0.113.50"
+    },
+    {
+      "id": "trusted-lb-rightmost-take-next-left",
+      "peer": "10.0.0.9",
+      "xff_lines": ["203.0.113.7, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "203.0.113.7"
+    },
+    {
+      "id": "multi-hop-1-trusted-proxy",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "multi-hop-2-trusted-proxies",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.1.8, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24", "10.0.1.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "multi-hop-3-trusted-proxies",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.2.7, 10.0.1.8, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "chain-truncated-at-untrusted-hop",
+      "description": "the walk stops at the first untrusted entry: an attacker-chosen left tail never wins",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 1.2.3.4, 10.0.1.8, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24", "10.0.1.0/24"],
+      "expected": "1.2.3.4"
+    },
+    {
+      "id": "all-trusted-chain-falls-back-to-peer",
+      "peer": "10.0.0.9",
+      "xff_lines": ["10.0.1.8, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24", "10.0.1.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "real-ip-precedence-xff-wins",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.0.9"],
+      "real_ip": "1.2.3.4",
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "real-ip-used-when-no-xff",
+      "peer": "10.0.0.9",
+      "xff_lines": null,
+      "real_ip": "198.51.100.5",
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "real-ip-invalid-falls-back-to-peer",
+      "peer": "10.0.0.9",
+      "xff_lines": null,
+      "real_ip": "not-an-ip",
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "real-ip-honored-when-xff-empty",
+      "peer": "10.0.0.9",
+      "xff_lines": [""],
+      "real_ip": "198.51.100.5",
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "ipv6-peer-untrusted-xff-ignored",
+      "peer": "2001:db8::50",
+      "xff_lines": ["1.2.3.4"],
+      "real_ip": null,
+      "trusted": [],
+      "expected": "2001:db8::50"
+    },
+    {
+      "id": "ipv6-trusted-chain",
+      "peer": "2001:db8::9",
+      "xff_lines": ["2001:db8:1::50, 2001:db8::9"],
+      "real_ip": null,
+      "trusted": ["2001:db8::/64"],
+      "expected": "2001:db8:1::50"
+    },
+    {
+      "id": "ipv6-all-trusted-falls-back",
+      "peer": "2001:db8::9",
+      "xff_lines": ["2001:db8::50, 2001:db8::9"],
+      "real_ip": null,
+      "trusted": ["2001:db8::/64"],
+      "expected": "2001:db8::9",
+      "note": "every chain entry sits inside the trusted /64, so the peer wins"
+    },
+    {
+      "id": "ipv4-mapped-peer-normalized",
+      "peer": "::ffff:10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "ipv4-mapped-hop-normalized",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, ::ffff:10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "ipv6-mapped-not-in-list-still-client",
+      "peer": "10.0.0.9",
+      "xff_lines": ["::ffff:198.51.100.5, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5",
+      "note": "the mapped form normalizes to dotted IPv4 text"
+    },
+    {
+      "id": "garbage-hop-terminates-chain",
+      "description": "an unparsable hop fails the walk closed: the peer wins, never a left-side address",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, garbage!!, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "garbage-rightmost-terminates-chain",
+      "peer": "10.0.0.9",
+      "xff_lines": ["garbage"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "unknown-token-terminates-chain",
+      "peer": "10.0.0.9",
+      "xff_lines": ["unknown, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "obfuscated-token-terminates-chain",
+      "peer": "10.0.0.9",
+      "xff_lines": ["_obfuscated, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "control-byte-header-refused",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5\u000b, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "port-suffix-stripped-ipv4",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5:4711, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "port-suffix-stripped-bracketed-ipv6",
+      "peer": "10.0.0.9",
+      "xff_lines": ["[2001:db8::5]:4711, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "2001:db8::5"
+    },
+    {
+      "id": "malformed-port-terminates-chain",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5:notaport, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "oversized-xff-garbage-tail",
+      "description": "a long chain with a garbage entry right of the client still fails closed",
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 203.0.113.1, 203.0.113.2, 203.0.113.3, bogus#entry, 10.0.0.9"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9"
+    },
+    {
+      "id": "whitespace-padded-entries-trimmed",
+      "peer": "10.0.0.9",
+      "xff_lines": ["  198.51.100.5  ,  10.0.0.9  "],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "198.51.100.5"
+    },
+    {
+      "id": "duplicate-headers-ambiguous-fail-closed",
+      "description": "two X-Forwarded-For header lines: a surface that sees each line answers the peer; a platform that merges them walks the merged chain",
+      "duplicate_detection": true,
+      "peer": "10.0.0.9",
+      "xff_lines": ["198.51.100.5, 10.0.0.9", "1.2.3.4"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "10.0.0.9",
+      "expected_merged": "1.2.3.4",
+      "note": "expected is for duplicate-visible surfaces, expected_merged for platforms that join the lines into one value"
+    },
+    {
+      "id": "peer-unparseable-returns-peer-text",
+      "peer": "unix-socket",
+      "xff_lines": ["1.2.3.4"],
+      "real_ip": null,
+      "trusted": ["10.0.0.0/24"],
+      "expected": "unix-socket",
+      "note": "a peer that is not an IP can never be trusted, so it is returned verbatim"
+    }
+  ]
+}

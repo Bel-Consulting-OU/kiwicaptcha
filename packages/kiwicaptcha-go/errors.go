@@ -13,6 +13,7 @@ const (
 	ErrCodeBadSignature         VerifyError = "bad_signature"
 	ErrCodeExpired              VerifyError = "expired"
 	ErrCodeWrongScope           VerifyError = "wrong_scope"
+	ErrCodeRequiredScope        VerifyError = "required_scope"
 	ErrCodeIPMismatch           VerifyError = "ip_mismatch"
 	ErrCodeMissingClientIP      VerifyError = "missing_client_ip"
 	ErrCodeWrongRegion          VerifyError = "wrong_region"
@@ -69,6 +70,7 @@ var verifyErrorDescriptions = map[VerifyError]string{
 	ErrCodeBadSignature:         "challenge signature is invalid",
 	ErrCodeExpired:              "challenge has expired",
 	ErrCodeWrongScope:           "challenge was issued for a different scope",
+	ErrCodeRequiredScope:        "the scope option is required: verify refuses to accept a token for any scope",
 	ErrCodeIPMismatch:           "challenge was issued to a different client ip",
 	ErrCodeMissingClientIP:      "challenge is ip-bound but no client ip was supplied",
 	ErrCodeWrongRegion:          "challenge was issued for a different region",

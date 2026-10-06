@@ -180,6 +180,18 @@ test('server-state MAC inputs and digests match the PHP core', () => {
     consumedResultMac(key, fixed, true, 'bind-9', 'op-7'),
     golden.server_state_mac.consumed_result_hex,
   );
+  // The length prefixes count BYTES (the PHP strlen and the Rust
+  // str::len semantics), never UTF-16 code units: a non-ASCII hostname
+  // must produce the identical MAC input on every surface.
+  const unicodeHost = 'münchen.example';
+  assert.equal(Buffer.byteLength(unicodeHost), 16);
+  assert.ok(recordMetaInput(fixed, 1700000000123456, unicodeHost).includes(`16:${unicodeHost}`));
+  assert.ok(!recordMetaInput(fixed, 1700000000123456, unicodeHost).includes(`15:${unicodeHost}`));
+  // The MAC itself stays the HMAC over the byte-exact input.
+  assert.equal(
+    recordMetaMac(key, fixed, 1700000000123456, unicodeHost).length,
+    64,
+  );
 });
 
 test('binding tags and legacy IP hashes match the PHP core', () => {

@@ -18,7 +18,7 @@ import (
 const DecisionKey = "kiwi.decision"
 
 // Middleware builds the echo guard middleware.
-func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) echo.MiddlewareFunc {
+func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, options ...Option) echo.MiddlewareFunc {
 	config := optionsConfig(options)
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ctx echo.Context) error {
@@ -31,7 +31,7 @@ func Middleware(verifier *kiwi.Verifier, secretKey string, options ...Option) ec
 			}
 			outcome := verifier.Verify(token, kiwi.VerifyOptions{
 				SecretKey:     secretKey,
-				ExpectedScope: config.expectedScope,
+				ExpectedScope: expectedScope,
 				ClientIP:      clientIP(ctx),
 			})
 			decision := kiwi.DecisionFromOutcome(outcome, "")
@@ -56,17 +56,11 @@ func DecisionFrom(ctx echo.Context) (kiwi.VerifyDecision, bool) {
 }
 
 type echoConfig struct {
-	expectedScope  string
 	scopePredicate func(path string) bool
 }
 
 // Option shapes the echo guard.
 type Option func(*echoConfig)
-
-// WithExpectedScope pins one scope for every protected route.
-func WithExpectedScope(scope string) Option {
-	return func(c *echoConfig) { c.expectedScope = scope }
-}
 
 // WithScopePredicate receives the route path and answers whether the
 // route needs a token.

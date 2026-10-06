@@ -25,7 +25,10 @@ export function serverStateKey(secret: string | Buffer, tenantId: string | null 
 }
 
 function lp(value: string): string {
-  return `${value.length}:${value}`;
+  // The length prefix counts BYTES (the PHP strlen and the Rust
+  // str::len semantics), never UTF-16 code units: a non-ASCII field
+  // must produce the identical MAC input on every surface.
+  return `${Buffer.byteLength(value)}:${value}`;
 }
 
 function opt(value: string | null): string {

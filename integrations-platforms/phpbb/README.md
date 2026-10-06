@@ -20,7 +20,7 @@ registers `captcha.plugins.kiwi`.
 - `config/services.yml` wires both; `language/en/info_acp_kiwi.php`
   carries the ACP strings; the config keys are `kiwi_verify_url`,
   `kiwi_bearer`, `kiwi_shim_url`, `kiwi_scope`, `kiwi_mode`,
-  `kiwi_trust_proxy` (set them through a small ACP page or an SQL
+  `kiwi_trusted_proxies` (comma-separated trusted-proxy CIDRs; empty never trusts a forwarded header) (set them through a small ACP page or an SQL
   insert; the plugin reads them from the board config table).
 
 ## Deployment steps

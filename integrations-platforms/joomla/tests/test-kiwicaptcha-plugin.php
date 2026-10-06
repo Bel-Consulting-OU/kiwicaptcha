@@ -47,8 +47,11 @@ $json = KiwiClient::buildRequest(['verify_url' => 'http://127.0.0.1:7371/verify'
 $body = json_decode($json['body'], true);
 check('json mode url and body', $json['url'] === 'http://127.0.0.1:7371/verify' && ($body['token'] ?? '') === 't' && ($body['scope'] ?? '') === 'login');
 check('json mode bearer header', ($json['headers']['Authorization'] ?? '') === 'Bearer b');
-$compat = KiwiClient::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 'sec', 'trust_proxy' => true], 't2', 'signup', ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.5, 10.0.0.2']);
+$compat = KiwiClient::buildRequest(['verify_url' => 'https://k.test/sv', 'mode' => 'compat', 'bearer' => 'sec', 'trusted_proxies' => '10.0.0.0/24'], 't2', 'signup', ['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.5, 10.0.0.2']);
 check('compat mode encodes response and secret', strpos($compat['body'], 'response=t2') !== false && strpos($compat['body'], 'secret=sec') !== false && strpos($compat['body'], 'remoteip=203.0.113.5') !== false);
+check('untrusted peer ignores xff', KiwiClient::clientIp(['REMOTE_ADDR' => '192.0.2.7', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4']) === '192.0.2.7');
+check('trusted lb takes next left', KiwiClient::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '203.0.113.5, 10.0.0.1'], '10.0.0.0/24') === '203.0.113.5');
+check('garbage hop fails closed', KiwiClient::clientIp(['REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4, garbage!!, 10.0.0.1'], '10.0.0.0/24') === '10.0.0.1');
 
 // The decision table over the test transport.
 KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_encode(['success' => true])];
@@ -66,7 +69,7 @@ $params = new TestParams([
     'scope' => 'signup',
     'mode' => 'json',
     'bearer' => '',
-    'trust_proxy' => '1',
+    'trusted_proxies' => '10.0.0.0/8',
 ]);
 $plugin = new PlgCaptchaKiwicaptcha(null, $params);
 
@@ -83,8 +86,7 @@ check('onDisplay carries the class', strpos($markup, 'kiwi-container extra-class
 $app = new TestApplication(
     ['REMOTE_ADDR' => '192.0.2.7', 'HTTP_X_FORWARDED_FOR' => '203.0.113.9'],
     ['kiwi__token' => 'good-token']
-);
-$plugin->setTestApp($app);
+);$plugin->setTestApp($app);
 KiwiClient::$testTransport = function (array $request) use (&$captured): array {
     $captured = $request;
 
@@ -92,7 +94,7 @@ KiwiClient::$testTransport = function (array $request) use (&$captured): array {
 };
 check('onCheckAnswer verifies a good token', $plugin->onCheckAnswer(null) === true);
 $body = json_decode($captured['body'] ?? '', true);
-check('onCheckAnswer binds the trusted proxy ip', ($body['remoteip'] ?? '') === '203.0.113.9' && ($body['token'] ?? '') === 'good-token' && ($body['scope'] ?? '') === 'signup');
+check('onCheckAnswer binds the untrusted peer ip', ($body['remoteip'] ?? '') === '192.0.2.7' && ($body['token'] ?? '') === 'good-token' && ($body['scope'] ?? '') === 'signup');
 
 KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_encode(['success' => false])];
 check('onCheckAnswer rejects a failed challenge', $plugin->onCheckAnswer(null) === false);

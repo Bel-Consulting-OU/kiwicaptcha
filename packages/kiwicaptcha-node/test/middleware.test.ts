@@ -65,7 +65,7 @@ describe('express middleware', () => {
     app.post(
       '/redirect',
       kiwiVerifyExpress({
-        verify: () => ({ storage: state.storage, secretKey: SECRET, ...(state.clock as object) }),
+        verify: () => ({ storage: state.storage, secretKey: SECRET, expectedScope: 'login', ...(state.clock as object) }),
         failureRedirect: '/captcha',
         tokenField: 'captcha',
       }),
@@ -221,7 +221,7 @@ describe('fastify middleware', () => {
     await state.storage.store(challengeRecordFromJson(
       goldenVectors().records.find((entry) => entry.name === 'sha_plain')?.record ?? {},
     ));
-    const result = await verify(state.token, { storage: state.storage, secretKey: SECRET, ...state.clock });
+    const result = await verify(state.token, { storage: state.storage, secretKey: SECRET, expectedScope: 'login', ...state.clock });
     assert.deepEqual(
       { ok: result.ok, disposition: result.disposition },
       { ok: true, disposition: 'allow' },

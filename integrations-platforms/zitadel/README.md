@@ -19,6 +19,10 @@ unreachable deployment fails closed.
   then carry the solved token in the registration payload's
   `kiwiToken` field or the `X-Kiwi-Token` header; the action verifies
   it at PreCreation, so no user row exists before the proof.
+- The IP binding rides `ctx.request.ipAddress`: Zitadel derives that
+  address server-side from the connection, so no client-supplied
+  forwarding header is trusted and no trusted-proxy configuration is
+  needed here.
 
 ## Deployment steps
 

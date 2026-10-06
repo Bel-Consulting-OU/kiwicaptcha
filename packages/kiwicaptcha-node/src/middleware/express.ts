@@ -1,4 +1,5 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { resolveClientIp } from '../clientip.js';
 import { verify, type VerifyOptions } from '../verify.js';
 
 /**
@@ -6,7 +7,11 @@ import { verify, type VerifyOptions } from '../verify.js';
  * the token locally, and answers 422 with a JSON error body on
  * failure. A verified request exposes kiwi.verify on the request for
  * downstream handlers (the decision handle, the price rung, the
- * binding).
+ * binding). When trustedProxies is configured, the middleware resolves
+ * the canonical client IP itself (the same trusted-proxy walk every
+ * SDK ships) and fills clientIp on the factory's options when the
+ * factory left it unset; express's own trust proxy setting is never
+ * consulted, so the behavior stays identical across frameworks.
  */
 
 export const DEFAULT_TOKEN_FIELD = 'kiwi__token';
@@ -20,6 +25,42 @@ export interface ExpressVerifyOptions {
   failureStatus?: number;
   /** Render the failure as a redirect instead of the JSON error. */
   failureRedirect?: string;
+  /**
+   * The trusted-proxy CIDR list. The default empty list trusts
+   * nobody: X-Forwarded-For and X-Real-IP are ignored and the socket
+   * peer is the client IP.
+   */
+  trustedProxies?: string[];
+}
+
+/** The canonical client IP of one request per the shared contract. */
+export function clientIpFromRequest(req: Request, trustedProxies: string[] = []): string {
+  return resolveClientIp({
+    peer: req.socket?.remoteAddress ?? '',
+    xffLines: rawHeaderLines(req, 'x-forwarded-for'),
+    realIp: singleHeader(req, 'x-real-ip'),
+    trustedProxies,
+  });
+}
+
+/** Every header line for one name, preserving duplicates and case. */
+function rawHeaderLines(req: Request, name: string): string[] {
+  const raw = req.rawHeaders ?? [];
+  const lines: string[] = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const key = raw[i];
+    const value = raw[i + 1];
+    if (key !== undefined && key.toLowerCase() === name) {
+      lines.push(value ?? '');
+    }
+  }
+  return lines;
+}
+
+function singleHeader(req: Request, name: string): string | null {
+  const lines = rawHeaderLines(req, name);
+  const first = lines[0];
+  return lines.length > 0 && first !== undefined ? first : null;
 }
 
 function readToken(req: Request, field: string): string | null {
@@ -60,6 +101,13 @@ export function kiwiVerifyExpress(options: ExpressVerifyOptions): RequestHandler
       }
       try {
         const verifyOptions = await options.verify(req);
+        if (options.trustedProxies !== undefined && (verifyOptions.clientIp === undefined || verifyOptions.clientIp === null)) {
+          // With trustedProxies configured (an empty list included),
+          // the middleware owns the client-IP boundary: it binds the
+          // socket peer, or a forwarded entry when a trusted hop
+          // justifies one. A factory-pinned clientIp always wins.
+          verifyOptions.clientIp = clientIpFromRequest(req, options.trustedProxies);
+        }
         const result = await verify(rawToken, verifyOptions);
         if (!result.ok) {
           fail(

@@ -18,6 +18,7 @@ class VerifyError(str, Enum):
     BAD_SIGNATURE = "bad_signature"
     EXPIRED = "expired"
     WRONG_SCOPE = "wrong_scope"
+    REQUIRED_SCOPE = "required_scope"
     IP_MISMATCH = "ip_mismatch"
     MISSING_CLIENT_IP = "missing_client_ip"
     WRONG_REGION = "wrong_region"
@@ -73,6 +74,7 @@ _DESCRIPTIONS = {
     VerifyError.BAD_SIGNATURE: "challenge signature is invalid",
     VerifyError.EXPIRED: "challenge has expired",
     VerifyError.WRONG_SCOPE: "challenge was issued for a different scope",
+    VerifyError.REQUIRED_SCOPE: "the scope option is required: verify refuses to accept a token for any scope",
     VerifyError.IP_MISMATCH: "challenge was issued to a different client ip",
     VerifyError.MISSING_CLIENT_IP: "challenge is ip-bound but no client ip was supplied",
     VerifyError.WRONG_REGION: "challenge was issued for a different region",

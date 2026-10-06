@@ -32,7 +32,7 @@ final class KiwiCaptcha_Settings
             'shim_url' => '',
             'bearer' => '',
             'mode' => 'json',
-            'trust_proxy' => false,
+            'trusted_proxies' => '',
             'enabled_login' => true,
             'enabled_signup' => true,
             'enabled_comment' => false,
@@ -86,7 +86,7 @@ final class KiwiCaptcha_Settings
         add_settings_field('shim_url', 'Shim script URL', [__CLASS__, 'fieldShimUrl'], 'kiwicaptcha', 'kiwicaptcha_deployment');
         add_settings_field('bearer', 'Bearer secret', [__CLASS__, 'fieldBearer'], 'kiwicaptcha', 'kiwicaptcha_deployment');
         add_settings_field('mode', 'Wire format', [__CLASS__, 'fieldMode'], 'kiwicaptcha', 'kiwicaptcha_deployment');
-        add_settings_field('trust_proxy', 'Trust X-Forwarded-For', [__CLASS__, 'fieldTrustProxy'], 'kiwicaptcha', 'kiwicaptcha_deployment');
+        add_settings_field('trusted_proxies', 'Trusted proxies', [__CLASS__, 'fieldTrustedProxies'], 'kiwicaptcha', 'kiwicaptcha_deployment');
 
         add_settings_section('kiwicaptcha_forms', 'Protected forms', '__return_false', 'kiwicaptcha');
         foreach (['login', 'signup', 'comment', 'checkout'] as $form) {
@@ -146,14 +146,15 @@ final class KiwiCaptcha_Settings
         );
     }
 
-    public static function fieldTrustProxy(): void
+    public static function fieldTrustedProxies(): void
     {
         $all = self::all();
         printf(
-            '<input type="checkbox" name="%s[trust_proxy]" value="1"%s> honor X-Forwarded-For as the client ip',
+            '<input class="regular-text" type="text" name="%s[trusted_proxies]" value="%s">',
             esc_attr(self::OPTION_KEY),
-            $all['trust_proxy'] ? ' checked' : ''
+            esc_attr($all['trusted_proxies'])
         );
+        echo '<p class="description">Comma-separated trusted-proxy CIDRs (IPv4 or IPv6), e.g. 10.0.0.0/8, 2001:db8::/32. Empty (the default) never trusts a forwarded header: the socket peer is the client ip.</p>';
     }
 
     /**
@@ -193,7 +194,11 @@ final class KiwiCaptcha_Settings
         if (isset($input['mode']) && in_array($input['mode'], ['json', 'compat'], true)) {
             $clean['mode'] = (string) $input['mode'];
         }
-        $clean['trust_proxy'] = !empty($input['trust_proxy']);
+        if (isset($input['trusted_proxies']) && is_string($input['trusted_proxies'])) {
+            $clean['trusted_proxies'] = sanitize_text_field($input['trusted_proxies']);
+            // A CIDR entry that fails to parse never widens the trust
+            // boundary: the resolver drops it at resolve time.
+        }
         foreach (['login', 'signup', 'comment', 'checkout'] as $form) {
             $clean['enabled_'.$form] = !empty($input['enabled_'.$form]);
             if (isset($input['scope_'.$form]) && is_string($input['scope_'.$form]) && preg_match('/^[A-Za-z0-9_:-]{1,64}$/', $input['scope_'.$form]) === 1) {
