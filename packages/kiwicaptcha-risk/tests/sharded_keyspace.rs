@@ -384,6 +384,7 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
             honeypot_hit: false,
             v1_weights: kiwicaptcha_risk::score::RiskWeights::default(),
             v2_weights: kiwicaptcha_risk::score::RiskV2Weights::default(),
+            target_id: None,
         };
         (o, registration)
     };
@@ -460,8 +461,8 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
 /// The hysteresis script floors a corrupt negative level at 0 and never
 /// lets it feed the ratchet as upgrade head-start. The write-on-change
 /// guard is pinned at the source: a steady-state transition must not
-/// rewrite the hot key (OBJECT IDLETIME cannot observe it — the
-/// script's own HMGET resets the idle clock — so the guard itself is
+/// rewrite the hot key (`OBJECT IDLETIME` cannot observe it — the
+/// script's own `HMGET` resets the idle clock — so the guard itself is
 /// the regression surface).
 #[test]
 fn hysteresis_floors_negative_levels_and_writes_only_on_change() {

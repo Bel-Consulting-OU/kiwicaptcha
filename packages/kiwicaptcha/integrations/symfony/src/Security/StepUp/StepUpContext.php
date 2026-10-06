@@ -8,11 +8,11 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  * One step-up demand: who must step up, under which scope, and why.
  *
  * The identity fields carry pseudonyms only, exactly the shapes the
- * risk engine derives (the principal pseudonym of
- * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::principalId()} — 32
- * lowercase hex chars — and the target pseudonym of
- * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()} — the full
- * 64 lowercase hex char digest). A raw-looking value is rejected at
+ * risk engine derives. The principal pseudonym is
+ * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::principalId()}, 32
+ * lowercase hex chars. The target pseudonym is
+ * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()}, the full
+ * 64 lowercase hex char digest. A raw-looking value is rejected at
  * construction, fail-closed, so a raw username or email can never ride
  * a challenge record, a store key or an outcome handle. The one place
  * the target narrows to 32 hex is the outcomes handle/marking key,

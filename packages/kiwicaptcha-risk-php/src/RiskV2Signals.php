@@ -23,6 +23,10 @@ final class RiskV2Signals
         public readonly int $sessionInconsistency = 0,
         /** Trusted-edge TLS inconsistency: 1000 when the session's first-seen TLS classification tag differs from the current request's tag, 0 when consistent or when no tag exists (first request / absent / unbounded value). */
         public readonly int $tlsInconsistency = 0,
+        /** Target-account authentication-failure pressure, normalized against the attack threshold. */
+        public readonly int $targetFailurePressure = 0,
+        /** Distinct source+asn spread of failures against the target, normalized. */
+        public readonly int $targetSpread = 0,
     ) {
         foreach (get_object_vars($this) as $value) {
             if ($value < 0 || $value > 1000) {
@@ -36,11 +40,12 @@ final class RiskV2Signals
     /** All-zero vector (no risk-v2 evidence). */
     public static function zero(): self
     {
-        return new self(0, 0, 0);
+        return new self(0, 0, 0, 0, 0);
     }
 
     public function isZero(): bool
     {
-        return $this->honeypot === 0 && $this->sessionInconsistency === 0 && $this->tlsInconsistency === 0;
+        return $this->honeypot === 0 && $this->sessionInconsistency === 0 && $this->tlsInconsistency === 0
+            && $this->targetFailurePressure === 0 && $this->targetSpread === 0;
     }
 }

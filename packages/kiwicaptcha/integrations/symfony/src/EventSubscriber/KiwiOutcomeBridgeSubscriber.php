@@ -274,9 +274,9 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     /**
      * The target handle. The engine derives the full 32-byte digest of
      * the normalized identifier (the canonical 64-hex target
-     * pseudonym); the outcomes API addresses target marks under the
+     * pseudonym). The outcomes API addresses target marks under the
      * 128-bit handle spelling, so the one projection lives in
-     * {@see TargetMarkKey::of()} — never a try-both fallback here.
+     * {@see TargetMarkKey::of()}. Never a try-both fallback here.
      * Authentication outcomes write no target marks of their own, so
      * the projection cannot split a mark key; anything else is a skip
      * with a debug log.

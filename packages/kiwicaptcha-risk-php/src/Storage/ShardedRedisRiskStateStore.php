@@ -1007,7 +1007,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         $this->mergePerShard = $perShard;
         $this->mergedAtMs = $nowMs;
 
-        // The level/cooldown ratchet runs HERE — once per staleness
+        // The level/cooldown ratchet runs here — once per staleness
         // window — not on every assessment: the hot path reuses the
         // published level/cooldown, so the hysteresis hash is no longer
         // a per-request single-slot write.

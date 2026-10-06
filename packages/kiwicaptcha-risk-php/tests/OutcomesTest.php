@@ -349,7 +349,7 @@ final class OutcomesTest extends TestCase
         $outcomes = new KiwiOutcomes($this->engine($store), $store);
         $target = '5e2a9b4c1d7f38e6a0b5c9d2e4f6a813';
 
-        // The ENGINE stores each authentication failure against the
+        // The engine stores each authentication failure against the
         // target — the test injects no record.
         for ($i = 0; $i < 5; $i++) {
             $outcomes->report(Outcome::AuthenticationFailure, OutcomeHandle::target($target), "fail-$i", $this->context());

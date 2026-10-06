@@ -59,7 +59,7 @@ final class StepUpHardeningTest extends TestCase
         $begin = $handler->begin($this->beginRequest(), $this->context(self::PRINCIPAL));
         $code = (string) $this->sender->lastCode();
 
-        // The same session completes: bound to PRINCIPAL, matching.
+        // The same session completes: bound to the principal, matching.
         $ok = $handler->complete($this->completeRequest($this->ticketOf($begin), $code, self::PRINCIPAL));
         self::assertSame(StepUpResultStatus::Succeeded, $ok->status);
 
@@ -80,7 +80,7 @@ final class StepUpHardeningTest extends TestCase
 
     /**
      * The cross-challenge budget: five failures arm the first lockout
-     * on BOTH the principal and the target keys, a further campaign
+     * on both the principal and the target keys, a further campaign
      * escalates the lockout, and begin()/complete() refuse while it
      * holds. The lockout is keyed per principal and per target, so a
      * hot target cools off independently of one account.

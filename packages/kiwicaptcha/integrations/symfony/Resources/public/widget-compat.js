@@ -163,7 +163,8 @@
   // into an adjacent holder, and this table backs resolve/remove and
   // the owned activation listener.
   var compatControlByElement = new WeakMap();
-  var compatControlById = {};
+  // Null-prototype: the key is the widget render id (page-influenced).
+  var compatControlById = Object.create(null);
   function compatIsControl(el) {
     return !!el && (el.tagName === "BUTTON" || el.tagName === "INPUT");
   }

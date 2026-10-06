@@ -117,7 +117,22 @@ function widgetPage() {
 
 let pageBytes;
 if (htmlFile !== "" && existsSync(htmlFile)) {
-    pageBytes = readFileSync(htmlFile);
+    // Custom pages are templates: __URL_<kind>__ and __SRI_<kind>__
+    // resolve to the live asset hash and integrity of THIS tree, so a
+    // rebuilt widget never silently 404s against a stale fixture.
+    let html = readFileSync(htmlFile, "utf8");
+    for (const [kind, file] of Object.entries(ASSET_FILES)) {
+        const { url, sri } = assetUrl(kind, file);
+        html = html.split(`__URL_${kind}__`).join(url);
+        html = html.split(`__SRI_${kind}__`).join(sri);
+    }
+    // Also rewrite any leftover hard-coded hashed asset URLs to the
+    // live hash (integrity attributes are refreshed by the tokens).
+    html = html.replace(/(\/kiwi-captcha\/assets\/[a-z]+)\.[0-9a-f]{64}(\.js)/g, (_m, head, tail) => {
+        const kind = head.split("/").pop();
+        return assetUrl(kind, ASSET_FILES[kind] ?? "widget-driver.js").url;
+    });
+    pageBytes = Buffer.from(html, "utf8");
 } else {
     pageBytes = Buffer.from(widgetPage(), "utf8");
 }

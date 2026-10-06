@@ -15,11 +15,11 @@ namespace KiwiCaptcha\Storage;
  * APCu while a cli process does not, so the message names the
  * `apc.enable_cli` remedy for that case.
  *
- * Construction also refuses the cli SAPI outside test runners: a CLI
+ * Construction also refuses the cli SAPI outside test runners. A CLI
  * process (RoadRunner worker, queue consumer, command) owns a private
- * APCu segment invisible to the PHP-FPM workers that serve traffic, so
- * records stored from CLI can never be verified by the web tier and
- * vice versa — the one-host shared-segment contract of this adapter
+ * APCu segment invisible to the PHP-FPM workers that serve traffic.
+ * Records stored from CLI can never be verified by the web tier and
+ * vice versa. The one-host shared-segment contract of this adapter
  * only holds inside one web SAPI. Tests (phpunit) construct it for the
  * real-extension leg; production CLI hosts select the Redis or SQLite
  * store instead.

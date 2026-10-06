@@ -245,6 +245,56 @@ func newUnauthedSidecarDouble(t *testing.T) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+func TestSidecarDelegationForwardsExpectedRequestBinding(t *testing.T) {
+	// The delegation body always carries the binding this SDK's
+	// verification context expects, so the sidecar enforces the same
+	// exact expectation instead of silently dropping it. An unenforced
+	// context sends no expectation at all (the sidecar's documented
+	// backward-compatible posture).
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"success":true,"kiwi-code":"ok"}`))
+	}))
+	defer func() { server.Close() }()
+	policy := &ExecutionPolicy{SidecarURL: server.URL}
+	record := &ChallengeRecord{RequestBinding: "checkout:order-42"}
+
+	// The default context is exact: the expected binding rides the body.
+	outcome := delegateExecutionVerify("tok", record, VerifyOptions{
+		SecretKey:              "s",
+		ExpectedScope:          "login",
+		ExpectedRequestBinding: "checkout:order-42",
+	}, policy)
+	if !outcome.Valid {
+		t.Fatalf("the delegated verify must accept: %+v", outcome)
+	}
+	if got["expected_request_binding"] != "checkout:order-42" {
+		t.Fatalf("the expected request binding must ride the body: %v", got)
+	}
+
+	// An empty expected binding asserts an explicitly unbound record.
+	delegateExecutionVerify("tok", &ChallengeRecord{}, VerifyOptions{
+		SecretKey:     "s",
+		ExpectedScope: "login",
+	}, policy)
+	if got["expected_request_binding"] != "" {
+		t.Fatalf("the empty expectation must assert unbound: %v", got)
+	}
+
+	// An explicitly unenforced context omits the field entirely.
+	unenforced := UnenforcedBinding()
+	delegateExecutionVerify("tok", record, VerifyOptions{
+		SecretKey:          "s",
+		ExpectedScope:      "login",
+		BindingExpectation: &unenforced,
+	}, policy)
+	if _, present := got["expected_request_binding"]; present {
+		t.Fatalf("an unenforced context must send no expectation: %v", got)
+	}
+}
+
 func TestSidecarPolicyDescribe(t *testing.T) {
 	if got := (*ExecutionPolicy)(nil).describeDelegation(); got != "fail-closed" {
 		t.Fatalf("the nil policy is fail-closed: %s", got)

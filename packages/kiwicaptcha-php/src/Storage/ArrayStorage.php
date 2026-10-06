@@ -149,6 +149,14 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function store(ChallengeRecord $record): void
     {
+        // A store must never rewind live state. Re-placing an older
+        // genuine pending envelope over a consumed or cancelled entry
+        // would re-open a one-shot token. The consumed flag is the
+        // monotonic witness: it only ever moves forward.
+        $existing = $this->records[$record->nonce] ?? null;
+        if ($existing !== null && ($existing['consumed'] || ($existing['cancelled'] ?? false))) {
+            throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+        }
         // Bounded retention: expired entries never accumulate (they are
         // absent to every read anyway, see {@see self::entry()}), and a
         // long-lived process never exceeds the hard cap — the evictions

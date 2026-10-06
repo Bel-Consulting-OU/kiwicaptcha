@@ -36,10 +36,11 @@ namespace KiwiCaptcha;
  * the reference vectors in `protocol/server-state-v1/fixtures.json`
  * pin it.
  *
- * What a MAC cannot close: a storage writer can still roll state back
- * (re-store an earlier, genuinely MACed envelope, e.g. flip a consumed
- * record back to pending). Closing rollback requires trusted state
- * outside the store.
+ * What a MAC cannot close alone: a storage writer could re-store an
+ * earlier, genuinely MACed envelope. The storage layer's monotonic
+ * consumed flag closes that rewind, so a one-shot token stays one-shot.
+ * The only remaining physical limit is a full restore of the entire
+ * store to an earlier media snapshot.
  */
 final class ServerStateMac
 {

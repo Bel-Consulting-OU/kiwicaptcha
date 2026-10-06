@@ -130,8 +130,8 @@ final class AgentsHardeningMatrixTest extends TestCase
 
     /**
      * The nonce TTL math: it must cover the whole acceptance window
-     * (min(expires, created + skew)), never fall below the floor and
-     * never stretch past twice the skew window plus the margin.
+     * min(expires, created + skew). It must never fall below the floor,
+     * and it must never stretch past twice the skew window plus the margin.
      */
     public function testNonceTtlCoversTheAcceptanceWindowWithFloorAndCeiling(): void
     {

@@ -291,6 +291,10 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
 
         $this->writeTransition('challenge issuance', $paths['lock'], function () use ($record, $retainedUntil, $paths): void {
             $this->sweepExpiredRecords();
+            $prior = $this->liveDecoded($paths['record']);
+            if ($prior !== null && ($prior['state'] ?? 'pending') !== 'pending') {
+                throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+            }
             $this->writeAtomic(
                 $paths['record'],
                 $this->encodeEnvelope($record, 'pending', null, null, $retainedUntil),

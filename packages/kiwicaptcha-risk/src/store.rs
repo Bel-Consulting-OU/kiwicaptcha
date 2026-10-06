@@ -95,6 +95,11 @@ pub struct OutcomeRegistration {
     pub v1_weights: RiskWeights,
     /// The exact risk-v2 weights the engine scores with.
     pub v2_weights: RiskV2Weights,
+    /// The target pseudonym this assessment protects (None = no target
+    /// dimension). When set, the consolidated script maintains the
+    /// target failure counter and spread HLLs and reports them back so
+    /// the score can react.
+    pub target_id: Option<String>,
 }
 
 /// The full reply of one consolidated assessment.
@@ -112,6 +117,12 @@ pub struct AssessV2Reply {
     /// no registration was requested or the decision is already
     /// registered (SET NX collision).
     pub registration_status: bool,
+    /// The target's decayed authentication-failure count at assessment
+    /// time (0 when the observation carries no target).
+    pub target_failures: u32,
+    /// The distinct source+asn spread of failures against the target
+    /// (0 when the observation carries no target).
+    pub target_spread: u32,
 }
 
 /// The live target-dimension state (change.md 3.2.1): the leaky-bucket

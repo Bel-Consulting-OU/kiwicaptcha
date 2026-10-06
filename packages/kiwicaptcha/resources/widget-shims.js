@@ -45,7 +45,8 @@
   // adjacent holder, and this table backs remove() and the owned
   // activation listener.
   var shimsControlByElement = new WeakMap();
-  var shimsControlById = {};
+  // Null-prototype: the key is the widget render id (page-influenced).
+  var shimsControlById = Object.create(null);
   try {
     var shimsScript = document.currentScript;
     if (!shimsScript) {
@@ -72,7 +73,8 @@
   // empty (the sitekey then travels verbatim), never throws.
   function shimsScopeMap() {
     if (shimsScopeMapCache !== null) return shimsScopeMapCache;
-    shimsScopeMapCache = {};
+    // Null-prototype: keys come from the page's data-kiwi-scope-map JSON.
+    shimsScopeMapCache = Object.create(null);
     try {
       var el = shimsScriptEl;
       var raw = el && el.getAttribute ? el.getAttribute("data-kiwi-scope-map") : null;

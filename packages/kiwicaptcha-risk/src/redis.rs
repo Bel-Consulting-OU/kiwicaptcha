@@ -144,6 +144,7 @@ pub struct RedisRiskStateStore {
     key_tag: String,
     state_ttl_secs: u64,
     dedupe_ttl_secs: u64,
+    target_ttl_secs: u64,
     hysteresis_ms: u64,
     session_ttl_secs: u64,
     principal_ttl_secs: u64,
@@ -340,6 +341,7 @@ impl RedisRiskStateStore {
             namespace_version,
             state_ttl_secs: 1800,
             dedupe_ttl_secs: 60,
+            target_ttl_secs: 86_400,
             hysteresis_ms: 60_000,
             session_ttl_secs: 1800,
             principal_ttl_secs: 86_400,
@@ -827,8 +829,23 @@ impl RedisRiskStateStore {
             .unwrap_or_else(|| "0".repeat(32));
         keys.push(format!("{}:risk:ctx:{session_hex}", self.key_tag));
         keys.push(format!("{}:risk:tls:{session_hex}", self.key_tag));
-        if let Some(reg) = registration {
-            keys.push(self.outcome_ledger_key(&reg.decision_id));
+        // Stable KEYS positions 13..16: the ledger slot always exists
+        // (the Lua indexes it unconditionally when ARGV[25] is set) and
+        // the three target slots always exist (touched only when
+        // has_target = 1). A missing registration uses a dummy ledger
+        // key in the same hash tag; a missing target uses dummy target
+        // keys so the slot map never shifts.
+        match registration {
+            Some(reg) => keys.push(self.outcome_ledger_key(&reg.decision_id)),
+            None => keys.push(format!("{}:risk:ledger:unused", self.key_tag)),
+        }
+        match registration.and_then(|reg| reg.target_id.as_deref()) {
+            Some(target_id) => keys.extend(self.target_state_keys(target_id)),
+            None => {
+                keys.push(format!("{}:risk:tgt:unused", self.key_tag));
+                keys.push(format!("{}:risk:tgt:src:unused", self.key_tag));
+                keys.push(format!("{}:risk:tgt:asn:unused", self.key_tag));
+            }
         }
         self.check_key_tag(&keys)?;
 
@@ -891,12 +908,30 @@ impl RedisRiskStateStore {
                 for weight in [w2.honeypot, w2.session_inconsistency, w2.tls] {
                     invocation.arg(weight);
                 }
+                // Target dimension (KEYS[14..16]) and the two additive
+                // target score weights (ARGV[52..53]).
+                if reg.target_id.is_some() {
+                    invocation.arg(1u8);
+                } else {
+                    invocation.arg(0u8);
+                }
+                invocation.arg("");
+                invocation.arg("");
+                invocation.arg(self.target_ttl_secs);
+                invocation.arg(w2.target_failure_pressure);
+                invocation.arg(w2.target_spread);
             }
             None => {
                 invocation.arg("");
                 for _ in 0..22 {
                     invocation.arg(0u16);
                 }
+                invocation.arg(0u8);
+                invocation.arg("");
+                invocation.arg("");
+                invocation.arg(self.target_ttl_secs);
+                invocation.arg(0u16);
+                invocation.arg(0u16);
             }
         }
 
@@ -904,7 +939,7 @@ impl RedisRiskStateStore {
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
 
-        if reply.len() < 19 {
+        if reply.len() < 21 {
             return Err(RiskStoreError::ScriptError(format!(
                 "risk script returned an unexpected payload ({} values)",
                 reply.len()
@@ -966,6 +1001,8 @@ impl RedisRiskStateStore {
                 .then_some(existing_context_tag),
             existing_tls_tag: (!existing_tls_tag.is_empty()).then_some(existing_tls_tag),
             registration_status,
+            target_failures: value_i64(&reply[19])?.max(0) as u32,
+            target_spread: value_i64(&reply[20])?.max(0) as u32,
         })
     }
 
@@ -2031,7 +2068,7 @@ mod tests {
 
         // assess_v2_full: the same clamps in the 19-slot consolidated
         // reply (slots 16..18 are the tag/registration strings).
-        let reply = b"*19\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n".to_vec();
+        let reply = b"*21\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n:0\r\n:0\r\n".to_vec();
         let store = fake_store(String::from_utf8(reply).unwrap(), "clampv2");
         let reply = store
             .assess_v2_full(&observation(&event_id(1), 0, T0, 0), None, None, None)
@@ -2092,7 +2129,7 @@ mod tests {
             ),
         ];
         for (namespace, malformed_slot, malformed_reply, label) in cases {
-            let reply = fixed_reply(19, |i| {
+            let reply = fixed_reply(21, |i| {
                 if i == malformed_slot {
                     malformed_reply
                 } else if i == 16 {
@@ -2119,7 +2156,7 @@ mod tests {
     #[test]
     fn assess_v2_full_tag_slots_accept_nil_and_strings() {
         let observation = observation(&event_id(1), 0, T0, 0);
-        let reply = fixed_reply(19, |i| match i {
+        let reply = fixed_reply(21, |i| match i {
             16 => "$-1\r\n",
             17 => "$2\r\nbb\r\n",
             _ => ":0\r\n",
@@ -2131,7 +2168,7 @@ mod tests {
         assert_eq!(reply.existing_context_tag, None, "a Nil tag means none");
         assert_eq!(reply.existing_tls_tag.as_deref(), Some("bb"));
 
-        let reply = fixed_reply(19, |i| match i {
+        let reply = fixed_reply(21, |i| match i {
             16 => "$2\r\naa\r\n",
             17 => "$-1\r\n",
             _ => ":0\r\n",
@@ -2154,7 +2191,7 @@ mod tests {
             ("tagint", 16, ":5\r\n", "an integer context tag"),
             ("tagarr", 17, "*1\r\n:5\r\n", "an array TLS tag"),
         ] {
-            let reply = fixed_reply(19, |i| {
+            let reply = fixed_reply(21, |i| {
                 if i == tag_slot {
                     malformed_reply
                 } else if i == 16 || i == 17 {
@@ -2620,6 +2657,7 @@ mod tests {
             honeypot_hit: false,
             v1_weights: crate::score::RiskWeights::default(),
             v2_weights: crate::score::RiskV2Weights::default(),
+            target_id: None,
         };
 
         let reply = store

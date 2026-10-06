@@ -75,11 +75,11 @@ final class AgentsSignatureStructureTest extends TestCase
 
     /**
      * The signature base of a bodyless request: no content-length
-     * line, the content-digest of the empty body (the digest is
-     * required even when nothing is uploaded), and the parameter
-     * order of the input is preserved in the re-serialization (a
+     * line, and the content-digest of the empty body. The digest is
+     * required even when nothing is uploaded. The parameter
+     * order of the input is preserved in the re-serialization. A
      * reordering verifier would rebuild a different base and reject
-     * every signature).
+     * every signature.
      */
     public function testSignatureBasePreservesParameterOrderWithoutBody(): void
     {

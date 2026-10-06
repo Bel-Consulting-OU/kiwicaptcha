@@ -170,25 +170,17 @@ final class AttackerDenialSimulatorTest extends TestCase
         $sessions = $this->attackerSessions();
         $buckets = $this->asnBuckets();
 
-        $targetFailures = 0;
         $lastFailureAt = 0;
-        $attackStartedAt = 0;
         $stepUpCompleted = false;
         $marked = array_fill(0, self::K, false);
         $deniedAt = [];
         $victimActions = [];
 
-        // The reader-side target view: while the target's rolling failure
-        // count is at or above the attack threshold (and the victim has
-        // not yet completed its step-up credit), a login claiming the
-        // target sees the attacked-target record — the shape the evidence
-        // plane's target-failure signal compiles into.
-        $targetRecord = null;
-        $refreshTargetRecord = function () use (&$targetRecord, &$targetFailures, &$attackStartedAt, &$lastFailureAt): void {
-            $targetRecord = $targetFailures >= self::TARGET_ATTACK_THRESHOLD
-                ? ['kind' => 'targetUnderAttack', 'count' => $targetFailures, 'first_ms' => $attackStartedAt, 'last_ms' => $lastFailureAt]
-                : null;
-        };
+        // The engine owns the target's failure counter: the outcome
+        // bridge writes AuthenticationFailure against the target handle,
+        // and MarksView::read compiles the attacked-target record from
+        // that live state. The test never injects the record.
+        $outcomes = new KiwiOutcomes($this->engine($store), $marks);
 
         // Round-robin attempts: round j runs attacker 0..K-1 in order, so
         // each group's first attacker writes the shared ASN bucket mark
@@ -206,19 +198,20 @@ final class AttackerDenialSimulatorTest extends TestCase
                     self::assertSame(RiskAction::Sha16, $plain->action);
                 }
                 $bucket = $buckets[intdiv($i * self::GROUPS, self::K)];
-                $refreshTargetRecord();
-                $view = MarksView::read($marks, ['session' => $sessions[$i], 'asn' => $bucket], null)
-                    ->withTarget($targetRecord);
+                $view = MarksView::read($marks, ['session' => $sessions[$i], 'asn' => $bucket], $victimTarget);
                 $decision = MarksEscalation::apply($plain, $view, MarksEscalation::corroborated($signals, false), $now, $ttl, $healthy);
                 if ($decision->action === RiskAction::Deny) {
                     $deniedAt[$i] ??= $j;
                 } else {
-                    // The attempt proceeds and fails authentication: one
-                    // more target failure.
-                    $targetFailures++;
-                    if ($targetFailures === self::TARGET_ATTACK_THRESHOLD) {
-                        $attackStartedAt = $now;
-                    }
+                    // The attempt proceeds and fails authentication: the
+                    // outcome bridge books the failure into the engine's
+                    // target state (the test never counts it by hand).
+                    $outcomes->report(
+                        Outcome::AuthenticationFailure,
+                        OutcomeHandle::target($victimTarget),
+                        'attacker-'.$i.'-round-'.$j,
+                        $this->victimContext(),
+                    );
                     $lastFailureAt = $now;
                 }
                 if (!$marked[$i] && $badProof >= MarksEscalation::CORROBORATION_FLOOR) {
@@ -235,20 +228,18 @@ final class AttackerDenialSimulatorTest extends TestCase
                 // exactly the interactive step-up, never a lockout.
                 $now = self::T0 + (self::K * 2) * 1000;
                 $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $now);
-                $refreshTargetRecord();
-                $view = MarksView::read($marks, ['session' => $victimSession, 'principal' => $victimPrincipal], null)
-                    ->withTarget($targetRecord);
+                $view = MarksView::read($marks, ['session' => $victimSession, 'principal' => $victimPrincipal], $victimTarget);
                 $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
                 self::assertSame(RiskAction::StepUp, $decision->action);
                 self::assertTrue($decision->hasReason(\KiwiCaptcha\Risk\RiskReason::TargetUnderAttack));
                 $victimActions[] = $decision->action;
 
                 // The victim completes the step-up: the outcome credit
-                // through the typed outcomes facade over the same store.
-                $outcomes = new KiwiOutcomes($this->engine($store), $marks);
+                // through the typed outcomes facade over the same store,
+                // on the target handle so the engine clears its counter.
                 $receipt = $outcomes->report(
                     Outcome::StepUpCompleted,
-                    OutcomeHandle::principal($victimPrincipal),
+                    OutcomeHandle::target($victimTarget),
                     'victim-step-up-credit',
                     $this->victimContext(),
                 );
@@ -275,20 +266,19 @@ final class AttackerDenialSimulatorTest extends TestCase
         // shared ASN bucket mark and are denied at attempt 2.
         self::assertSame([0, 8, 16], $leaders);
 
-        // The attack subsides: denied attempts add no target failures, so
-        // a quiet window decays the rolling count back below the
-        // threshold.
+        // The attack subsides: denied attempts add no target failures, and
+        // the victim's completed step-up cleared the engine counter, so a
+        // quiet window leaves no attacked-target record at all.
         $quietAt = $lastFailureAt + self::QUIET_WINDOW_MS;
-        self::assertGreaterThan($attackStartedAt, $quietAt);
+        self::assertGreaterThan(0, $quietAt);
         self::assertTrue($stepUpCompleted, 'the victim completed its step-up before the relief');
-        $targetFailures = 0;
-        $refreshTargetRecord();
+        $stateAfter = $marks->readTargetState($victimTarget);
+        self::assertSame(0, $stateAfter['fails'], 'the step-up credit cleared the engine failure counter');
 
         // (b) the victim's next login is the plain allow again: no
         // step-up, no lockout, and exactly one step-up happened overall.
         $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $quietAt);
-        $view = MarksView::read($marks, ['session' => $victimSession, 'principal' => $victimPrincipal], null)
-            ->withTarget($targetRecord);
+        $view = MarksView::read($marks, ['session' => $victimSession, 'principal' => $victimPrincipal], $victimTarget);
         $decision = MarksEscalation::apply($plain, $view, false, $quietAt, $ttl, $healthy);
         self::assertSame(RiskAction::Allow, $decision->action);
         self::assertFalse($decision->hasReason(\KiwiCaptcha\Risk\RiskReason::TargetUnderAttack));

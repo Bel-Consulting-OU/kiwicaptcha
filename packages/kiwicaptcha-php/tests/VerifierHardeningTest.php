@@ -359,18 +359,20 @@ final class VerifierHardeningTest extends TestCase
 
     public function testTelemetryRejectedOnlyWhenEnforced(): void
     {
-        $storage = new ArrayStorage();
-        [$record, $token] = $this->issueAndSolve($storage, minDurationMs: 0);
+        [$record, $token] = $this->issueAndSolve(new ArrayStorage(), minDurationMs: 0);
 
         $botToken = SolutionToken::create($record->nonce, SolutionToken::decode($token)->counter, 5000, ['wd' => true])->encode();
 
-        $verifier = new Verifier($storage, acceptLegacyV1: true);
-        $storage->store($record);
-        $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77');
+        // A fresh storage per case: store() never rewinds a consumed
+        // record, so each posture needs its own pending envelope.
+        $off = new ArrayStorage();
+        $off->store($record);
+        $outcome = (new Verifier($off, acceptLegacyV1: true))->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77');
         self::assertTrue($outcome->isOk(), 'telemetry must be ignored when enforcement is off');
 
-        $storage->store($record);
-        $outcome = $verifier->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
+        $on = new ArrayStorage();
+        $on->store($record);
+        $outcome = (new Verifier($on, acceptLegacyV1: true))->verify($botToken, Vectors::SECRET, 'login', '198.51.100.77', enforceTelemetry: true);
         self::assertSame(VerifyError::TelemetryRejected, $outcome->error);
     }
 

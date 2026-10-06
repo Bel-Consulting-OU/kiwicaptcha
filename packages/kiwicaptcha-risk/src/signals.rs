@@ -74,6 +74,13 @@ pub struct RiskV2Signals {
     /// when consistent or when no tag exists (first request / absent /
     /// over-bound value).
     pub tls_inconsistency: u16,
+    /// Target-account authentication-failure pressure: the bounded
+    /// leaky-bucket count of failures against this target, normalized
+    /// against the attack threshold so a stuffed target raises the score.
+    pub target_failure_pressure: u16,
+    /// Distinct source+asn spread of the failures against this target,
+    /// normalized so a wide spray raises the score.
+    pub target_spread: u16,
 }
 
 impl RiskV2Signals {

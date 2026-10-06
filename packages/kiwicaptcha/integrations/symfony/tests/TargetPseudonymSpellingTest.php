@@ -23,9 +23,9 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The one-spelling pin across the target-pseudonym components: the
- * engine derives 64 hex, the step-up plane carries 64 hex end to end
- * (controller attribute, context, challenge record, credit), and the
- * only narrowing — the outcomes handle / mark key — is a single
+ * engine derives 64 hex, and the step-up plane carries 64 hex end to end
+ * (controller attribute, context, challenge record, credit). The
+ * only narrowing is the outcomes handle / mark key, a single
  * documented projection. A regression that re-opens the 32-vs-64
  * disagreement (a 422 on target-scoped step-up, a try-both handle
  * fallback, a mark read that misses its write) fails this test.

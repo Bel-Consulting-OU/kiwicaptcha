@@ -1111,6 +1111,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot_hit: v2.map(|v2ctx| v2ctx.honeypot_hit).unwrap_or(false),
             v1_weights: self.policy.weights,
             v2_weights: effective_v2_weights,
+            target_id: None,
         });
 
         let start = Instant::now();
@@ -1142,6 +1143,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         reply.existing_context_tag.as_deref(),
                         reply.existing_tls_tag.as_deref(),
                         ctx.event,
+                        reply.target_failures,
+                        reply.target_spread,
                     )
                 });
                 (reply.observed, v2_signals, registration.is_some())
@@ -1168,8 +1171,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 self.metrics
                     .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
-                let v2_signals = v2
-                    .map(|v2ctx| self.derive_v2_signals(v2ctx, observation.session_id, ctx.event));
+                let v2_signals = v2.map(|v2ctx| {
+                    // The fallback path has no consolidated reply: the
+                    // target counters stay zero here (the marks stage
+                    // still reads live TargetState on its own).
+                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0)
+                });
                 (observed, v2_signals, false)
             }
         };
@@ -1350,6 +1357,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         v2: &RiskV2Context,
         session_id: Option<[u8; 16]>,
         event: RiskEventKind,
+        target_failures: u32,
+        target_spread: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -1378,6 +1387,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot,
             session_inconsistency,
             tls_inconsistency,
+            target_failure_pressure: target_pressure_signal(target_failures),
+            target_spread: target_spread_signal(target_spread),
         }
     }
 
@@ -1405,6 +1416,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         existing_context_tag: Option<&str>,
         existing_tls_tag: Option<&str>,
         event: RiskEventKind,
+        target_failures: u32,
+        target_spread: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -1423,6 +1436,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot,
             session_inconsistency,
             tls_inconsistency,
+            target_failure_pressure: target_pressure_signal(target_failures),
+            target_spread: target_spread_signal(target_spread),
         }
     }
 
@@ -1521,7 +1536,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     }
                     // Reputation authorization: statuses 1 and 2 always;
                     // status 3 (a capped label) only when the outcome is
-                    // abusive — a capped TRUST label must never mint
+                    // abusive — a capped trust label must never mint
                     // unlimited reputation credit (the v2 confirm's trust
                     // caps return 4 for exactly that case). Status 0/4
                     // and backend errors book nothing: the receipt/ledger
@@ -1604,12 +1619,24 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         legitimate: bool,
         weight: Option<f64>,
     ) -> Result<u8, RiskError> {
+        self.confirm_outcome_for(decision_id, legitimate, weight, None)
+    }
+
+    /// Identity-aware confirmation: names the credited identity so the
+    /// per-identity trust cap applies on top of the per-source cap.
+    pub fn confirm_outcome_for(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+        identity: Option<&str>,
+    ) -> Result<u8, RiskError> {
         if decision_id.is_empty() {
             return Err(RiskError::EmptyDecisionId);
         }
         match &self.calibration {
             Some(calibration) => calibration
-                .confirm_outcome(decision_id, legitimate, weight)
+                .confirm_outcome_for(decision_id, legitimate, weight, identity)
                 .map_err(|e| match e {
                     crate::calibration::CalibrationError::WeightRequired(id) => {
                         RiskError::CalibrationWeightRequired(id)
@@ -2132,6 +2159,19 @@ fn presented_tls_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -
         return None;
     }
     Some(tag)
+}
+
+/// Bounded target-failure pressure: five failures (the attack threshold)
+/// saturates at 1000 so a stuffed target raises the numeric score before
+/// the marks stage escalates.
+fn target_pressure_signal(fails: u32) -> u16 {
+    crate::signals::normalize(fails.min(u32::from(u16::MAX)), 5)
+}
+
+/// Bounded target source+asn spread: twenty distinct sources saturate at
+/// 1000 so a wide spray raises the numeric score.
+fn target_spread_signal(spread: u32) -> u16 {
+    crate::signals::normalize(spread.min(u32::from(u16::MAX)), 20)
 }
 
 #[cfg(test)]

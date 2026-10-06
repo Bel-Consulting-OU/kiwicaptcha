@@ -15,13 +15,24 @@ curl -s http://127.0.0.1:7371/issue \
   -d '{"scope":"login","remoteip":"203.0.113.9"}'
 curl -s http://127.0.0.1:7371/verify \
   -H 'content-type: application/json' \
-  -d '{"token":"...","scope":"login","remoteip":"203.0.113.9"}'
+  -d '{"token":"...","scope":"login","remoteip":"203.0.113.9","expected_request_binding":"txn-A"}'
 ```
 
 The secret has a 32-byte floor, and published example values are
 refused at startup. While IP binding is on (the default), `remoteip` is
 required on both endpoints; the loopback-only development escape hatch
 is `KIWI_ALLOW_NO_REMOTEIP=1`.
+
+The verify body's optional `expected_request_binding` is the
+independent expected application-transaction binding of the
+redemption: when present it is enforced as exact Option-equality
+against the record's signed `request_binding` (an empty string asserts
+the record must be explicitly unbound), and a mismatch is the typed
+`request_binding_mismatch` refusal. When the field is absent (or null)
+that check is not enforced — the backward-compatible posture for
+callers that predate the field. Callers who care about the transaction
+binding must send it; the Go and Node sidecar clients always forward
+the binding their verification context expects.
 
 ## Challenge profiles
 

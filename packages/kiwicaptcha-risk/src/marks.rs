@@ -110,7 +110,7 @@ impl MarksView {
     /// Reads the view from a marks store: one lookup per own dimension
     /// (absent marks simply drop out) plus the target lookup when the
     /// request presents a target pseudonym. The target record is the
-    /// written mark when one exists; otherwise it is COMPILED from the
+    /// written mark when one exists; otherwise it is compiled from the
     /// live engine state (the target-failure counter the outcome bridge
     /// maintains): a count at or above [`TARGET_ATTACK_THRESHOLD`]
     /// produces the `targetUnderAttack` record the stage maps to exactly

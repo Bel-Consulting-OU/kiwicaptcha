@@ -13,9 +13,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()} derives and
  * what every step-up context, challenge record and trust-gate call
  * carries. The outcomes API addresses target marks under the 128-bit
- * family shape (32 lowercase hex chars) —
+ * family shape (32 lowercase hex chars).
  * {@see \KiwiCaptcha\Risk\Outcomes\OutcomeHandle::target()} enforces
- * that spelling and the mark keys follow the handle id — so every mark
+ * that spelling, and the mark keys follow the handle id. Every mark
  * write and every mark read for a target projects the canonical
  * pseudonym through this single function. Nothing "tries 64 then falls
  * back to 32" anymore: a target is 64 hex everywhere above this class,

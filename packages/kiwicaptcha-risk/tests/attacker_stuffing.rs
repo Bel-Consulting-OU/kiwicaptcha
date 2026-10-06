@@ -7,7 +7,7 @@
 //! lockouts end-to-end.
 //!
 //! The simulation is deterministic and policy-layer only: each attempt
-//! is a realistic FIRST attempt with a fresh stuffed credential pair
+//! is a realistic first attempt with a fresh stuffed credential pair
 //! (the OpenBullet-class list shape of D3.5 — one pair per attempt, no
 //! retries of a malformed token). Attempt j carries the accumulated
 //! invalid-proof evidence `bad_proof = min(1000, 250 * j)` through the
@@ -15,7 +15,7 @@
 //! abuse marks (session plus ASN bucket) once its evidence corroborates
 //! (bad_proof at the corroboration floor, attempt 2). When an attempt
 //! is not denied it reaches authentication and fails (the stuffed pair
-//! is not the victim's password) — and the ENGINE stores that target
+//! is not the victim's password) — and the engine stores that target
 //! failure through the typed outcomes facade
 //! (`Outcome::AuthenticationFailure` on the target handle), which owns
 //! the leaky counter and the spread HLLs. The test never injects the
@@ -92,7 +92,7 @@ fn asn_buckets() -> Vec<String> {
 /// The credit closure reports the victim's stepUpCompleted outcome
 /// through the typed outcomes facade and answers (channel_booked,
 /// marks_written); the failure closure reports one attacker
-/// authentication failure against the victim target — the ENGINE stores
+/// authentication failure against the victim target — the engine stores
 /// the target failure. Both closures run the real report path.
 fn run_simulation(
     store: &dyn OutcomeMarksStore,
@@ -138,7 +138,7 @@ fn run_simulation(
                 assert_eq!(plain.action.as_str(), "sha16");
             }
             let bucket = &buckets[i * GROUPS / K];
-            // The ENGINE compiles the target record from its own
+            // The engine compiles the target record from its own
             // failure state — the test injects nothing.
             let view = MarksView::read(
                 store,
@@ -162,7 +162,7 @@ fn run_simulation(
                 denied_at[i].get_or_insert(j);
             } else {
                 // The attempt reaches authentication with its fresh
-                // stuffed pair and fails: the ENGINE stores the target
+                // stuffed pair and fails: the engine stores the target
                 // failure (leaky counter + spread HLLs).
                 report_failure();
                 last_failure_at = now;
@@ -233,7 +233,7 @@ fn run_simulation(
     assert_eq!(leaders, vec![0, 8, 16]);
 
     // The attack subsides: denied attempts add no target failures and
-    // the step-up completion cleared the counter, so the ENGINE state
+    // the step-up completion cleared the counter, so the engine state
     // is below the threshold again (the leaky bucket would also decay
     // it across the quiet window).
     assert!(
@@ -271,7 +271,7 @@ fn run_simulation(
 
 /// The in-memory marks-and-state twin of the PHP RiskStateStoreStub:
 /// cloning shares the state, so the engine owns one clone while the
-/// simulation drives another. The TARGET STATE is the engine's own
+/// simulation drives another. The target state is the engine's own
 /// (leaky counter + spread set): `register_target_failure` is what the
 /// outcomes facade calls, and `MarksView::read` compiles the
 /// attacked-target record from it.
@@ -459,7 +459,7 @@ fn stuffing_storm_denies_attackers_and_saves_the_victim() {
     let outcomes = KiwiOutcomes::new(&engine, &store);
     let victim_principal = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6".to_string();
     let victim_target = "5e2a9b4c1d7f38e6a0b5c9d2e4f6a813".to_string();
-    // The ENGINE stores each authentication failure against the target
+    // The engine stores each authentication failure against the target
     // (the outcome-bridge write path) — the simulation never touches the
     // target state directly.
     let report_failure = || {

@@ -700,6 +700,23 @@ impl CalibrationStore for RedisCalibrationStoreV2 {
         )
     }
 
+    fn confirm_outcome_for(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+        identity: Option<&str>,
+    ) -> Result<u8, CalibrationError> {
+        self.confirm_outcome_with_provenance(
+            decision_id,
+            legitimate,
+            ProvenanceClass::HumanReview,
+            0,
+            weight,
+            identity,
+        )
+    }
+
     fn correct_outcome(
         &self,
         decision_id: &str,

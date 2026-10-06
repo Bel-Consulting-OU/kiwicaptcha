@@ -369,3 +369,96 @@ fn the_server_refuses_bindings_off_loopback() {
     // sidecar shares the core's clock, no second time source).
     assert!(now_epoch_micros() > 1_700_000_000 * 1_000_000);
 }
+
+#[test]
+fn expected_request_binding_is_enforced_when_the_caller_states_it() {
+    let server = spawn(SidecarState::new(
+        SECRET.to_string(),
+        None,
+        vec!["login".to_string()],
+        "http://127.0.0.1:0",
+    ));
+
+    let mint_bound = |binding: Option<&str>| -> Issued {
+        let now_ns = now_epoch_micros();
+        let issued = issue_challenge(
+            &sha_config(),
+            "login",
+            CLIENT_IP,
+            now_ns / 1_000_000,
+            now_ns,
+            0,
+            binding,
+        )
+        .expect("issuance succeeds");
+        std::thread::sleep(Duration::from_millis(10));
+        issued
+    };
+
+    // Equal binding redeems.
+    let ok = mint_bound(Some("txn-A"));
+    let ok_wire = kiwicaptcha_verifier::issue_wire_of(&ok);
+    server
+        .state
+        .inject_record(ok.record.clone(), None, None);
+    let ok_token = solve_token(&ok_wire);
+    let (status, body) = post_json(
+        server.addr,
+        "/verify",
+        &format!(
+            "{{\"token\":\"{ok_token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"expected_request_binding\":\"txn-A\"}}"
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(payload["success"], serde_json::Value::Bool(true), "{body}");
+
+    // A different expected binding refuses the same-shaped record.
+    let other = mint_bound(Some("txn-A"));
+    let other_wire = kiwicaptcha_verifier::issue_wire_of(&other);
+    server.state.inject_record(other.record, None, None);
+    let other_token = solve_token(&other_wire);
+    let (status, body) = post_json(
+        server.addr,
+        "/verify",
+        &format!(
+            "{{\"token\":\"{other_token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"expected_request_binding\":\"txn-B\"}}"
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(payload["success"], serde_json::Value::Bool(false), "{body}");
+    assert_eq!(payload["kiwi-code"], "request_binding_mismatch", "{body}");
+
+    // An empty expectation asserts the record carries no binding.
+    let bare = mint_bound(None);
+    let bare_wire = kiwicaptcha_verifier::issue_wire_of(&bare);
+    server.state.inject_record(bare.record, None, None);
+    let bare_token = solve_token(&bare_wire);
+    let (status, body) = post_json(
+        server.addr,
+        "/verify",
+        &format!(
+            "{{\"token\":\"{bare_token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"expected_request_binding\":\"\"}}"
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(payload["success"], serde_json::Value::Bool(true), "{body}");
+
+    // A bound record cannot satisfy the empty expectation.
+    let bound = mint_bound(Some("txn-A"));
+    let bound_wire = kiwicaptcha_verifier::issue_wire_of(&bound);
+    server.state.inject_record(bound.record, None, None);
+    let bound_token = solve_token(&bound_wire);
+    let (_, body) = post_json(
+        server.addr,
+        "/verify",
+        &format!(
+            "{{\"token\":\"{bound_token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"expected_request_binding\":\"\"}}"
+        ),
+    );
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(payload["success"], serde_json::Value::Bool(false), "{body}");
+    assert_eq!(payload["kiwi-code"], "request_binding_mismatch", "{body}");
+}

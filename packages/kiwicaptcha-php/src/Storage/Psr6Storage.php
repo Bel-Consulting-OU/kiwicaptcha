@@ -98,6 +98,13 @@ final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface, 
     public function store(ChallengeRecord $record): void
     {
         $item = $this->pool->getItem(self::key($record->nonce));
+        if ($item->isHit()) {
+            $prior = $item->get();
+            $priorState = \is_array($prior) ? ($prior['state'] ?? 'pending') : 'pending';
+            if ($priorState !== 'pending') {
+                throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+            }
+        }
         $item->set($record->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null]);
         $item->expiresAfter(max(1, $record->expiresAt - time()));
         if (!$this->pool->save($item)) {

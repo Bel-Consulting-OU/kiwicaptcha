@@ -288,7 +288,10 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   // failing check decides the outcome.
   const failure = cheapPhaseCheck(config, secrets, peek, token, evidence, true, receiptNs, delegateExecution);
   if (failure === null && delegateExecution) {
-    const delegated = await delegateToSidecar(rawToken, config.expectedScope, config.clientIp, options.executionPolicy!);
+    // Always forward the binding this verification expects: the legacy
+    // shim's unbound-record pass asserts unboundness so the sidecar's
+    // exact check agrees, everything else forwards the expected value.
+    const delegated = await delegateToSidecar(rawToken, config.expectedScope, config.clientIp, options.executionPolicy!, config.legacyBinding && peek.requestBinding === null ? '' : config.expectedRequestBinding);
     if (delegated.ok) {
       return valid(token.nonce, ladderRung(peek), peek.requestBinding, true, null, peek.decoyField);
     }

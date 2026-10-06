@@ -218,6 +218,10 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
         $keys = $this->keysFor($record->nonce);
 
         $this->writeTransition('challenge issuance', $record->nonce, function () use ($record, $retainedUntil, $keys): void {
+            $prior = $this->liveDecoded($keys['record']);
+            if ($prior !== null && ($prior['state'] ?? 'pending') !== 'pending') {
+                throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+            }
             $this->putEnvelope(
                 $keys['record'],
                 $this->encodeEnvelope($record, 'pending', null, null, null, null, $retainedUntil),

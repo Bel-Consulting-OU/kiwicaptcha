@@ -288,6 +288,26 @@ pub trait CalibrationStore: Send + Sync {
         weight: Option<f64>,
     ) -> Result<u8, CalibrationError>;
 
+    /// Identity-aware confirmation: the same atomic confirmation, but
+    /// naming the identity whose reputation the label would credit so
+    /// the per-identity trust cap can bound trust-granting labels (the
+    /// generic [`CalibrationStore::confirm_outcome`] has no identity and
+    /// stays per-source capped only). The default implementation
+    /// ignores the identity and delegates to
+    /// [`CalibrationStore::confirm_outcome`], so stores without a
+    /// trust-cap dimension keep compiling and keep their exact
+    /// semantics; stores with the cap override this.
+    fn confirm_outcome_for(
+        &self,
+        decision_id: &str,
+        legitimate: bool,
+        weight: Option<f64>,
+        identity: Option<&str>,
+    ) -> Result<u8, CalibrationError> {
+        let _ = identity;
+        self.confirm_outcome(decision_id, legitimate, weight)
+    }
+
     /// Corrects a decision's outcome atomically (one canonical Lua
     /// invocation — `resources/correction.lua`): flips the outcome ledger
     /// L <-> A and reverses the original bucket contribution (exact

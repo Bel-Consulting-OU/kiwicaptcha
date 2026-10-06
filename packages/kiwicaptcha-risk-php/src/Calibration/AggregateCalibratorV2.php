@@ -277,18 +277,19 @@ final class AggregateCalibratorV2 implements CalibrationStore
      *                                    admission is capped.
      *
      * @param string|null       $identity  the pseudonym whose reputation
-     *                                    this label would credit (the
+     *                                    this label would credit. The
      *                                    per-identity trust cap of
-     *                                    trust-granting labels)
+     *                                    trust-granting labels applies.
      *
-     * @return int the shared accepted-outcome status: 0 nothing
-     *             consumed, 1 first confirmation with calibration
-     *             recorded, 2 first confirmation deliberately unsampled,
-     *             3 first confirmation with calibration withheld by the
-     *             per-source window cap, 4 first confirmation whose
-     *             trust-granting reputation credit is withheld by a
-     *             trust cap. Reputation is authorized on 1 and 2 (and on
-     *             3 only for abuse labels); 4 never authorizes it.
+     * @return int the shared accepted-outcome status. 0 means nothing
+     *             consumed. 1 is the first confirmation with calibration
+     *             recorded. 2 is the first confirmation deliberately
+     *             unsampled. 3 is the first confirmation with calibration
+     *             withheld by the per-source window cap. 4 is the first
+     *             confirmation whose trust-granting reputation credit is
+     *             withheld by a trust cap. Reputation is authorized on 1
+     *             and 2 (and on 3 only for abuse labels). Status 4 never
+     *             authorizes it.
      *
      * @throws \InvalidArgumentException when the sampling mode is
      *                                   'weighted' and $weight is null

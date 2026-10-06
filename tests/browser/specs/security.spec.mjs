@@ -112,6 +112,54 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(risk).toMatch(/worker\.onmessage\s*=/);
   });
 
+  test('page-influenced dictionary maps are null-prototype (static source assertion)', () => {
+    // A plain {} map keyed by a page-supplied string (data-kiwi-instance,
+    // a widget render id, a scope-map key, an asset URL, a module kind)
+    // is a prototype-pollution sink: `map["__proto__"] = record` sets the
+    // map's [[Prototype]] to that record, so every other key inherits a
+    // forged entry. Every such store must be Object.create(null).
+    const sources = [
+      ['widget-driver.js', driverSource()],
+      ['widget-risk.js', riskModuleSource()],
+      ['widget-compat.js', fs.readFileSync(assetPath('widget-compat.js'), 'utf8')],
+      ['widget-shims.js', fs.readFileSync(assetPath('widget-shims.js'), 'utf8')],
+      ['execution-interpreter.js', fs.readFileSync(assetPath('execution-interpreter.js'), 'utf8')],
+    ];
+    const mapNames = [
+      'kiwiWidgets',
+      'compatControlById',
+      'shimsControlById',
+      'kiwiRuntimeGlueCache',
+      'kiwiWorkerAssetCache',
+      'kiwiModuleApis',
+      'kiwiModuleLoads',
+      'kiwiModuleFailedAt',
+      'shimsScopeMapCache',
+    ];
+    for (const [name, source] of sources) {
+      for (const mapName of mapNames) {
+        // Every live binding of a dictionary map must be Object.create(null).
+        // A lazy cache may assign Object.create(null) later. A plain `{}` reset
+        // is the pollution sink and is forbidden.
+        const plain = source.match(new RegExp(String.raw`\b${mapName}\s*=\s*\{\s*\}`, 'g')) ?? [];
+        expect(
+          plain,
+          `${name}: ${mapName} must never be assigned a plain {}; use Object.create(null)`
+        ).toEqual([]);
+      }
+      // docIds lives on the runner object literal.
+      const docIds = source.match(/docIds:\s*\{\s*\}/g) ?? [];
+      expect(docIds, `${name}: docIds must never be a plain {}`).toEqual([]);
+    }
+    // Positive: the driver's widget map and the shim/compat control maps
+    // must actually be constructed as null-prototype dictionaries.
+    expect(driverSource()).toMatch(/var\s+kiwiWidgets\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-compat.js'), 'utf8'))
+      .toMatch(/var\s+compatControlById\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-shims.js'), 'utf8'))
+      .toMatch(/var\s+shimsControlById\s*=\s*Object\.create\(null\)/);
+  });
+
   test('worker message handlers are schema-guarded (versioned, unknown shapes ignored) (static source assertion)', () => {
     const src = driverSource();
     const risk = riskModuleSource();

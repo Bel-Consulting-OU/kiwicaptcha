@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 /**
- * The cross-challenge brute-force budget of the step-up plane: the
+ * The cross-challenge brute-force budget of the step-up plane. The
  * per-challenge attempt cap alone allows ~1440 guesses/day (3 begins
- * per 15-minute window × 5 attempts × 96 windows), so the verification
- * failures also feed an escalating lockout keyed by BOTH the principal
+ * per 15-minute window × 5 attempts × 96 windows). The verification
+ * failures also feed an escalating lockout keyed by both the principal
  * and the target pseudonym. Each failure bumps the pair's window
  * counter; at every threshold the lockout is armed (or extended) for
  * the matching duration, and the owner is notified through the

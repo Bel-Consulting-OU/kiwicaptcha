@@ -175,7 +175,7 @@ final class StepUpController
      * example the claimed username of a login step-up). Only the exact
      * pseudonym shape is accepted — the canonical 64-char lowercase
      * hex digest the engine derives
-     * ({@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()}); a
+     * {@see \KiwiCaptcha\Risk\RiskIdentityFactory::targetId()}. A
      * truncated or raw value is refused.
      */
     private function targetPseudonym(Request $request): ?string

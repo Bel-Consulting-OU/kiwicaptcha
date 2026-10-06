@@ -426,7 +426,7 @@ pub fn identity_dimensions() -> [HandleDimension; 4] {
 /// last_kind, count, first_ms and last_ms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkRecord {
-    /// The MAXIMUM-SEVERITY outcome name ever written onto the mark: a
+    /// The maximum-severity outcome name ever written onto the mark: a
     /// mild report after a chargeback can never downgrade it (severity
     /// order: spamReported < accountBanned < fraudConfirmed < chargeback;
     /// unknown kinds rank lowest and never displace an earned kind).

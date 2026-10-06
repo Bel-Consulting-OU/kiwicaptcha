@@ -237,11 +237,12 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-103,303 bytes raw, 30,619 bytes gzip and 25,897 bytes brotli, against
-caps of 160,000 / 30,720 / 28,000 bytes (the raw cap carried forward
+103,784 bytes raw, 30,802 bytes gzip and 26,037 bytes brotli, against
+caps of 160,000 / 32,000 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
-bootstrap target); every widget-risk.js copy (the lazy adaptive-risk
-module) is 42,308 bytes raw, 12,382 bytes gzip and 10,623 bytes
+bootstrap target; the gzip cap is re-baselined for the Object.create(null)
+prototype-pollution hardening); every widget-risk.js copy (the lazy adaptive-risk
+module) is 42,409 bytes raw, 12,423 bytes gzip and 10,653 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 5,621 bytes raw, 2,104 bytes gzip and 1,780
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
@@ -251,16 +252,16 @@ bytes raw, 4,403 bytes gzip and 3,882 bytes brotli against caps of
 per language in a fixed key order, rebuilt into the same registered
 object shape at module scope — which removed the repeated key names
 and restored translation headroom without a cap raise); every
-widget-compat.js copy is 32,094 bytes raw, 9,389 bytes gzip and 8,175
+widget-compat.js copy is 32,183 bytes raw, 9,423 bytes gzip and 8,191
 bytes brotli against caps of 32,768 / 12,000 / 10,000; every
 widget-shims.js copy (the standalone incumbent API shims, fetched only
 by a page presenting the provider globals or Altcha / Friendly Captcha
-markup over a plain driver bootstrap) is 24,921 bytes raw, 7,271 bytes
-gzip and 6,252 bytes brotli against caps of 36,000 / 12,000 / 10,000;
+markup over a plain driver bootstrap) is 25,102 bytes raw, 7,332 bytes
+gzip and 6,299 bytes brotli against caps of 36,000 / 12,000 / 10,000;
 every
 execution-interpreter copy (execution-interpreter.js, the lazy
-ExecutionChallengeV1 asset) is 33,039 bytes raw, 9,998 bytes gzip and
-8,675 bytes brotli, against caps of 36,000 / 11,200 / 9,500 bytes; the
+ExecutionChallengeV1 asset) is 49,426 bytes raw, 14,623 bytes gzip and
+12,521 bytes brotli, against caps of 56,000 / 16,500 / 14,000 bytes; the
 same budgets section also records the measured raw bytes of the worker
 at 155,097 bytes, the wasm glue runtime at 125,053 bytes and the widget
 stylesheet at 14,984 bytes, each byte-identical across the three
@@ -329,7 +330,10 @@ again (2026-10-05): execution-interpreter.js at 49,353 raw / 14,592
 gzip / 12,518 brotli against deliberately raised caps of 56,000 raw /
 16,500 gzip / 14,000 brotli (the five platform probes and the async
 version-6 runner; the zlib 1.2.12 and 1.3.2 families measure the
-same gzip output for this asset). The armed challenge-response row
+same gzip output for this asset). The Object.create(null) prototype-
+pollution hardening re-recorded the interpreter row again
+(2026-10-06) at 49,426 raw / 14,623 gzip / 12,521 brotli against the
+same caps. The armed challenge-response row
 was re-recorded at the same rung: the version-6 count formula tops
 at 23 ops, and the deterministic largest-wire probe measured 2,230
 bytes for sha256, 2,321 for argon2id and 2,552 for the rsw document
@@ -337,7 +341,7 @@ bytes for sha256, 2,321 for argon2id and 2,552 for the rsw document
 
 ## Ordinary-bootstrap target
 
-The eager-core caps (160,000 raw / 30,720 gzip / 28,000 brotli bytes,
+The eager-core caps (160,000 raw / 32,000 gzip / 28,000 brotli bytes,
 perf-budget.sh) are the guardrail: a regression there fails the perf
 budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
@@ -361,14 +365,14 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (103,303 raw / 30,618 gzip / 25,905 brotli);
+  lazy-module loader (103,784 raw / 30,802 gzip / 26,037 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge, an armed response or a glue-less SHA-256 solve (42,308
-  raw / 12,382 gzip / 10,623
+  challenge, an armed response or a glue-less SHA-256 solve (42,409
+  raw / 12,423 gzip / 10,653
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
@@ -383,11 +387,11 @@ record's budget rows, equality-gated):
   brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (32,094 raw / 9,389 gzip / 8,175 brotli);
+  (32,183 raw / 9,423 gzip / 8,191 brotli);
 - `widget-shims.js`, the standalone incumbent API shims (the provider
   globals over a plain driver bootstrap, plus the Altcha and Friendly
   Captcha element conventions), fetched only by a page that uses one of
-  those surfaces (24,921 raw / 7,271 gzip / 6,252 brotli).
+  those surfaces (25,102 raw / 7,332 gzip / 6,299 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:

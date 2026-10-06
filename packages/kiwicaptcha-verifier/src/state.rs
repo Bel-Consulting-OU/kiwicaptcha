@@ -406,6 +406,23 @@ impl SidecarState {
         };
         let token = parsed.get("token").and_then(|v| v.as_str()).unwrap_or("");
         let scope = parsed.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+        // Present field binds the record's signed request binding.
+        // Absent or null keeps the legacy unenforced posture so older
+        // callers still verify. An empty string asserts the record must
+        // carry no binding at all.
+        let expected_request_binding = match parsed.get("expected_request_binding") {
+            None | Some(serde_json::Value::Null) => RequestBindingExpectation::Unenforced,
+            Some(serde_json::Value::String(s)) if s.is_empty() => {
+                RequestBindingExpectation::Exact(None)
+            }
+            Some(serde_json::Value::String(s)) => {
+                RequestBindingExpectation::Exact(Some(s.as_str()))
+            }
+            Some(_) => {
+                self.metrics.record_outcome("bad_request");
+                return self.provider_response(&["bad_request"], Some("bad_request"));
+            }
+        };
         let remoteip = match self.resolve_remoteip(&parsed) {
             Ok(ip) => ip,
             Err(response) => return response,
@@ -466,7 +483,7 @@ impl SidecarState {
             now_ns,
             min_duration_ms: floor,
             expected_scope: Some(scope),
-            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_request_binding,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,

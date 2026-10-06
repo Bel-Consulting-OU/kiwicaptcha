@@ -113,6 +113,8 @@
 --        target failure)
 --   [51] target_ttl_s     the target-dimension retention (24h default;
 --        required when has_target = 1)
+--   [52] target_failure_pressure weight (default 0 when absent)
+--   [53] target_spread weight (default 0 when absent)
 --
 -- Returns (SignalVector order + extras):
 --   source_fast, source_slow, subnet_fast, issue_debt, bad_proof, malformed,
@@ -598,6 +600,48 @@ local sig_principal_credit = normalize(prin.trust, tonumber(ARGV[18]))
 -- possible here beyond the SET NX collision (a retried decision_id);
 -- a script error still fails the whole assessment (fail-closed), exactly
 -- as any risk-v1 observation error does.
+-- ── Target-account protection (change.md 3.2.1 / 3.3.3): the failure
+-- counter and the source/asn spread HLLs of the target dimension. An
+-- AuthenticationFailure (11) reported against the target increments the
+-- leaky bucket and PFADDs the failing source/asn; the assessment reply
+-- carries the decayed failure pressure and the spread so the decision
+-- path can protect the account (the marks stage maps an attacked target
+-- to exactly the interactive step-up). Failures are stored by THIS
+-- engine state, never by callers: a denied attempt never reaches
+-- authentication and so never writes here. The same pressure and spread
+-- feed the ledger score so the numeric decision reacts to a stuffed
+-- target, not only the policy stage.
+local target_failures = 0
+local target_spread = 0
+if has_target then
+    local LEAK_MS = 60000
+    local v = redis.call('HMGET', KEYS[14], 'ts', 'fails')
+    local ts = tonumber(v[1]) or 0
+    local fails = tonumber(v[2]) or 0
+    if ts > 0 then
+        local elapsed = now - ts
+        if elapsed < 0 then elapsed = 0 end
+        fails = fails - math.floor(elapsed / LEAK_MS)
+        if fails < 0 then fails = 0 end
+    end
+    if event == 11 and not is_duplicate then
+        fails = fails + 1
+        redis.call('HSET', KEYS[14], 'ts', now, 'fails', fails, 'last_ms', now)
+        redis.call('HSETNX', KEYS[14], 'first_ms', now)
+        redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
+        if ARGV[49] and ARGV[49] ~= '' then
+            redis.call('PFADD', KEYS[15], ARGV[49])
+            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
+        end
+        if ARGV[50] and ARGV[50] ~= '' then
+            redis.call('PFADD', KEYS[16], ARGV[50])
+            redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
+        end
+    end
+    target_failures = fails
+    target_spread = redis.call('PFCOUNT', KEYS[15]) + redis.call('PFCOUNT', KEYS[16])
+end
+
 local registration_status = 0
 if ARGV[25] ~= '' then
     local score_gp = sig_global_pressure
@@ -632,6 +676,12 @@ if ARGV[25] ~= '' then
     risk = risk + weighted(v2_honeypot, tonumber(ARGV[45]))
     risk = risk + weighted(v2_session, tonumber(ARGV[46]))
     risk = risk + weighted(v2_tls, tonumber(ARGV[47]))
+    -- Target pressure and spread: five failures or twenty distinct
+    -- sources saturate at 1000, matching the engine's target helpers.
+    local v2_tfail = normalize(target_failures, 5)
+    local v2_tspread = normalize(target_spread, 20)
+    risk = risk + weighted(v2_tfail, tonumber(ARGV[52] or '0'))
+    risk = risk + weighted(v2_tspread, tonumber(ARGV[53] or '0'))
     if risk < 0 then risk = 0 elseif risk > 1000 then risk = 1000 end
     local ledger = cjson.encode({
         o = 'P',
@@ -643,46 +693,6 @@ if ARGV[25] ~= '' then
     if redis.call('SET', KEYS[13], ledger, 'NX', 'EX', tonumber(ARGV[27])) then
         registration_status = 1
     end
-end
-
--- ── Target-account protection (change.md 3.2.1 / 3.3.3): the failure
--- counter and the source/asn spread HLLs of the target dimension. An
--- AuthenticationFailure (11) reported against the target increments the
--- leaky bucket and PFADDs the failing source/asn; the assessment reply
--- carries the decayed failure pressure and the spread so the decision
--- path can protect the account (the marks stage maps an attacked target
--- to exactly the interactive step-up). Failures are stored by THIS
--- engine state, never by callers: a denied attempt never reaches
--- authentication and so never writes here.
-local target_failures = 0
-local target_spread = 0
-if has_target then
-    local LEAK_MS = 60000
-    local v = redis.call('HMGET', KEYS[14], 'ts', 'fails')
-    local ts = tonumber(v[1]) or 0
-    local fails = tonumber(v[2]) or 0
-    if ts > 0 then
-        local elapsed = now - ts
-        if elapsed < 0 then elapsed = 0 end
-        fails = fails - math.floor(elapsed / LEAK_MS)
-        if fails < 0 then fails = 0 end
-    end
-    if event == 11 and not is_duplicate then
-        fails = fails + 1
-        redis.call('HSET', KEYS[14], 'ts', now, 'fails', fails, 'last_ms', now)
-        redis.call('HSETNX', KEYS[14], 'first_ms', now)
-        redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
-        if ARGV[49] and ARGV[49] ~= '' then
-            redis.call('PFADD', KEYS[15], ARGV[49])
-            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
-        end
-        if ARGV[50] and ARGV[50] ~= '' then
-            redis.call('PFADD', KEYS[16], ARGV[50])
-            redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
-        end
-    end
-    target_failures = fails
-    target_spread = redis.call('PFCOUNT', KEYS[15]) + redis.call('PFCOUNT', KEYS[16])
 end
 
 return {

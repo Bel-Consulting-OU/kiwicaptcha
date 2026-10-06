@@ -1146,6 +1146,18 @@ LUA;
     public function store(ChallengeRecord $record): void
     {
         $key = $this->prefix.$record->nonce;
+        // A store must never rewind live state. An older genuine
+        // pending envelope placed over a consumed entry would re-open
+        // a one-shot token.
+        $prior = $this->client instanceof \Redis
+            ? $this->client->get($key)
+            : $this->client->get($key);
+        if (\is_string($prior) && $prior !== '') {
+            $priorState = json_decode($prior, true)['state'] ?? 'pending';
+            if ($priorState !== 'pending') {
+                throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+            }
+        }
         $value = json_encode(
             $record->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null],
             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,

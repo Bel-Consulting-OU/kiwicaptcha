@@ -49,12 +49,20 @@ interface SidecarResponse {
  * kiwi-code (the shared wire vocabulary) verbatim, with the transport
  * and trust failures fail-closed (storage_unavailable keeps the retry
  * disposition for an unreachable sidecar, whose record stays intact).
+ *
+ * `expectedRequestBinding` is the independent expected transaction
+ * binding taken from the SDK's own verification context and always
+ * forwarded: `null` asserts the record must be explicitly unbound, a
+ * string must match the record's signed requestBinding exactly. The
+ * sidecar enforces it, so the delegation never drops the caller's
+ * binding expectation.
  */
 export async function delegateToSidecar(
   rawToken: string,
   scope: string,
   clientIp: string | null,
   policy: ExecutionPolicy,
+  expectedRequestBinding: string | null,
 ): Promise<{ ok: boolean; code: VerifyErrorCode | string }> {
   const base = policy.sidecarUrl!.trim().replace(/\/+$/, '');
   const controller = new AbortController();
@@ -67,7 +75,12 @@ export async function delegateToSidecar(
         'content-type': 'application/json',
         ...(policy.bearerToken ? { authorization: `Bearer ${policy.bearerToken}` } : {}),
       },
-      body: JSON.stringify({ token: rawToken, scope, remoteip: clientIp ?? undefined }),
+      body: JSON.stringify({
+        token: rawToken,
+        scope,
+        remoteip: clientIp ?? undefined,
+        expected_request_binding: expectedRequestBinding ?? '',
+      }),
       signal: controller.signal,
     });
   } catch {

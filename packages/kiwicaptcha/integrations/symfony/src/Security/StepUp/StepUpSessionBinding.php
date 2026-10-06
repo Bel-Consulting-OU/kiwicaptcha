@@ -11,9 +11,9 @@ use Symfony\Component\HttpFoundation\Request;
  * challenge is only ever accepted for the same principal that began
  * it. {@see \BelConsulting\KiwiCaptchaBundle\Controller\StepUpController::complete()}
  * re-resolves the principal of the current request and binds it here
- * before dispatching to a handler; every handler then requires the
- * bound principal to equal the challenge record's own — a stolen
- * ticket presented under another session is refused, never completed.
+ * before dispatching to a handler. Every handler then requires the
+ * bound principal to equal the challenge record's own. A stolen
+ * ticket presented under another session is refused and never completed.
  *
  * A request that carries no binding (a handler reached without the
  * controller) matches nothing: fail closed, never open.

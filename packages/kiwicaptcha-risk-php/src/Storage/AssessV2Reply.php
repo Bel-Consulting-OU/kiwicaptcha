@@ -38,6 +38,10 @@ final class AssessV2Reply
          * when none was requested or the decision is already registered
          * (SET NX collision). */
         public readonly bool $registrationStatus,
+        /** Decayed target failure count at assessment time (0 without a target). */
+        public readonly int $targetFailures = 0,
+        /** Distinct source+asn spread of target failures (0 without a target). */
+        public readonly int $targetSpread = 0,
     ) {
     }
 }

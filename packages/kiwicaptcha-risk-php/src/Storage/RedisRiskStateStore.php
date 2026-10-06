@@ -138,6 +138,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         private readonly int $hysteresisMs = 60000,
         private readonly array $saturations = self::DEFAULT_SATURATIONS,
         private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
+        private readonly int $targetTtlSecs = 86_400,
         int $namespaceKeyVersion = DeploymentNamespace::VERSION_LEGACY,
         private readonly int $markTtlSecs = self::DEFAULT_MARK_TTL_SECS,
     ) {
@@ -754,13 +755,25 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}",
             "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}",
         ];
-        if ($registration !== null) {
-            $keys[] = $this->ledgerKey($registration->decisionId);
+        // Stable KEYS positions 13..16: ledger then the three target
+        // slots, always present so the Lua index map never shifts.
+        $keys[] = $registration !== null
+            ? $this->ledgerKey($registration->decisionId)
+            : "{kiwi:{$this->namespace}}:risk:ledger:unused";
+        if ($registration !== null && $registration->targetId !== null && $registration->targetId !== '') {
+            foreach ($this->targetStateKeys($registration->targetId) as $k) {
+                $keys[] = $k;
+            }
+        } else {
+            $keys[] = "{kiwi:{$this->namespace}}:risk:tgt:unused";
+            $keys[] = "{kiwi:{$this->namespace}}:risk:tgt:src:unused";
+            $keys[] = "{kiwi:{$this->namespace}}:risk:tgt:asn:unused";
         }
         $this->assertSameSlot($keys);
 
         $args = [...$this->observationArgs($observation), $contextTag ?? '', $tlsTag ?? ''];
         if ($registration !== null) {
+            $v2w = $registration->v2Weights;
             $args = [...$args,
                 $registration->decisionId,
                 $registration->decisionHour,
@@ -770,14 +783,24 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
                 $registration->baseRisk,
                 $registration->honeypotHit ? 1 : 0,
                 ...array_values($registration->weights->toArray()),
-                ...array_values($registration->v2Weights->toArray()),
+                // The wire still takes exactly three risk-v2 weights at
+                // ARGV[45..47]; the two target weights ride ARGV[52..53].
+                $v2w->honeypot,
+                $v2w->sessionInconsistency,
+                $v2w->tls,
+                ($registration->targetId !== null && $registration->targetId !== '') ? 1 : 0,
+                '',
+                '',
+                $this->targetTtlSecs,
+                $v2w->targetFailurePressure,
+                $v2w->targetSpread,
             ];
         } else {
-            $args = [...$args, '', 0, 0, 0, 1, 0, 0, ...array_fill(0, 16, 0)];
+            $args = [...$args, '', 0, 0, 0, 1, 0, 0, ...array_fill(0, 16, 0), 0, '', '', $this->targetTtlSecs, 0, 0];
         }
         $result = $this->runScript($keys, $args, $this->assessV2Script);
 
-        if (!is_array($result) || count($result) < 19) {
+        if (!is_array($result) || count($result) < 21) {
             throw new RiskStoreException('Risk script returned an unexpected payload');
         }
 
@@ -789,6 +812,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             existingContextTag: self::scriptTag($result[16], 'client-context tag'),
             existingTlsTag: self::scriptTag($result[17], 'TLS tag'),
             registrationStatus: self::scriptInteger($result[18], 'registration status') !== 0,
+            targetFailures: self::scriptInteger($result[19], 'target failures'),
+            targetSpread: self::scriptInteger($result[20], 'target spread'),
         );
     }
 

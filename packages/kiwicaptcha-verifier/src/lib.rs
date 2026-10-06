@@ -19,13 +19,23 @@
 //!
 //! # Endpoints
 //!
-//! - `POST /verify` `{token, scope, remoteip}` — the provider JSON
+//! - `POST /verify` `{token, scope, remoteip, expected_request_binding?}`
+//!   — the provider JSON
 //!   shape (`success`, `challenge_ts`, `hostname`, `action`, `cdata`,
 //!   `error-codes`), built by the core crate's siteverify mapper, plus
 //!   the additive `kiwi-code` field carrying the precise core wire code
 //!   (`ok`, `wrong_scope`, ...). While IP binding is on (the default)
 //!   `remoteip` is required: its absence is a typed 400
-//!   (`remoteip_required`). The loopback-only development escape hatch
+//!   (`remoteip_required`). `expected_request_binding` is the
+//!   independent expected application-transaction binding: when the
+//!   field is present it is enforced as exact Option-equality against
+//!   the record's signed `request_binding` (an empty string asserts the
+//!   record must be explicitly unbound), and a mismatch is the typed
+//!   `request_binding_mismatch` refusal. When the field is absent (or
+//!   null) the check is not enforced — the backward-compatible posture
+//!   for callers that predate the field. Callers who care about the
+//!   transaction binding MUST send it: the Go and Node sidecar clients
+//!   always do. The loopback-only development escape hatch
 //!   is `--allow-no-remoteip`.
 //! - `POST /issue` `{scope, remoteip, action?, cdata?}` — mints through
 //!   the core crate's real issuer under a challenge profile: the rung

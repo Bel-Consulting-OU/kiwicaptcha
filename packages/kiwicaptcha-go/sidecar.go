@@ -58,6 +58,44 @@ type sidecarVerifyRequest struct {
 	Token    string `json:"token"`
 	Scope    string `json:"scope"`
 	RemoteIP string `json:"remoteip,omitempty"`
+	// ExpectedRequestBinding is the independent expected transaction
+	// binding of the redemption, forwarded from this SDK's own
+	// verification context so the sidecar enforces it too. nil means
+	// no expectation (the sidecar's backward-compatible unenforced
+	// posture); an empty string asserts the record must be explicitly
+	// unbound; a non-empty string must match the record's signed
+	// request_binding exactly.
+	ExpectedRequestBinding *string `json:"expected_request_binding,omitempty"`
+}
+
+// sidecarExpectedBinding maps the SDK verification context onto the
+// sidecar body field, so the sidecar enforces the same expectation the
+// local cheap phase just applied. The expected binding is always sent
+// whenever the context enforces one — an empty string asserts the
+// record must be explicitly unbound, a non-empty string must match the
+// record's signed request_binding exactly. The legacy shim permits an
+// unbound record regardless of the expectation, a shape the sidecar's
+// exact wire cannot express; for it the field carries "unbound" on an
+// unbound record and the expected binding on a bound one (where the
+// shim does compare) — both exact-enforceable and both matching the
+// shim's verdict. A context that enforces nothing sends no expectation
+// (the sidecar's backward-compatible unenforced posture).
+func sidecarExpectedBinding(record *ChallengeRecord, options VerifyOptions) *string {
+	expectation := UnenforcedBinding()
+	if options.BindingExpectation != nil {
+		expectation = *options.BindingExpectation
+	} else {
+		expectation = ExactBinding(options.ExpectedRequestBinding)
+	}
+	if !expectation.Enforced {
+		return nil
+	}
+	if !expectation.RequireBindingPresence && (record == nil || record.RequestBinding == "") {
+		unbound := ""
+		return &unbound
+	}
+	expected := expectation.Expected
+	return &expected
 }
 
 // sidecarVerifyResponse is the provider-shaped answer plus the
@@ -77,9 +115,10 @@ type sidecarVerifyResponse struct {
 // already_consumed from the shared store.
 func delegateExecutionVerify(rawToken string, record *ChallengeRecord, options VerifyOptions, policy *ExecutionPolicy) VerifyOutcome {
 	body, err := json.Marshal(sidecarVerifyRequest{
-		Token:    rawToken,
-		Scope:    options.ExpectedScope,
-		RemoteIP: options.ClientIP,
+		Token:                  rawToken,
+		Scope:                  options.ExpectedScope,
+		RemoteIP:               options.ClientIP,
+		ExpectedRequestBinding: sidecarExpectedBinding(record, options),
 	})
 	if err != nil {
 		return InvalidOutcome(ErrCodeExecutionMismatch)

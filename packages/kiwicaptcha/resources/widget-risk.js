@@ -189,8 +189,9 @@
   // the page cannot compute it (no crypto.subtle.digest) the fetch is
   // refused with integrity-unverifiable — an unverifiable asset never
   // runs, and a mismatch never reaches the browser APIs.
-  var kiwiRuntimeGlueCache = {};
-  var kiwiWorkerAssetCache = {};
+  // Null-prototype caches: keys are asset URLs (page-influenced).
+  var kiwiRuntimeGlueCache = Object.create(null);
+  var kiwiWorkerAssetCache = Object.create(null);
   // The supported SRI digest algorithms: the crypto.subtle digest name
   // and the exact base64 length of each algorithm's output. A multi-hash
   // integrity attribute verifies against the first supported token.

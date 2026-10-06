@@ -531,7 +531,7 @@
    v5: v5,
    u8: new Uint8Array(0),
    cur: null, // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
-   docIds: {}, // id -> true for appended nodes
+   docIds: Object.create(null), // id -> true for appended nodes (null-proto: id is program-controlled)
    entries: [],
    frags: [null, null, null, null], // the four v5 fragment slots
    hasAppend: false,
@@ -562,7 +562,7 @@
    }
   };
   R.copyMap = function (src) {
-   var out = {};
+   var out = Object.create(null);
    for (var key in src) {
     if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = src[key];
    }

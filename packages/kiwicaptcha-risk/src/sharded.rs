@@ -522,7 +522,7 @@ impl ShardedRedisRiskStateStore {
     /// The merge batch: one read-only scope invocation per shard (every
     /// shard on its own slot, summed client-side in shard order), then
     /// the single-slot level/cooldown transition on the summed pressure.
-    /// The level transition runs HERE — once per staleness window —
+    /// The level transition runs here — once per staleness window —
     /// instead of on every assessment: the hot path reuses the published
     /// level/cooldown, so the hysteresis hash is no longer a per-request
     /// single-slot write. Both steps stay bounded (16 reads + one
@@ -1013,6 +1013,8 @@ struct Assessment {
     existing_context_tag: Option<String>,
     existing_tls_tag: Option<String>,
     registration_status: bool,
+    target_failures: u32,
+    target_spread: u32,
     /// The post-apply leaked sum of the event's own scope shard, written
     /// back into the merge cache.
     shard_sum: i64,
@@ -1163,6 +1165,11 @@ impl Assessment {
             existing_context_tag,
             existing_tls_tag,
             registration_status: false,
+            // Target state rides a separate key family; the sharded
+            // batch does not carry those slots. The engine reads the
+            // live TargetState on the marks/score path instead.
+            target_failures: 0,
+            target_spread: 0,
             shard_sum,
         })
     }
@@ -1389,6 +1396,8 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
             existing_context_tag: assessment.existing_context_tag,
             existing_tls_tag: assessment.existing_tls_tag,
             registration_status: assessment.registration_status,
+            target_failures: assessment.target_failures,
+            target_spread: assessment.target_spread,
         }))
     }
 

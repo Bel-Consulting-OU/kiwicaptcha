@@ -288,6 +288,12 @@ final class SqliteStorage implements AtomicStorageInterface, ConsumedStateReadab
                 'DELETE FROM kiwicaptcha_challenge_records WHERE retained_until <= :now'
             );
             $sweep->execute([':now' => $this->nowInSeconds()]);
+            $prior = $this->pdo->prepare('SELECT state FROM kiwicaptcha_challenge_records WHERE nonce = :nonce');
+            $prior->execute([':nonce' => $record->nonce]);
+            $priorState = $prior->fetchColumn();
+            if ($priorState !== false && $priorState !== null && $priorState !== 'pending') {
+                throw new StorageWriteException('refusing to rewind a consumed or cancelled record to pending');
+            }
             $insert = $this->pdo->prepare(
                 'INSERT INTO kiwicaptcha_challenge_records '
                 .'(nonce, record_json, state, consumed_result_json, operation_identity, resume_owner, resume_until, retained_until) '

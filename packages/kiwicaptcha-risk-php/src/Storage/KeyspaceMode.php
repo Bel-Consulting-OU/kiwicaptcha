@@ -165,8 +165,8 @@ enum KeyspaceMode: string
     /**
      * The scope shard an event id increments: fnv1a32(event_id) mod 16,
      * 0..15. The empty event id (dedupe disabled) has no id bytes to
-     * hash, so the caller's stable fallback (the assessment's source
-     * pseudonym) is hashed instead: routing every dedupe-less write to
+     * hash. The caller's stable fallback (the assessment's source
+     * pseudonym) is hashed instead. Routing every dedupe-less write to
      * the single fnv1a32('') shard would put all of that traffic on one
      * slot.
      */

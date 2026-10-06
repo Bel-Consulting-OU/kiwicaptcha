@@ -616,7 +616,11 @@
   // Per-widget generation + cancellation handles: every async
   // continuation captures its generation and refuses stale writes;
   // reset/remove/destroy bump it and retire the handles.
-  var kiwiWidgets = {}; // widgetId -> {W, options, state, token, gen, abortController, abortTimer, worker, retryTimer, countdownTimer, expiryTimer, errorFired, responseKey, start}
+  // Null-prototype dictionary: widgetId comes from the page's
+  // data-kiwi-instance attribute, so a plain {} would let a crafted
+  // instance id of "__proto__" set this map's [[Prototype]] and make
+  // every other widgetId inherit a forged record.
+  var kiwiWidgets = Object.create(null); // widgetId -> {W, options, state, token, gen, abortController, abortTimer, worker, retryTimer, countdownTimer, expiryTimer, errorFired, responseKey, start}
   function kiwiGenerationCurrent(id, gen) {
     var r = kiwiWidgets[id];
     return !!(r && r.gen === gen);
@@ -1787,16 +1791,18 @@
     observe: kiwiObserve,
     destroy: kiwiDestroy
   };
-  var kiwiModuleApis = {};
+  // Null-prototype dictionaries: module kind strings are compared and
+  // stored by name, so a plain {} would be pollutable via "__proto__".
+  var kiwiModuleApis = Object.create(null);
   // In-flight deduplication only: a settled promise is retired, and a
   // terminal failure records a short backoff instead of being memoized
   // for the page lifetime.
-  var kiwiModuleLoads = {};
-  var kiwiModuleFailedAt = {};
+  var kiwiModuleLoads = Object.create(null);
+  var kiwiModuleFailedAt = Object.create(null);
   var KIWI_MODULE_FAILURE_BACKOFF_MS = 5000;
   // Explicit retries only.
   function kiwiClearModuleBackoff() {
-    kiwiModuleFailedAt = {};
+    kiwiModuleFailedAt = Object.create(null);
   }
   function kiwiModuleApi(kind) {
     return kiwiModuleApis[kind] || null;

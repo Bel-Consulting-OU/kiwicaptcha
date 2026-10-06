@@ -588,8 +588,12 @@ final class ProtocolV4Test extends TestCase
 
         $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
         for ($value = 0; $value <= 9; $value++) {
-            $storage->store($this->armedRecordWithExecutionVersion($record, $value));
-            $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+            // A fresh storage per case: store() never rewinds a consumed
+            // record, so each version needs its own pending envelope.
+            $caseStorage = new ArrayStorage();
+            $caseStorage->store($this->armedRecordWithExecutionVersion($record, $value));
+            $outcome = (new Verifier($caseStorage, now: static fn (): int => time()))
+                ->verify($token, self::SECRET, 'login', '198.51.100.7');
             if ($value < 1 || $value > $max) {
                 self::assertSame(
                     VerifyError::MalformedRecord,

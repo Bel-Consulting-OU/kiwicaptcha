@@ -1,0 +1,18 @@
+[package]
+name = "kiwicaptcha-redteam-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies]
+kiwicaptcha = { path = "../../../packages/kiwicaptcha" }
+serde_json = "1"
+
+[[bin]]
+name = "coverage-fuzz"
+path = "src/coverage_fuzz.rs"
+test = false
+doc = false
+
+[workspace]
+members = ["."]

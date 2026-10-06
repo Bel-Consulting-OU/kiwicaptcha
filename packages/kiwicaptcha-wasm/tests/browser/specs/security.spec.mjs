@@ -112,6 +112,54 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(risk).toMatch(/worker\.onmessage\s*=/);
   });
 
+  test('page-influenced dictionary maps are null-prototype (static source assertion)', () => {
+    // A plain {} map keyed by a page-supplied string (data-kiwi-instance,
+    // a widget render id, a scope-map key, an asset URL, a module kind)
+    // is a prototype-pollution sink: `map["__proto__"] = record` sets the
+    // map's [[Prototype]] to that record, so every other key inherits a
+    // forged entry. Every such store must be Object.create(null).
+    const sources = [
+      ['widget-driver.js', driverSource()],
+      ['widget-risk.js', riskModuleSource()],
+      ['widget-compat.js', fs.readFileSync(assetPath('widget-compat.js'), 'utf8')],
+      ['widget-shims.js', fs.readFileSync(assetPath('widget-shims.js'), 'utf8')],
+      ['execution-interpreter.js', fs.readFileSync(assetPath('execution-interpreter.js'), 'utf8')],
+    ];
+    const mapNames = [
+      'kiwiWidgets',
+      'compatControlById',
+      'shimsControlById',
+      'kiwiRuntimeGlueCache',
+      'kiwiWorkerAssetCache',
+      'kiwiModuleApis',
+      'kiwiModuleLoads',
+      'kiwiModuleFailedAt',
+      'shimsScopeMapCache',
+    ];
+    for (const [name, source] of sources) {
+      for (const mapName of mapNames) {
+        // Every live binding of a dictionary map must be Object.create(null).
+        // A lazy cache may assign Object.create(null) later. A plain `{}` reset
+        // is the pollution sink and is forbidden.
+        const plain = source.match(new RegExp(String.raw`\b${mapName}\s*=\s*\{\s*\}`, 'g')) ?? [];
+        expect(
+          plain,
+          `${name}: ${mapName} must never be assigned a plain {}; use Object.create(null)`
+        ).toEqual([]);
+      }
+      // docIds lives on the runner object literal.
+      const docIds = source.match(/docIds:\s*\{\s*\}/g) ?? [];
+      expect(docIds, `${name}: docIds must never be a plain {}`).toEqual([]);
+    }
+    // Positive: the driver's widget map and the shim/compat control maps
+    // must actually be constructed as null-prototype dictionaries.
+    expect(driverSource()).toMatch(/var\s+kiwiWidgets\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-compat.js'), 'utf8'))
+      .toMatch(/var\s+compatControlById\s*=\s*Object\.create\(null\)/);
+    expect(fs.readFileSync(assetPath('widget-shims.js'), 'utf8'))
+      .toMatch(/var\s+shimsControlById\s*=\s*Object\.create\(null\)/);
+  });
+
   test('worker message handlers are schema-guarded (versioned, unknown shapes ignored) (static source assertion)', () => {
     const src = driverSource();
     const risk = riskModuleSource();
@@ -566,7 +614,9 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"\) algorithm = "sha256";/);
     // The request body algorithm is exactly the attribute-derived variable.
-    expect(src).toMatch(/var algorithm\s*=\s*W\.getAttribute\("data-kiwi-algorithm"\) \|\| container\.getAttribute\("data-kiwi-algorithm"\) \|\| "sha256"/);
+    // The one assignment goes through the shared supported-configuration
+    // reader (attribute-only, never client-synthesized).
+    expect(src).toMatch(/var algorithm\s*=\s*kiwiConfigValue\(W, container, "data-kiwi-algorithm"\) \|\| "sha256"/);
     expect(src).toMatch(/reqBody\.algorithm\s*=\s*algorithm/);
     // Only the three server-offered profiles are selectable — anything
     // else is normalized to the default; the client can never invent
@@ -623,7 +673,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', {
       timeout: 60_000,
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('Worker unavailable', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('could not start on this device', {
       timeout: 60_000,
     });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
@@ -729,13 +779,13 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     // header keeps a server that never heard of it working unchanged.
     // The header is attached only under the same condition that arms
     // the execution surface (data-kiwi-execution-src + integrity) and
-    // with the exact integer-string value 5 (the newest execution
+    // with the exact integer-string value 6 (the newest execution
     // grammar the widget can solve), and the fetch carries the header
     // object built right next to the body.
     expect(src.match(/Kiwi-Execution-Max-Version/g) ?? []).not.toEqual([]);
     expect(src).toMatch(/var reqHeaders = \{ "Accept": "application\/json", "Content-Type": "application\/json" \};/);
-    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "5";/);
-    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "5";/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "6";/);
+    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "6";/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/headers: reqHeaders,/);
     // The narrow request shape holds: the capability must never exist
     // as a body field anywhere in the driver.

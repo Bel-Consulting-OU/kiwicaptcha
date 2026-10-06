@@ -157,22 +157,36 @@ $totp = new TotpStepUpHandler(
     900,        // begin window seconds
     '/kiwi/step-up/complete',
     $clock,
+    MASTER,
 );
 
 $context = static fn (string $principal): StepUpContext => new StepUpContext(
     $principal,
-    str_repeat('a7', 16),
+    str_repeat('a7', 32),
     'login',
     '/back',
     'post_solve_step_up_required',
     StepUpContext::MODE_JSON,
 );
 $beginRequest = static fn (): Request => Request::create('https://' . HOST . '/kiwi/step-up/begin');
-$completeRequest = static function (string $tick, string $code): Request {
-    return Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
+// The controller re-resolves the principal and binds it before the
+// handler runs; a direct handler call must bind the same way or the
+// session-mismatch guard refuses every completion.
+$completeRequest = static function (string $tick, string $code, string $principal = PRINCIPAL): Request {
+    $request = Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
         TotpStepUpHandler::TICKET_FIELD => $tick,
         TotpStepUpHandler::CODE_FIELD => $code,
     ]);
+    \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, $principal);
+    return $request;
+};
+$waCompleteRequest = static function (string $tick, string $credentialJson, string $principal = PRINCIPAL): Request {
+    $request = Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler::TICKET_FIELD => $tick,
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler::CREDENTIAL_FIELD => $credentialJson,
+    ]);
+    \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, $principal);
+    return $request;
 };
 $ticketOf = static function (object $response): string {
     $document = json_decode((string) $response->getContent(), true);
@@ -223,7 +237,7 @@ $beginThree = $totp->begin($beginRequest(), $context(VICTIM));
 $ticketThree = $ticketOf($beginThree);
 $attemptCapReached = false;
 for ($i = 0; $i < 8; $i++) {
-    $result = $totp->complete($completeRequest($ticketThree, sprintf('%06d', (900000 + $i * 137) % 1000000)));
+    $result = $totp->complete($completeRequest($ticketThree, sprintf('%06d', (900000 + $i * 137) % 1000000), VICTIM));
     if ($result->status === StepUpResultStatus::Failed) {
         $attemptCapReached = true;
         break;
@@ -232,6 +246,10 @@ for ($i = 0; $i < 8; $i++) {
 
 // ---------- the WebAuthn ceremony ----------
 $waStore = new BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore($clock);
+// The TOTP completion above marked a step-up success on the TOTP
+// store; the WebAuthn enrollment precondition reads its own store, so
+// the same completed-step-up fact is recorded there (the controller
+// does this across handlers on the live plane).
 $fakeRedis = new BelConsulting\KiwiCaptchaBundle\Tests\FakeWebAuthnRedis();
 $registry = new WebAuthnCredentialRegistry($fakeRedis, 'tests:rt37:webauthn:');
 $webauthn = new WebAuthnStepUpHandler(
@@ -247,18 +265,11 @@ $webauthn = new WebAuthnStepUpHandler(
     '/kiwi/step-up/complete',
     $clock,
     true,
+    HOST,
+    ['https://' . HOST],
 );
-$waBegin = $webauthn->begin(
-    Request::create('https://' . HOST . '/kiwi/step-up/begin'),
-    $context(PRINCIPAL),
-);
-$waBeginRaw = (string) $waBegin->getContent();
-$waDocument = json_decode($waBeginRaw, true) ?? [];
-$waChallenge = (string) $waDocument['public_key']['challenge'];
+$waStore->markStepUpSuccess(PRINCIPAL, 900, $now);
 
-// The phishing origin: the same user is tricked into completing on
-// evil.example with an rpId of the phisher's own domain. The library's
-// ceremony steps must refuse it.
 $vectors = 'BelConsulting\KiwiCaptchaBundle\Tests\WebAuthnTestVectors';
 $attestationOf = static function (string $challengeB64, string $credentialId, string $origin, string $rpId) use ($vectors): string {
     $authData = $vectors::authDataForAttestation($rpId, $credentialId, WebAuthnStepUpHandlerTestVectorsX, WebAuthnStepUpHandlerTestVectorsY);
@@ -276,50 +287,50 @@ $assertionOf = static function (string $challengeB64, string $credentialId, int 
     $signature = $vectors::es256Sign($authData . hash('sha256', $clientDataJson, true));
     return $vectors::publicKeyJson($credentialId, $clientDataJson, null, $authData, $signature);
 };
-$phishAttestation = $attestationOf($waChallenge, 'cred-phish', 'https://evil.example', 'phishing.example');
-$waTicket = $ticketOf($waBegin);
-$phishComplete = $webauthn->complete(Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
-    WebAuthnStepUpHandler::TICKET_FIELD => $waTicket,
-    WebAuthnStepUpHandler::CREDENTIAL_FIELD => $phishAttestation,
-]));
-$phishRefused = $phishComplete->status !== StepUpResultStatus::Succeeded;
 
-// The honest origin: registration then assertion both complete.
-$freshBegin = $webauthn->begin(
+// Enrollment first (the creation ceremony lives on the enrollment
+// entry points): the honest origin registers the security key.
+$enrollBegin = $webauthn->enrollBegin(
     Request::create('https://' . HOST . '/kiwi/step-up/begin'),
     $context(PRINCIPAL),
 );
-$freshDoc = json_decode((string) $freshBegin->getContent(), true);
-$freshChallenge = (string) $freshDoc['public_key']['challenge'];
-$freshTicket = $ticketOf($freshBegin);
-$attestation = $attestationOf($freshChallenge, 'cred-rt37', 'https://' . HOST, HOST);
-$registration = $webauthn->complete(Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
-    WebAuthnStepUpHandler::TICKET_FIELD => $freshTicket,
-    WebAuthnStepUpHandler::CREDENTIAL_FIELD => $attestation,
-]));
+$enrollDoc = json_decode((string) $enrollBegin->getContent(), true) ?? [];
+$enrollTicket = $ticketOf($enrollBegin);
+$attestation = $attestationOf((string) ($enrollDoc['public_key']['challenge'] ?? ''), 'cred-rt37', 'https://' . HOST, HOST);
+$registration = $webauthn->enrollComplete($waCompleteRequest($enrollTicket, $attestation));
 $registrationOk = $registration->status === StepUpResultStatus::Succeeded;
 
+// The phishing origin: the same user is tricked into completing on
+// evil.example with an rpId of the phisher's own domain. The library's
+// ceremony steps must refuse it (a bad attempt, never a success).
+$waBegin = $webauthn->begin(
+    Request::create('https://' . HOST . '/kiwi/step-up/begin'),
+    $context(PRINCIPAL),
+);
+$waBeginRaw = (string) $waBegin->getContent();
+$waDocument = json_decode($waBeginRaw, true) ?? [];
+$waChallenge = (string) ($waDocument['public_key']['challenge'] ?? '');
+$phishAttestation = $attestationOf($waChallenge, 'cred-phish', 'https://evil.example', 'phishing.example');
+$waTicket = $ticketOf($waBegin);
+$phishComplete = $webauthn->complete($waCompleteRequest($waTicket, $phishAttestation));
+$phishRefused = $phishComplete->status !== StepUpResultStatus::Succeeded;
+
+// The honest origin assertion completes end to end.
 $assertBegin = $webauthn->begin(
     Request::create('https://' . HOST . '/kiwi/step-up/begin'),
     $context(PRINCIPAL),
 );
 $assertDoc = json_decode((string) $assertBegin->getContent(), true);
 $assertTicket = $ticketOf($assertBegin);
-$assertionJson = $assertionOf((string) $assertDoc['public_key']['challenge'], 'cred-rt37', 2, 'https://' . HOST, HOST);
-$assertionComplete = $webauthn->complete(Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
-    WebAuthnStepUpHandler::TICKET_FIELD => $assertTicket,
-    WebAuthnStepUpHandler::CREDENTIAL_FIELD => $assertionJson,
-]));
+$assertionJson = $assertionOf((string) ($assertDoc['public_key']['challenge'] ?? ''), 'cred-rt37', 2, 'https://' . HOST, HOST);
+$assertionComplete = $webauthn->complete($waCompleteRequest($assertTicket, $assertionJson));
 $assertionOk = $assertionComplete->status === StepUpResultStatus::Succeeded;
 $assertionDetail = json_encode($assertionComplete->toArray());
 
 // The assertion replay: the same credential response presented again
 // is refused (the challenge record is single use; the sign-count
 // guard backs it inside one challenge).
-$replayComplete = $webauthn->complete(Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
-    WebAuthnStepUpHandler::TICKET_FIELD => $assertTicket,
-    WebAuthnStepUpHandler::CREDENTIAL_FIELD => $assertionJson,
-]));
+$replayComplete = $webauthn->complete($waCompleteRequest($assertTicket, $assertionJson));
 $replayRefused = $replayComplete->status !== StepUpResultStatus::Succeeded;
 
 $summary = [
@@ -337,7 +348,7 @@ $summary = [
         'attempt_cap_burns_challenge' => $attemptCapReached,
     ],
     'webauthn' => [
-        'begins_present' => $waChallenge !== '' && isset($freshDoc['public_key']) && isset($assertDoc['public_key']),
+        'begins_present' => $waChallenge !== '' && isset($enrollDoc['public_key']) && isset($assertDoc['public_key']),
         'phishing_origin_refused' => $phishRefused,
         'honest_registration_completed' => $registrationOk,
         'honest_assertion_completed' => $assertionOk,
@@ -351,7 +362,7 @@ echo json_encode($summary), "\n";
 
 $pass = $relayOneOk
     && ($waChallenge !== '')
-    && isset($freshDoc['public_key'])
+    && isset($enrollDoc['public_key'])
     && isset($assertDoc['public_key'])
     && $relayTwoBlocked
     && $consumedRefused

@@ -397,6 +397,8 @@ final class AdaptiveRiskEngine
         // null defers to the side channels for stores without the surface.
         $globalLevel = null;
         $cooldownUntilMs = null;
+        $targetFailures = 0;
+        $targetSpread = 0;
         try {
             if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
                 // Consolidated assessment: ONE atomic script call runs the
@@ -418,6 +420,8 @@ final class AdaptiveRiskEngine
                     $cooldownUntilMs = $reply->cooldownUntilMs;
                     $existingContextTag = $reply->existingContextTag;
                     $existingTlsTag = $reply->existingTlsTag;
+                    $targetFailures = (int) ($reply->targetFailures ?? 0);
+                    $targetSpread = (int) ($reply->targetSpread ?? 0);
                 } else {
                     [$vector, $existingContextTag, $existingTlsTag, $_registered] = $this->store->assessV2(
                         $observation,
@@ -489,7 +493,7 @@ final class AdaptiveRiskEngine
         $v2Signals = null;
         if ($v2 !== null) {
             $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
-                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag)
+                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpread)
                 : $this->buildV2Signals($v2, $c, $observation);
         }
         $score = $v2Signals !== null
@@ -840,10 +844,10 @@ final class AdaptiveRiskEngine
 
     /**
      * Reputation authorization of one accepted-outcome status: statuses
-     * 1 and 2 always; status 3 (a capped label) only when the outcome is
-     * abusive — a capped trust label must never mint unlimited
-     * reputation credit (status 4 is the v2 confirm's trust cap and
-     * never authorizes). Rust mirror: emit_feedback's confirm gate.
+     * 1 and 2 always. Status 3 (a capped label) is authorized only when
+     * the outcome is abusive. A capped trust label must never mint
+     * unlimited reputation credit. Status 4 is the v2 confirm's trust
+     * cap and never authorizes. Rust mirror: emit_feedback's confirm gate.
      */
     private static function reputationAuthorized(int $status, bool $legitimate): bool
     {
@@ -1093,13 +1097,13 @@ final class AdaptiveRiskEngine
      *   It is 0 when no record exists (first request), the tag is absent,
      *   or the record read failed (neutral degradation).
      */
-    private function deriveV2SignalsFromRecords(RiskV2Context $v2, RiskContext $c, ?string $existingContextTag, ?string $existingTlsTag): RiskV2Signals
+    private function deriveV2SignalsFromRecords(RiskV2Context $v2, RiskContext $c, ?string $existingContextTag, ?string $existingTlsTag, int $targetFailures = 0, int $targetSpread = 0): RiskV2Signals
     {
         $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
         $inconsistent = ($existingContextTag !== null && $existingContextTag !== '' && $existingContextTag !== $v2->clientContextTag) ? 1000 : 0;
         $tlsInconsistent = ($existingTlsTag !== null && $existingTlsTag !== '' && $existingTlsTag !== $v2->tlsTag) ? 1000 : 0;
 
-        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent);
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal($targetSpread));
     }
 
     /**
@@ -1124,7 +1128,7 @@ final class AdaptiveRiskEngine
      *   fails (neutral degradation), or the store lacks the optional
      *   SessionTlsTagStoreInterface capability.
      */
-    private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation): RiskV2Signals
+    private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation, int $targetFailures = 0, int $targetSpread = 0): RiskV2Signals
     {
         $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
         $inconsistent = 0;
@@ -1163,7 +1167,20 @@ final class AdaptiveRiskEngine
             }
         }
 
-        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent);
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal($targetSpread));
+    }
+
+
+    /** Five failures (the attack threshold) saturate at 1000. */
+    private static function targetPressureSignal(int $fails): int
+    {
+        return (int) min(1000, intdiv(max(0, $fails) * 1000, 5));
+    }
+
+    /** Twenty distinct sources saturate at 1000. */
+    private static function targetSpreadSignal(int $spread): int
+    {
+        return (int) min(1000, intdiv(max(0, $spread) * 1000, 20));
     }
 
     /**

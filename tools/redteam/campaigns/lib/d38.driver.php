@@ -67,6 +67,7 @@ $registryFor = static function (bool $revoked) use ($redis, $reporter): AgentsVe
             new AgentNonceStore($redis, '{kiwi:rt38}:'),
             300,
             static fn (): int => NOW,
+            'http://127.0.0.1',
         ),
         new AgentQuota($redis, '{kiwi:rt38}:'),
         $reporter,
@@ -162,7 +163,7 @@ $nonceSingleUse = $first->isVerified() && !$second->isVerified();
 
 // The quota refusal's abuse mark: the outcomes reporter saw at least
 // one abuse attribution for the agent dimension once the quota busted.
-$marksSeen = method_exists($reporter, 'reports') ? count($reporter->reports) : -1;
+$marksSeen = is_array($reporter->reports ?? null) ? count($reporter->reports) : -1;
 
 $summary = [
     'signed_in_quota' => $inQuota,
