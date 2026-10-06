@@ -18,7 +18,8 @@
   "scripts": {
     "build": "ng-packagr -p ng-package.json",
     "test": "npm run typecheck",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:unit": "vitest run"
   },
   "keywords": [
     "captcha",

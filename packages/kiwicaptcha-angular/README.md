@@ -51,9 +51,19 @@ export class LoginForm {
 
 `src/kiwi-captcha.component.spec.ts` holds the TestBed specs
 (mount and markup, verified emission, failed/expired, destroy hygiene,
-the imperative controls, the injectable service). Status in this
-checkout: TYPECHECKED, NOT EXECUTED. The local toolchain has no Karma
-browser launcher, so the specs compile under the strict `tsc
---noEmit` gate (`npm run typecheck`, part of `npm test`) and run in
-the Angular workspace CI with `ng test`. No pass is claimed beyond the
-typecheck.
+the imperative controls, the injectable service). Two runners are
+wired: `npm run test:unit` executes the suite under vitest + jsdom
+with the Angular compiler transform, and `npm test` keeps the strict
+`tsc --noEmit` gate. `ng test` (karma.conf.cjs, angular.json) is the
+workspace runner and launches the headless Chromium named by
+CHROME_BIN.
+
+Status in this checkout: the vitest runner discovers and executes all
+six specs (one passes; five fail on Angular's required view-query
+signals never resolving under the jsdom transform chain, reproduced
+with a minimal probe component with no project code involved). The
+Karma runner launches the browser but the builder's bundle does not
+attach to the karma file list in this container. Both symptoms are
+environment-level, neither is a claim of passing: the suite is
+expected to pass in an Angular CI image with a system Chrome, and no
+pass is claimed here beyond the one assertion the vitest run proves.
