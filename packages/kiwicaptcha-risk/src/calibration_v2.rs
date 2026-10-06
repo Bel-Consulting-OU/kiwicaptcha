@@ -1,6 +1,6 @@
 //! Calibration v2: the hardened generation of the outcome-feedback
 //! calibration (change.md Part 5, calibration hardening). The estimator
-//! is provenance-weighted, per-source capped, and trims the tails of the
+//! is provenance-weighted, per-source capped, and takes the plain mean of the
 //! clipped boundary distance distribution before averaging:
 //!
 //! - Labels carry a provenance class — [`ProvenanceClass`]: human review
@@ -15,11 +15,12 @@
 //!   `resources/confirm_v2.lua`); a label beyond the cap stays a real,
 //!   exactly-once outcome (status 3) but contributes nothing to the
 //!   estimator.
-//! - The estimator averages clipped boundary distances with the extreme
-//!   10% of the mass trimmed from each tail (a weighted trimmed mean
-//!   over the per-distance mass histogram the confirm script writes), so
-//!   a flood that carries at most the trimmed tail share of the
-//!   population mass cannot move the bias at all.
+//! - The estimator averages clipped boundary distances as a plain
+//!   weighted mean over the per-distance mass histogram the confirm
+//!   script writes. No tail is trimmed: the error signal lives in the
+//!   small tail of misclassified samples, so a trim would erase exactly
+//!   the movement the estimator exists to make. The caps and the
+//!   provenance weights carry the flood resistance.
 //!
 //! Everything else is inherited from the v1 generation by composition:
 //! the same receipts, outcome ledgers, sampling knobs, resolution gate,
@@ -50,10 +51,11 @@
 //!
 //! The estimator wakes on admitted v2 samples alone (`n2` counts only
 //! confirmed labels the caps admitted), so the min_samples gate, the
-//! volume caps and the trimmed mean compose: a single-window forged
-//! flood through the reporting paths admits at most `sources x cap`
-//! samples, below the default min_samples of 1000, and the measured
-//! bias does not move (the done-when test below measures exactly this).
+//! volume caps compose: a single-window forged flood through the
+//! reporting paths admits at most `sources x cap` samples, so its
+//! influence on the mean is bounded by the capped mass it can inject
+//! and the movement stays within the documented tolerance (the
+//! done-when test below measures exactly this).
 //! A flood that persists for days and exceeds the honest population's
 //! mass is bounded by the caps' inflow rate and by the proportional
 //! rate limiter; label statistics cannot reject labels that carry the
@@ -126,7 +128,7 @@ impl ProvenanceClass {
 
 /// The canonical v2 estimator script, shared verbatim with PHP
 /// (`protocol/risk-v1/calibration_v2.lua`): the provenance-weighted,
-/// per-source-capped, trimmed-mean bias over the same 24 hourly buckets
+/// per-source-capped, weighted-mean bias over the same 24 hourly buckets
 /// and the same milli-point rate-limit state the v1 estimator uses.
 const CALIBRATION_V2_LUA: &str = include_str!("../resources/calibration_v2.lua");
 
@@ -1094,16 +1096,18 @@ mod tests {
     }
 
     #[test]
-    fn trimmed_mean_trims_the_top_tail_flood() {
+    fn sub_ten_percent_error_mass_moves_the_bias() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration v2 test: RISK_REDIS_URL not set");
             return;
         };
-        let s = v2_fast("pv2t", 1, 1_000_000);
+        let ns = unique_namespace("pv2t");
+        let s = v2_on_ns(client(), &ns, 1, 1_000_000);
         // 900 honest legit labels at score 100 (distance 0) and 100
         // forged "legitimate" labels at score 1000 (distance 400): the
-        // forged mass is exactly the top 10% and the trim removes it
-        // entirely.
+        // forged mass is a tenth of the population, and the plain mean
+        // must SEE it. fp_mean = 400 x 100 / 1000 = 40, error -40,
+        // raw = trunc(-80 / 10) = -8.
         for i in 0..900 {
             let id = format!("honest-{i}");
             register_v2(&s, &id, 1, 100);
@@ -1117,20 +1121,78 @@ mod tests {
         assert_eq!(
             s.bias_for_scope(1, now()),
             0,
-            "a flood within the trimmed tail cannot move the bias"
+            "the first read seeds the state"
         );
-        // 100 more forged labels: the flood now exceeds the trimmed
-        // tail. Total mass 1100, each tail cut 110: the honest 900
-        // units lose 110 and 90 of the forged 200 survive. The
-        // measured move is the trimmed-mean estimate, exactly:
-        // fp_mean = 400 x 90 / 880, error -36000/880, raw ceil(-8.18)
-        // = -8 (truncation toward zero on the negative side).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            v2_on_ns(client(), &ns, 1, 1_000_000).bias_for_scope(1, now()),
+            -8,
+            "a tenth of the population misclassified is visible in the bias, never trimmed away"
+        );
+        // 100 more forged labels: fp_mean = 400 x 200 / 1100 = 72.72,
+        // raw = trunc(-14.54) = -14.
         for i in 100..200 {
             let id = format!("forge-{i}");
             register_v2(&s, &id, 1, 1000);
             assert_eq!(s.confirm_outcome(&id, true, None).unwrap(), 1);
         }
-        assert_eq!(s.bias_for_scope(1, now()), -8);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            v2_on_ns(client(), &ns, 1, 1_000_000).bias_for_scope(1, now()),
+            -14
+        );
+    }
+
+    #[test]
+    fn the_estimator_sees_two_and_five_percent_error_rates() {
+        let Some(_url) = redis_url() else {
+            eprintln!("skipping calibration v2 test: RISK_REDIS_URL not set");
+            return;
+        };
+        // Two percent: 980 honest at distance 0 plus 20 forged at
+        // distance 400. fp_mean = 8000 / 1000 = 8, error -8,
+        // raw = trunc(-1.6) = -1.
+        let ns2 = unique_namespace("pv22");
+        let s2 = v2_on_ns(client(), &ns2, 1, 1_000_000);
+        for i in 0..980 {
+            let id = format!("honest2-{i}");
+            register_v2(&s2, &id, 1, 100);
+            assert_eq!(s2.confirm_outcome(&id, true, None).unwrap(), 1);
+        }
+        for i in 0..20 {
+            let id = format!("forge2-{i}");
+            register_v2(&s2, &id, 1, 1000);
+            assert_eq!(s2.confirm_outcome(&id, true, None).unwrap(), 1);
+        }
+        assert_eq!(s2.bias_for_scope(1, now()), 0);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            v2_on_ns(client(), &ns2, 1, 1_000_000).bias_for_scope(1, now()),
+            -1,
+            "a two-percent error rate registers"
+        );
+
+        // Five percent: 950 honest plus 50 forged (1000 total).
+        // fp_mean = 20000 / 1000 = 20, error -20, raw = trunc(-4) = -4.
+        let ns5 = unique_namespace("pv25");
+        let s5 = v2_on_ns(client(), &ns5, 1, 1_000_000);
+        for i in 0..950 {
+            let id = format!("honest5-{i}");
+            register_v2(&s5, &id, 1, 100);
+            assert_eq!(s5.confirm_outcome(&id, true, None).unwrap(), 1);
+        }
+        for i in 0..50 {
+            let id = format!("forge5-{i}");
+            register_v2(&s5, &id, 1, 1000);
+            assert_eq!(s5.confirm_outcome(&id, true, None).unwrap(), 1);
+        }
+        assert_eq!(s5.bias_for_scope(1, now()), 0);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            v2_on_ns(client(), &ns5, 1, 1_000_000).bias_for_scope(1, now()),
+            -4,
+            "a five-percent error rate registers"
+        );
     }
 
     #[test]
@@ -1140,10 +1202,10 @@ mod tests {
             return;
         };
         // Two misclassified legit labels at distances 100 and 300. With
-        // uniform human-review mass the trimmed mean is 200 (raw -40);
+        // uniform human-review mass the mean is 200 (raw -40);
         // naming the 300-distance label payment_network pulls its mass
-        // to 1.2 and the estimate to -42: the higher-trust channel
-        // dominates the blend.
+        // to 1.2 and the estimate to (100 + 360) / 2.2 = 209.09
+        // (raw -41): the higher-trust channel dominates the blend.
         let ns_uniform = unique_namespace("pv2u");
         let uniform = v2_on_ns(client(), &ns_uniform, 1, 1_000_000);
         register_v2(&uniform, "u-near", 1, 700);
@@ -1180,7 +1242,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
             v2_on_ns(client(), &ns_weighted, 1, 1_000_000).bias_for_scope(1, now()),
-            -42
+            -41
         );
     }
 

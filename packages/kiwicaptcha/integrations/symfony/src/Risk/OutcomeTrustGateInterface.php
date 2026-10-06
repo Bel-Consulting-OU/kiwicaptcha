@@ -25,15 +25,15 @@ interface OutcomeTrustGateInterface
      * True when this authentication success may also credit the session
      * and the source dimension of the identity.
      *
-     * @param string $principalPseudonym the 128-bit principal pseudonym
-     *                                   the report addresses
+     * @param string $principalPseudonym the principal pseudonym the
+     *                                   report addresses.
      * @param string|null $sessionPseudonym the session pseudonym whose
      *                                      windowed history decides the
      *                                      credit, null when the request
-     *                                      carries no continuity cookie
+     *                                      carries no continuity cookie.
      * @param string|null $targetPseudonym the target pseudonym of the
      *                                     same flow when one was
-     *                                     derived, null otherwise
+     *                                     derived, null otherwise.
      */
     public function allowsSessionSourceCredit(string $principalPseudonym, ?string $sessionPseudonym, ?string $targetPseudonym): bool;
 }

@@ -15,7 +15,7 @@ use Predis\Response\ServerException;
  * identical client, namespace, key layout and knobs, so the two
  * generations address identical keys and an upgrade never orphans state.
  * The hardening has three parts: provenance classes, per-source
- * label-volume caps, and a trimmed-mean estimator over clipped boundary
+ * label-volume caps, and a plain weighted mean over clipped boundary
  * distances.
  *
  * What v2 adds over the v1 estimator:
@@ -32,11 +32,11 @@ use Predis\Response\ServerException;
  *   stays a real, exactly-once outcome (status 3) but contributes
  *   nothing to the estimator.
  * - The estimator (calibration_v2.lua) averages clipped boundary
- *   distances with the extreme 10% of the mass trimmed from each tail.
- *   The trim is a weighted mean over the per-distance mass histogram
- *   the confirm script writes. A flood that carries at most the
- *   trimmed tail share of the population mass cannot move the bias at
- *   all.
+ *   distances as a plain weighted mean over the per-distance mass
+ *   histogram the confirm script writes. No tail is trimmed: the error
+ *   signal lives in the small tail of misclassified samples, so a trim
+ *   would erase exactly the movement the estimator exists to make. The
+ *   caps and the provenance weights carry the flood resistance.
  *
  * Versioning: calibration v2 is the version new deployments use, and it
  * is discovered at first touch of the ledger. Registration stamps every
@@ -50,10 +50,11 @@ use Predis\Response\ServerException;
  * attached) selects the version for new decisions and for the bias read.
  *
  * The estimator wakes on admitted v2 samples alone (the n2 counter).
- * The min_samples gate, the volume caps and the trimmed mean compose: a
- * single-window forged flood through the reporting paths admits at most
- * sources x cap samples, below the default minSamples of 1000, and the
- * measured bias does not move. A flood that persists for days and
+ * The min_samples gate and the volume caps compose. A single-window
+ * forged flood through the reporting paths admits at most
+ * sources x cap samples, so its influence on the mean is bounded by
+ * the capped mass it can inject. The movement stays within the
+ * documented tolerance. A flood that persists for days and
  * exceeds the honest population's mass is bounded by the caps' inflow
  * rate and by the proportional rate limiter. Label statistics cannot
  * reject labels that carry the only ground truth the system has: the

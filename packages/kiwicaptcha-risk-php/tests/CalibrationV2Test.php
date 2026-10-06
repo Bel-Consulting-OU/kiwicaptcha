@@ -26,7 +26,7 @@ use Predis\Client;
 
 /**
  * Redis-backed calibration v2 tests: the provenance classes and their
- * frozen weights, the per-source window caps, the trimmed-mean estimator
+ * frozen weights, the per-source window caps, the weighted-mean estimator
  * over clipped boundary distances and the version discovery rule. New
  * ledgers are v2; every ledger that predates the v2 store keeps v1. The
  * done-when case floods 100000 forged ConfirmedLegitimate labels through
@@ -271,14 +271,15 @@ final class CalibrationV2Test extends TestCase
         self::assertFalse($c->correctOutcome('corr-1', false));
     }
 
-    public function testTrimmedMeanTrimsTheTopTailFlood(): void
+    public function testSubTenPercentErrorMassMovesTheBias(): void
     {
         $ns = $this->uniqueNamespace('pv2t');
         $c = $this->fastV2($ns, cap: 1_000_000);
         // 900 honest legit labels at score 100 (distance 0) and 100
-        // forged "legitimate" labels at score 1000 (distance 400): the
-        // forged mass is exactly the top 10% and the trim removes it
-        // entirely.
+        // forged "legitimate" labels at score 1000 (distance 400): a
+        // tenth of the population misclassified, and the plain mean
+        // must see it. fp_mean = 400 x 100 / 1000 = 40, error -40,
+        // raw = trunc(-80 / 10) = -8.
         foreach (range(0, 899) as $i) {
             self::assertTrue($c->recordReceipt("honest-{$i}", 1, 1, RiskAction::Sha20, 100, 1, $this->decisionHour()));
             self::assertSame(1, $c->confirmOutcome("honest-{$i}", true));
@@ -293,28 +294,60 @@ final class CalibrationV2Test extends TestCase
         self::assertSame(0, $c->biasForScope(1, $this->nowMs()), 'the first read seeds the state');
         usleep(300_000);
         $this->clearCache($c);
-        self::assertSame(0, $c->biasForScope(1, $this->nowMs()), 'a flood within the trimmed tail cannot move the bias');
-        // 100 more forged labels: the flood now exceeds the trimmed
-        // tail. Total mass 1100, each tail cut 110: the honest 900
-        // units lose 110 and 90 of the forged 200 survive. The measured
-        // move is the trimmed-mean estimate, exactly: fp_mean = 400 x
-        // 90 / 880, error -36000/880, raw ceil(-8.18) = -8.
+        self::assertSame(-8, $c->biasForScope(1, $this->nowMs()), 'a tenth of the population misclassified is visible in the bias');
+        // 100 more forged labels: fp_mean = 400 x 200 / 1100 = 72.72,
+        // raw = trunc(-14.54) = -14.
         foreach (range(100, 199) as $i) {
             self::assertTrue($c->recordReceipt("forge-{$i}", 1, 6, RiskAction::Argon16, 1000, 1, $this->decisionHour()));
             self::assertSame(1, $c->confirmOutcome("forge-{$i}", true));
         }
         usleep(300_000);
         $this->clearCache($c);
-        self::assertSame(-8, $c->biasForScope(1, $this->nowMs()));
+        self::assertSame(-14, $c->biasForScope(1, $this->nowMs()));
+    }
+
+    public function testTheEstimatorSeesTwoAndFivePercentErrorRates(): void
+    {
+        // Two percent: 980 honest at distance 0 plus 20 forged at
+        // distance 400. fp_mean = 8000 / 1000 = 8, raw = trunc(-1.6) = -1.
+        $c2 = $this->fastV2($this->uniqueNamespace('pv22'), cap: 1_000_000);
+        foreach (range(0, 979) as $i) {
+            self::assertTrue($c2->recordReceipt("honest2-{$i}", 1, 1, RiskAction::Sha20, 100, 1, $this->decisionHour()));
+            self::assertSame(1, $c2->confirmOutcome("honest2-{$i}", true));
+        }
+        foreach (range(0, 19) as $i) {
+            self::assertTrue($c2->recordReceipt("forge2-{$i}", 1, 6, RiskAction::Argon16, 1000, 1, $this->decisionHour()));
+            self::assertSame(1, $c2->confirmOutcome("forge2-{$i}", true));
+        }
+        self::assertSame(0, $c2->biasForScope(1, $this->nowMs()));
+        usleep(300_000);
+        $this->clearCache($c2);
+        self::assertSame(-1, $c2->biasForScope(1, $this->nowMs()), 'a two-percent error rate registers');
+
+        // Five percent: 950 honest plus 50 forged (1000 total).
+        // fp_mean = 20000 / 1000 = 20, raw = trunc(-4) = -4.
+        $c5 = $this->fastV2($this->uniqueNamespace('pv25'), cap: 1_000_000);
+        foreach (range(0, 949) as $i) {
+            self::assertTrue($c5->recordReceipt("honest5-{$i}", 1, 1, RiskAction::Sha20, 100, 1, $this->decisionHour()));
+            self::assertSame(1, $c5->confirmOutcome("honest5-{$i}", true));
+        }
+        foreach (range(0, 49) as $i) {
+            self::assertTrue($c5->recordReceipt("forge5-{$i}", 1, 6, RiskAction::Argon16, 1000, 1, $this->decisionHour()));
+            self::assertSame(1, $c5->confirmOutcome("forge5-{$i}", true));
+        }
+        self::assertSame(0, $c5->biasForScope(1, $this->nowMs()));
+        usleep(300_000);
+        $this->clearCache($c5);
+        self::assertSame(-4, $c5->biasForScope(1, $this->nowMs()), 'a five-percent error rate registers');
     }
 
     public function testPaymentNetworkMassOutvotesHumanReviewMass(): void
     {
         // Two misclassified legit labels at distances 100 and 300. With
-        // uniform human-review mass the trimmed mean is 200 (raw -40);
-        // naming the 300-distance label payment_network pulls its mass
-        // to 1.2 and the estimate to -42: the higher-trust channel
-        // dominates the blend.
+        // uniform human-review mass the mean is 200 (raw -40); naming
+        // the 300-distance label payment_network pulls its mass to 1.2
+        // and the estimate to (100 + 360) / 2.2 = 209.09 (raw -41): the
+        // higher-trust channel dominates the blend.
         $nsUniform = $this->uniqueNamespace('pv2u');
         $uniform = $this->fastV2($nsUniform);
         self::assertTrue($uniform->recordReceipt('u-near', 1, 6, RiskAction::Argon16, 700, 1, $this->decisionHour()));
@@ -331,7 +364,7 @@ final class CalibrationV2Test extends TestCase
         self::assertTrue($weighted->recordReceipt('w-far', 1, 6, RiskAction::Argon16, 900, 1, $this->decisionHour()));
         self::assertSame(1, $weighted->confirmOutcomeWithProvenance('w-far', true, ProvenanceClass::PaymentNetwork, 0));
         $this->seedBias($weighted);
-        self::assertSame(-42, $weighted->biasForScope(1, $this->nowMs()));
+        self::assertSame(-41, $weighted->biasForScope(1, $this->nowMs()));
     }
 
     /**

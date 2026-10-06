@@ -380,7 +380,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
      * The request's unique id, derived server-side: Request::getRequestId()
      * on newer Symfony, or the fingerprint of the request's server
      * material (time, address, port). The client-controlled X-Request-Id
-     * header is consulted ONLY when the deployment declares a fronting
+     * header is consulted only when the deployment declares a fronting
      * edge that overwrites it (risk.outcomes.trust_request_id_header);
      * otherwise a caller could replay one header value across attempts
      * and collapse every failure into one deduplicated event. The

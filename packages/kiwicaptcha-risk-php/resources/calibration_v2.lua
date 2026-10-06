@@ -1,4 +1,4 @@
--- Calibration v2: provenance-weighted, per-source-capped, trimmed-mean
+-- Calibration v2: provenance-weighted, per-source-capped, plain-mean
 -- bias over clipped boundary distances (canonical, shared PHP/Rust).
 --
 -- This is the generation-2 estimator. It is additive over
@@ -53,14 +53,15 @@
 --   abuse distance = max(0, T - score)   (a false negative's shortfall)
 -- Each admitted sample contributes its weight (the inverse sampling
 -- probability times the provenance class weight) as mass at its
--- distance slot. The estimator is a weighted trimmed mean:
+-- distance slot. The estimator is the plain weighted mean over ALL
+-- admitted mass:
 --   1. sum the mass per kind;
---   2. walk the distance slots ascending and trim the lowest 10% of
---      the mass, walk descending and trim the highest 10% (a distance
---      slot at a trim edge contributes its mass fractionally);
---   3. the mean over the kept middle mass is the kind's distance mean.
---   fp_mean = trimmed weighted mean of the legit distances
---   fn_mean = trimmed weighted mean of the abuse distances
+--   2. the mean over every distance slot weighted by its mass is the
+--      kind's distance mean. No tail is trimmed: the error signal
+--      lives in the small tail of misclassified samples, and a trim
+--      would erase exactly the movement the estimator exists to make.
+--   fp_mean = weighted mean of the legit distances
+--   fn_mean = weighted mean of the abuse distances
 --   error   = fn_mean * fn_cost - fp_mean * fp_cost
 --   raw     = clamp(trunc(error * 2 / 10), ±max_adjustment)
 -- The final stage (error normalization, clamp, milli-point rate limit,
@@ -71,16 +72,16 @@
 -- WHAT THE HARDENING BUYS. A forged-label flood moves the bias only
 -- through mass that survives all of: the per-source window caps
 -- (enforced atomically by confirm_v2.lua at label time — capped labels
--- contribute no mass and no admitted count), the min_samples gate
--- (counted over ADMITTED v2 samples only), the resolution gate and
--- the trimmed mean (a flood that carries at most the trimmed tail
--- share of the population mass is removed entirely by the trim), and
--- the proportional rate limiter (the bias can move at most
+-- contribute no mass and no admitted count, so one source can inject
+-- at most its cap per window), the min_samples gate (counted over
+-- ADMITTED v2 samples only), the resolution gate, and the
+-- proportional rate limiter (the bias can move at most
 -- max_change_per_minute per minute). The provenance weights scale the
 -- mass: payment-network confirmations carry 1.2x the influence of a
 -- human-review label and security-event confirmations 0.8x, so the
 -- higher-trust channels dominate the estimate when they disagree with
--- a low-trust flood.
+-- a low-trust flood, and the caps bound how fast any single source can
+-- accumulate influence at all.
 --
 -- RESOLUTION GATE: identical semantics with calibration.lua — in
 -- random_sample mode the bias target stays 0 while sample_total >=
@@ -95,11 +96,6 @@ end
 -- The decision boundary T shared with the action ladder and with
 -- calibration.lua / confirm_v2.lua / correction_v2.lua.
 local BOUNDARY_T = 600
-
--- The trimmed tails: 10% of the mass is cut from each end before the
--- mean is taken. Pinned here so both cores compute the same estimate.
-local TRIM_NUM = 1
-local TRIM_DEN = 10
 
 -- The distance slots are integer clipped distances 0..1000 (the score
 -- itself is bounded to 0..1000), so the walk below is bounded no
@@ -147,41 +143,21 @@ for i = 1, 24 do
     end
 end
 
--- Weighted trimmed mean over the distance slots: trim TRIM_NUM/TRIM_DEN
--- of the mass from each tail (a slot at an edge contributes its mass
--- fractionally), then average the kept middle mass by its distance.
-local function trimmed_mean(masses, total)
+-- Plain weighted mean over the distance slots: every admitted mass
+-- unit counts at its distance. The caps and provenance weights carry
+-- the flood resistance; the estimator carries the error signal.
+local function weighted_mean(masses, total)
     if total <= 0 then
         return 0
     end
-    local low_cut = total * TRIM_NUM / TRIM_DEN
-    local high_cut = total - low_cut
-    if high_cut <= low_cut then
-        return 0
-    end
-    local cum = 0
     local sum = 0
-    local kept = 0
     for d = 0, MAX_DISTANCE do
         local m = masses[d]
         if m and m > 0 then
-            local seg_lo = cum
-            local seg_hi = cum + m
-            cum = seg_hi
-            local lo = seg_lo
-            local hi = seg_hi
-            if lo < low_cut then lo = low_cut end
-            if hi > high_cut then hi = high_cut end
-            if hi > lo then
-                sum = sum + d * (hi - lo)
-                kept = kept + (hi - lo)
-            end
+            sum = sum + d * m
         end
     end
-    if kept <= 0 then
-        return 0
-    end
-    return sum / kept
+    return sum / total
 end
 
 -- Distributed clock for the rate-limit window (identical with v1).
@@ -199,7 +175,7 @@ if not prev_ts then
 end
 redis.call('HSET', KEYS[25], 'ts', now)
 
--- Target: the trimmed-mean calibration above the threshold, 0 below.
+-- Target: the weighted-mean calibration above the threshold, 0 below.
 -- The threshold counts ADMITTED v2 samples only (n2); generation-1
 -- samples feed the v1 estimator, never this one.
 local raw_mp = 0
@@ -214,8 +190,8 @@ if admitted >= tonumber(ARGV[2]) and admitted > 0 then
         end
     end
     if resolved_ratio_ok then
-        local fp_mean = trimmed_mean(legit_mass, legit_mass_total)
-        local fn_mean = trimmed_mean(abuse_mass, abuse_mass_total)
+        local fp_mean = weighted_mean(legit_mass, legit_mass_total)
+        local fn_mean = weighted_mean(abuse_mass, abuse_mass_total)
         local error = fn_mean * tonumber(ARGV[8]) - fp_mean * tonumber(ARGV[7])
         local raw = trunc_div(error * 2, 10)
         local max_adj = tonumber(ARGV[3])

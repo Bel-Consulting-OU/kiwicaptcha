@@ -6,14 +6,15 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
 /**
  * The Redis-backed auth-outcome window: per-identity hash counters
- * (HINCRBY f/s) under the risk store's hash-tagged key family with a
- * window-bounded TTL, so every worker of a deployment shares one view.
- * The read path returns null when the backend is unreachable — the
- * gate then refuses credit, fail closed.
+ * (the hash-increment command on fields f and s) under the risk
+ * store's hash-tagged key family with a window-bounded TTL, so every
+ * worker of a deployment shares one view. The read path returns null
+ * when the backend is unreachable — the gate then refuses credit, fail
+ * closed.
  */
 final class RedisAuthOutcomeWindow implements AuthOutcomeWindowInterface
 {
-    /** HINCRBY one field and arm the window TTL; mint the key on first touch. */
+    /** Increment one field and arm the window TTL; mint the key on first touch. */
     private const RECORD_SCRIPT = <<<'LUA'
 local n = redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
