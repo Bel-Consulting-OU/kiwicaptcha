@@ -173,8 +173,10 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             }
             if ($this->authWindow !== null) {
                 // The principal window accumulates across sessions so a
-                // cross-session stuffer cannot reset the ratio.
-                $this->authWindow->recordSuccess($principalPseudonym);
+                // cross-session stuffer cannot reset the ratio. Keyed
+                // on the same normalized target as the failure lane.
+                $windowKey = $this->principalWindowKey($identifier) ?? $principalPseudonym;
+                $this->authWindow->recordSuccess($windowKey);
             }
             if ($credit) {
                 // keep $sessionRaw: the gate approved session/source credit
@@ -205,11 +207,9 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                 $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
             }
             if ($username !== null && $username !== '') {
-                try {
-                    $this->authWindow?->recordFailure($this->identityFactory->principalId($username));
-                } catch (\Throwable) {
-                    // A claimed id that cannot be pseudonymized never
-                    // enters the window.
+                $windowKey = $this->principalWindowKey($username);
+                if ($windowKey !== null) {
+                    $this->authWindow?->recordFailure($windowKey);
                 }
             }
             $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
@@ -544,6 +544,23 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
      * The target pseudonym of the request's claimed identifier (the
      * trust gate's spread input); null when none is derivable.
      */
+    /**
+     * The window key of an identity: the normalized target pseudonym
+     * under the principal purpose. Both the success and the failure
+     * lanes key on THIS, so the login field and the user identifier
+     * never diverge into two windows.
+     */
+    private function principalWindowKey(string $raw): ?string
+    {
+        try {
+            $normalized = TargetIdentifierNormalizer::normalize($raw);
+
+            return $this->identityFactory->principalId($normalized);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     private function targetPseudonymOf(?Request $request): ?string
     {
         $username = $this->claimedIdentifier($request);

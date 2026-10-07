@@ -497,6 +497,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function enrollComplete(Request $request): StepUpResult
     {
         $boundSessionId = StepUpSessionBinding::sessionId($request);
+        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired || $resolved === null) {

@@ -1822,7 +1822,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     new Reference('kiwi_captcha.risk.identity_factory'),
                     $outcomesScopeName,
                 ]))
-                    ->setArgument('$stepUpPath', (string) ($riskConfig['step_up']['path'] ?? '/kiwi/step-up/begin'))
+                    ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$enabled', true)
                     ->addTag('kernel.event_subscriber')

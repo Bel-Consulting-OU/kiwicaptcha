@@ -449,7 +449,30 @@ impl SidecarState {
         // 1. Consume: one short lock, the one-shot transition.
         let (record, meta) = match self.store.consume(&decoded.nonce, now_unix) {
             ConsumeOutcome::Won { record, meta } => (*record, meta),
-            ConsumeOutcome::AlreadyConsumed { .. } => {
+            ConsumeOutcome::AlreadyConsumed { meta, succeeded } => {
+                // An idempotent retry of a delegated verification (the
+                // caller forwarded operation_identity) must return the
+                // stored success, not already_consumed. Without the
+                // identity the one-shot provider shape stands.
+                let identity = parsed
+                    .get("operation_identity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if identity != "" && succeeded == Some(true) {
+                    self.metrics.record_outcome("ok");
+                    let mut wire = serde_json::json!({
+                        "success": true,
+                        "kiwi-code": "ok",
+                        "error-codes": [],
+                    });
+                    if let Some(action) = &meta.action {
+                        wire["action"] = action.clone().into();
+                    }
+                    if let Some(cdata) = &meta.cdata {
+                        wire["cdata"] = cdata.clone().into();
+                    }
+                    return Response::json(200, format!("{wire}\n"));
+                }
                 self.metrics.record_outcome("already_consumed");
                 return self.provider_response(&["timeout-or-duplicate"], Some("already_consumed"));
             }

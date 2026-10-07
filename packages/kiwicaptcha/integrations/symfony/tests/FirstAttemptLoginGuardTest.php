@@ -11,6 +11,9 @@ use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
+use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\User\UserInterface;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -30,22 +33,83 @@ final class FirstAttemptLoginGuardTest extends TestCase
         return Request::create('https://example.com/login', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.10']);
     }
 
-    /** A duck-typed LoginSuccessEvent: the class is optional at runtime. */
+    /**
+     * A duck-typed AuthenticationTokenCreatedEvent carrying a duck-typed
+     * authenticated token. The test asserts the TOKEN is replaced (the
+     * session is withheld), not merely that a response was swapped.
+     */
     private function event(): object
     {
         $request = $this->request();
-        $user = new class {
+        $token = new class implements TokenInterface {
+            private array $attributes = [];
+
+            public function __toString(): string
+            {
+                return 'authenticated(user-42)';
+            }
+
             public function getUserIdentifier(): string
             {
                 return 'user-42';
             }
+
+            public function getRoleNames(): array
+            {
+                return ['ROLE_USER'];
+            }
+
+            public function getUser(): ?UserInterface
+            {
+                return null;
+            }
+
+            public function setUser(UserInterface $user): void
+            {
+            }
+
+            public function getAttributes(): array
+            {
+                return $this->attributes;
+            }
+
+            public function setAttributes(array $attributes): void
+            {
+                $this->attributes = $attributes;
+            }
+
+            public function hasAttribute(string $name): bool
+            {
+                return isset($this->attributes[$name]);
+            }
+
+            public function getAttribute(string $name): mixed
+            {
+                return $this->attributes[$name] ?? null;
+            }
+
+            public function setAttribute(string $name, mixed $value): void
+            {
+                $this->attributes[$name] = $value;
+            }
+
+            public function __serialize(): array
+            {
+                return ['attributes' => $this->attributes];
+            }
+
+            public function __unserialize(array $data): void
+            {
+                $this->attributes = $data['attributes'] ?? [];
+            }
         };
 
-        return new class ($request, $user) {
-            private ?object $response = null;
+        return new class ($request, $token) {
+            private ?object $token;
 
-            public function __construct(private readonly Request $request, private readonly object $user)
+            public function __construct(private readonly Request $request, object $token)
             {
+                $this->token = $token;
             }
 
             public function getRequest(): Request
@@ -53,19 +117,14 @@ final class FirstAttemptLoginGuardTest extends TestCase
                 return $this->request;
             }
 
-            public function getUser(): object
+            public function getToken(): ?object
             {
-                return $this->user;
+                return $this->token;
             }
 
-            public function setResponse(object $response): void
+            public function setToken(object $token): void
             {
-                $this->response = $response;
-            }
-
-            public function getResponse(): ?object
-            {
-                return $this->response;
+                $this->token = $token;
             }
         };
     }
@@ -100,38 +159,39 @@ final class FirstAttemptLoginGuardTest extends TestCase
         };
     }
 
-    public function testAStepUpDecisionReplacesTheSuccessResponse(): void
+    public function testAStepUpDecisionWithholdsTheSessionToken(): void
     {
-        $guard = new FirstAttemptLoginGuard($this->stubGateway($this->decision(RiskAction::StepUp)), $this->identity(), '1', '/kiwi/step-up/begin');
+        $guard = new FirstAttemptLoginGuard($this->stubGateway($this->decision(RiskAction::StepUp)), $this->identity(), '1');
 
         $event = $this->event();
-        $guard->onLoginSuccess($event);
+        $guard->onTokenCreated($event);
 
-        $response = method_exists($event, 'getResponse') ? $event->getResponse() : null;
-        self::assertNotNull($response, 'a StepUp decision must replace the success response');
-        self::assertSame(302, $response->getStatusCode());
-        self::assertStringContainsString('/kiwi/step-up/begin', (string) $response->headers->get('Location'));
+        $token = $event->getToken();
+        self::assertInstanceOf(StepUpPendingToken::class, $token, 'a StepUp decision must withhold the session token');
+        self::assertSame([StepUpPendingToken::ROLE], $token->getRoleNames(), 'the pending token grants only the step-up role');
     }
 
-    public function testAnAllowDecisionLeavesTheLoginIntact(): void
+    public function testAnAllowDecisionLeavesTheTokenIntact(): void
     {
         $guard = new FirstAttemptLoginGuard($this->stubGateway($this->decision(RiskAction::Allow)), $this->identity(), '1');
 
         $event = $this->event();
-        $guard->onLoginSuccess($event);
+        $guard->onTokenCreated($event);
 
-        $response = method_exists($event, 'getResponse') ? $event->getResponse() : null;
-        self::assertNull($response, 'an Allow decision must not touch the success response');
+        self::assertNotInstanceOf(StepUpPendingToken::class, $event->getToken(), 'an Allow decision must not touch the token');
     }
 
-    public function testAGatewayErrorNeverBreaksAuthentication(): void
+    public function testAGatewayErrorFailsClosedToThePendingToken(): void
     {
         $guard = new FirstAttemptLoginGuard($this->stubGateway(null, true), $this->identity(), '1');
 
         $event = $this->event();
-        $guard->onLoginSuccess($event);
+        $guard->onTokenCreated($event);
 
-        $response = method_exists($event, 'getResponse') ? $event->getResponse() : null;
-        self::assertNull($response, 'a risk backend failure logs and allows');
+        self::assertInstanceOf(
+            StepUpPendingToken::class,
+            $event->getToken(),
+            'a gate error must fail closed to the pending token, never hand out a full session',
+        );
     }
 }

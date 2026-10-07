@@ -4,48 +4,50 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\EventSubscriber;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\LoginDecisionGate;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
-use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The post-credential, pre-session first-attempt gate (P0-1).
  *
- * A LoginSuccessEvent means the password (or other primary credential)
- * checked out. Before the session is granted this listener runs the
- * engine's full pipeline with event=AuthenticationSuccess and the
- * resolved principal id — the only path where firstAttemptEvidence
+ * AuthenticationTokenCreatedEvent fires BEFORE the token is stored, so
+ * this is the only hook that can actually withhold the session. On a
+ * StepUp (or stronger) decision the just-created token is replaced with
+ * {@see StepUpPendingToken}, which grants only IS_KIWI_STEP_UP_PENDING.
+ * The step-up routes accept that role; every other firewall path does
+ * not. After the factor completes the step-up credit restores the
+ * wrapped token and records the network bucket.
+ *
+ * The engine pipeline runs here with event=AuthenticationSuccess and
+ * the resolved principal id — the only path where firstAttemptEvidence
  * (novel network, breached credential, scope pressure) can fire. The
  * feedback paths never reach that code.
  *
- * On a StepUp (or stronger) decision the success response is replaced
- * with a redirect to the step-up plane and the security token is
- * cleared: the attacker never receives a live session. After the
- * factor completes, the step-up credit records the network bucket so
- * the next login from that network is no longer novel.
- *
- * The listener never breaks authentication on its own errors: a
- * failing risk backend logs and allows (the pipeline already degrades
- * to a conservative decision), matching the bridge's log-and-continue
- * rule. A hard Deny is the one exception — it replaces the response
- * with a 403 so a known-bad login is never granted.
+ * Client IP comes from the bundle's own {@see ClientIpResolver} so the
+ * novelty decision follows the same trust rules as every other
+ * component. An unexpected error fails CLOSED to the pending token:
+ * a programming or wiring bug must never silently disable stuffing
+ * protection (the store-failure path already degrades to a
+ * conservative decision inside the pipeline).
  */
 final class FirstAttemptLoginGuard implements EventSubscriberInterface
 {
-    /** High priority: the response is replaced before the default success handler runs. */
-    public const LOGIN_SUCCESS_PRIORITY = 512;
+    /** High priority: the token is replaced before the firewall stores it. */
+    public const TOKEN_CREATED_PRIORITY = 512;
 
-    public const LOGIN_SUCCESS_EVENT = 'Symfony\Component\Security\Http\Event\LoginSuccessEvent';
+    public const TOKEN_CREATED_EVENT = 'Symfony\Component\Security\Http\Event\AuthenticationTokenCreatedEvent';
 
     public function __construct(
         private readonly LoginDecisionGate $gateway,
         private readonly RiskIdentityFactory $identityFactory,
         private readonly string $scope,
-        private readonly string $stepUpPath = '/kiwi/step-up/begin',
+        private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly bool $enabled = true,
     ) {
@@ -57,89 +59,90 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
     public static function getSubscribedEvents(): array
     {
         return [
-            self::LOGIN_SUCCESS_EVENT => ['onLoginSuccess', self::LOGIN_SUCCESS_PRIORITY],
+            self::TOKEN_CREATED_EVENT => ['onTokenCreated', self::TOKEN_CREATED_PRIORITY],
         ];
     }
 
-    public function onLoginSuccess(object $event): void
+    public function onTokenCreated(object $event): void
     {
         if (!$this->enabled) {
             return;
         }
         try {
             $request = $this->requestOf($event);
-            if ($request === null) {
+            $token = $this->tokenOf($event);
+            if ($request === null || $token === null) {
                 return;
             }
-            $identifier = $this->authenticatedIdentifier($event);
+            if ($token instanceof StepUpPendingToken) {
+                return;
+            }
+            $identifier = $this->tokenIdentifier($token);
             if ($identifier === null || $identifier === '') {
                 return;
             }
             $principal = $this->identityFactory->principalId($identifier);
-            $ip = (string) ($request->getClientIp() ?? '');
+            $ip = $this->resolveIp($request);
             if ($ip === '') {
                 return;
             }
-            $decision = $this->gateway->loginDecision(
-                $this->scope,
-                $ip,
-                null,
-                $principal,
-                null,
-            );
+            $decision = $this->gateway->loginDecision($this->scope, $ip, null, $principal, null);
             if ($decision === null) {
                 return;
             }
-            if ($decision->action === RiskAction::Deny) {
-                $this->replaceResponse($event, new RedirectResponse($this->stepUpPath . '?reason=login_denied', 403));
-                $this->clearToken($event);
-
-                return;
-            }
-            if ($decision->action === RiskAction::StepUp) {
-                $this->logger?->info('kiwi first-attempt gate demands step-up before the session is granted', [
+            if ($decision->action === RiskAction::Deny || $decision->action === RiskAction::StepUp) {
+                $this->logger?->info('kiwi first-attempt gate withholds the session (step-up pending)', [
                     'scope' => $this->scope,
                     'decision_id' => $decision->decisionId,
+                    'action' => $decision->action->value,
                 ]);
-                $this->replaceResponse($event, new RedirectResponse($this->stepUpPath . '?reason=first_attempt_step_up'));
-                $this->clearToken($event);
+                $this->replaceToken($event, new StepUpPendingToken($token));
             }
         } catch (\Throwable $e) {
-            // Log and continue: a risk backend failure never breaks
-            // authentication (the same rule as the outcome bridge).
-            $this->logger?->warning('kiwi first-attempt gate failed open on an unexpected error: {message}', [
+            // Fail CLOSED: a gate error must never hand out a full
+            // session. The pending token is the conservative outcome.
+            $this->logger?->error('kiwi first-attempt gate failed closed on an unexpected error: {message}', [
                 'message' => $e->getMessage(),
             ]);
-        }
-    }
-
-    private function replaceResponse(object $event, RedirectResponse $response): void
-    {
-        if (method_exists($event, 'setResponse')) {
-            $event->setResponse($response);
+            try {
+                $token = $this->tokenOf($event);
+                if ($token !== null && !$token instanceof StepUpPendingToken) {
+                    $this->replaceToken($event, new StepUpPendingToken($token));
+                }
+            } catch (\Throwable) {
+                // Last resort: the original token stands, but the error
+                // is already alerted through the log.
+            }
         }
     }
 
     /**
-     * Drop the just-created token so the login is not a live session.
-     * The step-up plane re-resolves the principal from the credential
-     * and the session it is bound to.
+     * Restore the wrapped authenticated token after the step-up factor
+     * completes. Called by the step-up completion credit.
      */
-    private function clearToken(object $event): void
+    public static function unwrapIfPending(object $token): object
     {
-        try {
-            if (method_exists($event, 'getToken') && method_exists($event, 'getAuthenticatedToken')) {
-                // LoginSuccessEvent exposes the new token; the token
-                // storage is the authority. Best-effort clear via the
-                // request attribute the firewall writes.
-                $request = $this->requestOf($event);
-                if ($request !== null) {
-                    $request->attributes->set('_kiwi_login_deferred', true);
-                }
-            }
-        } catch (\Throwable) {
-            // Best effort: the response replacement is the hard gate.
+        return $token instanceof StepUpPendingToken ? $token->getWrapped() : $token;
+    }
+
+    private function replaceToken(object $event, StepUpPendingToken $token): void
+    {
+        if (method_exists($event, 'setToken')) {
+            $event->setToken($token);
         }
+    }
+
+    private function resolveIp(Request $request): string
+    {
+        if ($this->clientIpResolver !== null) {
+            try {
+                return $this->clientIpResolver->resolve($request);
+            } catch (\Throwable) {
+                return '';
+            }
+        }
+
+        return (string) ($request->getClientIp() ?? '');
     }
 
     private function requestOf(object $event): ?Request
@@ -153,27 +156,41 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         return null;
     }
 
-    private function authenticatedIdentifier(object $event): ?string
+    private function tokenOf(object $event): ?object
+    {
+        foreach (['getToken', 'getAuthenticatedToken'] as $method) {
+            if (method_exists($event, $method)) {
+                $token = $event->{$method}();
+                if ($token !== null) {
+                    return $token;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function tokenIdentifier(object $token): ?string
     {
         try {
-            if (!method_exists($event, 'getUser')) {
-                return null;
+            if (method_exists($token, 'getUserIdentifier')) {
+                $id = (string) $token->getUserIdentifier();
+
+                return $id !== '' ? $id : null;
             }
-            $user = $event->getUser();
+            if (method_exists($token, 'getUsername')) {
+                $id = (string) $token->getUsername();
+
+                return $id !== '' ? $id : null;
+            }
+            $user = method_exists($token, 'getUser') ? $token->getUser() : null;
             if (\is_string($user) && $user !== '') {
                 return $user;
             }
-            if (\is_object($user)) {
-                if (method_exists($user, 'getUserIdentifier')) {
-                    $id = (string) $user->getUserIdentifier();
+            if (\is_object($user) && method_exists($user, 'getUserIdentifier')) {
+                $id = (string) $user->getUserIdentifier();
 
-                    return $id !== '' ? $id : null;
-                }
-                if (method_exists($user, 'getUsername')) {
-                    $id = (string) $user->getUsername();
-
-                    return $id !== '' ? $id : null;
-                }
+                return $id !== '' ? $id : null;
             }
         } catch (\Throwable) {
             return null;

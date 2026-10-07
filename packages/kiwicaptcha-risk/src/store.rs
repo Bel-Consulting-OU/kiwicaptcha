@@ -381,7 +381,7 @@ pub trait SessionTlsTagStore {
 /// from that network), so a bare password check never vouches for the
 /// network and a retried stuffed login stays novel until the victim
 /// really proves themselves.
-pub trait PrincipalNetworkTagStore {
+pub trait PrincipalNetworkTagStore: Send + Sync {
     /// Whether the principal has been seen (established) from this
     /// network bucket: `Ok(Some(true))` = seen before, `Ok(Some(false))`
     /// = never seen (the first-attempt novel-network signal),

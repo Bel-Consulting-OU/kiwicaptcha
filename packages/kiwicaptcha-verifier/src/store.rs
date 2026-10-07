@@ -53,7 +53,11 @@ pub enum ConsumeOutcome {
     },
     /// The record was already consumed (a replay, or the loser of a
     /// race). The retained metadata rides along for the provider echo.
-    AlreadyConsumed { meta: RecordMeta },
+    AlreadyConsumed {
+        meta: RecordMeta,
+        /// The stored verdict of the first (winning) verification.
+        succeeded: Option<bool>,
+    },
     /// No record under the nonce, pending or consumed.
     NotFound,
     /// The backend could not serve the transition; the record's state is
@@ -148,6 +152,7 @@ impl MapState {
         match self.consumed.get(nonce) {
             Some(entry) => ConsumeOutcome::AlreadyConsumed {
                 meta: entry.meta.clone(),
+                succeeded: entry.valid,
             },
             None => ConsumeOutcome::NotFound,
         }
@@ -424,6 +429,7 @@ impl RecordStore for FileStore {
         match state.consumed.get(nonce) {
             Some(entry) => ConsumeOutcome::AlreadyConsumed {
                 meta: entry.meta.clone(),
+                succeeded: entry.valid,
             },
             None => ConsumeOutcome::NotFound,
         }
@@ -512,7 +518,7 @@ impl RecordStore for RedisStore {
                         meta,
                     }
                 } else {
-                    ConsumeOutcome::AlreadyConsumed { meta }
+                    ConsumeOutcome::AlreadyConsumed { meta, succeeded: entry.valid }
                 }
             }
             Ok(None) => ConsumeOutcome::NotFound,
