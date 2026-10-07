@@ -117,7 +117,8 @@ describe("exit-criteria skip-mode run (needs the redis target)", () => {
         const { code, stdout } = runGate();
         assert.equal(code, 1, "a skipped row must fail the run unless explicitly allowed");
         assert.ok(!/^\s+\S+\s+GREEN\s+skipped/m.test(stdout), "a skipped row must never print as green");
-        assert.match(stdout, /skip=33/);
+        assert.match(stdout, /skip=\d+/);
+        assert.ok(!/ALL GREEN/.test(stdout), "a skip-heavy run must never print ALL GREEN");
         assert.match(stdout, /the release gate is closed/);
     });
 

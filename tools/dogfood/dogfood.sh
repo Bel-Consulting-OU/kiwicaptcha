@@ -106,11 +106,14 @@ PIDS+=($!)
 sleep 0.5
 GTOKEN=$("$SOLVER" solve --endpoint "http://127.0.0.1:$APP_PORT/challenge" --scope login 2>/dev/null | json_field token)
 G1=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php" \
-  -H 'content-type: application/json' -d "{\"token\":\"$GTOKEN\"}")
+  -H 'content-type: application/json' -d "{\"kiwi_token\":\"$GTOKEN\"}")
 G2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php" \
-  -H 'content-type: application/json' -d '{"token":"garbage"}')
+  -H 'content-type: application/json' -d '{"kiwi_token":"garbage"}')
 [ "$G1" = "204" ] || bad "gate refused a valid token: $G1 (see $TMP/gate.log)"
 [ "$G2" = "403" ] || bad "gate answered $G2 for garbage (expected 403)"
+G3=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php" \
+  -H 'content-type: application/json' -d "{\"token\":\"$GTOKEN\"}")
+[ "$G3" = "403" ] || bad "bare application token field must not be consumed (got $G3)"
 ok "gateway allows a valid token (204) and refuses garbage (403)"
 
 step "nginx auth_request in front of the same gate"
