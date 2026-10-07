@@ -61,8 +61,7 @@ function targetUp() {
 describe("exit-criteria source contract", () => {
     const src = readFileSync(GATE, "utf8");
 
-    test("KIWI_EC_ALLOW_SKIP is consulted and only accepts SKIP rows", () => {
-        assert.match(src, /KIWI_EC_ALLOW_SKIP/);
+    test("SKIP rows remain non-green", () => {
         assert.match(src, /those rows remain non-green/);
     });
 

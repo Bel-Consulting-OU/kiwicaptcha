@@ -8,10 +8,12 @@ namespace KiwiCaptcha\Tests\Support;
  * The browserless shadow solver of the execution grammars: a dev-only
  * oracle that forges verifier-accepted executed traces without a
  * browser for the pure-semantics rungs, versions 1 through 5, the
- * causal object-graph rung included. The real-platform rung (version
- * 6) sits above the solver's reach by design. Its five probes need a
- * real layout engine, and the envelope walker rejects every forged
- * attempt (see the fail harness under tests/browser/execution-v6).
+ * causal object-graph rung included. On version 6 this naive solver is
+ * rejected only because it emits the pure-sim placeholders rather than
+ * the operand-derived envelope entries; a forger who implements the
+ * published envelopes (WhiteBoxEnvelopeForger) passes every version-6
+ * program without a browser. This solver is the lazy-forger baseline,
+ * not a boundary measurement.
  *
  * The solver replays the interpreter's own semantics over a decoded
  * program, which the caller obtains from
@@ -33,12 +35,13 @@ namespace KiwiCaptcha\Tests\Support;
  * The oracle is the forgeability regression benchmark, preserved on
  * purpose: the test sweeps 100 generated programs of every
  * pure-semantics version and asserts every forged trace verifies and
- * digests, then sweeps version 6 and asserts a 100 percent rejection
- * rate. The trace of versions 1-5 is supplementary evidence,
- * reproducible by a pure implementation of the public semantics. The
- * version-6 envelope is the environment boundary the oracle cannot
- * cross until it implements the real Web Platform semantics, and the
- * oracle extends only together with them.
+ * digests, then sweeps version 6 and asserts this naive solver (which
+ * emits pure-sim placeholders) is rejected. That rejection is NOT a
+ * full-knowledge number: the white-box forger (WhiteBoxEnvelopeForger)
+ * reimplements the five published envelopes and passes every
+ * version-6 program without a browser. Versions 1-5 and version 6
+ * alike cost an attacker one reading of the source; the whole ladder
+ * is supplementary evidence, never a browser boundary.
  */
 final class BrowserlessForgerySolver
 {

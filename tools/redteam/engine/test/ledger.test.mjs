@@ -22,7 +22,7 @@ const EXPECTED = [
     "D3.2 stealth headless",
     "D3.3 PoW farm economics",
     "D3.4 proxy pools",
-    "D3.5 credential stuffing (step-up prevention)",
+    "D3.5 credential stuffing",
     "D3.6 token brokering",
     "D3.7 human solver farms",
     "D3.8 AI agents",

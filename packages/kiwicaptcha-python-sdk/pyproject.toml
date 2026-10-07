@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Security",
     "Topic :: Internet :: WWW/HTTP :: Session",
 ]
-dependencies = []
+dependencies = ["argon2-cffi>=23.1.0"]
 
 [project.optional-dependencies]
 redis = ["redis>=4.2"]

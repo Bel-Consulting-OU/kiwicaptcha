@@ -658,6 +658,12 @@ pub struct RiskEngine<
     /// the element is never empty when a report carries a context, so
     /// distinct network origins count toward spread.
     asn_dataset: Option<Arc<crate::asn::AsnDataset>>,
+    /// Optional principal first-seen network tag store (P0-1): when
+    /// attached, a login whose network bucket is novel for the principal
+    /// (and whose account carries no prior trusted network) forces the
+    /// interactive step-up before any session credit. Absent by default
+    /// so the decision path is byte-identical for existing consumers.
+    principal_networks: Option<Arc<dyn crate::store::PrincipalNetworkTagStore>>,
 }
 
 impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
@@ -695,6 +701,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             decoy_escalation: None,
             context_trust: None,
             asn_dataset: None,
+            principal_networks: None,
         }
     }
 
@@ -811,6 +818,24 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// unwired engine.
     pub fn with_context_trust(mut self, source: Arc<dyn crate::trust::ContextTrustSource>) -> Self {
         self.context_trust = Some(source);
+        self
+    }
+
+    /// Attaches the principal first-seen network tag store (P0-1
+    /// novel-network step-up): a login from a network bucket the
+    /// principal has never been established from forces the interactive
+    /// step-up before any session credit — the first-attempt valid
+    /// stuffing prevention. The tag record is written (SET NX) when a
+    /// session credit is actually granted (a completed step-up or an
+    /// established-network success), never on a bare password check, so
+    /// a retried stuffed login stays novel until the victim proves
+    /// themselves. Without a store the assessment path is byte-identical
+    /// to the unwired engine.
+    pub fn with_principal_networks(
+        mut self,
+        store: Arc<dyn crate::store::PrincipalNetworkTagStore>,
+    ) -> Self {
+        self.principal_networks = Some(store);
         self
     }
 
@@ -1165,7 +1190,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         reply.existing_tls_tag.as_deref(),
                         ctx.event,
                         reply.target_failures,
-                        reply.target_spread,
+                        reply.target_spread_sources,
+                        reply.target_spread_asns,
                     )
                 });
                 (reply.observed, v2_signals, registration.is_some())
@@ -1196,7 +1222,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     // The fallback path has no consolidated reply: the
                     // target counters stay zero here (the marks stage
                     // still reads live TargetState on its own).
-                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0)
+                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0, 0)
                 });
                 (observed, v2_signals, false)
             }
@@ -1272,6 +1298,21 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // selection (change.md 1.3 and 3.3.4) is part of the decision
         // plane's posture: a server-confirmed spam identity with a clean
         // request quarantines instead of escalating, wire-identical to
+        // The first-attempt prevention evidence (P0-1): the signals that
+        // stop a VALID stolen credential on its very first attempt —
+        // before any failure has accumulated anywhere. The engine derives
+        // them beside the frozen risk-v1 wire and hands them to the marks
+        // stage (or applies the gate directly when no marks reader is
+        // wired). Novel-network and scope-pressure evidence are
+        // login-shaped (AuthenticationSuccess / first login); the
+        // breached-credential flag rides the v2 context like honeypot.
+        let first_attempt = self.first_attempt_evidence(
+            &ctx,
+            &observation,
+            v2,
+            &vector,
+            global_level,
+        );
         // allow.
         if let Some(reader) = self.marks_reader.as_ref() {
             let request = crate::marks::MarksRequest {
@@ -1285,7 +1326,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             decision = match reader.request_marks(&request) {
                 Ok(view) => crate::marks::apply(
                     decision,
-                    &view,
+                    &view.with_first_attempt(first_attempt),
                     crate::marks::corroborated(&vector, decoy_evidence),
                     now_ms,
                     reader.mark_ttl_ms(),
@@ -1294,6 +1335,23 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 ),
                 Err(_) => crate::marks::apply_unreadable(decision, now_ms, &ctx.resources),
             };
+        } else if first_attempt.requires_step_up() {
+            // No marks reader: the first-attempt gate still runs (a
+            // clean view with just the evidence), so the prevention
+            // never depends on the marks surface being wired.
+            let view = crate::marks::MarksView::default().with_first_attempt(first_attempt);
+            decision = crate::marks::apply(
+                decision,
+                &view,
+                crate::marks::corroborated(
+                    &vector,
+                    v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot(),
+                ),
+                now_ms,
+                crate::marks::DEFAULT_MARK_TTL_MS,
+                &ctx.resources,
+                true,
+            );
         }
         // The decoy escalation stage: additive, after the marks stage,
         // and only when a decoy-escalation reader is wired. An unreadable
@@ -1379,7 +1437,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         session_id: Option<[u8; 16]>,
         event: RiskEventKind,
         target_failures: u32,
-        target_spread: u32,
+        target_spread_sources: u32,
+        target_spread_asns: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -1409,8 +1468,79 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             session_inconsistency,
             tls_inconsistency,
             target_failure_pressure: target_pressure_signal(target_failures),
-            target_spread: target_spread_signal(target_spread),
+            target_spread: target_spread_signal(target_spread_sources.max(target_spread_asns)),
         }
+    }
+
+    /// The first-attempt prevention evidence (P0-1) of one assessment:
+    /// the signals that stop a VALID stolen credential before any
+    /// failure has accumulated anywhere.
+    ///
+    /// - `novel_network`: on an AuthenticationSuccess / first login,
+    ///   the principal has never been seen from this network bucket (/64
+    ///   for IPv6, the IPv4 itself) OR the account carries no prior
+    ///   trusted network — the login cannot be vouched for by any
+    ///   network history, so the step-up must come before the session
+    ///   credit. A store without the record surface (or a failed read)
+    ///   degrades to neutral (never novel), like the session tags.
+    /// - `breached_credential`: the caller's v2 context asserts a
+    ///   known-breached credential (the same step-up-worthy shape as
+    ///   honeypot evidence).
+    /// - `scope_pressure`: global pressure is enabled and the scope
+    ///   failure-ratio pressure is running at/above
+    ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
+    ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
+    ///   login escalates, not only the attacked target's.
+    fn first_attempt_evidence(
+        &self,
+        ctx: &RiskContext<'_>,
+        observation: &crate::event::RiskObservation,
+        v2: Option<&RiskV2Context>,
+        vector: &crate::signals::SignalVector,
+        global_level: u8,
+    ) -> crate::marks::FirstAttemptEvidence {
+        use crate::marks::FirstAttemptEvidence;
+
+        let is_login = ctx.event == RiskEventKind::AuthenticationSuccess
+            || ctx.event == RiskEventKind::AuthenticationFailure;
+        let mut evidence = FirstAttemptEvidence::zero();
+
+        // Novel network: only on the login shape and only with a
+        // principal to address. The network bucket is the IPv4 address
+        // itself or the IPv6 /64 (identity::masked_network with a full
+        // IPv4 mask).
+        if is_login {
+            if let (Some(networks), Some(principal)) =
+                (&self.principal_networks, &observation.principal_id)
+            {
+                let principal_hex = hex::encode(principal);
+                let network = network_bucket(ctx.source_ip);
+                let seen = networks
+                    .principal_network_seen(&principal_hex, &network)
+                    .unwrap_or(None);
+                let trusted = networks
+                    .principal_has_trusted_network(&principal_hex)
+                    .unwrap_or(None);
+                // Novel when either first-attempt condition holds and
+                // the store answers definitively: the principal has
+                // never been seen from this network bucket, or the
+                // account carries no prior trusted network at all. A
+                // neutral answer (None — no surface / failed read)
+                // never fires, like the session tags.
+                evidence.novel_network =
+                    matches!(seen, Some(false)) || matches!(trusted, Some(false));
+            }
+            if self.enable_global_pressure
+                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
+                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
+            {
+                evidence.scope_pressure = true;
+            }
+        }
+        if v2.is_some_and(|context| context.breached_credential) {
+            evidence.breached_credential = true;
+        }
+        evidence
     }
 
     /// Derives the bounded risk-v2 signal vector from the tags recorded by
@@ -1438,7 +1568,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         existing_tls_tag: Option<&str>,
         event: RiskEventKind,
         target_failures: u32,
-        target_spread: u32,
+        target_spread_sources: u32,
+        target_spread_asns: u32,
     ) -> crate::signals::RiskV2Signals {
         let honeypot = if v2.honeypot_hit || event.is_honeypot() {
             1000
@@ -1458,7 +1589,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             session_inconsistency,
             tls_inconsistency,
             target_failure_pressure: target_pressure_signal(target_failures),
-            target_spread: target_spread_signal(target_spread),
+            target_spread: target_spread_signal(target_spread_sources.max(target_spread_asns)),
         }
     }
 
@@ -1816,23 +1947,38 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// The spread elements one outcome report contributes to the target
-    /// dimension's HLLs: the source pseudonym of the reporting context
-    /// (the current epoch's id, the same one the feedback observation
-    /// books) and the source address's ASN bucket (the attached
-    /// dataset's lookup, else the unlisted-namespace bucket — see
-    /// [`crate::asn::unlisted_bucket_for`]). An absent context records
-    /// no spread element.
-    pub(crate) fn target_spread_elements(&self, ctx: Option<&RiskContext<'_>>) -> (String, String) {
+    /// dimension's HLLs: a NON-ROTATING element scoped to the target.
+    /// The source element is `HMAC(spread_key, target_id || '/' ||
+    /// /64-or-IPv4)` (the full IPv4 address, or the IPv6 /64) and the
+    /// ASN element `HMAC(spread_key, target_id || '/' || asn_bucket)`.
+    /// Both are keyed by the target-dimension HKDF key. The elements
+    /// never rotate with the 15-minute source epoch, so one IP cannot
+    /// mint a fresh "distinct source" every epoch and inflate the
+    /// spread into an elapsed-time meter. The ASN bucket is the
+    /// attached dataset's lookup, else the unlisted-namespace bucket —
+    /// see [`crate::asn::unlisted_bucket_for`]. An absent context
+    /// records no spread element.
+    pub(crate) fn target_spread_elements(
+        &self,
+        target_id: &str,
+        ctx: Option<&RiskContext<'_>>,
+    ) -> (String, String) {
         let Some(ctx) = ctx else {
             return (String::new(), String::new());
         };
-        let now_secs = (crate::now_ms() / 1000) as i64;
-        let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
-        let source = self.identity.source_id_for_epoch(ctx.source_ip, src_epoch);
-        let asn = match self.asn_dataset.as_ref() {
+        let net = crate::identity::masked_network(ctx.source_ip, 32, 64);
+        let mut source_msg = target_id.as_bytes().to_vec();
+        source_msg.extend_from_slice(b"/");
+        source_msg.extend_from_slice(&net);
+        let source = spread_element(&self.keys.target, &source_msg);
+        let asn_bucket = match self.asn_dataset.as_ref() {
             Some(dataset) => dataset.bucket_id(ctx.source_ip),
             None => crate::asn::unlisted_bucket_for(ctx.source_ip),
         };
+        let mut asn_msg = target_id.as_bytes().to_vec();
+        asn_msg.extend_from_slice(b"/");
+        asn_msg.extend_from_slice(asn_bucket.as_bytes());
+        let asn = spread_element(&self.keys.target, &asn_msg);
         (source, asn)
     }
 
@@ -2132,6 +2278,14 @@ fn drop_quarantine_on_escalation(decision: RiskDecision) -> RiskDecision {
     }
 }
 
+/// The network bucket of a source address for the novel-network gate
+/// (P0-1): the IPv4 address itself, or the IPv6 /64 prefix. Stable,
+/// deployment-neutral spelling (family byte + masked packed bytes, hex)
+/// so both cores key the same bucket for the same address.
+fn network_bucket(ip: std::net::IpAddr) -> String {
+    hex::encode(crate::identity::masked_network(ip, 32, 64))
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2196,9 +2350,23 @@ fn target_pressure_signal(fails: u32) -> u16 {
 }
 
 /// Bounded target source+asn spread: twenty distinct sources saturate at
-/// 1000 so a wide spray raises the numeric score.
+/// 1000 so a wide spray raises the numeric score. The scored value is
+/// the wider of the two dimensions (never the sum).
 fn target_spread_signal(spread: u32) -> u16 {
     crate::signals::normalize(spread.min(u32::from(u16::MAX)), 20)
+}
+
+/// The hex HLL element of one target-spread contribution: the first 16
+/// bytes of `HMAC-SHA256(spread_key, message)`, the same digest width
+/// the identity pseudonyms use.
+fn spread_element(key: &[u8], message: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(message);
+    let digest = mac.finalize().into_bytes();
+    hex::encode(&digest[..16])
 }
 
 #[cfg(test)]

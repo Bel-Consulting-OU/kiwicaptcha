@@ -65,6 +65,18 @@ final class MarksEscalation
     /** The D3.5 target-attack threshold (Rust mirror: marks::TARGET_ATTACK_THRESHOLD). */
     public const TARGET_ATTACK_THRESHOLD = 5;
 
+    /**
+     * The scope failure-ratio pressure floor for first-attempt login
+     * escalation (Rust mirror: marks::SCOPE_PRESSURE_FLOOR): at/above
+     * this global_pressure signal (or global level
+     * SCOPE_PRESSURE_LEVEL) every login escalates to the interactive
+     * step-up, not only the attacked target's.
+     */
+    public const SCOPE_PRESSURE_FLOOR = 300;
+
+    /** The global hysteresis level at which scope pressure escalates first-attempt logins. */
+    public const SCOPE_PRESSURE_LEVEL = 1;
+
     /** The whole-window default: the store's 90-day mark TTL in ms. */
     public const DEFAULT_MARK_TTL_MS = RedisRiskStateStore::DEFAULT_MARK_TTL_SECS * 1000;
 
@@ -174,6 +186,31 @@ final class MarksEscalation
                 $action = RiskAction::StepUp;
             }
             $stageReasons[] = RiskReason::TargetUnderAttack;
+        }
+
+        // Rule 4: first-attempt prevention (P0-1). A VALID credential on
+        // its very first attempt carries no marks and no target history,
+        // so rules 1-3 stay silent — exactly the D3.5 hole. Any of the
+        // three signals (novel network, a known-breached credential, or
+        // scope failure-ratio pressure at/above the floor) forces the
+        // interactive step-up before any session credit, and tops out at
+        // StepUp like target evidence: the legitimate owner must always
+        // be able to finish the login (never Deny, never a rung).
+        $firstAttempt = $view->firstAttempt();
+        if ($firstAttempt->requiresStepUp()) {
+            $quarantined = false;
+            if ($action->rank() < RiskAction::StepUp->rank()) {
+                $action = RiskAction::StepUp;
+            }
+            if ($firstAttempt->novelNetwork) {
+                $stageReasons[] = RiskReason::NovelNetwork;
+            }
+            if ($firstAttempt->breachedCredential) {
+                $stageReasons[] = RiskReason::BreachedCredential;
+            }
+            if ($firstAttempt->scopePressure) {
+                $stageReasons[] = RiskReason::GlobalAttack;
+            }
         }
 
         if ($stageReasons === []) {

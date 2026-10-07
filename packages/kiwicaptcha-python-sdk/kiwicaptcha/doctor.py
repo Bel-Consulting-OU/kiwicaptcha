@@ -46,7 +46,13 @@ class CheckResult:
 
 
 def check_settings(secret: str, profile: str) -> CheckResult:
-    from .config import MIN_SECRET_BYTES, PROFILES, PROFILE_ARGON_PARAMS, argon_rung_verifiable
+    from .config import (
+        MIN_SECRET_BYTES,
+        PROFILES,
+        PROFILE_ARGON_PARAMS,
+        argon_rung_verifiable,
+        valid_argon_memory_kib,
+    )
 
     if len(secret) < MIN_SECRET_BYTES:
         return CheckResult(
@@ -61,6 +67,14 @@ def check_settings(secret: str, profile: str) -> CheckResult:
             f"the profile must be one of {', '.join(PROFILES)}",
         )
     rung = PROFILE_ARGON_PARAMS.get(profile)
+    if rung is not None and not valid_argon_memory_kib(rung[0]):
+        return CheckResult(
+            "settings",
+            False,
+            f"the profile {profile!r} issues argon2id memory m_kib={rung[0]},"
+            " outside the protocol profile space (powers of two within"
+            " 8..=65536 KiB); refused at configuration time, never per request",
+        )
     if rung is not None and not argon_rung_verifiable(*rung):
         return CheckResult(
             "settings",

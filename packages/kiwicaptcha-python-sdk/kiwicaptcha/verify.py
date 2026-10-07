@@ -61,6 +61,7 @@ from .tokens import DecodeError, SolutionToken
 from .stores.base import (
     AtomicDeleteIfPendingStorage,
     AuthenticatedResultCommitStorage,
+    ChallengeRuntimeState,
     ChallengeRuntimeStateKind,
     ConsumedRecord,
     ConsumedResult,
@@ -921,6 +922,47 @@ class Verifier:
 
     # ---- the main entry --------------------------------------------------------
 
+    def telemetry_gate_outcome(
+        self,
+        token: SolutionToken,
+        runtime: Optional[ChallengeRuntimeState],
+        enforce_telemetry: bool,
+    ) -> Optional[VerifyOutcome]:
+        """The opt-in telemetry gate: a rejection outcome or None.
+
+        ``None`` falls through un-rejected (including the
+        replay-exempt already-consumed case). A rejected pending
+        record is burned exactly like the one-shot model demands.
+        """
+        if not (
+            enforce_telemetry
+            and (not token.telemetry or score_telemetry(token.telemetry, token.duration_ms))
+            and not (runtime is not None and runtime.kind == ChallengeRuntimeStateKind.CONSUMED)
+        ):
+            return None
+        if isinstance(self.storage, AtomicDeleteIfPendingStorage):
+            try:
+                cleanup = self.storage.delete_if_pending(token.nonce)
+            except Exception:
+                return VerifyOutcome.invalid(VerifyError.STORAGE_UNAVAILABLE)
+            if not cleanup.was_consumed():
+                return VerifyOutcome.invalid(VerifyError.TELEMETRY_REJECTED)
+            return None
+        if runtime is not None:
+            retained = (
+                "consumed"
+                if runtime.kind == ChallengeRuntimeStateKind.CONSUMED
+                else "pending"
+            )
+        else:
+            retained = self.retained_consumed_state(token.nonce)
+        if retained == "unreadable":
+            return VerifyOutcome.invalid(VerifyError.STORAGE_UNAVAILABLE)
+        if retained != "consumed":
+            self.best_effort_delete(token.nonce)
+            return VerifyOutcome.invalid(VerifyError.TELEMETRY_REJECTED)
+        return None
+
     def verify(self, raw_token: str, options: VerifyOptions) -> VerifyOutcome:
         """Verify one solution token against this verifier's store."""
         expectation = (
@@ -974,15 +1016,33 @@ class Verifier:
             delegate_execution,
         )
         if failure is None and delegate_execution:
+            # The opt-in telemetry gate runs locally first: the
+            # delegation must never widen acceptance past the gate the
+            # local path enforces.
+            gate_outcome = self.telemetry_gate_outcome(
+                token, runtime, options.enforce_telemetry
+            )
+            if gate_outcome is not None:
+                return gate_outcome
             ok, code = delegate_to_sidecar(
-                raw_token, options.expected_scope, options.client_ip, options.execution_policy
+                raw_token,
+                options.expected_scope,
+                options.client_ip,
+                options.execution_policy,
+                enforce_telemetry=options.enforce_telemetry,
+                operation_identity=options.operation_identity,
             )
             if ok:
+                # The sidecar's acceptance is a fresh full-core
+                # derivation of this very submission, never a replay
+                # of a stored result.
                 return VerifyOutcome.valid_outcome(
                     nonce=token.nonce,
                     request_binding=peek.request_binding,
-                    from_stored_result=True,
-                    solve_duration_ms=None,
+                    from_stored_result=False,
+                    solve_duration_ms=self.measurable_solve_duration_ms(
+                        peek, receipt_ns
+                    ),
                     decoy_field=peek.decoy_field,
                 )
             # The sidecar's kiwi-code is the shared wire vocabulary: a
@@ -1032,32 +1092,14 @@ class Verifier:
                         self.best_effort_delete(token.nonce)
                     return VerifyOutcome.invalid(failure)
 
-        if (
-            options.enforce_telemetry
-            and (not token.telemetry or score_telemetry(token.telemetry, token.duration_ms))
-            and not (runtime is not None and runtime.kind == ChallengeRuntimeStateKind.CONSUMED)
-        ):
-            if isinstance(self.storage, AtomicDeleteIfPendingStorage):
-                try:
-                    cleanup = self.storage.delete_if_pending(token.nonce)
-                except Exception:
-                    return VerifyOutcome.invalid(VerifyError.STORAGE_UNAVAILABLE)
-                if not cleanup.was_consumed():
-                    return VerifyOutcome.invalid(VerifyError.TELEMETRY_REJECTED)
-            else:
-                if runtime is not None:
-                    retained = (
-                        "consumed"
-                        if runtime.kind == ChallengeRuntimeStateKind.CONSUMED
-                        else "pending"
-                    )
-                else:
-                    retained = self.retained_consumed_state(token.nonce)
-                if retained == "unreadable":
-                    return VerifyOutcome.invalid(VerifyError.STORAGE_UNAVAILABLE)
-                if retained != "consumed":
-                    self.best_effort_delete(token.nonce)
-                    return VerifyOutcome.invalid(VerifyError.TELEMETRY_REJECTED)
+        # The opt-in telemetry gate: client-controlled evidence about
+        # the original solve, replay-exempt, deletion only for a
+        # pending record.
+        gate_outcome = self.telemetry_gate_outcome(
+            token, runtime, options.enforce_telemetry
+        )
+        if gate_outcome is not None:
+            return gate_outcome
 
         if runtime is not None:
             if runtime.kind == ChallengeRuntimeStateKind.CANCELLED:

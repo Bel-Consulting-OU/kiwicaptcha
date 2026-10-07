@@ -34,4 +34,6 @@ enum RiskReason: string
     case SolveAnomaly = 'solve_anomaly';
     case DecoyEscalation = 'decoy_escalation';
     case SpamMarkQuarantine = 'spam_mark_quarantine';
+    case NovelNetwork = 'novel_network';
+    case BreachedCredential = 'breached_credential';
 }

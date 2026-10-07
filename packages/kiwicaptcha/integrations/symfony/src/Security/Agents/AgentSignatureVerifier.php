@@ -38,6 +38,16 @@ use Symfony\Component\HttpFoundation\Request;
  * sets: every configured public key of the agent is tried, so a
  * rotation window verifies under either key.
  *
+ * @target-uri is reconstructed as the configured public origin
+ * (public_base_url) concatenated with the request URI, never from the
+ * request Host header. Behind a reverse proxy that strips an external
+ * mount prefix before the request reaches the application,
+ * public_base_url must include that mount prefix: the client signs
+ * the externally visible absolute URI, and only a base that carries
+ * the stripped prefix reconstructs it. A mismatch fails the
+ * signature (the captured @target-uri never verifies against a
+ * different base).
+ *
  * Failure mapping: every refusal carries a typed code and an HTTP
  * status (401 for everything here); no path can surface a raw
  * exception to the caller, and no unverifiable input can verify.

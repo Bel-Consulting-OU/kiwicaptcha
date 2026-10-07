@@ -150,6 +150,36 @@ defmodule Kiwicaptcha.DoctorTest do
     end
   end
 
+  test "the argon memory profile space is powers of two, rejected at config time" do
+    assert Settings.valid_argon_memory_kib?(16 * 1024)
+    assert Settings.valid_argon_memory_kib?(32 * 1024)
+    assert Settings.valid_argon_memory_kib?(64 * 1024)
+    refute Settings.valid_argon_memory_kib?(100)
+    refute Settings.valid_argon_memory_kib?(10_000)
+    refute Settings.valid_argon_memory_kib?(0)
+    refute Settings.valid_argon_memory_kib?(7)
+    refute Settings.valid_argon_memory_kib?(65_537)
+
+    assert Settings.assert_argon_rung_params!(16 * 1024, 3) == :ok
+
+    # The rejection lives at configuration time, never per request.
+    assert_raise ArgumentError, ~r/configuration time/, fn ->
+      Settings.assert_argon_rung_params!(100, 3)
+    end
+
+    # Every priced rung budget sits in the protocol space, so the
+    # configured profiles boot.
+    for m_kib <- Settings.argon_rung_memory_kib() do
+      assert Settings.valid_argon_memory_kib?(m_kib), "rung budget #{m_kib} KiB"
+      assert Settings.assert_argon_rung_params!(m_kib, 3) == :ok
+    end
+
+    if Kiwicaptcha.Pow.argon2_available?() do
+      report = Doctor.run(secret: secret(), store: memory_store(), profile: "argon16")
+      assert finding(report, "argon2").ok, finding(report, "argon2").detail
+    end
+  end
+
   defp finding(report, name), do: Enum.find(report.checks, &(&1.name == name))
 
   # A store whose every read raises: the doctor must report it, not

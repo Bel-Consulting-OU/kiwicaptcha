@@ -398,9 +398,8 @@ final class OutcomesTest extends TestCase
         }
 
         $state = $store->readTargetState($target);
-        self::assertGreaterThanOrEqual(2, $state['spread'], 'two distinct ASNs must spread at least 2');
-        self::assertArrayHasKey('asn:a64496', $store->targetSpread[$target]);
-        self::assertArrayHasKey('asn:a64500', $store->targetSpread[$target]);
+        self::assertGreaterThanOrEqual(2, $state['spread_asns'], 'two distinct ASNs must spread at least 2');
+        self::assertCount(2, array_filter(array_keys($store->targetSpread[$target]), static fn (string $k): bool => str_starts_with($k, 'asn:')));
     }
 
     public function testReportRejectsUnmappedHandleDimensions(): void

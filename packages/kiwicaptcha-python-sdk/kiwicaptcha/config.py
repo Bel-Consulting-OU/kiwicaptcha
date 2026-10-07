@@ -19,7 +19,13 @@ from typing import Optional, Tuple
 
 from . import argon2 as argon2_backend
 from .stores import open_store
-from .verify import ArgonAdmissionGate, Verifier, VerifierConfig
+from .verify import (
+    MAX_ARGON_MEMORY_KIB,
+    MIN_ARGON_MEMORY_KIB,
+    ArgonAdmissionGate,
+    Verifier,
+    VerifierConfig,
+)
 
 MIN_SECRET_BYTES = 32
 
@@ -35,9 +41,30 @@ PROFILE_ARGON_PARAMS = {
 }
 
 
+def valid_argon_memory_kib(m_kib: int) -> bool:
+    """The protocol Argon2id memory profile space.
+
+    A power of two within 8..=65536 KiB, so every verifier — including
+    log2-only bindings — can rederive what any profile mints. Budgets
+    outside it are refused at configuration time, never per request.
+    """
+    return (
+        isinstance(m_kib, int)
+        and not isinstance(m_kib, bool)
+        and MIN_ARGON_MEMORY_KIB <= m_kib <= MAX_ARGON_MEMORY_KIB
+        and (m_kib & (m_kib - 1)) == 0
+    )
+
+
 def argon_rung_verifiable(m_kib: int, t_cost: int,
                           gate: Optional[ArgonAdmissionGate] = None) -> bool:
-    """Whether this runtime can verify the argon2id rung (m_kib, t)."""
+    """Whether this runtime can verify the argon2id rung (m_kib, t).
+
+    The rung must sit in the protocol power-of-two profile space AND
+    inside this runtime's admission budget.
+    """
+    if not valid_argon_memory_kib(m_kib):
+        return False
     gate = gate if gate is not None else ArgonAdmissionGate()
     return gate.admits_params(m_kib, t_cost)
 
@@ -77,6 +104,13 @@ class Settings:
         if not isinstance(self.scopes, tuple):
             self.scopes = tuple(self.scopes)
         rung = PROFILE_ARGON_PARAMS.get(self.profile)
+        if rung is not None and not valid_argon_memory_kib(rung[0]):
+            raise ValueError(
+                f"profile {self.profile!r} issues argon2id memory"
+                f" m_kib={rung[0]}, outside the protocol profile space"
+                " (powers of two within 8..=65536 KiB): refused at"
+                " configuration time, never per request"
+            )
         if rung is not None and not argon_rung_verifiable(*rung):
             raise ValueError(
                 f"profile {self.profile!r} issues an argon2id rung"
@@ -110,4 +144,5 @@ __all__ = [
     "Settings",
     "VerifierConfig",
     "argon_rung_verifiable",
+    "valid_argon_memory_kib",
 ]

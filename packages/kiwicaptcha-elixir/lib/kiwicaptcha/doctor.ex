@@ -34,17 +34,31 @@ defmodule Kiwicaptcha.Doctor do
 
   # The argon2id capability flag: a priced ladder that issues Argon
   # rungs fails the check when the native binding is absent; the
-  # refusal is loud and typed, never a silent downgrade.
+  # refusal is loud and typed, never a silent downgrade. The rung
+  # budgets are also checked against the protocol power-of-two profile
+  # space here at config time — never discovered per request.
   defp argon2_check(profile) do
     available = Kiwicaptcha.Pow.argon2_available?()
     required = profile == nil or profile in ["argon16", "argon32", "argon64", "abuse_first", "high_abuse"]
 
-    ok = available or not required
+    rungs_in_space =
+      Enum.all?(
+        Kiwicaptcha.Settings.argon_rung_memory_kib(),
+        &Kiwicaptcha.Settings.valid_argon_memory_kib?/1
+      )
+
+    ok = (available or not required) and rungs_in_space
 
     detail =
       cond do
+        not rungs_in_space ->
+          "an argon2id rung budget is outside the protocol profile space " <>
+            "(powers of two within 8..=65536 KiB); refused at configuration " <>
+            "time, never per request"
+
         available ->
-          "native Argon2id binding present (argon2_elixir); argon rungs verify"
+          "native Argon2id binding present (argon2_elixir); argon rungs verify " <>
+            "(protocol profile space: powers of two within 8..=65536 KiB)"
 
         required ->
           "native Argon2id binding missing: the priced ladder issues argon2id rungs " <>

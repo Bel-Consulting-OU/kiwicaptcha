@@ -122,34 +122,37 @@ final class StepUpHardeningTest extends TestCase
         }
         self::assertNotEmpty($notifications, 'the owner is notified on lockout');
         $dimensions = array_column($notifications, 0);
-        self::assertContains('principal', $dimensions);
-        self::assertContains('target', $dimensions);
+        // Five failures arm the per-context ladder only. The shared
+        // principal and target keys use the high-threshold backstop
+        // (5x), so one attacking context never locks the account cheaply.
+        self::assertContains('context', $dimensions);
+        self::assertNotContains('principal', $dimensions, 'the account backstop does not arm at 5 failures');
 
-        $retryAfter = $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now);
-        self::assertSame(300, $retryAfter, 'the first rung locks the pair for 300 s');
+        $contextKey = StepUpLockoutGuard::contextKeyOf($this->beginRequest());
+        $retryAfter = $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now, $contextKey);
+        self::assertSame(300, $retryAfter, 'the first rung locks the failing context for 300 s');
+        self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now), 'the shared keys stay open below the backstop threshold');
 
-        // While locked: begin refuses with 429 and complete refuses.
+        // While the failing context is locked: begin refuses with 429.
         $refused = $handler->begin($this->beginRequest(), $this->context(self::PRINCIPAL));
         self::assertSame(429, $refused->getStatusCode());
         self::assertSame('300', (string) $refused->headers->get('Retry-After'));
 
-        // A different principal is not held out by someone else's
-        // budget — the target key is, though, so a target-scoped flow
-        // for the same target must also wait.
-        self::assertSame(300, $guard->retryAfterSecs(self::PRINCIPAL_B, self::TARGET, $this->now), 'the target budget holds every principal out');
-        self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL_B, null, $this->now), 'a clean principal with no target is admissible');
+        // A different context (fresh request with another session) is
+        // not held out by someone else's budget.
+        self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now), 'a clean context is admissible');
 
         // Escalation: past the second rung the lockout grows.
         $this->now += 400;
         for ($i = 0; $i < 15; ++$i) {
-            $guard->registerFailure(self::PRINCIPAL, self::TARGET);
+            $guard->registerFailure(self::PRINCIPAL, self::TARGET, $contextKey);
         }
-        self::assertSame(1800, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now), '15 failures escalate to the 30-minute rung');
+        self::assertSame(1800, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now, $contextKey), '15 failures escalate to the 30-minute rung');
 
         // A completed step-up clears the owner's budget.
         $this->now += 2000;
-        $guard->registerSuccess(self::PRINCIPAL, self::TARGET);
-        self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now));
+        $guard->registerSuccess(self::PRINCIPAL, self::TARGET, $contextKey);
+        self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now, $contextKey));
     }
 
     /**
@@ -165,8 +168,9 @@ final class StepUpHardeningTest extends TestCase
         $ticket = $this->ticketOf($begin);
         $code = (string) $this->sender->lastCode();
 
+        $contextKey = StepUpLockoutGuard::contextKeyOf($this->beginRequest());
         for ($i = 0; $i < 5; ++$i) {
-            $guard->registerFailure(self::PRINCIPAL, self::TARGET);
+            $guard->registerFailure(self::PRINCIPAL, self::TARGET, $contextKey);
         }
         $result = $handler->complete($this->completeRequest($ticket, $code, self::PRINCIPAL));
         self::assertSame(StepUpResult::FAIL_LOCKED_OUT, $result->failureCode, 'the correct code is still refused while locked');
@@ -214,17 +218,30 @@ final class StepUpHardeningTest extends TestCase
         return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required');
     }
 
+    private const SESSION = 'hardening-test-session-00000000001';
+
+    private function withSession(Request $request, string $sessionId = self::SESSION): Request
+    {
+        $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+        $storage->setId($sessionId);
+        $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
+        $session->start();
+        $request->setSession($session);
+
+        return $request;
+    }
+
     private function beginRequest(): Request
     {
-        return Request::create('https://example.com/kiwi/step-up/begin');
+        return $this->withSession(Request::create('https://example.com/kiwi/step-up/begin'));
     }
 
     private function completeRequest(string $ticket, string $code, string $bindPrincipal): Request
     {
-        $request = Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
+        $request = $this->withSession(Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
             EmailOtpStepUpHandler::TICKET_FIELD => $ticket,
             EmailOtpStepUpHandler::CODE_FIELD => $code,
-        ]);
+        ]));
         StepUpSessionBinding::bind($request, $bindPrincipal);
 
         return $request;

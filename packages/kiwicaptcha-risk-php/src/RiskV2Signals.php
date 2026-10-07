@@ -13,6 +13,13 @@ namespace KiwiCaptcha\Risk;
  * time and never mutate the risk-v1 state script or the v1 SignalVector.
  * Both crates use the identical field names and fixed-point semantics
  * (Rust mirror: honeypot, session_inconsistency, tls_inconsistency).
+ *
+ * There is deliberately NO execution-evidence field: execution traces
+ * and digests are forgeable without a browser by a full-knowledge
+ * forger (the v6 envelopes are public functions of the shipped
+ * operands; see WhiteBoxEnvelopeForger, pass rate 1.0), so they are
+ * never weighted as proof of a real browser anywhere in the risk
+ * engine.
  */
 final class RiskV2Signals
 {
@@ -25,7 +32,8 @@ final class RiskV2Signals
         public readonly int $tlsInconsistency = 0,
         /** Target-account authentication-failure pressure, normalized against the attack threshold. */
         public readonly int $targetFailurePressure = 0,
-        /** Distinct source+asn spread of failures against the target, normalized. */
+        /** Wider of the distinct-source and distinct-ASN spreads of
+         * failures against the target, normalized (never the sum). */
         public readonly int $targetSpread = 0,
     ) {
         foreach (get_object_vars($this) as $value) {

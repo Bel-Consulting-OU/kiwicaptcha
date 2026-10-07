@@ -8,7 +8,7 @@
 # sidecar's issue and verify pair, gate requests through the compat
 # gateway and nginx auth_request, and read the health, metrics and
 # doctor surfaces. Every step asserts; any failure exits non-zero.
-# Ports 8490-8494 belong to this script and are torn down on exit.
+# Ports 8490-8494 and 8513 belong to this script and are torn down on exit.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -114,6 +114,24 @@ G2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT
 G3=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php" \
   -H 'content-type: application/json' -d "{\"token\":\"$GTOKEN\"}")
 [ "$G3" = "403" ] || bad "bare application token field must not be consumed (got $G3)"
+# Aggressive gate shapes: content-type confusion, query-string tokens,
+# healthz path confusion and a non-http(s) verify target.
+G4=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php" \
+  -H 'content-type: application/jsonp' -d "{\"kiwi_token\":\"$GTOKEN\"}")
+[ "$G4" = "403" ] || bad "application/jsonp must not open the JSON token source (got $G4)"
+G5=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$GATE_PORT/kiwi-verify.php?kiwi_token=$GTOKEN" \
+  -H 'content-type: application/json' -d '{}')
+[ "$G5" = "403" ] || bad "query-string tokens must not be consumed (got $G5)"
+G6=$(curl -s "http://127.0.0.1:$GATE_PORT/kiwi-verify.php/admin/healthz")
+printf '%s' "$G6" | grep -q '"status"' && bad "suffix /admin/healthz answered the healthz document: $G6"
+( cd "$ROOT/integrations-platforms" && \
+  exec env KIWI_VERIFY_URL="file:///etc/passwd" KIWI_SCOPE=login \
+  php -S "127.0.0.1:$((GATE_PORT + 20))" -t . ) >"$TMP/gate-ssrf.log" 2>&1 &
+PIDS+=($!)
+sleep 0.5
+G7=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$((GATE_PORT + 20))/kiwi-verify.php" \
+  -H 'content-type: application/json' -d "{\"kiwi_token\":\"$GTOKEN\"}")
+[ "$G7" = "503" ] || bad "a file:// verify target must fail closed (got $G7)"
 ok "gateway allows a valid token (204) and refuses garbage (403)"
 
 step "nginx auth_request in front of the same gate"

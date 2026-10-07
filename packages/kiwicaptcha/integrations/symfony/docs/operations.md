@@ -854,18 +854,27 @@ before the solver models it. The test-only shadow solver
 decodes each program, replays the interpreter's own semantics, picks
 an arbitrary legal observed height (1 to 255), and emits a trace the
 verifier accepts. The oracle runs 100 generated programs per version
-at heights 1, 10, 17 and 255 and asserts every trace verifies and
-digests. Mirrors live in the PHP suite
+at heights 1, 10, 17 and 255. On versions 1-5 every forged trace
+verifies and digests; on version 6 the naive solver is rejected only
+because it emits pure-sim placeholders rather than the operand-derived
+envelope entries. Mirrors live in the PHP suite
 (BrowserlessExecutionForgeryTest) and the Rust execution module with
 identical acceptance assertions.
 
 The trace is supplementary evidence, reproducible by any
-implementation of the public semantics, never a browser attestation.
-Acceptance criterion: the oracle keeps accepting every trace the
-generator mints at any live version up to its
-`MAX_EXECUTION_VERSION`. A grammar extension beyond that maximum is
-accepted only when the solver reproduces the tested Web Platform
-behavior instead of the shadow model.
+implementation of the public semantics plus the published envelopes,
+never a browser attestation. A full-knowledge forger who reads the
+open-source verifier reimplements the five version-6 acceptance
+envelopes (they are deterministic functions of the operands that ship
+with the program) and passes every version-6 program without a browser
+(WhiteBoxExecutionForgeryTest / white_box_envelope_forgery_solver;
+measured pass rate 1.0). Version 6 costs an attacker one reading of
+the source, the same class as versions 1-5. Acceptance criterion: the
+naive oracle keeps accepting every version-1-5 trace the generator
+mints, and the white-box forger keeps measuring the honest
+full-knowledge pass rate on version 6. No rung is a browser boundary;
+the risk engine never weights execution evidence as proof of a real
+browser.
 
 ## Graceful shutdown sequence
 

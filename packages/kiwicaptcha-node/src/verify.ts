@@ -288,12 +288,32 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   // failing check decides the outcome.
   const failure = cheapPhaseCheck(config, secrets, peek, token, evidence, true, receiptNs, delegateExecution);
   if (failure === null && delegateExecution) {
+    // The opt-in telemetry gate runs locally BEFORE the delegation
+    // return: the sidecar's /verify API does not accept
+    // enforce_telemetry, so skipping it here would drop the caller's
+    // gate entirely.
+    if (
+      config.enforceTelemetry &&
+      (Object.keys(token.telemetry).length === 0 || scoreTelemetry(token.telemetry, token.durationMs)) &&
+      runtime.kind !== 'consumed'
+    ) {
+      return invalid(VerifyErrorCode.TelemetryRejected);
+    }
     // Always forward the binding this verification expects: the legacy
     // shim's unbound-record pass asserts unboundness so the sidecar's
     // exact check agrees, everything else forwards the expected value.
-    const delegated = await delegateToSidecar(rawToken, config.expectedScope, config.clientIp, options.executionPolicy!, config.legacyBinding && peek.requestBinding === null ? '' : config.expectedRequestBinding);
+    const delegated = await delegateToSidecar(
+      rawToken,
+      config.expectedScope,
+      config.clientIp,
+      options.executionPolicy!,
+      config.legacyBinding && peek.requestBinding === null ? '' : config.expectedRequestBinding,
+      config.enforceTelemetry,
+      config.operationIdentity,
+    );
     if (delegated.ok) {
-      return valid(token.nonce, ladderRung(peek), peek.requestBinding, true, null, peek.decoyField);
+      // A fresh delegated success is a fresh result, never a stored one.
+      return valid(token.nonce, ladderRung(peek), peek.requestBinding, false, null, peek.decoyField);
     }
     // The sidecar's kiwi-code is the shared wire vocabulary: a known
     // code passes through the deny shape verbatim, an unknown one

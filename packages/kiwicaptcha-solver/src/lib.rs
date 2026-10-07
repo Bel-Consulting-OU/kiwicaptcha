@@ -208,10 +208,18 @@ impl Challenge {
                 "the prefix length is outside 1..=4096",
             ));
         }
+        // The base64 length gate runs BEFORE decode: a zip-bomb-sized
+        // salt must never be allocated into a decoded buffer just to be
+        // rejected afterwards.
+        if self.salt.is_empty() || self.salt.len() > 512 {
+            return Err(SolveError::MalformedChallenge(
+                "the salt is empty or longer than 512 characters",
+            ));
+        }
         let salt = B64
             .decode(&self.salt)
             .map_err(|_| SolveError::MalformedChallenge("the salt is not standard base64"))?;
-        if salt.is_empty() || self.salt.len() > 512 {
+        if salt.is_empty() {
             return Err(SolveError::MalformedChallenge(
                 "the salt is empty or longer than 512 characters",
             ));
@@ -262,6 +270,14 @@ impl Challenge {
                         .ok_or(SolveError::UnsupportedRswParams(
                             "an rsw challenge carries no modulus",
                         ))?;
+                // A canonical 2048-bit modulus is exactly 256 bytes, i.e.
+                // 344 standard-base64 characters. Refuse a longer string
+                // before decoding so a zip-bomb modulus never allocates.
+                if modulus.len() > 344 {
+                    return Err(SolveError::UnsupportedRswParams(
+                        "the rsw modulus is not a canonical 2048-bit odd composite",
+                    ));
+                }
                 let bytes = B64.decode(modulus).map_err(|_| {
                     SolveError::UnsupportedRswParams("the rsw modulus is not standard base64")
                 })?;

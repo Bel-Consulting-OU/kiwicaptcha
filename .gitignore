@@ -14,6 +14,9 @@ playwright-report/
 deploy/.env
 tools/rsw-keygen/Cargo.lock
 
+# Dogfood run output: runtime logs, never source.
+tools/dogfood/last-run/*.log
+
 # The interpreted languages' build and cache artifacts stay out of the
 # index: python bytecode caches, the Elixir build tree, and the native
 # sqlite3 NIF it compiles are reproducible from the tracked sources.

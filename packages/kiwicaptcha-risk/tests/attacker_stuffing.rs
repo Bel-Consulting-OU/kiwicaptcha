@@ -43,7 +43,9 @@ use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::score::{score as compute_score, RiskWeights};
 use kiwicaptcha_risk::signals::SignalVector;
-use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError, TargetState};
+use kiwicaptcha_risk::store::{
+    Observed, PrincipalNetworkTagStore, RiskStateStore, RiskStoreError, TargetState,
+};
 use kiwicaptcha_risk::{marks, RiskError};
 use serde_json::json;
 
@@ -269,6 +271,145 @@ fn run_simulation(
     assert_eq!(victim_denies, 0, "the victim is never locked out");
 }
 
+/// First-attempt valid stuffing (P0-1 success criterion): a VALID
+/// stolen credential on its very first attempt — no prior failures
+/// anywhere, and a network the principal has never been seen from —
+/// must yield StepUp, never Allow. The engine derives the novel-network
+/// evidence beside the frozen wire and the marks stage forces the
+/// interactive step-up before any session credit. Once the step-up
+/// completes (the network tag is recorded SET NX), the same login from
+/// the same network is the plain allow again.
+#[test]
+fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
+    let store = SimStore::default();
+    let networks = Arc::new(SimNetworks::default());
+    let engine = kiwicaptcha_risk::RiskEngine::new(
+        store.clone(),
+        CidrNetworkClassifier::from_entries(vec![]),
+        policy(),
+        RiskKeys::from_master(&[0x42; 32]),
+    )
+    .with_principal_networks(networks.clone());
+    let principal_bytes = [0xf6u8; 16];
+    // The engine addresses the principal by its derived pseudonym, so
+    // the tag writes must key the same one.
+    let identity = kiwicaptcha_risk::identity::RiskIdentityFactory::new(RiskKeys::from_master(
+        &[0x42; 32],
+    ));
+    let principal_hex = hex::encode(identity.principal_id(&principal_bytes));
+    let home_ip = "198.51.100.23".parse().unwrap();
+    let home_bucket = hex::encode(kiwicaptcha_risk::identity::masked_network(home_ip, 32, 64));
+    let fresh_ip = "203.0.113.99".parse().unwrap();
+
+    let ctx_for = |ip| {
+        RiskContext::new(
+            1,
+            ip,
+            None,
+            Some(&principal_bytes),
+            RiskEventKind::AuthenticationSuccess,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        )
+    };
+
+    // Attempt 1: the attacker's network has never been seen for this
+    // principal and the account carries no trusted network at all —
+    // exactly the first-attempt valid stuffing shape. No failures were
+    // registered anywhere (the store's target state is empty).
+    let decision = engine
+        .reassess(ctx_for(home_ip), Some("stuffing-1".to_string()))
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "step_up",
+        "first-attempt valid stuffing must be stepped up, never allowed ({:?})",
+        decision.action
+    );
+    assert!(
+        decision.has_reason(RiskReason::NovelNetwork),
+        "the step-up must carry the novel-network reason ({:?})",
+        decision.reasons
+    );
+
+    // The victim completes the step-up: the session credit records the
+    // network tag (SET NX) and the account now has a trusted network.
+    assert!(
+        networks
+            .record_principal_network_tag(&principal_hex, &home_bucket)
+            .expect("record"),
+        "the first established network records its tag"
+    );
+
+    // Attempt 2 from the SAME network: established — the plain allow.
+    let decision = engine
+        .reassess(ctx_for(home_ip), Some("stuffing-2".to_string()))
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "allow",
+        "an established network is the plain allow again ({:?})",
+        decision.action
+    );
+
+    // Attempt 3 from a NEW network (the attacker moves): stepped up
+    // again — a fresh bucket for a principal is novel while the account
+    // still vouches only for its established bucket... and a second
+    // network without any established history is the same first-attempt
+    // shape.
+    let decision = engine
+        .reassess(ctx_for(fresh_ip), Some("stuffing-3".to_string()))
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "step_up",
+        "a novel network for the principal is stepped up ({:?})",
+        decision.action
+    );
+}
+
+/// The in-memory principal first-seen network tag store (P0-1): SET NX
+/// per (principal, network-bucket) pair, plus the account-level trusted
+/// flag the novel-network gate also consults.
+#[derive(Default)]
+struct SimNetworks {
+    pairs: Mutex<HashSet<(String, String)>>,
+}
+
+impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
+    fn principal_network_seen(
+        &self,
+        principal_id: &str,
+        network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Ok(Some(
+            self.pairs
+                .lock()
+                .unwrap()
+                .contains(&(principal_id.to_string(), network.to_string())),
+        ))
+    }
+
+    fn record_principal_network_tag(
+        &self,
+        principal_id: &str,
+        network: &str,
+    ) -> Result<bool, RiskStoreError> {
+        Ok(self
+            .pairs
+            .lock()
+            .unwrap()
+            .insert((principal_id.to_string(), network.to_string())))
+    }
+
+    fn principal_has_trusted_network(
+        &self,
+        principal_id: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Ok(Some(self.pairs.lock().unwrap().iter().any(|(p, _)| p == principal_id)))
+    }
+}
+
 /// The in-memory marks-and-state twin of the PHP RiskStateStoreStub:
 /// cloning shares the state, so the engine owns one clone while the
 /// simulation drives another. The target state is the engine's own
@@ -294,16 +435,18 @@ impl SimStore {
             .get(target_id)
             .copied()
             .unwrap_or((0, 0, 0));
-        let spread = self
-            .target_spread
-            .lock()
-            .unwrap()
-            .get(target_id)
-            .map(|s| s.len() as u32)
+        let set = self.target_spread.lock().unwrap();
+        let set = set.get(target_id);
+        let spread_sources = set
+            .map(|s| s.iter().filter(|e| e.starts_with("src:")).count() as u32)
+            .unwrap_or(0);
+        let spread_asns = set
+            .map(|s| s.iter().filter(|e| e.starts_with("asn:")).count() as u32)
             .unwrap_or(0);
         TargetState {
             fails,
-            spread,
+            spread_sources,
+            spread_asns,
             first_ms,
             last_ms,
         }
@@ -568,16 +711,17 @@ fn stuffing_storm_over_real_redis_marks() {
     run_simulation(&marks_store, &report_failure, &report);
 
     // Cleanup: the exact mark keys of the run plus the target state.
-    let mut keys = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     for session in attacker_sessions() {
         keys.push(marks_store.mark_key("session", &session).unwrap());
     }
     for bucket in asn_buckets() {
         keys.push(marks_store.mark_key("asn", &bucket).unwrap());
     }
-    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:{victim_target}"));
-    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:src:{victim_target}"));
-    keys.push(format!("{{kiwi:{namespace}}}:risk:tgt:asn:{victim_target}"));
+    keys.extend(kiwicaptcha_risk::keyspace::target_state_keys(
+        &namespace,
+        &victim_target,
+    ));
     let mut conn = ::redis::Client::open(url)
         .unwrap()
         .get_connection()

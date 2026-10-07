@@ -2897,10 +2897,21 @@ pub enum SignError {
     InvalidRswParams,
 }
 
-// The `hex` 0.4 crate supplies the hex encoding of HMAC tags and IP
-// hashes (lowercase, byte-identical to the former in-module encoder)
-// and the strict even-length, mixed-case decode of signature tags.
+// Strict LOWERCASE-hex decode of signature and server-state MAC tags.
+// The emitters (`hex::encode`, PHP `hash_hmac`) always spell tags in
+// lowercase, and the PHP twin compares tag text case-sensitively
+// (`hash_equals` against the lowercase expected tag), so an uppercase
+// or mixed-case spelling is a different wire token. Accepting it would
+// (1) give one signature two verification-true encodings — challenge-
+// string malleability for anything keyed on the challenge bytes — and
+// (2) create a Rust/PHP parser differential (the Rust verifier would
+// accept a challenge the PHP verifier rejects). Fail closed on every
+// non-lowercase character; the `hex` 0.4 crate still supplies the
+// even-length / non-hex validation for the lowercase spelling.
 fn hex_decode_strict(s: &str) -> Option<Vec<u8>> {
+    if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
     hex::decode(s).ok()
 }
 
@@ -3184,7 +3195,14 @@ mod tests {
     fn hex_decode_round_trips() {
         assert_eq!(hex_decode_strict(""), Some(Vec::<u8>::new()));
         assert_eq!(hex_decode_strict("00ff"), Some(vec![0x00, 0xff]));
-        assert_eq!(hex_decode_strict("00FF"), Some(vec![0x00, 0xff]));
+        // Non-lowercase hex is non-canonical and must fail closed: the
+        // signing/MAC emitters only ever spell tags in lowercase and the
+        // PHP twin compares tag text case-sensitively, so a case variant
+        // is a second wire spelling of the same tag (malleability) and a
+        // Rust/PHP parser differential.
+        assert_eq!(hex_decode_strict("00FF"), None, "uppercase hex must fail");
+        assert_eq!(hex_decode_strict("00Ff"), None, "mixed-case hex must fail");
+        assert_eq!(hex_decode_strict("00fF"), None, "mixed-case hex must fail");
         assert_eq!(
             hex_decode_strict(&hex::encode(b"kiwi")),
             Some(b"kiwi".to_vec())

@@ -118,3 +118,80 @@ class SidecarDelegationTest < Minitest::Test
     end
   end
 end
+
+# The delegation verdict contract, without the sidecar binary: a
+# fresh acceptance is a fresh result (never a stored-result replay),
+# the opt-in telemetry gate runs before the delegation, and the
+# caller's telemetry posture and operation identity ride along instead
+# of being dropped at the seam.
+class DelegationVerdictTest < Minitest::Test
+  include TestSupport
+
+  class FakePolicy
+    attr_reader :calls
+
+    def initialize(ok: true, code: 'ok')
+      @ok = ok
+      @code = code
+      @calls = []
+    end
+
+    def enabled?
+      true
+    end
+
+    def delegate(*args, **kwargs)
+      @calls << [args, kwargs]
+      [@ok, @code]
+    end
+  end
+
+  def armed_setup(telemetry: nil, enforce_telemetry: false, operation_identity: nil, policy: FakePolicy.new)
+    row = TestSupport.golden_record('sha_execution_v4')
+    record = TestSupport.record_from_row(row)
+    storage = KiwiCaptcha::MemoryStore.new(now: -> { record.issued_at + 10 })
+    storage.store(record)
+    token_b64 = row['token_b64']
+    if telemetry
+      token = KiwiCaptcha::Token.decode(token_b64)
+      token_b64 = token.class.new(**token.to_h.merge(telemetry: telemetry)).encode
+    end
+    opts = {
+      storage: storage, secret_key: SECRET,
+      expected_scope: row['verify_opts']['expected_scope'],
+      enforce_telemetry: enforce_telemetry, operation_identity: operation_identity,
+      execution_policy: policy
+    }.merge(TestSupport.frozen_clock(record))
+    [token_b64, TestSupport.verify_options(opts), policy]
+  end
+
+  def test_fresh_delegation_success_is_a_fresh_result
+    token, opts, policy = armed_setup
+    result = KiwiCaptcha.verify(token, opts)
+    assert result.ok, result.code
+    refute result.from_stored_result
+    assert_equal 1, policy.calls.length
+  end
+
+  def test_delegation_runs_the_telemetry_gate_first
+    token, opts, policy = armed_setup(telemetry: { 'wd' => true }, enforce_telemetry: true)
+    result = KiwiCaptcha.verify(token, opts)
+    refute result.ok
+    assert_equal 'telemetry_rejected', result.code
+    assert_empty policy.calls
+    # Opt-out: the same bot token delegates when the gate is off.
+    token2, opts2, = armed_setup(telemetry: { 'wd' => true })
+    assert KiwiCaptcha.verify(token2, opts2).ok
+  end
+
+  def test_delegation_forwards_telemetry_and_operation_identity
+    token, opts, policy = armed_setup(
+      telemetry: { 'v' => 1 }, enforce_telemetry: true, operation_identity: 'order-123'
+    )
+    result = KiwiCaptcha.verify(token, opts)
+    assert result.ok, result.code
+    _args, kwargs = policy.calls.first
+    assert_equal true, kwargs[:enforce_telemetry]
+    assert_equal 'order-123', kwargs[:operation_identity]
+  end
+end

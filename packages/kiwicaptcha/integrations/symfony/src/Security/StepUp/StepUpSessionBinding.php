@@ -60,10 +60,16 @@ final class StepUpSessionBinding
 
     /**
      * Whether the request's bound principal and session match the
-     * challenge. Absent or malformed bindings do not match. When both
-     * sides carry a session id they must be equal; a request with no
-     * started session (CLI/tests) falls back to the principal check,
-     * and the enrollment gates still demand a session-scoped proof.
+     * challenge. Absent or malformed bindings do not match. The
+     * challenge's own recorded session hash is the authority: a
+     * completion presented under a different session than the one that
+     * began the challenge is refused, even for the same principal
+     * (cross-session ticket replay / session fixation).
+     *
+     * An empty session id NEVER matches — on either side. A stateless
+     * request (no started PHP session) can therefore never complete a
+     * challenge, whatever the challenge recorded: the binding fails
+     * closed rather than degenerating to a principal-only check.
      */
     public static function matches(Request $request, StepUpChallenge $challenge): bool
     {
@@ -74,12 +80,18 @@ final class StepUpSessionBinding
         if (!hash_equals($challenge->principalPseudonym, $bound)) {
             return false;
         }
-        $boundSession = $request->attributes->get(self::SESSION_ATTRIBUTE);
         $requestSession = self::sessionId($request);
-        if (\is_string($boundSession) && $boundSession !== '' && $requestSession !== '') {
-            return hash_equals($boundSession, $requestSession);
+        if ($requestSession === '') {
+            return false;
+        }
+        $requestHash = StepUpChallenge::sessionHash($requestSession);
+        $boundHash = $challenge->sessionHash;
+        if ($boundHash === null || $boundHash === '') {
+            // A challenge begun without a recorded session can never be
+            // completed (an empty session id never matches).
+            return false;
         }
 
-        return true;
+        return $requestHash !== null && hash_equals($boundHash, $requestHash);
     }
 }

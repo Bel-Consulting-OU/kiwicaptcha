@@ -52,27 +52,33 @@ if (!defined('KIWI_CAPTCHA_CLIENT_IP')) {
      */
     function kiwi_captcha_client_ip($peer, $forwardedFor, $realIp, array $trusted)
     {
-        $peer = trim((string) $peer);
-        if ($trusted === []) {
-            return $peer;
+        $peerCanonical = kiwi_captcha_canonical_ip(trim((string) $peer));
+        if ($peerCanonical === null) {
+            // Fail closed: a missing or unparsable socket peer is not a
+            // loopback client. The caller refuses the request rather
+            // than inventing 127.0.0.1 or forwarding a fabricated
+            // identity.
+            return '';
         }
-        $peerCanonical = kiwi_captcha_canonical_ip($peer);
-        $peerTrusted = $peerCanonical !== null && kiwi_captcha_in_trusted($peerCanonical, $trusted);
+        if ($trusted === []) {
+            return $peerCanonical;
+        }
+        $peerTrusted = kiwi_captcha_in_trusted($peerCanonical, $trusted);
         $forwarded = is_string($forwardedFor) ? trim($forwardedFor) : '';
         if ($forwarded === '') {
             if (!$peerTrusted) {
-                return $peer;
+                return $peerCanonical;
             }
             $realIp = is_string($realIp) ? trim($realIp) : '';
             if ($realIp === '' || preg_match('/[\x00-\x1F\x7F]/', $realIp) === 1) {
-                return $peer;
+                return $peerCanonical;
             }
             $canonical = kiwi_captcha_canonical_ip($realIp);
 
-            return $canonical === null ? $peer : $canonical;
+            return $canonical === null ? $peerCanonical : $canonical;
         }
         if (preg_match('/[\x00-\x1F\x7F]/', $forwarded) === 1 || !$peerTrusted) {
-            return $peer;
+            return $peerCanonical;
         }
         $hops = array_reverse(array_map('trim', explode(',', $forwarded)));
         foreach ($hops as $hop) {
@@ -81,14 +87,14 @@ if (!defined('KIWI_CAPTCHA_CLIENT_IP')) {
                 // An unparsable hop terminates the trust chain: who
                 // lies beyond it cannot be established, so the peer
                 // falls back.
-                return $peer;
+                return $peerCanonical;
             }
             if (!kiwi_captcha_in_trusted($canonical, $trusted)) {
                 return $canonical;
             }
         }
 
-        return $peer;
+        return $peerCanonical;
     }
 
     /**

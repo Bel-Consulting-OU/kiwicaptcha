@@ -601,6 +601,26 @@ fn out_of_contract_parameters_are_refused_before_work() {
         solve(&merge(&base, &short_modulus), &mut opts),
         Err(SolveError::UnsupportedRswParams(_))
     ));
+    // A zip-bomb-sized salt is refused before any decode allocation.
+    let huge_salt =
+        serde_json::json!({"algorithm": "sha256", "mKib": 0, "t": 1, "p": 1, "targetBits": 4, "salt": "A".repeat(100_000)});
+    assert!(matches!(
+        solve(&merge(&base, &huge_salt), &mut opts),
+        Err(SolveError::MalformedChallenge(_))
+    ));
+    // A zip-bomb-sized rsw modulus is refused before any decode allocation.
+    let huge_modulus = serde_json::json!({"algorithm": "rsw", "mKib": 0, "t": kiwicaptcha::challenge::MIN_RSW_T, "p": 1, "targetBits": 1, "rsw_modulus": "A".repeat(100_000)});
+    assert!(matches!(
+        solve(&merge(&base, &huge_modulus), &mut opts),
+        Err(SolveError::UnsupportedRswParams(_))
+    ));
+    // A negative target_bits never parses into u32: the document is
+    // malformed rather than wrapping into a huge difficulty.
+    let mut negative_doc = base.clone();
+    if let Some(map) = negative_doc.as_object_mut() {
+        map.insert("targetBits".into(), serde_json::json!(-5));
+    }
+    assert!(Challenge::from_json(&negative_doc.to_string()).is_err());
     // An execution-armed challenge needs the browser interpreter.
     let armed = serde_json::json!({"algorithm": "sha256", "mKib": 0, "t": 1, "p": 1, "targetBits": 4, "execution_program": "AAAAAA=="});
     assert_eq!(

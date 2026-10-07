@@ -493,7 +493,9 @@
         // not a versioned progress/done/failed message is ignored.
         worker.onmessage = function(ev) {
           var msg = ev.data;
-          if (!msg || typeof msg !== "object" || msg.v !== 1) return;
+          // Arrays and non-objects are ignored: a schema-confused frame
+          // never settles or steers the solve.
+          if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.v !== 1) return;
           // One settle per solve: after the first terminal frame (done,
           // failed, mismatch, deadline) every later message — a
           // duplicate done, a stale progress or a foreign reply — is

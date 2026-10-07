@@ -76,11 +76,6 @@ def client_ip(
     import ipaddress
     import re
 
-    peer = (remote_addr or "127.0.0.1").strip() or "127.0.0.1"
-    cidrs = [c.strip() for c in (trusted_proxies or "").split(",") if c.strip()]
-    if not cidrs:
-        return peer
-
     control = re.compile(r"[\x00-\x1F\x7F]")
 
     def canonical(text: str) -> Optional[str]:
@@ -104,6 +99,10 @@ def client_ip(
             parts = candidate.split(":")
             if _strict_ipv4(parts[-1]):
                 candidate = ":".join(parts[:-1])
+        if "%" in candidate:
+            # Zone-scoped IPv6 is not a globally meaningful identity and
+            # the shared grammar refuses it (ipaddress would accept it).
+            return None
         try:
             addr = ipaddress.ip_address(candidate)
         except ValueError:
@@ -128,27 +127,37 @@ def client_ip(
                 return True
         return False
 
+    peer = (remote_addr or "").strip()
+    cidrs = [c.strip() for c in (trusted_proxies or "").split(",") if c.strip()]
     peer_canonical = canonical(peer)
-    peer_trusted = peer_canonical is not None and in_trusted(peer_canonical)
+    if peer_canonical is None:
+        # Fail closed: a missing or unparsable socket peer is not a
+        # loopback client. The caller refuses the request rather than
+        # inventing 127.0.0.1 or forwarding a fabricated identity.
+        return ""
+    if not cidrs:
+        return peer_canonical
+
+    peer_trusted = in_trusted(peer_canonical)
     forwarded = (forwarded_for or "").strip()
     if forwarded == "":
         if not peer_trusted:
-            return peer
+            return peer_canonical
         candidate = (real_ip or "").strip()
         if candidate == "" or control.search(candidate):
-            return peer
-        return canonical(candidate) or peer
+            return peer_canonical
+        return canonical(candidate) or peer_canonical
     if control.search(forwarded) or not peer_trusted:
-        return peer
+        return peer_canonical
     for hop in reversed([part.strip() for part in forwarded.split(",")]):
         canonical_text = canonical(hop)
         if canonical_text is None:
             # An unparsable hop terminates the trust chain: who lies
             # beyond it cannot be established, so the peer falls back.
-            return peer
+            return peer_canonical
         if not in_trusted(canonical_text):
             return canonical_text
-    return peer
+    return peer_canonical
 
 
 def _valid_port(suffix: str) -> bool:
@@ -190,7 +199,10 @@ def build_request(
 
 def decide(status: int, body: str) -> Dict[str, Any]:
     """The decision table: a transport failure, 5xx or 401/404 is a
-    gate fault; the rest answer the challenge verdict."""
+    gate fault; a pass requires the upstream to say success on a 2xx
+    status (a redirect or other non-2xx carrying a success-shaped body
+    is a status/body mismatch and fails closed); the rest answer the
+    challenge verdict."""
     if status == 0 or status >= 500 or status in (401, 404):
         return {"ok": False, "code": "verify_unavailable"}
     try:
@@ -199,7 +211,7 @@ def decide(status: int, body: str) -> Dict[str, Any]:
         return {"ok": False, "code": "verify_unreadable"}
     if not isinstance(parsed, dict):
         return {"ok": False, "code": "verify_unreadable"}
-    if parsed.get("success") is True:
+    if 200 <= status <= 299 and parsed.get("success") is True:
         return {"ok": True, "code": "verified"}
     return {"ok": False, "code": "challenge_failed"}
 
@@ -237,8 +249,13 @@ def verify(
 
 def requests_transport(url: str, body: str, headers: Dict[str, str]) -> Dict[str, Any]:
     """The production transport: authentik ships requests. A non-2xx
-    answer still returns, so the decision table sees the status."""
+    answer still returns, so the decision table sees the status.
+    Redirects are refused at the transport: the verify call must land
+    on the configured endpoint exactly, never be re-pointed at a
+    third party through a 3xx from the network path."""
     import requests  # local import: only needed in production
 
-    response = requests.post(url, data=body, headers=headers, timeout=5)
+    response = requests.post(
+        url, data=body, headers=headers, timeout=5, allow_redirects=False
+    )
     return {"status": response.status_code, "body": response.text}

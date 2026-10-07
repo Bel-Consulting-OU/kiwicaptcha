@@ -72,6 +72,10 @@ class KiwiVerifier
                 'body' => $request['body'],
                 'timeout' => 5,
                 'http_errors' => false,
+                // The verify call must land on the configured endpoint
+                // exactly: a 3xx from the network path can never
+                // re-point it at a third party.
+                'allow_redirects' => false,
             ]);
         } catch (GuzzleException $e) {
             return ['status' => 0, 'body' => ''];

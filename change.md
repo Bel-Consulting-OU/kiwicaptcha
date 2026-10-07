@@ -117,9 +117,9 @@ interaction_anomaly	from rebuilt telemetry (§3.2.3)	token payload
 
 Done: real-user samples from the device matrix score in the human band; an AI agent driving genuine input is scored as evidence (never classified as "absent"); the entropy rule's minimum-sample count equals the payload cap (no dead rule).
 
-3.2.4 Execution dimension as a real browser boundary (v6). Today's browserless oracle forges v1–v5 by design. v6 requires web-platform semantics a pure reimplementation cannot shortcut, executed in a real layout engine: randomized-CSS computed geometry, MutationObserver delivery order, real event phases with listener side effects, Range/Selection over a constructed text graph, IntersectionObserver thresholds. The verifier checks the trace against an envelope derived from the cross-engine qualification matrix.
+3.2.4 Execution dimension as supplementary evidence (v6, full-knowledge honesty). Today's browserless oracle forges v1–v5 by design. v6 adds web-platform-shaped probes (randomized-CSS computed geometry, MutationObserver delivery order, real event phases with listener side effects, Range/Selection over a constructed text graph, IntersectionObserver thresholds) checked against operand-derived envelopes. Full-knowledge correction: every envelope is a deterministic function of the operands that ship with the program, so a forger who reads the open-source verifier reimplements the five envelope functions and emits passing traces WITHOUT any browser (white-box forger, measured: 100% pass rate). v6 is NOT a browser boundary; it costs an attacker one reading of the source, the same class as v1–v5. The naive oracle's ≥99.9% rejection only tested forgers who did not know the envelopes.
 
-Done: the existing oracle and a jsdom/happy-dom emulator both fail ≥ 99.9% over 10⁵ programs; Chromium, Firefox, WebKit (plus mobile) pass 100%; the cost of a full-fidelity headless emulator is measured and published (Plane 8).
+Done: the white-box forger is in the execution-v6 harness and the D3.2 campaign and is measured honestly; the naive oracle and jsdom/happy-dom emulators still fail ≥99.9% over 10⁵ programs (lazy-forger number only); Chromium, Firefox, WebKit (plus mobile) pass 100%; the risk engine never weights execution evidence as proof of a real browser (RiskV2Signals / EvidenceModel carry no execution field).
 
 Plane 3 — Decision
 

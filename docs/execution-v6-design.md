@@ -10,31 +10,47 @@ causal object-graph grammar); the version-6 real-platform rung it
 specifies has since landed as the generator maximum
 (`ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`).
 
-## Why a sixth rung
+## Why a sixth rung (and what it actually buys)
 
 Versions 1-5 are reproducible by a pure implementation of the public
 interpreter semantics. The forgeability oracle
 (`BrowserlessExecutionForgeryTest` and its Rust mirror) pins that on
 purpose: the trace of those rungs is supplementary evidence, never a
-browser attestation. Version 6 is the first rung whose evidence
-requires web-platform behavior a pure reimplementation cannot
-shortcut, executed in a real layout engine:
+browser attestation.
 
-- randomized-CSS computed geometry (getComputedStyle plus the
-  measured line-box stack of a laid-out probe),
-- MutationObserver delivery order (microtask-ordered records over a
-  drawn DOM churn),
-- real event phases (capture, target registration order, bubble,
-  with a listener side effect read back after the dispatch),
-- Range and Selection over a constructed text graph (the exact range
-  string plus the line-box fragment count plus the Selection state),
-- IntersectionObserver thresholds (the initial entry with a
-  layout-driven intersection ratio against a drawn threshold).
+Version 6 was designed as the first rung whose evidence would require
+web-platform behavior: randomized-CSS computed geometry, MutationObserver
+delivery order, real event phases, Range/Selection over a constructed
+text graph, and IntersectionObserver thresholds. The verifier checks
+every version-6 entry against an acceptance envelope derived from the
+program operands.
 
-The verifier checks every version-6 entry against an acceptance
-envelope derived from the program operands and calibrated by the
-cross-engine qualification matrix. A browserless forgery fails
-closed; the fail harness measures the rejection rates.
+**Honest boundary statement (full-knowledge adversary).** Every one of
+those envelopes is a deterministic function of the operands that ship
+with the program:
+
+- OP_MUT_ORDER: the exact expected record-type string
+- OP_RANGE_ORDER: the exact range string length plus a 1..16 fragment band
+- OP_CSS_GEOM: the exact font size plus a seed-derived height interval
+- OP_INT_OBS: a seed-derived ratio band
+- OP_EV_PHASE_FULL: the constant `1234:3` for every program
+
+A forger who implements those five functions (they are published in the
+open-source verifier) emits passing traces WITHOUT any browser. The
+white-box forger (`WhiteBoxEnvelopeForger` in the PHP suite,
+`white_box_envelope_forgery_solver` in the Rust fixtures, and the
+`whitebox` leg of the fail harness) measures that honestly: it passes
+every version-6 program. The naive oracle's "100 percent rejection"
+only tested forgers who did not know the envelopes — that is not a
+full-knowledge number.
+
+Version 6 therefore costs an attacker one reading of the source, the
+same class as versions 1-5. It is NOT a browser boundary. It is
+supplementary evidence that raises the cost of a *lazy* forger (one who
+does not read the verifier) and keeps the pure-sim placeholder forger
+out. The risk engine must never weight execution evidence as proof of a
+real browser (it does not: `RiskV2Signals` and `EvidenceModel` carry no
+execution field).
 
 ## The ladder after the rung lands
 
@@ -165,19 +181,47 @@ percent, plus the exact-computed entries that admit no spread).
 
 ## The fail harness
 
-tests/browser/execution-v6 carries the fail proof: a deterministic
-10^5-program synthetic corpus (the real generator at the real-platform
-rung) driven through three legs, all judged by the real PHP envelope
-walker:
+tests/browser/execution-v6 carries the measurement harness: a
+deterministic 10^5-program synthetic corpus (the real generator at the
+real-platform rung) driven through four legs, all judged by the real
+PHP envelope walker:
 
-- the unchanged browserless forgery oracle,
+- the unchanged browserless forgery oracle (naive, emits pure-sim
+  placeholders — rejected 100 percent, NOT a full-knowledge number),
+- the white-box envelope forger (reimplements the five published
+  envelopes; **passes every program** — the honest full-knowledge
+  number, proving version 6 is not a browser boundary),
 - the unmodified interpreter asset inside jsdom,
 - the same inside happy-dom.
 
-The measured outcome (see docs/performance-analysis.md, the Plane 8
-section): every leg rejects 100 percent of the corpus, far above the
-99.9 percent bar, and the emulator legs publish their per-attempt
-cost (the full-fidelity headless emulator cost of a v6 attempt).
+The measured outcome: the naive oracle and the emulator legs reject
+100 percent of the corpus; the white-box leg passes 100 percent. The
+emulator legs publish their per-attempt cost (the full-fidelity
+headless emulator cost of a v6 attempt). The white-box pass rate is
+the figure that belongs in every threat model: version 6 costs one
+reading of the source.
+
+## Optional hardening considered: HMAC-bound envelopes
+
+Binding the expected envelope to a per-deployment secret (`execution_key`)
+was considered and rejected as a fix that cannot exist in this
+architecture:
+
+- The key never leaves the server (it only feeds the program
+  generator), so the browser interpreter cannot compute any keyed
+  expected value.
+- The browser reports real measurements determined by the public
+  operands and the platform; a keyed envelope would either exclude real
+  engines or add no restriction over the public band.
+- Any keyed value shipped in the program or on the wire is visible to
+  the same forger who already reads the operands.
+
+The correct fix is honesty plus risk weighting: treat v6 as evidence
+that costs one source reading, never weight it as proof of a real
+browser, and keep the PoW/price ladder as the real acceptance boundary.
+Deployments that want a genuine environment boundary need a protocol
+change that puts a secret on the client (e.g. attested execution or a
+server-mediated measurement), which is out of scope for this rung.
 
 ## Authority
 

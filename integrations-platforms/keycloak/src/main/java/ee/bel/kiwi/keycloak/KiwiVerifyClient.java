@@ -66,7 +66,11 @@ public final class KiwiVerifyClient {
         if (status == 0 || status >= 500 || status == 401 || status == 404) {
             return Result.UNAVAILABLE;
         }
-        if (responseBodyHasSuccess(response.body())) {
+        // A pass requires the upstream to say success on a 2xx status:
+        // a redirect (3xx) or any other non-2xx carrying a
+        // success-shaped body is a status/body mismatch and fails
+        // closed.
+        if (status >= 200 && status <= 299 && responseBodyHasSuccess(response.body())) {
             return new Result(true, "verified", status);
         }
         return new Result(false, "challenge_failed", status);

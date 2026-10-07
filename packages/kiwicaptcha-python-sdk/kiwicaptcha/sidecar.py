@@ -51,6 +51,8 @@ def delegate_to_sidecar(
     scope: str,
     client_ip: Optional[str],
     policy: ExecutionPolicy,
+    enforce_telemetry: bool = False,
+    operation_identity: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Hand one execution-armed verification to the sidecar.
 
@@ -59,9 +61,21 @@ def delegate_to_sidecar(
     wire vocabulary) through verbatim, with the transport failures
     fail-closed (``storage_unavailable`` keeps the retry disposition
     with the record intact).
+
+    ``enforce_telemetry`` and ``operation_identity`` ride along so a
+    sidecar that enforces either never sees a watered-down request:
+    the caller's telemetry posture and idempotency identity are the
+    verification's own, never silently dropped at the delegation
+    seam.
     """
     base = policy.sidecar_url.strip().rstrip("/")
-    body = json.dumps({"token": raw_token, "scope": scope, "remoteip": client_ip}).encode()
+    body = json.dumps({
+        "token": raw_token,
+        "scope": scope,
+        "remoteip": client_ip,
+        "enforce_telemetry": bool(enforce_telemetry),
+        "operation_identity": operation_identity,
+    }).encode()
     request = urllib.request.Request(
         f"{base}/verify",
         data=body,

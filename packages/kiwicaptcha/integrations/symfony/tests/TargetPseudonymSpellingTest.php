@@ -153,6 +153,7 @@ final class TargetPseudonymSpellingTest extends TestCase
             300,
             5,
             'hash',
+            targetOwned: true,
         );
         $credit->credit($challenge->id, $challenge);
         self::assertCount(2, $reporter->reports);

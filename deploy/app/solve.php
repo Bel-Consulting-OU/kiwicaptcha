@@ -30,6 +30,14 @@ declare(strict_types=1);
  * SolutionToken API the browser uses.
  */
 
+if (PHP_SAPI !== 'cli') {
+    // Defense in depth: the router already answers every HTTP request
+    // with 404, but this helper must also refuse to execute when the
+    // document root is ever served without the router in front.
+    http_response_code(404);
+    exit;
+}
+
 require __DIR__.'/vendor/autoload.php';
 
 use KiwiCaptcha\SolutionToken;

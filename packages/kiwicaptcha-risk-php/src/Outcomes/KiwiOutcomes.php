@@ -94,11 +94,16 @@ final class KiwiOutcomes
             // protection: an authentication failure reported against a
             // target registers the failure in the engine's target state;
             // a completed step-up clears the counter (change.md 3.4.2).
+            // The clear is gated on a non-empty idempotency key: only
+            // the step-up completion credit path (which always derives
+            // one from the consumed challenge) may reset a target's
+            // failure counter. A bare report with no key is not proof of
+            // completion and must never launder a victim's state.
             if ($handle->dimension === OutcomeHandleDimension::Target && $this->marks instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface) {
                 if ($outcome === Outcome::AuthenticationFailure) {
-                    [$source, $asn] = $this->engine->targetSpreadElements($context);
+                    [$source, $asn] = $this->engine->targetSpreadElements($handle->id, $context);
                     $this->marks->registerTargetFailure($handle->id, $source, $asn);
-                } elseif ($outcome === Outcome::StepUpCompleted) {
+                } elseif ($outcome === Outcome::StepUpCompleted && $idempotencyKey !== null && $idempotencyKey !== '') {
                     $this->marks->clearTargetFailures($handle->id);
                 }
             }

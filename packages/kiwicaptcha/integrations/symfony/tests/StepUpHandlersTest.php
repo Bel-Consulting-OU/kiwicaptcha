@@ -357,6 +357,88 @@ final class StepUpHandlersTest extends TestCase
         self::assertSame(StepUpResult::FAIL_REPLAYED_STEP, $result4->failureCode);
     }
 
+    /**
+     * First-time TOTP enrollment is gated exactly like a re-enroll:
+     * without a step-up completed in THIS session (with an established
+     * factor) the handler refuses — the credential-stuffing takeover
+     * path (planting the attacker's own authenticator on a secret-less
+     * account) must never run. A principal-level marker never suffices.
+     */
+    public function testFirstTotpEnrollmentRequiresASessionStepUp(): void
+    {
+        $handler = $this->totpHandler();
+        // No step-up at all: refused.
+        try {
+            $handler->enroll(self::PRINCIPAL, 'sess-totp');
+            self::fail('HOLE: first TOTP enrollment ran with no session step-up');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('step-up completed in this session', $e->getMessage());
+        }
+        // No session id at all: refused.
+        try {
+            $handler->enroll(self::PRINCIPAL);
+            self::fail('HOLE: first TOTP enrollment ran with no session id');
+        } catch (\RuntimeException) {
+        }
+        // A principal-level marker is not session-scoped: refused.
+        $this->store->markStepUpSuccess(self::PRINCIPAL, 900, $this->now);
+        try {
+            $handler->enroll(self::PRINCIPAL, 'sess-totp');
+            self::fail('HOLE: a principal-level marker authorized first enrollment');
+        } catch (\RuntimeException) {
+        }
+        // The session-scoped step-up with any established factor (the
+        // email_otp floor) authorizes the first enrollment.
+        $this->store->markSessionStepUpSuccess('sess-totp', self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $secret32 = $handler->enroll(self::PRINCIPAL, 'sess-totp');
+        self::assertMatchesRegularExpression('/^[A-Z2-7]{32}$/D', $secret32);
+        // Re-enroll then demands the strongest-factor floor (totp), so
+        // the stale email_otp marker no longer opens the swap.
+        try {
+            $handler->enroll(self::PRINCIPAL, 'sess-totp');
+            self::fail('HOLE: an email_otp marker authorized a TOTP re-enroll');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('current factor', $e->getMessage());
+        }
+    }
+
+    /**
+     * The at-rest seal is bound to the owning principal: a sealed
+     * secret transplanted into another principal's record slot never
+     * decrypts, and the failure is the typed unseal error mapped to a
+     * failed verdict — never an uncaught exception / 500.
+     */
+    public function testTotpSecretsAreBoundToTheirPrincipal(): void
+    {
+        $handler = $this->totpHandler();
+        $this->store->markSessionStepUpSuccess('sess-totp', self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $secret32 = $handler->enroll(self::PRINCIPAL, 'sess-totp');
+        $sealed = $this->store->findTotpSecret(self::PRINCIPAL);
+        self::assertIsString($sealed);
+        self::assertNotSame($secret32, $sealed, 'the stored value is the sealed blob, never the raw key material');
+        self::assertNotSame((string) TotpCode::base32Decode($secret32), $sealed);
+
+        // Cross-slot copy: the victim's sealed secret planted on another
+        // principal must fail closed as a typed failure, not 500.
+        $other = 'ffeeddccbbaa99887766554433221100';
+        $this->store->saveTotpSecret($other, $sealed);
+        $begin = $handler->begin($this->beginRequest(), $this->contextNoTargetFor($other));
+        $ticket = $this->ticketOf($begin);
+        $result = $handler->complete($this->completeRequestFor($other, $ticket, '000000'));
+        self::assertSame(StepUpResultStatus::Failed, $result->status);
+        self::assertSame(StepUpResult::FAIL_SECRET_UNUSABLE, $result->failureCode, 'a cross-principal transplant is an unusable secret, typed');
+
+        // A legacy plaintext record (predates the seal) is the same
+        // typed failure.
+        $this->store->saveTotpSecret(self::PRINCIPAL, 'plaintext-legacy-secret');
+        $begin2 = $handler->begin($this->beginRequest(), $this->contextNoTarget());
+        $result2 = $handler->complete($this->completeRequest($this->ticketOf($begin2), '000000'));
+        self::assertSame(StepUpResultStatus::Failed, $result2->status);
+        self::assertSame(StepUpResult::FAIL_SECRET_UNUSABLE, $result2->failureCode);
+        // The typed error itself is the documented unseal failure.
+        self::assertTrue(is_a(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpSecretUnsealException::class, \RuntimeException::class, true));
+    }
+
     public function testTheTotpHandlerRefusesUnenrolledPrincipalsAndFarCodes(): void
     {
         $handler = $this->totpHandler();
@@ -472,28 +554,51 @@ final class StepUpHandlersTest extends TestCase
 
     private function context(string $principal = self::PRINCIPAL, string $mode = StepUpContext::MODE_HTML): StepUpContext
     {
-        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode);
+        return new StepUpContext($principal, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode, true);
     }
 
     private function contextNoTarget(): StepUpContext
     {
-        return new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required');
+        return $this->contextNoTargetFor(self::PRINCIPAL);
+    }
+
+    private function contextNoTargetFor(string $principal): StepUpContext
+    {
+        return new StepUpContext($principal, null, 'login', null, 'post_solve_step_up_required');
+    }
+
+    private const SESSION = 'handlers-test-session-000000000001';
+
+    private function withSession(Request $request, string $sessionId = self::SESSION): Request
+    {
+        $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+        $storage->setId($sessionId);
+        $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
+        $session->start();
+        $request->setSession($session);
+
+        return $request;
     }
 
     private function beginRequest(): Request
     {
-        return Request::create('https://example.com/kiwi/step-up/begin');
+        return $this->withSession(Request::create('https://example.com/kiwi/step-up/begin'));
     }
 
     private function completeRequest(string $ticket, string $code): Request
     {
-        $request = Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
+        return $this->completeRequestFor(self::PRINCIPAL, $ticket, $code);
+    }
+
+    private function completeRequestFor(string $principal, string $ticket, string $code): Request
+    {
+        $request = $this->withSession(Request::create('https://example.com/kiwi/step-up/complete', 'POST', [
             EmailOtpStepUpHandler::TICKET_FIELD => $ticket,
             EmailOtpStepUpHandler::CODE_FIELD => $code,
-        ]);
+        ]));
         // The controller binds the re-resolved principal before the
         // handler runs; direct handler calls bind it the same way.
-        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, $principal);
 
         return $request;
     }

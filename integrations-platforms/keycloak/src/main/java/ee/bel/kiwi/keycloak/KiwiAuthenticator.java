@@ -71,10 +71,15 @@ public class KiwiAuthenticator implements Authenticator {
         // (KC_PROXY) rewrites the connection's remote address, so the
         // authenticator must never parse forwarding headers itself —
         // a client-supplied X-Forwarded-For would otherwise choose the
-        // bound IP with one header.
-        String ip = context.getConnection() == null ? "127.0.0.1" : context.getConnection().getRemoteAddr();
+        // bound IP with one header. A missing peer fails closed: never
+        // invent 127.0.0.1 (the remoteip is the challenge's binding
+        // key).
+        String ip = context.getConnection() == null ? null : context.getConnection().getRemoteAddr();
         if (ip == null || ip.isBlank()) {
-            ip = "127.0.0.1";
+            LOG.warn("kiwicaptcha: no socket peer for the verify binding; failing the flow closed");
+            context.getEvent().detail("kiwicaptcha", "missing_client_ip");
+            context.failure(AuthenticationFlowError.INTERNAL_ERROR);
+            return;
         }
 
         KiwiVerifyClient.Result result = client.verify(verifyUrl, bearer, token, scope, ip);

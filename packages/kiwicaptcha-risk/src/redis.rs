@@ -649,15 +649,19 @@ impl RedisRiskStateStore {
                 .any(|c| c.is_control() || matches!(c, ':' | '}' | '\u{2028}' | '\u{2029}'))
     }
 
-    /// Cheap per-assessment cluster-safety check: every key must carry the
-    /// store's hash-tag prefix (a shared prefix implies a shared cluster
-    /// slot — the tag's slot is fixed at construction, so the per-key
-    /// CRC-16 recomputation is unnecessary).
+    /// Cheap per-assessment key-family check: every key must carry either
+    /// the store's shared hash-tag prefix (a shared prefix implies a
+    /// shared cluster slot — the tag's slot is fixed at construction, so
+    /// the per-key CRC-16 recomputation is unnecessary) or the target
+    /// family tag `{kiwi:<ns>:target:<hex2>}` (the target failure hash
+    /// and its spread HLLs ride their own slot so a stuffing storm never
+    /// hammers the shared primary).
     fn check_key_tag(&self, keys: &[String]) -> Result<(), RiskStoreError> {
+        let target_family = format!("{{kiwi:{}:target:", self.namespace);
         for key in keys {
-            if !key.starts_with(&self.key_tag) {
+            if !key.starts_with(&self.key_tag) && !key.starts_with(&target_family) {
                 return Err(RiskStoreError::ScriptError(format!(
-                    "key {key} does not carry the {{kiwi:{}}} hash tag",
+                    "key {key} does not carry the {{kiwi:{}}} hash tag or the target family",
                     self.namespace
                 )));
             }
@@ -939,7 +943,7 @@ impl RedisRiskStateStore {
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
 
-        if reply.len() < 21 {
+        if reply.len() < 22 {
             return Err(RiskStoreError::ScriptError(format!(
                 "risk script returned an unexpected payload ({} values)",
                 reply.len()
@@ -1002,7 +1006,8 @@ impl RedisRiskStateStore {
             existing_tls_tag: (!existing_tls_tag.is_empty()).then_some(existing_tls_tag),
             registration_status,
             target_failures: value_i64(&reply[19])?.max(0) as u32,
-            target_spread: value_i64(&reply[20])?.max(0) as u32,
+            target_spread_sources: value_i64(&reply[20])?.max(0) as u32,
+            target_spread_asns: value_i64(&reply[21])?.max(0) as u32,
         })
     }
 
@@ -1016,14 +1021,14 @@ impl RedisRiskStateStore {
     }
 
     /// The target-dimension state keys of one target pseudonym: the
-    /// failure hash plus the source/asn spread HLLs, byte-identical with
-    /// the keys assess_v2.lua maintains (KEYS[14..16]).
+    /// failure hash plus the source/asn spread HLLs, on the target id's
+    /// own family slot (`{kiwi:<ns>:target:<hex2>}`) — byte-identical
+    /// with the keys assess_v2.lua maintains (KEYS[14..16]) and the
+    /// PHP `RedisRiskStateStore::targetStateKeys`. A stuffing storm
+    /// against one target then hits that target's slot, never the
+    /// shared `{kiwi:<ns>}` primary.
     fn target_state_keys(&self, target_id: &str) -> [String; 3] {
-        [
-            format!("{{kiwi:{}}}:risk:tgt:{target_id}", self.namespace),
-            format!("{{kiwi:{}}}:risk:tgt:src:{target_id}", self.namespace),
-            format!("{{kiwi:{}}}:risk:tgt:asn:{target_id}", self.namespace),
-        ]
+        crate::keyspace::target_state_keys(&self.namespace, target_id)
     }
 
     /// One target_failure.lua op, returning {fails, spread}.
@@ -1056,7 +1061,7 @@ impl RedisRiskStateStore {
         let reply: Vec<i64> = self
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
-        if reply.len() < 4 {
+        if reply.len() < 5 {
             return Err(RiskStoreError::ScriptError(format!(
                 "target_failure script returned {} values",
                 reply.len()
@@ -1064,9 +1069,10 @@ impl RedisRiskStateStore {
         }
         Ok(crate::store::TargetState {
             fails: reply[0].clamp(0, i64::from(u32::MAX)) as u32,
-            spread: reply[1].clamp(0, i64::from(u32::MAX)) as u32,
-            first_ms: reply[2],
-            last_ms: reply[3],
+            spread_sources: reply[1].clamp(0, i64::from(u32::MAX)) as u32,
+            spread_asns: reply[2].clamp(0, i64::from(u32::MAX)) as u32,
+            first_ms: reply[3],
+            last_ms: reply[4],
         })
     }
 
@@ -1102,7 +1108,10 @@ impl RedisRiskStateStore {
     /// TTL land in one script call. The clock is the server's TIME; the
     /// `now_ms` argument is kept for wire compatibility and ignored.
     /// `event_id` dedupes the write (`''` disables dedupe): a retried
-    /// report returns the count unchanged.
+    /// report returns the count unchanged. The dedupe marker carries
+    /// the script's retry-horizon TTL (24 h), not the mark's long TTL —
+    /// one marker key per event id must not pin the keyspace for the
+    /// whole mark life.
     ///
     /// # Errors
     ///
@@ -1131,7 +1140,18 @@ impl RedisRiskStateStore {
             // this path, never written beyond the marker slot).
             invocation.key(key.as_str());
         } else {
-            invocation.key(format!("mark:{{kiwi:{}}}:dd:{event_id}", self.namespace));
+            // The marker is scoped to THIS mark (dimension + id), so a
+            // reused event id on another dimension can never suppress a
+            // different mark (cross-dimension transplant / suppression).
+            // The event id itself must be a safe key component: it is
+            // interpolated into a Redis key.
+            if !Self::valid_key_component(event_id) {
+                return Err(RiskStoreError::InvalidIdentifier(format!(
+                    "event_id is not a safe Redis key component (got 0x{})",
+                    hex::encode(event_id)
+                )));
+            }
+            invocation.key(format!("{key}:dd:{event_id}"));
         }
         invocation.arg(kind);
         invocation.arg(now_ms);
@@ -2068,7 +2088,7 @@ mod tests {
 
         // assess_v2_full: the same clamps in the 19-slot consolidated
         // reply (slots 16..18 are the tag/registration strings).
-        let reply = b"*21\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n:0\r\n:0\r\n".to_vec();
+        let reply = b"*22\r\n:70000\r\n:-5\r\n:1000\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:0\r\n:65541\r\n:0\r\n:9\r\n:-7\r\n:2\r\n$2\r\naa\r\n$0\r\n\r\n:0\r\n:0\r\n:0\r\n:0\r\n".to_vec();
         let store = fake_store(String::from_utf8(reply).unwrap(), "clampv2");
         let reply = store
             .assess_v2_full(&observation(&event_id(1), 0, T0, 0), None, None, None)
@@ -2129,7 +2149,7 @@ mod tests {
             ),
         ];
         for (namespace, malformed_slot, malformed_reply, label) in cases {
-            let reply = fixed_reply(21, |i| {
+            let reply = fixed_reply(22, |i| {
                 if i == malformed_slot {
                     malformed_reply
                 } else if i == 16 {
@@ -2156,7 +2176,7 @@ mod tests {
     #[test]
     fn assess_v2_full_tag_slots_accept_nil_and_strings() {
         let observation = observation(&event_id(1), 0, T0, 0);
-        let reply = fixed_reply(21, |i| match i {
+        let reply = fixed_reply(22, |i| match i {
             16 => "$-1\r\n",
             17 => "$2\r\nbb\r\n",
             _ => ":0\r\n",
@@ -2168,7 +2188,7 @@ mod tests {
         assert_eq!(reply.existing_context_tag, None, "a Nil tag means none");
         assert_eq!(reply.existing_tls_tag.as_deref(), Some("bb"));
 
-        let reply = fixed_reply(21, |i| match i {
+        let reply = fixed_reply(22, |i| match i {
             16 => "$2\r\naa\r\n",
             17 => "$-1\r\n",
             _ => ":0\r\n",
@@ -2191,7 +2211,7 @@ mod tests {
             ("tagint", 16, ":5\r\n", "an integer context tag"),
             ("tagarr", 17, "*1\r\n:5\r\n", "an array TLS tag"),
         ] {
-            let reply = fixed_reply(21, |i| {
+            let reply = fixed_reply(22, |i| {
                 if i == tag_slot {
                     malformed_reply
                 } else if i == 16 || i == 17 {

@@ -17,11 +17,17 @@ use KiwiCaptcha\Risk\RiskReason;
  * stage that composes them (change.md 3.2.3). Mirror of the Rust
  * `evidence` module; the two cores must stay byte-identical.
  *
- * The stage runs after the marks stage and before the pricing stage and
- * may only raise the composed action; an absent-evidence assessment
- * passes the decision through untouched. The shared corpus
- * (protocol/telemetry-v1/evidence-vectors.json) pins the scoring, the
- * schema acceptance and the composed stage in both cores.
+ * Execution-dimension evidence (ExecutionChallengeV1 traces/digests) is
+ * NEVER an input here and is NEVER weighted as proof of a real browser:
+ * every version's trace is forgeable without a browser by a
+ * full-knowledge forger who reads the published envelopes (see
+ * WhiteBoxEnvelopeForger / the D3.2 whitebox stage; version 6 pass
+ * rate 1.0). The stage runs after the marks stage and before the
+ * pricing stage and may only raise the composed action; an
+ * absent-evidence assessment passes the decision through untouched.
+ * The shared corpus (protocol/telemetry-v1/evidence-vectors.json) pins
+ * the scoring, the schema acceptance and the composed stage in both
+ * cores.
  */
 final class EvidenceModel
 {

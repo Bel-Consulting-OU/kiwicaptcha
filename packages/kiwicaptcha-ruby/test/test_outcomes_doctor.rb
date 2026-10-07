@@ -169,6 +169,32 @@ class OutcomesDoctorTest < Minitest::Test
     end
   end
 
+  def test_the_argon_memory_profile_space_is_powers_of_two_rejected_at_config_time
+    valid = KiwiCaptcha::Settings.method(:valid_argon_memory_kib?)
+    assert valid.call(16 * 1024)
+    assert valid.call(32 * 1024)
+    assert valid.call(64 * 1024)
+    refute valid.call(100)
+    refute valid.call(10_000)
+    refute valid.call(0)
+    refute valid.call(7)
+    refute valid.call(65_537)
+
+    assert_equal :ok, KiwiCaptcha::Settings.assert_argon_rung_params!(16 * 1024, 3)
+
+    # The rejection lives at configuration time, never per request.
+    raised = assert_raises(ArgumentError) do
+      KiwiCaptcha::Settings.assert_argon_rung_params!(100, 3)
+    end
+    assert_match(/configuration time/, raised.message)
+
+    # Every priced rung budget sits in the protocol space.
+    KiwiCaptcha::Settings::ARGON_RUNG_MEMORY_KIB.each do |m_kib|
+      assert valid.call(m_kib), "rung budget #{m_kib} KiB"
+      assert_equal :ok, KiwiCaptcha::Settings.assert_argon_rung_params!(m_kib, 3)
+    end
+  end
+
   # A store whose every read raises: the doctor must report it, not
   # crash.
   class FailingStore

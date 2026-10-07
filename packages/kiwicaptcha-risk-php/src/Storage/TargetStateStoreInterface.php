@@ -6,11 +6,11 @@ namespace KiwiCaptcha\Risk\Storage;
 
 /**
  * The live target-dimension state (change.md 3.2.1): the leaky-bucket
- * authentication-failure counter of one target plus its source+asn
- * spread. Written by the outcome-bridge path when a failure is reported
- * against a target; compiled into the marks stage's attacked-target
- * record by MarksView::read. Rust mirror: the RiskStateStore target
- * methods over protocol/risk-v1/target_failure.lua.
+ * authentication-failure counter of one target plus its source and asn
+ * spreads (kept separate, never summed). Written by the outcome-bridge
+ * path when a failure is reported against a target; compiled into the
+ * marks stage's attacked-target record by MarksView::read. Rust mirror:
+ * the RiskStateStore target methods over protocol/risk-v1/target_failure.lua.
  */
 interface TargetStateStoreInterface
 {
@@ -19,7 +19,7 @@ interface TargetStateStoreInterface
      * increments the leaky failure counter and PFADDs the failing
      * source/asn spread elements. Returns the updated state.
      *
-     * @return array{fails: int, spread: int, first_ms: int, last_ms: int}
+     * @return array{fails: int, spread_sources: int, spread_asns: int, first_ms: int, last_ms: int}
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function registerTargetFailure(string $targetId, string $source, string $asn): array;
@@ -36,7 +36,7 @@ interface TargetStateStoreInterface
     /**
      * The live target-dimension state of one target.
      *
-     * @return array{fails: int, spread: int, first_ms: int, last_ms: int}
+     * @return array{fails: int, spread_sources: int, spread_asns: int, first_ms: int, last_ms: int}
      * @throws RiskStoreException when the underlying state backend fails
      */
     public function readTargetState(string $targetId): array;

@@ -130,7 +130,7 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
         return $this->marks["{$dimension}:{$id}"] ?? null;
     }
 
-    /** @var array<string, array{fails: int, spread: int, first_ms: int, last_ms: int}> */
+    /** @var array<string, array{fails: int, spread_sources: int, spread_asns: int, first_ms: int, last_ms: int}> */
     public array $targetState = [];
 
     /** @var array<string, array<string, true>> */
@@ -138,7 +138,7 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
 
     public function registerTargetFailure(string $targetId, string $source, string $asn): array
     {
-        $entry = $this->targetState[$targetId] ?? ['fails' => 0, 'spread' => 0, 'first_ms' => 0, 'last_ms' => 0];
+        $entry = $this->targetState[$targetId] ?? ['fails' => 0, 'spread_sources' => 0, 'spread_asns' => 0, 'first_ms' => 0, 'last_ms' => 0];
         $entry['fails'] += 1;
         $entry['last_ms'] = (int) floor(microtime(true) * 1000);
         if ($entry['first_ms'] === 0) {
@@ -152,7 +152,8 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
             $set["asn:$asn"] = true;
         }
         $this->targetSpread[$targetId] = $set;
-        $entry['spread'] = \count($set);
+        $entry['spread_sources'] = \count(array_filter(array_keys($set), static fn (string $k): bool => str_starts_with($k, 'src:')));
+        $entry['spread_asns'] = \count(array_filter(array_keys($set), static fn (string $k): bool => str_starts_with($k, 'asn:')));
         $this->targetState[$targetId] = $entry;
 
         return $entry;
@@ -169,7 +170,7 @@ abstract class RiskStateStoreStub implements RiskStateStoreInterface, SessionCon
 
     public function readTargetState(string $targetId): array
     {
-        return $this->targetState[$targetId] ?? ['fails' => 0, 'spread' => 0, 'first_ms' => 0, 'last_ms' => 0];
+        return $this->targetState[$targetId] ?? ['fails' => 0, 'spread_sources' => 0, 'spread_asns' => 0, 'first_ms' => 0, 'last_ms' => 0];
     }
 
     public function forgetMarks(string $dimension, string $id): int

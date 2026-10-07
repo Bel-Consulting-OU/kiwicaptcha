@@ -4,12 +4,13 @@ backends; every assertion here runs against both."""
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
 sys.path.insert(0, ".")
 
-from tests.support import ISSUED_AT, mint_v2_record
+from tests.support import CLIENT_IP, ISSUED_AT, NOW, SECRET, mint_v2_record, solve_sha
 
 from kiwicaptcha.stores.base import (
     AtomicDeleteIfPendingStorage,
@@ -23,6 +24,8 @@ from kiwicaptcha.stores.base import (
 )
 from kiwicaptcha.stores.memory import MemoryStorage
 from kiwicaptcha.stores.sqlite import SqliteStorage
+from kiwicaptcha.tokens import SolutionToken
+from kiwicaptcha.verify import Verifier, VerifierConfig, VerifyOptions
 
 
 def make_memory():
@@ -358,6 +361,91 @@ class SqliteConnectionPolicyTest(unittest.TestCase):
             self.assertIn("in-memory", str(exc))
         finally:
             caller.close()
+
+
+class SqliteThreadedAccessTest(unittest.TestCase):
+    """One shared store across request threads, the WSGI singleton.
+
+    The adapter's connection belongs to the store, not to the thread
+    that constructed it: verifications issued from worker threads must
+    resolve exactly like the constructing thread's own.
+    """
+
+    def _shared(self):
+        storage = make_sqlite()
+        self.addCleanup(storage.close)
+        verifier = Verifier(storage, VerifierConfig(now_provider=lambda: NOW))
+        return storage, verifier
+
+    def _verify(self, verifier, record, operation_identity=None):
+        counter = solve_sha(record.prefix, record.salt, record.target_bits)
+        token = SolutionToken.create(record.nonce, counter, 5000, {}).encode()
+        return verifier.verify(
+            token,
+            VerifyOptions(
+                secret_key=SECRET,
+                expected_scope="login",
+                client_ip=CLIENT_IP,
+                operation_identity=operation_identity,
+            ),
+        )
+
+    def test_shared_store_serves_verifications_across_threads(self):
+        storage, verifier = self._shared()
+        records = [mint_v2_record(nonce_bytes=bytes([i] * 32)) for i in range(8)]
+        for record in records:
+            storage.store(record)
+        outcomes = {}
+        errors = []
+
+        def worker(record):
+            try:
+                outcomes[record.nonce] = self._verify(verifier, record)
+            except Exception as exc:  # pragma: no cover - the regression pin
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(r,)) for r in records]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertEqual(8, len(outcomes))
+        for nonce, outcome in outcomes.items():
+            self.assertTrue(outcome.is_ok(), f"{nonce}: {outcome.code}")
+            self.assertFalse(outcome.from_stored_result)
+
+    def test_threaded_race_is_exactly_once(self):
+        storage, verifier = self._shared()
+        record = mint_v2_record()
+        storage.store(record)
+        outcomes = []
+        errors = []
+        barrier = threading.Barrier(6)
+
+        def worker():
+            try:
+                barrier.wait(timeout=5)
+                outcomes.append(self._verify(verifier, record))
+            except Exception as exc:  # pragma: no cover - the regression pin
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([], errors)
+        self.assertEqual(6, len(outcomes))
+        fresh = [o for o in outcomes if o.is_ok() and not o.from_stored_result]
+        self.assertEqual(1, len(fresh), f"exactly one fresh winner: {[(o.code, o.from_stored_result) for o in outcomes]}")
+        for outcome in outcomes:
+            self.assertNotEqual("storage_unavailable", outcome.code)
+            self.assertTrue(
+                outcome.is_ok()
+                or outcome.code in ("already_consumed", "consume_indeterminate"),
+                outcome.code,
+            )
 
 
 if __name__ == "__main__":

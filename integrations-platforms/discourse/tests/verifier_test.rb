@@ -70,6 +70,28 @@ check("garbage body is unreadable", KiwiCaptcha::Verifier.decide(
   token: "t", scope: "login", settings: settings, server: {},
   transport: ->(_r) { { status: 200, body: "<html>" } }
 ) == { ok: false, code: :unreadable })
+check("302 with success body fails closed", KiwiCaptcha::Verifier.decide(
+  token: "t", scope: "login", settings: settings, server: {},
+  transport: ->(_r) { { status: 302, body: '{"success":true}' } }
+) == { ok: false, code: :challenge_failed })
+check("403 with success body fails closed", KiwiCaptcha::Verifier.decide(
+  token: "t", scope: "login", settings: settings, server: {},
+  transport: ->(_r) { { status: 403, body: '{"success":true}' } }
+) == { ok: false, code: :challenge_failed })
+check("199 with success body fails closed", KiwiCaptcha::Verifier.decide(
+  token: "t", scope: "login", settings: settings, server: {},
+  transport: ->(_r) { { status: 199, body: '{"success":true}' } }
+) == { ok: false, code: :challenge_failed })
+check("204 with success body passes", KiwiCaptcha::Verifier.decide(
+  token: "t", scope: "login", settings: settings, server: {},
+  transport: ->(_r) { { status: 204, body: '{"success":true}' } }
+) == { ok: true, code: :verified })
+check("a raising transport is a fault, never an open gate", KiwiCaptcha::Verifier.decide(
+  token: "t", scope: "login", settings: settings, server: {},
+  transport: ->(_r) { raise IOError, "down" }
+) == { ok: false, code: :unavailable })
+check("missing peer fails closed", KiwiCaptcha::Verifier.client_ip({}, []) == "")
+check("garbage peer fails closed", KiwiCaptcha::Verifier.client_ip({ "REMOTE_ADDR" => "not-an-ip" }, []) == "")
 
 # The real transport against a handcrafted local HTTP server.
 require "socket"

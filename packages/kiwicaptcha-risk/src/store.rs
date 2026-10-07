@@ -120,14 +120,18 @@ pub struct AssessV2Reply {
     /// The target's decayed authentication-failure count at assessment
     /// time (0 when the observation carries no target).
     pub target_failures: u32,
-    /// The distinct source+asn spread of failures against the target
+    /// The distinct-source spread of failures against the target
+    /// (0 when the observation carries no target). Kept separate from
+    /// the ASN spread — the two are never summed.
+    pub target_spread_sources: u32,
+    /// The distinct-ASN spread of failures against the target
     /// (0 when the observation carries no target).
-    pub target_spread: u32,
+    pub target_spread_asns: u32,
 }
 
 /// The live target-dimension state (change.md 3.2.1): the leaky-bucket
-/// authentication-failure counter of one target plus its source+asn
-/// spread. Compiled into the marks stage's attacked-target record by
+/// authentication-failure counter of one target plus its source and asn
+/// spreads. Compiled into the marks stage's attacked-target record by
 /// [`crate::marks::MarksView::read`]; written by the outcome-bridge
 /// path when a failure is reported against a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,8 +142,11 @@ pub struct TargetState {
     pub first_ms: i64,
     /// The most recent failure (epoch ms).
     pub last_ms: i64,
-    /// The distinct source+asn spread (the two HyperLogLogs summed).
-    pub spread: u32,
+    /// The distinct-source spread (its own HyperLogLog; never summed
+    /// with the ASN spread).
+    pub spread_sources: u32,
+    /// The distinct-ASN spread (its own HyperLogLog).
+    pub spread_asns: u32,
 }
 
 /// Risk state store: applies an observation (event_id dedupe) and returns
@@ -355,6 +362,70 @@ pub trait SessionTlsTagStore {
         _session_id: &[u8; 16],
         _tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
+        Ok(None)
+    }
+}
+
+/// Optional risk-v2 capability: the principal's first-seen network tag
+/// records (one per (principal, network-bucket) pair, SET NX).
+///
+/// Kept out of the [`RiskStateStore`] trait for the same reason as the
+/// session tags — existing implementations compile unchanged — and
+/// wired into the engine beside the frozen wire via
+/// `RiskEngine::with_principal_networks`. The default implementation
+/// reports no record surface and the engine degrades the novel-network
+/// gate to neutral (never novel), never breaking an assessment.
+///
+/// The record marks a network bucket as ESTABLISHED for the principal
+/// (written when the session credit is granted — a completed step-up
+/// from that network), so a bare password check never vouches for the
+/// network and a retried stuffed login stays novel until the victim
+/// really proves themselves.
+pub trait PrincipalNetworkTagStore {
+    /// Whether the principal has been seen (established) from this
+    /// network bucket: `Ok(Some(true))` = seen before, `Ok(Some(false))`
+    /// = never seen (the first-attempt novel-network signal),
+    /// `Ok(None)` = no record surface (neutral: never novel).
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn principal_network_seen(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Ok(None)
+    }
+
+    /// Records the first-seen network tag for the (principal, network)
+    /// pair (SET NX, first write wins). Called when a session credit is
+    /// granted for a login from this network. Answers whether the record
+    /// was newly created.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn record_principal_network_tag(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<bool, RiskStoreError> {
+        Ok(false)
+    }
+
+    /// Whether the account carries ANY established network: the "no
+    /// prior trusted network" half of the novel-network gate.
+    /// `Ok(Some(true))` = the account has a trusted network,
+    /// `Ok(Some(false))` = none, `Ok(None)` = no record surface.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn principal_has_trusted_network(
+        &self,
+        _principal_id: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
         Ok(None)
     }
 }

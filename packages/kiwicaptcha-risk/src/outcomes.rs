@@ -637,17 +637,26 @@ where
             // target registers the failure in the engine's target state
             // (the leaky counter + spread HLLs assess_v2.lua maintains);
             // a completed step-up clears the counter so a legitimate
-            // user is not stepped up twice. Failures are stored by the
-            // engine, never injected by callers.
+            // user is not stepped up twice. The clear is gated on a
+            // non-empty idempotency key: only the step-up completion
+            // credit path (which always derives one from the consumed
+            // challenge) may reset a target's failure counter. Failures
+            // are stored by the engine, never injected by callers.
             if handle.dimension == HandleDimension::Target {
                 match outcome {
                     Outcome::AuthenticationFailure => {
-                        let (source, asn) =
-                            self.engine.target_spread_elements(context.as_ref());
+                        let (source, asn) = self
+                            .engine
+                            .target_spread_elements(&handle.id, context.as_ref());
                         self.engine
                             .register_target_failure(&handle.id, &source, &asn)?;
                     }
-                    Outcome::StepUpCompleted => {
+                    Outcome::StepUpCompleted
+                        if idempotency_key
+                            .as_deref()
+                            .map(|k| !k.is_empty())
+                            .unwrap_or(false) =>
+                    {
                         self.engine.clear_target_failures(&handle.id)?;
                     }
                     _ => {}
@@ -854,28 +863,32 @@ mod tests {
             if !asn.is_empty() {
                 set.insert(format!("asn:{asn}"));
             }
-            let spread = set.len() as u32;
+            let spread_sources = set.iter().filter(|e| e.starts_with("src:")).count() as u32;
+            let spread_asns = set.iter().filter(|e| e.starts_with("asn:")).count() as u32;
             Ok(TargetState {
                 fails: 1,
                 first_ms: 0,
                 last_ms: 0,
-                spread,
+                spread_sources,
+                spread_asns,
             })
         }
 
         fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskStoreError> {
-            let spread = self
-                .target_spread
-                .lock()
-                .unwrap()
-                .get(target_id)
-                .map(|s| s.len() as u32)
+            let set = self.target_spread.lock().unwrap();
+            let set = set.get(target_id);
+            let spread_sources = set
+                .map(|s| s.iter().filter(|e| e.starts_with("src:")).count() as u32)
+                .unwrap_or(0);
+            let spread_asns = set
+                .map(|s| s.iter().filter(|e| e.starts_with("asn:")).count() as u32)
                 .unwrap_or(0);
             Ok(TargetState {
                 fails: 0,
                 first_ms: 0,
                 last_ms: 0,
-                spread,
+                spread_sources,
+                spread_asns,
             })
         }
     }
@@ -1289,14 +1302,17 @@ mod tests {
 
         let state = RiskStateStore::read_target_state(&store, TARGET).unwrap();
         assert!(
-            state.spread >= 2,
+            state.spread_asns >= 2,
             "two distinct ASNs must spread at least 2 (got {})",
-            state.spread
+            state.spread_asns
         );
         let spread = store.target_spread.lock().unwrap();
         let elements = spread.get(TARGET).expect("spread recorded");
-        assert!(elements.contains("asn:a64496"), "got {elements:?}");
-        assert!(elements.contains("asn:a64500"), "got {elements:?}");
+        assert_eq!(
+            elements.iter().filter(|e| e.starts_with("asn:")).count(),
+            2,
+            "got {elements:?}"
+        );
     }
 
     #[test]

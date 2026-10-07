@@ -69,6 +69,8 @@ pub enum RiskReason {
     SolveAnomaly,
     DecoyEscalation,
     SpamMarkQuarantine,
+    NovelNetwork,
+    BreachedCredential,
 }
 
 impl RiskReason {
@@ -97,6 +99,8 @@ impl RiskReason {
             RiskReason::SolveAnomaly => "solve_anomaly",
             RiskReason::DecoyEscalation => "decoy_escalation",
             RiskReason::SpamMarkQuarantine => "spam_mark_quarantine",
+            RiskReason::NovelNetwork => "novel_network",
+            RiskReason::BreachedCredential => "breached_credential",
         }
     }
 }

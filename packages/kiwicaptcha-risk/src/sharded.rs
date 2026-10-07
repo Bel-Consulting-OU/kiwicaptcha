@@ -1014,7 +1014,8 @@ struct Assessment {
     existing_tls_tag: Option<String>,
     registration_status: bool,
     target_failures: u32,
-    target_spread: u32,
+    target_spread_sources: u32,
+    target_spread_asns: u32,
     /// The post-apply leaked sum of the event's own scope shard, written
     /// back into the merge cache.
     shard_sum: i64,
@@ -1169,7 +1170,8 @@ impl Assessment {
             // batch does not carry those slots. The engine reads the
             // live TargetState on the marks/score path instead.
             target_failures: 0,
-            target_spread: 0,
+            target_spread_sources: 0,
+            target_spread_asns: 0,
             shard_sum,
         })
     }
@@ -1397,7 +1399,8 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
             existing_tls_tag: assessment.existing_tls_tag,
             registration_status: assessment.registration_status,
             target_failures: assessment.target_failures,
-            target_spread: assessment.target_spread,
+            target_spread_sources: assessment.target_spread_sources,
+            target_spread_asns: assessment.target_spread_asns,
         }))
     }
 

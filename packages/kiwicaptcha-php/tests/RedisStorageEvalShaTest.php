@@ -22,6 +22,17 @@ use PHPUnit\Framework\TestCase;
  */
 final class RedisStorageEvalShaTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label: the record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes
+     * (the strict serde twin), so logical labels map to it here and the
+     * storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private const NONCE = 'evalsha-nonce-1';
 
     private function requirePredis(): FakePredisClient
@@ -36,7 +47,7 @@ final class RedisStorageEvalShaTest extends TestCase
     private function makeRecord(string $nonce = self::NONCE): ChallengeRecord
     {
         return new ChallengeRecord(
-            nonce: $nonce,
+            nonce: self::wn($nonce),
             scope: 'login',
             bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
@@ -46,8 +57,8 @@ final class RedisStorageEvalShaTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 123_456_789,
@@ -141,12 +152,12 @@ final class RedisStorageEvalShaTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $setup($storage, self::NONCE);
+        $setup($storage, self::wn(self::NONCE));
         $this->resetCounters($client);
 
         // First invocation: the sha is established with exactly one
         // `SCRIPT` `LOAD`, then the script runs through `EVALSHA`.
-        $op($storage, self::NONCE);
+        $op($storage, self::wn(self::NONCE));
         $loads = $client->scriptLoads;
         self::assertCount(1, $loads, 'the first invocation SCRIPT LOADs the script exactly once');
         $sha = sha1($loads[0]);
@@ -158,7 +169,7 @@ final class RedisStorageEvalShaTest extends TestCase
 
         // Second invocation: the cached sha serves — no `SCRIPT` `LOAD`, no
         // body, the same sha through `EVALSHA`.
-        $op($storage, self::NONCE);
+        $op($storage, self::wn(self::NONCE));
         self::assertSame([], $client->scriptLoads, 'the cached sha must serve; no SCRIPT LOAD on the second invocation');
         self::assertCount(1, $client->evalshas, 'the second invocation runs the script through EVALSHA');
         self::assertSame($sha, $client->evalshas[0], 'the second invocation uses the SAME cached sha');
@@ -184,12 +195,12 @@ final class RedisStorageEvalShaTest extends TestCase
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
-        $storage->consume(self::NONCE);
+        $storage->consume(self::wn(self::NONCE));
         $sha = $client->evalshas[0];
         $client->scriptsBySha = [];
         $this->resetCounters($client);
 
-        $retry = $storage->consume(self::NONCE);
+        $retry = $storage->consume(self::wn(self::NONCE));
 
         self::assertNotNull($retry);
         self::assertTrue($retry->consumedBefore, 'the replay of the consumed record resolves normally past the NOSCRIPT repair');
@@ -227,7 +238,7 @@ final class RedisStorageEvalShaTest extends TestCase
         self::assertNotNull($client);
         $storage = new RedisStorage($client, 'kiwi:');
 
-        $consumed = $storage->consume('absent-nonce');
+        $consumed = $storage->consume(self::wn('absent-nonce'));
 
         self::assertNull($consumed, 'the nil reply resolves as the missing record');
         self::assertSame(1, $client->evalShaCalls, 'exactly one EVALSHA ran');
@@ -245,7 +256,7 @@ final class RedisStorageEvalShaTest extends TestCase
         $client->evalShaBehavior = 'noscript-exception';
         $storage = new RedisStorage($client, 'kiwi:');
 
-        $result = $storage->consume('absent-nonce');
+        $result = $storage->consume(self::wn('absent-nonce'));
 
         self::assertNull($result, 'the canned repaired reply degrades to the missing semantics');
         self::assertSame(1, $client->evalShaCalls, 'the failing EVALSHA ran once');
@@ -264,7 +275,7 @@ final class RedisStorageEvalShaTest extends TestCase
         $client->evalShaBehavior = 'noscript-last-error';
         $storage = new RedisStorage($client, 'kiwi:');
 
-        $storage->consume('absent-nonce');
+        $storage->consume(self::wn('absent-nonce'));
 
         self::assertSame(1, $client->evalShaCalls, 'the buffered-NOSCRIPT EVALSHA ran once');
         self::assertSame(1, $client->evalCalls, 'the buffered NOSCRIPT is repaired through plain EVAL');

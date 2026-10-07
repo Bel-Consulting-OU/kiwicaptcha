@@ -93,31 +93,37 @@ final class KiwiVerifyLogic
                 $cidrs[] = $candidate;
             }
         }
-        $peer = (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
-        if ($cidrs === []) {
-            return $peer;
+        $peerCanonical = self::canonicalIp((string) ($server['REMOTE_ADDR'] ?? ''));
+        if ($peerCanonical === null) {
+            // Fail closed: a missing or unparsable socket peer is not a
+            // loopback client. The caller refuses the request rather
+            // than inventing 127.0.0.1 or forwarding a fabricated
+            // identity.
+            return '';
         }
-        $peerCanonical = self::canonicalIp($peer);
-        $peerTrusted = $peerCanonical !== null && self::inTrusted($peerCanonical, $cidrs);
+        if ($cidrs === []) {
+            return $peerCanonical;
+        }
+        $peerTrusted = self::inTrusted($peerCanonical, $cidrs);
         $forwarded = isset($server['HTTP_X_FORWARDED_FOR']) && is_string($server['HTTP_X_FORWARDED_FOR'])
             ? trim($server['HTTP_X_FORWARDED_FOR'])
             : '';
         if ($forwarded === '') {
             if (!$peerTrusted) {
-                return $peer;
+                return $peerCanonical;
             }
             $realIp = isset($server['HTTP_X_REAL_IP']) && is_string($server['HTTP_X_REAL_IP'])
                 ? trim($server['HTTP_X_REAL_IP'])
                 : '';
             if ($realIp === '' || preg_match('/[\x00-\x1F\x7F]/', $realIp) === 1) {
-                return $peer;
+                return $peerCanonical;
             }
             $canonical = self::canonicalIp($realIp);
 
-            return $canonical ?? $peer;
+            return $canonical ?? $peerCanonical;
         }
         if (preg_match('/[\x00-\x1F\x7F]/', $forwarded) === 1 || !$peerTrusted) {
-            return $peer;
+            return $peerCanonical;
         }
         foreach (array_reverse(array_map('trim', explode(',', $forwarded))) as $hop) {
             $canonical = self::canonicalIp($hop);
@@ -125,14 +131,14 @@ final class KiwiVerifyLogic
                 // An unparsable hop terminates the trust chain: who
                 // lies beyond it cannot be established, so the peer
                 // falls back.
-                return $peer;
+                return $peerCanonical;
             }
             if (!self::inTrusted($canonical, $cidrs)) {
                 return $canonical;
             }
         }
 
-        return $peer;
+        return $peerCanonical;
     }
 
     /**
@@ -319,7 +325,11 @@ final class KiwiVerifyLogic
         if (!is_array($body)) {
             return ['ok' => false, 'code' => 'verify_unreadable'];
         }
-        if (($body['success'] ?? false) === true) {
+        // A pass requires the upstream to say success on a 2xx status:
+        // a redirect (3xx) or any other non-2xx carrying a
+        // success-shaped body is a status/body mismatch and fails
+        // closed.
+        if ($status >= 200 && $status <= 299 && ($body['success'] ?? false) === true) {
             return ['ok' => true, 'code' => 'verified'];
         }
 

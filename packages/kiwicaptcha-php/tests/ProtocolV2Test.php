@@ -34,8 +34,8 @@ final class ProtocolV2Test extends TestCase
                 't' => 1,
                 'p' => 1,
                 'targetBits' => 8,
-                'salt' => 'c2FsdA==',
-                'prefix' => 'prefix',
+                'salt' => 'c2FsdHNhbHRzYWx0c2FsdA==',
+                'prefix' => 'challenge|c2FsdHNhbHRzYWx0c2FsdA==|',
                 'challenge' => 'challenge',
                 'minDurationMs' => 0,
             ], $overrides)

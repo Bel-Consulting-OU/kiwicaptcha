@@ -32,6 +32,17 @@ use PHPUnit\Framework\TestCase;
  */
 final class SqliteStorageContractTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label: the record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes
+     * (the strict serde twin), so logical labels map to it here and the
+     * storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private const ISSUED_AT = 1_800_000_000;
 
     private const CLIENT_IP = '198.51.100.7';
@@ -80,7 +91,7 @@ final class SqliteStorageContractTest extends TestCase
 
         $second = new SqliteStorage($path);
         self::assertSame(1, (int) $second->pdo()->query('PRAGMA user_version')->fetchColumn());
-        self::assertNotNull($second->find('reopen-nonce'), 'a reopened database keeps its records');
+        self::assertNotNull($second->find(self::wn('reopen-nonce')), 'a reopened database keeps its records');
         $this->unlinkDb($path);
     }
 
@@ -91,7 +102,7 @@ final class SqliteStorageContractTest extends TestCase
         $storage = new SqliteStorage($pdo, ttlMarginSecs: 0);
 
         $storage->store($this->makeRecord('pdo-arg-nonce'));
-        self::assertNotNull($storage->find('pdo-arg-nonce'));
+        self::assertNotNull($storage->find(self::wn('pdo-arg-nonce')));
         self::assertSame('wal', $pdo->query('PRAGMA journal_mode')->fetchColumn(), 'the pragmas reach the caller connection');
         $this->unlinkDb($path);
     }
@@ -184,7 +195,7 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $record = new ChallengeRecord(
-            nonce: 'full-nonce',
+            nonce: self::wn('full-nonce'),
             scope: 'login',
             bindingTag: 'tag-1',
             issuedAt: self::ISSUED_AT - 30,
@@ -194,8 +205,8 @@ final class SqliteStorageContractTest extends TestCase
             t: 2,
             p: 1,
             targetBits: 12,
-            salt: 'c2FsdA==',
-            prefix: 'pre-',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge-string'),
             challenge: 'challenge-string',
             minDurationMs: 250,
             issuedAtNs: 123_456_789_012_345,
@@ -210,7 +221,7 @@ final class SqliteStorageContractTest extends TestCase
         );
         $storage->store($record);
 
-        $loaded = $storage->find('full-nonce');
+        $loaded = $storage->find(self::wn('full-nonce'));
 
         self::assertNotNull($loaded);
         foreach ([
@@ -231,7 +242,7 @@ final class SqliteStorageContractTest extends TestCase
         $storage->store($this->makeRecord('same-nonce', expiresAt: self::ISSUED_AT + 60));
         $storage->store($this->makeRecord('same-nonce', expiresAt: self::ISSUED_AT + 300));
 
-        $loaded = $storage->find('same-nonce');
+        $loaded = $storage->find(self::wn('same-nonce'));
         self::assertSame(self::ISSUED_AT + 300, $loaded?->expiresAt, 'the second store replaces the first');
         self::assertSame(1, $this->rowCount($storage), 'one nonce maps to exactly one row');
     }
@@ -241,8 +252,8 @@ final class SqliteStorageContractTest extends TestCase
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('consume-once'));
 
-        $first = $storage->consume('consume-once');
-        $second = $storage->consume('consume-once');
+        $first = $storage->consume(self::wn('consume-once'));
+        $second = $storage->consume(self::wn('consume-once'));
 
         self::assertNotNull($first);
         self::assertTrue($first->consumedNow);
@@ -251,27 +262,27 @@ final class SqliteStorageContractTest extends TestCase
         self::assertNotNull($second, 'the replay reads the retained consumed state');
         self::assertFalse($second->consumedNow);
         self::assertTrue($second->consumedBefore);
-        self::assertNotNull($storage->find('consume-once'), 'the consumed record is retained until its retention ends');
+        self::assertNotNull($storage->find(self::wn('consume-once')), 'the consumed record is retained until its retention ends');
     }
 
     public function testConsumeOfAMissingNonceIsNull(): void
     {
         $storage = $this->memoryStorage();
 
-        self::assertNull($storage->consume('never-stored'));
-        self::assertNull($storage->find('never-stored'));
+        self::assertNull($storage->consume(self::wn('never-stored')));
+        self::assertNull($storage->find(self::wn('never-stored')));
     }
 
     public function testCommitResultIsOneShotAndRidesOnLaterConsumes(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('commit-once'));
-        $storage->consume('commit-once');
+        $storage->consume(self::wn('commit-once'));
 
-        self::assertTrue($storage->commitResult('commit-once', false, null));
-        self::assertFalse($storage->commitResult('commit-once', true, 'other'), 'a resultless consumed row accepts exactly one result');
+        self::assertTrue($storage->commitResult(self::wn('commit-once'), false, null));
+        self::assertFalse($storage->commitResult(self::wn('commit-once'), true, 'other'), 'a resultless consumed row accepts exactly one result');
 
-        $retry = $storage->consume('commit-once');
+        $retry = $storage->consume(self::wn('commit-once'));
         self::assertNotNull($retry?->consumedResult);
         self::assertFalse($retry->consumedResult->valid, 'the committed invalid outcome replays without re-deriving');
         self::assertNull($retry->consumedResult->binding);
@@ -281,13 +292,13 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('pending-commit'));
-        self::assertFalse($storage->commitResult('pending-commit', true, null), 'a pending row never takes a result');
+        self::assertFalse($storage->commitResult(self::wn('pending-commit'), true, null), 'a pending row never takes a result');
 
-        self::assertFalse($storage->commitResult('missing-commit', true, null));
+        self::assertFalse($storage->commitResult(self::wn('missing-commit'), true, null));
 
         $storage->store($this->makeRecord('cancelled-commit'));
-        $storage->cancel('cancelled-commit');
-        self::assertFalse($storage->commitResult('cancelled-commit', true, null), 'a cancelled row never takes a result');
+        $storage->cancel(self::wn('cancelled-commit'));
+        self::assertFalse($storage->commitResult(self::wn('cancelled-commit'), true, null), 'a cancelled row never takes a result');
     }
 
     public function testConsumedStateReadsTheRetainedEvidenceWithoutATransition(): void
@@ -295,13 +306,13 @@ final class SqliteStorageContractTest extends TestCase
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('state-read'));
 
-        self::assertNull($storage->consumedState('state-read'), 'a pending row has no consumed state');
-        self::assertNull($storage->consumedState('missing-read'));
+        self::assertNull($storage->consumedState(self::wn('state-read')), 'a pending row has no consumed state');
+        self::assertNull($storage->consumedState(self::wn('missing-read')));
 
-        $storage->consumeWithOperationIdentity('state-read', self::IDENTITY_A);
-        $storage->commitResult('state-read', true, 'b-1');
+        $storage->consumeWithOperationIdentity(self::wn('state-read'), self::IDENTITY_A);
+        $storage->commitResult(self::wn('state-read'), true, 'b-1');
 
-        $consumed = $storage->consumedState('state-read');
+        $consumed = $storage->consumedState(self::wn('state-read'));
         self::assertNotNull($consumed);
         self::assertTrue($consumed->consumedBefore);
         self::assertFalse($consumed->consumedNow);
@@ -315,20 +326,20 @@ final class SqliteStorageContractTest extends TestCase
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('identity-consume'));
 
-        $winner = $storage->consumeWithOperationIdentity('identity-consume', self::IDENTITY_A);
+        $winner = $storage->consumeWithOperationIdentity(self::wn('identity-consume'), self::IDENTITY_A);
         self::assertNotNull($winner);
         self::assertTrue($winner->consumedNow);
         self::assertSame(self::IDENTITY_A, $winner->operationIdentity);
-        self::assertSame(self::IDENTITY_A, $storage->consumedState('identity-consume')?->operationIdentity);
+        self::assertSame(self::IDENTITY_A, $storage->consumedState(self::wn('identity-consume'))?->operationIdentity);
     }
 
     public function testPlainConsumeRecordsNullIdentity(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('plain-identity'));
-        $storage->consume('plain-identity');
+        $storage->consume(self::wn('plain-identity'));
 
-        self::assertNull($storage->consumedState('plain-identity')?->operationIdentity);
+        self::assertNull($storage->consumedState(self::wn('plain-identity'))?->operationIdentity);
     }
 
     public function testAMalformedIdentityIsRejectedAndTheRowStaysPending(): void
@@ -337,14 +348,14 @@ final class SqliteStorageContractTest extends TestCase
         $storage->store($this->makeRecord('bad-identity'));
 
         try {
-            $storage->consumeWithOperationIdentity('bad-identity', 'not valid!');
+            $storage->consumeWithOperationIdentity(self::wn('bad-identity'), 'not valid!');
             self::fail('a malformed identity must be rejected at the storage boundary');
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('1..128 bytes', $e->getMessage());
         }
 
         self::assertSame('pending', $this->stateColumn($storage, 'bad-identity'), 'the refused consume leaves the row pending');
-        $lateWinner = $storage->consume('bad-identity');
+        $lateWinner = $storage->consume(self::wn('bad-identity'));
         self::assertTrue($lateWinner?->consumedNow, 'the challenge stays redeemable after the refusal');
     }
 
@@ -356,29 +367,29 @@ final class SqliteStorageContractTest extends TestCase
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('forged-pending'));
         $storage->pdo()->exec(
-            "UPDATE kiwicaptcha_challenge_records SET consumed_result_json = '{\"valid\":true,\"binding\":null}' WHERE nonce = 'forged-pending'"
+            "UPDATE kiwicaptcha_challenge_records SET consumed_result_json = '{\"valid\":true,\"binding\":null}' WHERE nonce = '". self::wn('forged-pending') ."'"
         );
 
-        self::assertNull($storage->consume('forged-pending'), 'the forged pending row reports missing');
-        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState('forged-pending')->kind, 'the runtime state still classifies the snapshot');
+        self::assertNull($storage->consume(self::wn('forged-pending')), 'the forged pending row reports missing');
+        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState(self::wn('forged-pending'))->kind, 'the runtime state still classifies the snapshot');
     }
 
     public function testARuntimeStateSnapshotClassifiesEveryState(): void
     {
         $storage = $this->memoryStorage();
-        self::assertSame(ChallengeRuntimeStateKind::Missing, $storage->runtimeState('absent')->kind);
+        self::assertSame(ChallengeRuntimeStateKind::Missing, $storage->runtimeState(self::wn('absent'))->kind);
 
         $storage->store($this->makeRecord('rt-pending'));
-        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState('rt-pending')->kind);
+        self::assertSame(ChallengeRuntimeStateKind::Pending, $storage->runtimeState(self::wn('rt-pending'))->kind);
 
-        $storage->consume('rt-pending');
-        $state = $storage->runtimeState('rt-pending');
+        $storage->consume(self::wn('rt-pending'));
+        $state = $storage->runtimeState(self::wn('rt-pending'));
         self::assertSame(ChallengeRuntimeStateKind::Consumed, $state->kind);
         self::assertTrue($state->consumed?->consumedBefore);
 
         $storage->store($this->makeRecord('rt-cancelled'));
-        $storage->cancel('rt-cancelled');
-        self::assertSame(ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState('rt-cancelled')->kind);
+        $storage->cancel(self::wn('rt-cancelled'));
+        self::assertSame(ChallengeRuntimeStateKind::Cancelled, $storage->runtimeState(self::wn('rt-cancelled'))->kind);
     }
 
     // ── the fused cleanup and cancellation transitions ────────────
@@ -387,35 +398,35 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
 
-        self::assertSame('missing', $storage->deleteIfPending('cleanup-absent')->state);
+        self::assertSame('missing', $storage->deleteIfPending(self::wn('cleanup-absent'))->state);
 
         $storage->store($this->makeRecord('cleanup-pending'));
-        self::assertSame('deleted-pending', $storage->deleteIfPending('cleanup-pending')->state);
-        self::assertNull($storage->find('cleanup-pending'), 'the one-shot cheap-failure policy deletes the pending row');
+        self::assertSame('deleted-pending', $storage->deleteIfPending(self::wn('cleanup-pending'))->state);
+        self::assertNull($storage->find(self::wn('cleanup-pending')), 'the one-shot cheap-failure policy deletes the pending row');
 
         $storage->store($this->makeRecord('cleanup-consumed'));
-        $storage->consumeWithOperationIdentity('cleanup-consumed', self::IDENTITY_A);
-        $storage->commitResult('cleanup-consumed', true, 'kept');
-        $kept = $storage->deleteIfPending('cleanup-consumed');
+        $storage->consumeWithOperationIdentity(self::wn('cleanup-consumed'), self::IDENTITY_A);
+        $storage->commitResult(self::wn('cleanup-consumed'), true, 'kept');
+        $kept = $storage->deleteIfPending(self::wn('cleanup-consumed'));
         self::assertSame('consumed', $kept->state);
         self::assertTrue($kept->consumed?->consumedBefore);
         self::assertSame('kept', $kept->consumed?->consumedResult?->binding);
         self::assertSame(self::IDENTITY_A, $kept->consumed?->operationIdentity);
-        self::assertNotNull($storage->find('cleanup-consumed'), 'the committed recovery evidence is never erased');
+        self::assertNotNull($storage->find(self::wn('cleanup-consumed')), 'the committed recovery evidence is never erased');
 
         $storage->store($this->makeRecord('cleanup-cancelled'));
-        $storage->cancel('cleanup-cancelled');
-        self::assertSame('cancelled', $storage->deleteIfPending('cleanup-cancelled')->state);
-        self::assertNotNull($storage->find('cleanup-cancelled'), 'a cancelled row is dead but retained');
+        $storage->cancel(self::wn('cleanup-cancelled'));
+        self::assertSame('cancelled', $storage->deleteIfPending(self::wn('cleanup-cancelled'))->state);
+        self::assertNotNull($storage->find(self::wn('cleanup-cancelled')), 'a cancelled row is dead but retained');
     }
 
     public function testACorruptRowIsReportedCorruptAndLeftUntouched(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('corrupt-row'));
-        $storage->pdo()->exec("UPDATE kiwicaptcha_challenge_records SET record_json = 'not-json' WHERE nonce = 'corrupt-row'");
+        $storage->pdo()->exec("UPDATE kiwicaptcha_challenge_records SET record_json = 'not-json' WHERE nonce = '". self::wn('corrupt-row')."'");
 
-        $result = $storage->deleteIfPending('corrupt-row');
+        $result = $storage->deleteIfPending(self::wn('corrupt-row'));
         self::assertSame('corrupt', $result->state);
         self::assertSame('pending', $this->stateColumn($storage, 'corrupt-row'), 'the cleanup never mutates a row it cannot classify');
     }
@@ -424,27 +435,27 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('delete-me'));
-        $storage->delete('delete-me');
+        $storage->delete(self::wn('delete-me'));
 
-        self::assertNull($storage->find('delete-me'));
-        self::assertNull($storage->consume('delete-me'));
+        self::assertNull($storage->find(self::wn('delete-me')));
+        self::assertNull($storage->consume(self::wn('delete-me')));
     }
 
     public function testCancelLifecycle(): void
     {
         $storage = $this->memoryStorage();
 
-        self::assertNull($storage->cancel('cancel-absent'), 'a never-issued nonce cancels idempotently as null');
+        self::assertNull($storage->cancel(self::wn('cancel-absent')), 'a never-issued nonce cancels idempotently as null');
 
         $storage->store($this->makeRecord('cancel-pending'));
-        $fresh = $storage->cancel('cancel-pending');
+        $fresh = $storage->cancel(self::wn('cancel-pending'));
         self::assertSame('cancelled-now', $fresh?->state);
         self::assertTrue($fresh?->wasCancelledNow());
-        self::assertSame('cancelled', $storage->cancel('cancel-pending')?->state, 'the retry is idempotent');
+        self::assertSame('cancelled', $storage->cancel(self::wn('cancel-pending'))?->state, 'the retry is idempotent');
 
         $storage->store($this->makeRecord('cancel-consumed'));
-        $storage->consume('cancel-consumed');
-        self::assertSame('consumed', $storage->cancel('cancel-consumed')?->state, 'a finalized record is never cancelled');
+        $storage->consume(self::wn('cancel-consumed'));
+        self::assertSame('consumed', $storage->cancel(self::wn('cancel-consumed'))?->state, 'a finalized record is never cancelled');
         self::assertSame('consumed', $this->stateColumn($storage, 'cancel-consumed'));
     }
 
@@ -452,14 +463,14 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('dead-row'));
-        $storage->cancel('dead-row');
+        $storage->cancel(self::wn('dead-row'));
 
-        self::assertNull($storage->consume('dead-row'));
-        self::assertNull($storage->consumeWithOperationIdentity('dead-row', self::IDENTITY_A));
-        self::assertNull($storage->consumedState('dead-row'));
-        self::assertFalse($storage->commitResult('dead-row', true, null));
-        self::assertNull($storage->claimResumeDerivation('dead-row'));
-        self::assertNotNull($storage->find('dead-row'), 'the dead row is retained until its retention ends');
+        self::assertNull($storage->consume(self::wn('dead-row')));
+        self::assertNull($storage->consumeWithOperationIdentity(self::wn('dead-row'), self::IDENTITY_A));
+        self::assertNull($storage->consumedState(self::wn('dead-row')));
+        self::assertFalse($storage->commitResult(self::wn('dead-row'), true, null));
+        self::assertNull($storage->claimResumeDerivation(self::wn('dead-row')));
+        self::assertNotNull($storage->find(self::wn('dead-row')), 'the dead row is retained until its retention ends');
     }
 
     // ── expiry and retention ──────────────────────────────────────
@@ -470,13 +481,13 @@ final class SqliteStorageContractTest extends TestCase
         $storage->store($this->makeRecord('expired-row', expiresAt: $this->clock + 10));
         $this->clock += 10;
 
-        self::assertNull($storage->find('expired-row'));
-        self::assertNull($storage->consume('expired-row'));
-        self::assertNull($storage->consumedState('expired-row'));
-        self::assertSame(ChallengeRuntimeStateKind::Missing, $storage->runtimeState('expired-row')->kind);
-        self::assertSame('missing', $storage->deleteIfPending('expired-row')->state);
-        self::assertNull($storage->cancel('expired-row'));
-        self::assertFalse($storage->commitResult('expired-row', true, null));
+        self::assertNull($storage->find(self::wn('expired-row')));
+        self::assertNull($storage->consume(self::wn('expired-row')));
+        self::assertNull($storage->consumedState(self::wn('expired-row')));
+        self::assertSame(ChallengeRuntimeStateKind::Missing, $storage->runtimeState(self::wn('expired-row'))->kind);
+        self::assertSame('missing', $storage->deleteIfPending(self::wn('expired-row'))->state);
+        self::assertNull($storage->cancel(self::wn('expired-row')));
+        self::assertFalse($storage->commitResult(self::wn('expired-row'), true, null));
     }
 
     public function testTheRetentionMarginExtendsReadabilityPastSignedExpiry(): void
@@ -485,12 +496,12 @@ final class SqliteStorageContractTest extends TestCase
         $storage->store($this->makeRecord('margin-row', expiresAt: $this->clock + 100));
         $this->clock += 110;
 
-        self::assertNotNull($storage->find('margin-row'), 'the retained evidence outlives the signed expiry by the margin');
-        $consumed = $storage->consume('margin-row');
+        self::assertNotNull($storage->find(self::wn('margin-row')), 'the retained evidence outlives the signed expiry by the margin');
+        $consumed = $storage->consume(self::wn('margin-row'));
         self::assertTrue($consumed?->consumedNow, 'the margin window keeps the one-shot transition open');
 
         $this->clock += 30;
-        self::assertNull($storage->consumedState('margin-row'), 'past the margin the retained evidence is gone');
+        self::assertNull($storage->consumedState(self::wn('margin-row')), 'past the margin the retained evidence is gone');
     }
 
     public function testStoreSweepsExpiredRowsThroughTheExpiryIndex(): void
@@ -501,7 +512,7 @@ final class SqliteStorageContractTest extends TestCase
         $storage->store($this->makeRecord('sweep-keeper', expiresAt: $this->clock + 100));
 
         self::assertSame(1, $this->rowCount($storage), 'the sweep removed the expired row');
-        self::assertNull($storage->find('sweep-me'));
+        self::assertNull($storage->find(self::wn('sweep-me')));
     }
 
     // ── the resume-derivation claim ───────────────────────────────
@@ -511,30 +522,30 @@ final class SqliteStorageContractTest extends TestCase
         $storage = $this->memoryStorage();
 
         $storage->store($this->makeRecord('claim-pending'));
-        self::assertNull($storage->claimResumeDerivation('claim-pending'), 'a pending row is refused');
-        self::assertNull($storage->claimResumeDerivation('claim-absent'));
+        self::assertNull($storage->claimResumeDerivation(self::wn('claim-pending')), 'a pending row is refused');
+        self::assertNull($storage->claimResumeDerivation(self::wn('claim-absent')));
 
-        $storage->consume('claim-pending');
-        $owner = $storage->claimResumeDerivation('claim-pending');
+        $storage->consume(self::wn('claim-pending'));
+        $owner = $storage->claimResumeDerivation(self::wn('claim-pending'));
         self::assertNotNull($owner);
         self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $owner);
 
-        $storage->commitResult('claim-pending', true, null);
-        self::assertNull($storage->claimResumeDerivation('claim-pending'), 'a committed row is refused');
+        $storage->commitResult(self::wn('claim-pending'), true, null);
+        self::assertNull($storage->claimResumeDerivation(self::wn('claim-pending')), 'a committed row is refused');
     }
 
     public function testALiveClaimExcludesASecondClaimAndExpires(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('claim-live'));
-        $storage->consume('claim-live');
+        $storage->consume(self::wn('claim-live'));
 
-        $first = $storage->claimResumeDerivation('claim-live', 60);
+        $first = $storage->claimResumeDerivation(self::wn('claim-live'), 60);
         self::assertNotNull($first);
-        self::assertNull($storage->claimResumeDerivation('claim-live', 60), 'a live lease blocks every other claimer');
+        self::assertNull($storage->claimResumeDerivation(self::wn('claim-live'), 60), 'a live lease blocks every other claimer');
 
         $this->clock += 61;
-        $second = $storage->claimResumeDerivation('claim-live', 60);
+        $second = $storage->claimResumeDerivation(self::wn('claim-live'), 60);
         self::assertNotSame($first, $second, 'the expired lease is re-claimable by a fresh owner');
     }
 
@@ -542,24 +553,24 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $this->expectException(\InvalidArgumentException::class);
-        $storage->claimResumeDerivation('whatever', 0);
+        $storage->claimResumeDerivation(self::wn('whatever'), 0);
     }
 
     public function testTheReleaseIsACompareAndDelete(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('claim-release'));
-        $storage->consume('claim-release');
-        $owner = $storage->claimResumeDerivation('claim-release');
+        $storage->consume(self::wn('claim-release'));
+        $owner = $storage->claimResumeDerivation(self::wn('claim-release'));
         self::assertNotNull($owner);
 
         $other = str_repeat('c', 32);
-        self::assertFalse($storage->releaseResumeDerivation('claim-release', $other), 'a different token never clears the lease');
+        self::assertFalse($storage->releaseResumeDerivation(self::wn('claim-release'), $other), 'a different token never clears the lease');
 
-        self::assertTrue($storage->releaseResumeDerivation('claim-release', $owner));
-        self::assertFalse($storage->releaseResumeDerivation('claim-release', $owner), 'the cleared lease stays cleared');
+        self::assertTrue($storage->releaseResumeDerivation(self::wn('claim-release'), $owner));
+        self::assertFalse($storage->releaseResumeDerivation(self::wn('claim-release'), $owner), 'the cleared lease stays cleared');
 
-        $reclaimed = $storage->claimResumeDerivation('claim-release');
+        $reclaimed = $storage->claimResumeDerivation(self::wn('claim-release'));
         self::assertNotNull($reclaimed, 'a released lease is immediately re-claimable');
     }
 
@@ -567,10 +578,10 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('bad-owner'));
-        $storage->consume('bad-owner');
+        $storage->consume(self::wn('bad-owner'));
 
         try {
-            $storage->releaseResumeDerivation('bad-owner', 'nothex');
+            $storage->releaseResumeDerivation(self::wn('bad-owner'), 'nothex');
             self::fail('a malformed owner token must be rejected');
         } catch (\InvalidArgumentException $e) {
             self::assertStringContainsString('32 lowercase hex', $e->getMessage());
@@ -581,37 +592,37 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('resume-commit'));
-        $storage->consume('resume-commit');
+        $storage->consume(self::wn('resume-commit'));
 
-        $owner = $storage->claimResumeDerivation('resume-commit', 60);
+        $owner = $storage->claimResumeDerivation(self::wn('resume-commit'), 60);
         self::assertNotNull($owner);
-        self::assertFalse($storage->commitResultResume('resume-commit', true, 'win', str_repeat('d', 32)), 'a foreign owner never commits');
+        self::assertFalse($storage->commitResultResume(self::wn('resume-commit'), true, 'win', str_repeat('d', 32)), 'a foreign owner never commits');
 
-        self::assertTrue($storage->commitResultResume('resume-commit', true, 'win', $owner));
-        self::assertSame('win', $storage->consumedState('resume-commit')?->consumedResult?->binding);
-        self::assertNull($storage->claimResumeDerivation('resume-commit'), 'the commit cleared the lease and the result now fences');
+        self::assertTrue($storage->commitResultResume(self::wn('resume-commit'), true, 'win', $owner));
+        self::assertSame('win', $storage->consumedState(self::wn('resume-commit'))?->consumedResult?->binding);
+        self::assertNull($storage->claimResumeDerivation(self::wn('resume-commit')), 'the commit cleared the lease and the result now fences');
 
         $storage->store($this->makeRecord('resume-expired'));
-        $storage->consume('resume-expired');
-        $staleOwner = $storage->claimResumeDerivation('resume-expired', 60);
+        $storage->consume(self::wn('resume-expired'));
+        $staleOwner = $storage->claimResumeDerivation(self::wn('resume-expired'), 60);
         $this->clock += 61;
-        self::assertFalse($storage->commitResultResume('resume-expired', true, null, $staleOwner), 'a lease that expired mid-derivation never commits');
+        self::assertFalse($storage->commitResultResume(self::wn('resume-expired'), true, null, $staleOwner), 'a lease that expired mid-derivation never commits');
     }
 
     public function testTheAuthenticatedCommitsStoreTheServerStateMac(): void
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('mac-plain'));
-        $storage->consume('mac-plain');
+        $storage->consume(self::wn('mac-plain'));
         $mac = hash_hmac('sha256', 'body', 'key');
-        self::assertTrue($storage->commitAuthenticatedResult('mac-plain', new ConsumedResult(true, 'b', $mac)));
-        self::assertSame($mac, $storage->consumedState('mac-plain')?->consumedResult?->mac);
+        self::assertTrue($storage->commitAuthenticatedResult(self::wn('mac-plain'), new ConsumedResult(true, 'b', $mac)));
+        self::assertSame($mac, $storage->consumedState(self::wn('mac-plain'))?->consumedResult?->mac);
 
         $storage->store($this->makeRecord('mac-resume'));
-        $storage->consume('mac-resume');
-        $owner = $storage->claimResumeDerivation('mac-resume');
-        self::assertTrue($storage->commitAuthenticatedResultResume('mac-resume', new ConsumedResult(false, null, $mac), $owner));
-        $result = $storage->consumedState('mac-resume')?->consumedResult;
+        $storage->consume(self::wn('mac-resume'));
+        $owner = $storage->claimResumeDerivation(self::wn('mac-resume'));
+        self::assertTrue($storage->commitAuthenticatedResultResume(self::wn('mac-resume'), new ConsumedResult(false, null, $mac), $owner));
+        $result = $storage->consumedState(self::wn('mac-resume'))?->consumedResult;
         self::assertFalse($result?->valid);
         self::assertSame($mac, $result?->mac);
     }
@@ -620,11 +631,11 @@ final class SqliteStorageContractTest extends TestCase
     {
         $storage = $this->memoryStorage();
         $storage->store($this->makeRecord('bad-result'));
-        $storage->consume('bad-result');
-        $storage->commitResult('bad-result', true, 'x');
-        $storage->pdo()->exec("UPDATE kiwicaptcha_challenge_records SET consumed_result_json = '{\"valid\":\"yes\"}' WHERE nonce = 'bad-result'");
+        $storage->consume(self::wn('bad-result'));
+        $storage->commitResult(self::wn('bad-result'), true, 'x');
+        $storage->pdo()->exec("UPDATE kiwicaptcha_challenge_records SET consumed_result_json = '{\"valid\":\"yes\"}' WHERE nonce = '". self::wn('bad-result')."'");
 
-        self::assertNull($storage->consumedState('bad-result')?->consumedResult, 'a malformed stored result is never trusted');
+        self::assertNull($storage->consumedState(self::wn('bad-result'))?->consumedResult, 'a malformed stored result is never trusted');
     }
 
     // ── the verifier invariants on this backend ───────────────────
@@ -797,7 +808,7 @@ final class SqliteStorageContractTest extends TestCase
     {
         $path = $this->tempDbPath();
         $issuer = new SqliteStorage($path, ttlMarginSecs: 60);
-        $issuer->store($this->makeRecord('locked-row', expiresAt: time() + 600));
+        $issuer->store($this->makeRecord('locked-row', expiresAt: self::ISSUED_AT + 300));
         $blocked = new SqliteStorage($path, busyTimeoutMs: 120, ttlMarginSecs: 60);
 
         $blocker = new \PDO('sqlite:'.$path, null, null, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
@@ -805,7 +816,7 @@ final class SqliteStorageContractTest extends TestCase
         $blocker->exec('BEGIN IMMEDIATE');
 
         try {
-            $blocked->consume('locked-row');
+            $blocked->consume(self::wn('locked-row'));
             self::fail('a write lock held past the busy timeout must fail closed');
         } catch (SqliteStorageException $e) {
             self::assertStringContainsString('write lock stayed held past the busy timeout', $e->getMessage());
@@ -813,7 +824,7 @@ final class SqliteStorageContractTest extends TestCase
         }
 
         $blocker->exec('ROLLBACK');
-        $winner = $blocked->consume('locked-row');
+        $winner = $blocked->consume(self::wn('locked-row'));
         self::assertTrue($winner?->consumedNow, 'the release restores the transition, still exactly once');
         $this->unlinkDb($path);
     }
@@ -843,7 +854,7 @@ final class SqliteStorageContractTest extends TestCase
     {
         $path = $this->tempDbPath();
         $storage = new SqliteStorage($path);
-        $storage->store($this->makeRecord('to-corrupt', expiresAt: time() + 600));
+        $storage->store($this->makeRecord('to-corrupt', expiresAt: self::ISSUED_AT + 300));
         unset($storage);
         clearstatcache();
         self::assertFileDoesNotExist($path.'-wal', 'closing the last connection checkpoints the wal');
@@ -874,19 +885,19 @@ final class SqliteStorageContractTest extends TestCase
     {
         $path = $this->tempDbPath();
         $first = new SqliteStorage($path, ttlMarginSecs: 60);
-        $first->store($this->makeRecord('two-conn', expiresAt: time() + 600));
+        $first->store($this->makeRecord('two-conn', expiresAt: self::ISSUED_AT + 300));
 
         // A second connection on the same file: its consume observes
         // the committed consumed state of the first, under the wal
         // snapshot isolation, and never wins a second transition.
         $second = new SqliteStorage($path, ttlMarginSecs: 60);
-        $winner = $first->consume('two-conn');
-        $loser = $second->consume('two-conn');
+        $winner = $first->consume(self::wn('two-conn'));
+        $loser = $second->consume(self::wn('two-conn'));
 
         self::assertTrue($winner?->consumedNow);
         self::assertFalse($loser?->consumedNow);
         self::assertTrue($loser?->consumedBefore, 'the second connection reads the committed consumed state');
-        self::assertTrue($second->commitResult('two-conn', true, 'from-second'), 'the retained row accepts the commit from either connection');
+        self::assertTrue($second->commitResult(self::wn('two-conn'), true, 'from-second'), 'the retained row accepts the commit from either connection');
         $this->unlinkDb($path);
     }
 
@@ -897,7 +908,7 @@ final class SqliteStorageContractTest extends TestCase
         }
         $path = $this->tempDbPath();
         $seed = new SqliteStorage($path, ttlMarginSecs: 60);
-        $seed->store($this->makeRecord('fork-nonce', expiresAt: time() + 600));
+        $seed->store($this->makeRecord('fork-nonce', expiresAt: self::ISSUED_AT + 300));
         unset($seed);
 
         $codes = $this->forkWorkers($path, 8, 'consume');
@@ -905,7 +916,7 @@ final class SqliteStorageContractTest extends TestCase
 
         self::assertSame([0, 1, 1, 1, 1, 1, 1, 1], $codes, 'exactly one consume winner, every loser reads the consumed state, no failures');
         $verifier = new SqliteStorage($path, ttlMarginSecs: 60);
-        $final = $verifier->consume('fork-nonce');
+        $final = $verifier->consume(self::wn('fork-nonce'));
         self::assertTrue($final?->consumedBefore);
         self::assertSame('fork-win', $final?->consumedResult?->binding, 'the single winner committed exactly one result');
         $this->unlinkDb($path);
@@ -918,7 +929,7 @@ final class SqliteStorageContractTest extends TestCase
         }
         $path = $this->tempDbPath();
         $seed = new SqliteStorage($path, ttlMarginSecs: 60);
-        $seed->store($this->makeRecord('fork-identity', expiresAt: time() + 600));
+        $seed->store($this->makeRecord('fork-identity', expiresAt: self::ISSUED_AT + 300));
         unset($seed);
 
         $codes = $this->forkWorkers($path, 6, 'identity');
@@ -926,7 +937,7 @@ final class SqliteStorageContractTest extends TestCase
 
         self::assertCount(1, $winners, 'exactly one identity-bearing consume wins');
 
-        $final = (new SqliteStorage($path, ttlMarginSecs: 60))->consumedState('fork-identity');
+        $final = (new SqliteStorage($path, ttlMarginSecs: 60))->consumedState(self::wn('fork-identity'));
         self::assertNotNull($final?->operationIdentity);
         self::assertMatchesRegularExpression('/^op-fork-[0-9]+$/', $final->operationIdentity, 'the stored identity is provably the actual winner identity');
         $this->unlinkDb($path);
@@ -939,7 +950,7 @@ final class SqliteStorageContractTest extends TestCase
         }
         $path = $this->tempDbPath();
         $seed = new SqliteStorage($path, ttlMarginSecs: 60);
-        $seed->store($this->makeRecord('fork-mixed', expiresAt: time() + 600));
+        $seed->store($this->makeRecord('fork-mixed', expiresAt: self::ISSUED_AT + 300));
         unset($seed);
 
         $codes = $this->forkWorkers($path, 8, 'mixed');
@@ -955,12 +966,12 @@ final class SqliteStorageContractTest extends TestCase
         // consumer read the dead record as missing.
         if (\count($consumeWins) === 1) {
             self::assertSame([], array_values($cancelFresh), 'a consume winner finalizes the record before every cancellation');
-            $state = (new SqliteStorage($path, ttlMarginSecs: 60))->runtimeState('fork-mixed');
+            $state = (new SqliteStorage($path, ttlMarginSecs: 60))->runtimeState(self::wn('fork-mixed'));
             self::assertSame(ChallengeRuntimeStateKind::Consumed, $state->kind);
         } else {
             self::assertCount(1, $cancelFresh, 'with no consume winner exactly one cancellation flipped the record');
             self::assertCount(4, $consumeNulls, 'every consumer read the cancelled record as missing');
-            $state = (new SqliteStorage($path, ttlMarginSecs: 60))->runtimeState('fork-mixed');
+            $state = (new SqliteStorage($path, ttlMarginSecs: 60))->runtimeState(self::wn('fork-mixed'));
             self::assertSame(ChallengeRuntimeStateKind::Cancelled, $state->kind);
         }
         $this->unlinkDb($path);
@@ -973,8 +984,8 @@ final class SqliteStorageContractTest extends TestCase
         }
         $path = $this->tempDbPath();
         $seed = new SqliteStorage($path, ttlMarginSecs: 60);
-        $seed->store($this->makeRecord('fork-claim', expiresAt: time() + 600));
-        $seed->consume('fork-claim');
+        $seed->store($this->makeRecord('fork-claim', expiresAt: self::ISSUED_AT + 300));
+        $seed->consume(self::wn('fork-claim'));
         unset($seed);
 
         $codes = $this->forkWorkers($path, 6, 'claim');
@@ -1020,34 +1031,34 @@ final class SqliteStorageContractTest extends TestCase
             usleep(random_int(0, 4000));
             $storage = new SqliteStorage($path, busyTimeoutMs: 15000, ttlMarginSecs: 60);
             if ($mode === 'consume') {
-                $consumed = $storage->consume('fork-nonce');
+                $consumed = $storage->consume(self::wn('fork-nonce'));
                 if ($consumed === null) {
                     return 2;
                 }
 
                 return $consumed->consumedNow
-                    ? ($storage->commitResult('fork-nonce', true, 'fork-win') ? 0 : 5)
+                    ? ($storage->commitResult(self::wn('fork-nonce'), true, 'fork-win') ? 0 : 5)
                     : 1;
             }
             if ($mode === 'identity') {
                 $identity = 'op-fork-'.$index;
-                $consumed = $storage->consumeWithOperationIdentity('fork-identity', $identity);
+                $consumed = $storage->consumeWithOperationIdentity(self::wn('fork-identity'), $identity);
 
                 return $consumed?->consumedNow === true ? 0 : 1;
             }
             if ($mode === 'claim') {
-                return $storage->claimResumeDerivation('fork-claim') !== null ? 0 : 1;
+                return $storage->claimResumeDerivation(self::wn('fork-claim')) !== null ? 0 : 1;
             }
             // The mixed consume-versus-cancel storm.
             if ($index % 2 === 0) {
-                $consumed = $storage->consume('fork-mixed');
+                $consumed = $storage->consume(self::wn('fork-mixed'));
                 if ($consumed === null) {
                     return 2;
                 }
 
                 return $consumed->consumedNow ? 0 : 1;
             }
-            $cancelled = $storage->cancel('fork-mixed');
+            $cancelled = $storage->cancel(self::wn('fork-mixed'));
 
             return $cancelled?->wasCancelledNow() === true ? 10 : 11;
         } catch (\Throwable) {
@@ -1069,7 +1080,7 @@ final class SqliteStorageContractTest extends TestCase
     private function makeRecord(string $nonce, ?int $expiresAt = null): ChallengeRecord
     {
         return new ChallengeRecord(
-            nonce: $nonce,
+            nonce: self::wn($nonce),
             scope: 'login',
             bindingTag: 'tag-1',
             issuedAt: self::ISSUED_AT,
@@ -1079,8 +1090,8 @@ final class SqliteStorageContractTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'pre-',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: self::ISSUED_AT * 1_000_000,
@@ -1122,7 +1133,7 @@ final class SqliteStorageContractTest extends TestCase
     private function stateColumn(SqliteStorage $storage, string $nonce): string
     {
         $select = $storage->pdo()->prepare('SELECT state FROM kiwicaptcha_challenge_records WHERE nonce = ?');
-        $select->execute([$nonce]);
+        $select->execute([self::wn($nonce)]);
 
         return (string) $select->fetchColumn();
     }

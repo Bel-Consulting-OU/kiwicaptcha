@@ -53,8 +53,9 @@ final class TwigRuntimeTest extends TestCase
         self::assertStringContainsString('.kiwi-container', $html);
         // WASM solver embed inlined
         self::assertStringContainsString('KIWI_WASM_B64', $html);
-        // Driver inlined
-        self::assertStringContainsString('window.KiwiCaptcha = {', $html);
+        // Driver inlined, installed as an own property so a DOM-clobbered
+        // named element can never impersonate the public API.
+        self::assertStringContainsString('Object.defineProperty(window, "KiwiCaptcha"', $html);
         self::assertStringContainsString('render: kiwiRender', $html);
         // The driver sends the container's request binding with
         // the challenge POST and writes the hidden kiwi_request_binding form

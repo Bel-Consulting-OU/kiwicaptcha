@@ -223,5 +223,31 @@ do_action('admin_init');
 check('settings registered through the API', $GLOBALS['kiwi_test']['settings_registered'] === 1);
 check('every form has a settings field', isset($GLOBALS['kiwi_test']['fields']['enabled_login'], $GLOBALS['kiwi_test']['fields']['enabled_checkout']));
 
+// Aggressive decision edges: a success-shaped body on a non-2xx is a
+// status/body mismatch and must fail closed.
+resetState();
+$settings = KiwiCaptcha_Settings::all();
+foreach ([301, 302, 303, 307, 308, 403, 429, 199] as $code) {
+    $GLOBALS['kiwi_test']['http'][$settings['verify_url']] = [
+        'response' => ['code' => $code],
+        'body' => json_encode(['success' => true, 'error-codes' => []]),
+    ];
+    $outcome = KiwiCaptcha_Client::evaluate($settings, 'login', ['REMOTE_ADDR' => '1.2.3.4'], ['kiwi__token' => 'x']);
+    check("non-2xx {$code} with success body fails closed", $outcome['ok'] === false && $outcome['code'] === 'challenge_failed');
+}
+$GLOBALS['kiwi_test']['http'][$settings['verify_url']] = [
+    'response' => ['code' => 204],
+    'body' => json_encode(['success' => true, 'error-codes' => []]),
+];
+$outcome = KiwiCaptcha_Client::evaluate($settings, 'login', ['REMOTE_ADDR' => '1.2.3.4'], ['kiwi__token' => 'x']);
+check('204 with success body passes', $outcome['ok'] === true && $outcome['code'] === 'verified');
+
+// Fail-closed client identity and the strict JSON media type.
+check('missing peer fails closed (never invents loopback)', KiwiCaptcha_Client::clientIp([]) === '');
+check('garbage peer fails closed', KiwiCaptcha_Client::clientIp(['REMOTE_ADDR' => 'not-an-ip']) === '');
+check('jsonp content type does not open the JSON source', KiwiCaptcha_Client::extractToken(['CONTENT_TYPE' => 'application/jsonp'], [], [], '{"kiwi_token":"x"}') === null);
+check('exact json media type with charset opens the source', KiwiCaptcha_Client::extractToken(['CONTENT_TYPE' => 'Application/JSON; charset=utf-8'], [], [], '{"kiwi_token":"x"}') === 'x');
+check('bare token json key stays ignored', KiwiCaptcha_Client::extractToken(['CONTENT_TYPE' => 'application/json'], [], [], '{"token":"app-secret"}') === null);
+
 fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));
 exit($failures === 0 ? 0 : 1);

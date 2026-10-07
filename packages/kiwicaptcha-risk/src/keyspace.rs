@@ -14,6 +14,7 @@
 //!   scope aggregate  `{kiwi:<ns>:s:<id>:<shard>}:scope:<id>:<shard>`
 //!   shard marker     `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`
 //!   outcome ledger   `{kiwi:<ns>:o:<hex2>}:outcome:<decision_id>`
+//!   target state     `{kiwi:<ns>:target:<hex2>}:risk:tgt[:src|:asn]:<id>`
 //!   mark dedupe      `mark:{kiwi:<ns>}:dd:<event_id>`
 //!   hysteresis state `{kiwi:<ns>}:risk:hyst`
 //!   mode marker      `{kiwi:<ns>}:mode`
@@ -226,6 +227,31 @@ pub fn outcome_ledger_key(encoded_namespace: &str, decision_id: &str) -> String 
 /// same slot as the mark hash (`mark:{kiwi:<ns>}:dd:<event_id>`).
 pub fn mark_dedupe_key(encoded_namespace: &str, event_id: &str) -> String {
     format!("mark:{{kiwi:{encoded_namespace}}}:dd:{event_id}")
+}
+
+/// The target-dimension state family of one target pseudonym
+/// (`{kiwi:<ns>:target:<hex2>}`): the target's failure hash and its
+/// source/asn spread HLLs live on the target id's own family slot
+/// instead of the shared namespace tag, so a stuffing storm against one
+/// target never hammers the primary that holds the rest of the risk
+/// state.
+pub fn target_state_tag(encoded_namespace: &str, hex_id: &str) -> String {
+    format!(
+        "{{kiwi:{encoded_namespace}:target:{}}}",
+        id_prefix(hex_id)
+    )
+}
+
+/// The three target-dimension state keys of one target pseudonym:
+/// the failure hash plus the source/asn spread HLLs, all on the
+/// target's own family slot (`{kiwi:<ns>:target:<hex2>}:risk:tgt...`).
+pub fn target_state_keys(encoded_namespace: &str, hex_id: &str) -> [String; 3] {
+    let tag = target_state_tag(encoded_namespace, hex_id);
+    [
+        format!("{tag}:risk:tgt:{hex_id}"),
+        format!("{tag}:risk:tgt:src:{hex_id}"),
+        format!("{tag}:risk:tgt:asn:{hex_id}"),
+    ]
 }
 
 /// The scope aggregate shard hash of one aggregate id and shard:
@@ -475,6 +501,18 @@ mod tests {
         assert_eq!(
             mark_dedupe_key(ns, "cd"),
             "mark:{kiwi:n1}:dd:cd"
+        );
+        assert_eq!(
+            target_state_tag(ns, "5e2a"),
+            "{kiwi:n1:target:5e}"
+        );
+        assert_eq!(
+            target_state_keys(ns, "5e2a"),
+            [
+                "{kiwi:n1:target:5e}:risk:tgt:5e2a",
+                "{kiwi:n1:target:5e}:risk:tgt:src:5e2a",
+                "{kiwi:n1:target:5e}:risk:tgt:asn:5e2a",
+            ]
         );
         assert_eq!(
             identity_state_key(ns, ShardedDimension::Target, None, "5e2a"),

@@ -240,7 +240,12 @@ impl SidecarState {
             .filter(|s| !s.is_empty());
         match provided {
             Some(ip) => match ip.parse::<IpAddr>() {
-                Ok(_) => Ok(ip.to_string()),
+                // The canonical text of the parsed address is what
+                // binds: "2001:DB8::1" and "2001:db8:0:0:0:0:0:1" are
+                // one identity, so the binding tag can never be split
+                // by spelling. Non-ASCII, zone ids and other lookalike
+                // forms never parse and are refused here.
+                Ok(addr) => Ok(addr.to_string()),
                 Err(_) => Err(self.error_response(
                     400,
                     "remoteip_invalid",

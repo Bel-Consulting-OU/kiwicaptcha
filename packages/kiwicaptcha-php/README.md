@@ -65,6 +65,13 @@ Byte-for-byte compatible with the reference implementation in
   minimum; issuance recommends 8192+ KiB, e.g. 8192 low-memory shared
   hosting or 65536 desktop), and the PoW result. Malformed or
   out-of-profile records fail closed with a distinguishable error.
+- Argon2id memory profile space: `Config` accepts only power-of-two
+  `mKib` values within 8..=65536 KiB (8192 low-memory, 16384/32768/65536
+  the named rungs), rejected at configuration time — never per request.
+  The restriction is protocol-wide so every verifier, including log2-only
+  bindings (e.g. Elixir's `argon2_elixir`), can rederive what any profile
+  mints; the verifier's structural record ceilings keep accepting any
+  signed 8..=65536 record.
 - clock skew tolerance: verification absorbs up to 5 s of host-clock
   skew (`Verifier::SKEW_TOLERANCE_US`) for the server-measured
   minimum-duration floor. A receipt time preceding issuance beyond the
@@ -173,7 +180,10 @@ $config = new Config(
     targetBits: 18,   // the ordinary default; 20 is the elevated rung (adaptive risk escalation)
 );
 
-// Argon2id mode requires t >= 3 and p == 1 (Config throws otherwise).
+// Argon2id mode requires t >= 3 and p == 1 (Config throws otherwise),
+// and mKib must be a power of two within 8..=65536 — the protocol
+// profile space every verifier can rederive (Config rejects others at
+// configuration time).
 // Recommended profiles: 8192 KiB low-memory (shared hosting) or 65536 KiB
 // desktop, always t: 3, p: 1:
 // $config = new Config(

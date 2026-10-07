@@ -29,12 +29,23 @@ use PHPUnit\Framework\TestCase;
  */
 final class OperationIdentityTest extends TestCase
 {
+
+    /**
+     * The wire nonce of a logical fixture label: the record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes
+     * (the strict serde twin), so logical labels map to it here and the
+     * storage keys stay readable at the call sites.
+     */
+    private static function wn(string $logical): string
+    {
+        return \KiwiCaptcha\Tests\Support\WireFixture::nonce($logical);
+    }
     private const VALID_HEX = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
     private function makeRecord(string $nonce): ChallengeRecord
     {
         return new ChallengeRecord(
-            nonce: $nonce,
+            nonce: self::wn($nonce),
             scope: 'login',
             bindingTag: 'abc123',
             issuedAt: 1_800_000_000,
@@ -44,8 +55,8 @@ final class OperationIdentityTest extends TestCase
             t: 1,
             p: 1,
             targetBits: 8,
-            salt: 'c2FsdA==',
-            prefix: 'prefix',
+            salt: \KiwiCaptcha\Tests\Support\WireFixture::SALT,
+            prefix: \KiwiCaptcha\Tests\Support\WireFixture::prefix('challenge'),
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 123_456_789,
@@ -80,19 +91,19 @@ final class OperationIdentityTest extends TestCase
     {
         foreach ($this->storages() as $name => $storage) {
             try {
-                $storage->consumeWithOperationIdentity(str_contains($name, 'redis') ? 'redis-nonce-1' : 'array-nonce-1', str_repeat('x', 129));
+                $storage->consumeWithOperationIdentity(str_contains($name, 'redis') ? self::wn('redis-nonce-1') : self::wn('array-nonce-1'), str_repeat('x', 129));
                 self::fail("an over-long identity must be rejected on $name");
             } catch (\InvalidArgumentException) {
                 // expected: the 1..128-byte bound fires before the transition
             }
-            $this->assertUntouched($storage, $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1');
+            $this->assertUntouched($storage, $name === 'redis' ? self::wn('redis-nonce-1') : self::wn('array-nonce-1'));
         }
     }
 
     public function testGsubSpecialAndNonAlphabetIdentitiesAreRejectedOnEveryStorage(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
+            $nonce = $name === 'redis' ? self::wn('redis-nonce-1') : self::wn('array-nonce-1');
             foreach (['deadbeef%deadbeef', 'deadbeef deadbeef', 'deadbeef=deadbeef', 'deadbeef/feed'] as $malformed) {
                 try {
                     $storage->consumeWithOperationIdentity($nonce, $malformed);
@@ -108,7 +119,7 @@ final class OperationIdentityTest extends TestCase
     public function testValidHexIdentityIsRecordedOnEveryStorage(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
+            $nonce = $name === 'redis' ? self::wn('redis-nonce-1') : self::wn('array-nonce-1');
             $consumed = $storage->consumeWithOperationIdentity($nonce, self::VALID_HEX);
             self::assertNotNull($consumed, "the identity-bearing consume must win the transition on $name");
             self::assertTrue($consumed->consumedNow);
@@ -127,7 +138,7 @@ final class OperationIdentityTest extends TestCase
         $storage = new ArrayStorage();
         foreach (['base64url_ABC-xyz_0123456789', '123e4567-e89b-42d3-a456-426614174000'] as $i => $identity) {
             $storage->store($this->makeRecord('nonce-'.$i));
-            $consumed = $storage->consumeWithOperationIdentity('nonce-'.$i, $identity);
+            $consumed = $storage->consumeWithOperationIdentity(self::wn('nonce-'.$i), $identity);
             self::assertNotNull($consumed);
             self::assertSame($identity, $consumed->operationIdentity, "'$identity' fits the narrow alphabet");
         }
@@ -136,7 +147,7 @@ final class OperationIdentityTest extends TestCase
     public function testNullIdentityPathIsUnchanged(): void
     {
         foreach ($this->storages() as $name => $storage) {
-            $nonce = $name === 'redis' ? 'redis-nonce-1' : 'array-nonce-1';
+            $nonce = $name === 'redis' ? self::wn('redis-nonce-1') : self::wn('array-nonce-1');
             $consumed = $storage->consumeWithOperationIdentity($nonce, null);
             self::assertNotNull($consumed, "the null identity must take the plain-consume path on $name");
             self::assertTrue($consumed->consumedNow);
@@ -163,19 +174,19 @@ final class OperationIdentityTest extends TestCase
             $this->makeRecord('markerless-nonce')->toArray() + ['state' => 'pending', 'consumed_result' => null],
             JSON_UNESCAPED_SLASHES,
         );
-        $client->set('kiwi:markerless-nonce', $envelope, 'EX', 120);
+        $client->set('kiwi:'.self::wn('markerless-nonce'), $envelope, 'EX', 120);
 
         try {
-            $storage->consumeWithOperationIdentity('markerless-nonce', self::VALID_HEX);
+            $storage->consumeWithOperationIdentity(self::wn('markerless-nonce'), self::VALID_HEX);
             self::fail('a non-empty identity on a markerless envelope must be refused');
         } catch (\KiwiCaptcha\Storage\StorageWriteException $e) {
             self::assertStringContainsString('operation_identity', $e->getMessage());
         }
 
-        $after = json_decode((string) $client->store['kiwi:markerless-nonce'], true);
+        $after = json_decode((string) $client->store['kiwi:'.self::wn('markerless-nonce')], true);
         self::assertIsArray($after);
         self::assertArrayNotHasKey('operation_identity', $after, 'the refused consume must not leave the record claiming an identity');
-        self::assertNull($storage->consumedState('markerless-nonce')?->operationIdentity, 'the retained state exposes no identity');
+        self::assertNull($storage->consumedState(self::wn('markerless-nonce'))?->operationIdentity, 'the retained state exposes no identity');
 
         // The plain consume on a markerless envelope stays legal: no
         // identity argument, nothing to splice.
@@ -183,8 +194,8 @@ final class OperationIdentityTest extends TestCase
             $this->makeRecord('markerless-nonce-2')->toArray() + ['state' => 'pending', 'consumed_result' => null],
             JSON_UNESCAPED_SLASHES,
         );
-        $client->set('kiwi:markerless-nonce-2', $secondEnvelope, 'EX', 120);
-        $consumed = $storage->consume('markerless-nonce-2');
+        $client->set('kiwi:'.self::wn('markerless-nonce-2'), $secondEnvelope, 'EX', 120);
+        $consumed = $storage->consume(self::wn('markerless-nonce-2'));
         self::assertTrue($consumed?->consumedNow ?? false, 'the plain consume of a markerless envelope is unchanged');
         self::assertNull($consumed?->operationIdentity);
     }

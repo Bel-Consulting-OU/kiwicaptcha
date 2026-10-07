@@ -78,6 +78,12 @@ impl<'a> RiskContext<'a> {
 ///   key). They ride together or not at all; a half-present pair rejects
 ///   the assessment input. The PHP mirror names them `solveMs` and
 ///   `solveRung`.
+/// - `breached_credential`: true when the caller's breached-password
+///   check reports the presented credential as known-breached (the
+///   D3.5 local corpus verdict). Step-up-worthy evidence in the same
+///   shape as `honeypot_hit`: it forces the interactive step-up before
+///   any session credit and never a deny on its own. The PHP mirror
+///   names the field `breachedCredential`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RiskV2Context {
     pub honeypot_hit: bool,
@@ -86,6 +92,7 @@ pub struct RiskV2Context {
     pub telemetry_payload: Option<String>,
     pub solve_ms: Option<u64>,
     pub solve_rung: Option<String>,
+    pub breached_credential: bool,
 }
 
 /// The contract bound on the risk-v2 session tag strings (bytes), shared
@@ -107,6 +114,7 @@ impl RiskV2Context {
             && self.telemetry_payload.is_none()
             && self.solve_ms.is_none()
             && self.solve_rung.is_none()
+            && !self.breached_credential
     }
 
     /// The solve facts as the tuple the evidence stage consumes, or

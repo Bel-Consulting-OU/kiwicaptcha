@@ -23,6 +23,8 @@ final class StepUpResult
     public const FAIL_BAD_CODE = 'bad_code';
     public const FAIL_TOO_MANY_ATTEMPTS = 'too_many_attempts';
     public const FAIL_NOT_ENROLLED = 'not_enrolled';
+    /** The stored factor secret cannot be unsealed for its principal (re-enroll required). */
+    public const FAIL_SECRET_UNUSABLE = 'secret_unusable';
     public const FAIL_REPLAYED_STEP = 'replayed_step';
     public const FAIL_OUTCOME_UNAVAILABLE = 'outcome_unavailable';
     /** The completing session is not the one that began the challenge. */

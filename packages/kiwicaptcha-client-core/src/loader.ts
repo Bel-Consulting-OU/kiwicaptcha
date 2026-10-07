@@ -6,10 +6,17 @@ type DriverWindow = Window & { KiwiCaptcha?: KiwiCaptchaApi };
 /**
  * Read the loaded driver surface from a document's window, or null when
  * the driver script has not run yet.
+ *
+ * A DOM-clobbered named property (`<div id="KiwiCaptcha">`) shadows the
+ * window slot with an element. Shape-check the API surface before
+ * accepting it: a clobbered value must never be handed out as the driver
+ * (it would make loadKiwiCaptcha resolve without loading anything, and
+ * every later render/execute would throw on a DOM node).
  */
 export function getKiwiCaptcha(doc: Document = document): KiwiCaptchaApi | null {
   const w = doc.defaultView as DriverWindow | null;
-  return (w && w.KiwiCaptcha) || null;
+  const api = w && w.KiwiCaptcha;
+  return api && typeof api.render === "function" ? api : null;
 }
 
 // One in-flight load per (document, src): a page that mounts five widget

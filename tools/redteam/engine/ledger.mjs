@@ -110,17 +110,16 @@ function statusOf(run) {
 }
 
 /**
- * D3.5 is split honestly: step-up prevention is the campaign's asserted
- * success criterion and may be GREEN; the compromise-economics
- * criterion (change.md D3.5 "cost/compromised-account >= critical
- * threshold") is its own row and is RED whenever the measured
- * compromised/valid rate or cost misses the stated threshold — real
- * compromises never ride into a green cell.
+ * D3.5 is one row: step-up prevention volume and compromise economics
+ * are measurements of the same run, so they share one status. The row
+ * is RED whenever the measured verdict is FAIL (real compromises never
+ * ride into a green cell) or the run itself did not pass — a single run
+ * is never reported as both GREEN and RED.
  */
-function d35EconomicsRow(run) {
+function d35Row(run) {
     const evidence = scaleNote(run);
     if (!run) {
-        return "| D3.5 compromise-economics | no measured economics | NOT RUN | NOT RUN: no run document; not a pass |";
+        return "| D3.5 credential stuffing | no measured economics | NOT RUN | NOT RUN: no run document; not a pass |";
     }
     const text = `${run.economic ?? ""} ${run.metrics?.raw ?? ""}`;
     const rate = /compromised_valid_rate=([0-9.]+)/.exec(text);
@@ -128,21 +127,18 @@ function d35EconomicsRow(run) {
     const verdict = /\bverdict=(PASS|FAIL)\b/.exec(text);
     const threshold = /critical_threshold=([0-9.]+)/.exec(text);
     const rateThreshold = /rate_threshold=([0-9.]+)/.exec(text);
+    const prevented = /blocked_valid_prevented=(\d+)/.exec(text);
     const numbers = `compromised_valid_rate=${rate?.[1] ?? "?"} (threshold ${rateThreshold?.[1] ?? "0.0"})`
-        + ` cost_per_compromised_account=${cost?.[1] ?? "?"} (critical threshold ${threshold?.[1] ?? "?"} usd)`;
-    const green = verdict?.[1] === "PASS";
-    return `| D3.5 compromise-economics | ${numbers} | ${green ? "GREEN" : "RED"} | ${evidence} |`;
+        + ` cost_per_compromised_account=${cost?.[1] ?? "?"} (critical threshold ${threshold?.[1] ?? "?"} usd)`
+        + (prevented ? ` blocked_valid_prevented=${prevented[1]}` : "");
+    const green = run.result === "PASS" && verdict?.[1] === "PASS";
+    return `| D3.5 credential stuffing | ${numbers} | ${green ? "GREEN" : "RED"} | ${evidence} |`;
 }
 
 const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
     const run = byCampaign.get(campaign);
     if (campaign === "d3.5-credential-stuffing") {
-        const prevention = statusOf(run);
-        const rows = [
-            `| ${attackClass} (step-up prevention) | ${prevention.verdict} | ${prevention.status} | ${prevention.evidence} |`,
-            d35EconomicsRow(run),
-        ];
-        return rows.join("\n");
+        return d35Row(run);
     }
     const { status, verdict, evidence } = statusOf(run);
     return `| ${attackClass} | ${verdict} | ${status} | ${evidence} |`;

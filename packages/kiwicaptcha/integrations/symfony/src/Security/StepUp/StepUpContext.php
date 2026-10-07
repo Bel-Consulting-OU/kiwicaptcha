@@ -36,6 +36,7 @@ final class StepUpContext
         public readonly ?string $returnPath,
         public readonly string $reason,
         public readonly string $mode = self::MODE_HTML,
+        public readonly bool $targetOwned = false,
     ) {
         if (preg_match('/^[0-9a-f]{32}$/D', $principalPseudonym) !== 1) {
             throw new \InvalidArgumentException(sprintf(

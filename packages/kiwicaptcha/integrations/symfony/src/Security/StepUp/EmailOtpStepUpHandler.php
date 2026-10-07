@@ -66,11 +66,13 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     public function begin(Request $request, StepUpContext $context): Response
     {
         $now = $this->now();
-        // The cross-challenge brute-force budget: while the principal
-        // or the target is locked out, no fresh challenge is minted
-        // (the budget is what keeps the per-challenge attempt cap from
-        // being farmed across challenges).
-        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        // The cross-challenge brute-force budget: while the requesting
+        // context (or the shared account/target backstops) is locked
+        // out, no fresh challenge is minted — unless the request rides
+        // the owner's trusted context, which may always begin.
+        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $trusted = $this->lockout?->isTrustedContext($request, $context->principalPseudonym, $now) ?? false;
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
             return $this->refusal(
                 $context,
@@ -104,6 +106,9 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             $this->ttlSecs,
             $this->maxAttempts,
             $this->codeHash($code),
+            null,
+            StepUpSessionBinding::sessionId($request),
+            $context->targetOwned,
         );
         try {
             $this->store->create($challenge, $this->ttlSecs);
@@ -133,9 +138,12 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
 
     private string $boundSessionId = '';
 
+    private string $boundContextKey = '';
+
     public function complete(Request $request): StepUpResult
     {
         $this->boundSessionId = StepUpSessionBinding::sessionId($request);
+        $this->boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -154,7 +162,8 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         if (!StepUpSessionBinding::matches($request, $challenge)) {
             return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
         }
-        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        $trusted = $this->lockout?->isTrustedContext($request, $challenge->principalPseudonym, $now) ?? false;
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $this->boundContextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
             return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
@@ -175,7 +184,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
-        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $this->boundContextKey);
 
         return $this->credit($challenge);
     }
@@ -189,7 +198,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     {
         // Every rejected code feeds the cross-challenge brute-force
         // budget before the per-challenge attempt cap.
-        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $this->boundContextKey);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);

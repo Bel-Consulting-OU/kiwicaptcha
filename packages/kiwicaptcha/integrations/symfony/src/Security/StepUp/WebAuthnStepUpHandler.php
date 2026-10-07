@@ -70,6 +70,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public const CEREMONY_CREATION = 'creation';
     public const CEREMONY_ASSERTION = 'assertion';
 
+    /** The request attributes a per-request CSP nonce may ride. */
+    public const NONCE_ATTRIBUTE = 'csp_nonce';
+    public const NONCE_ATTRIBUTE_ALT = '_csp_nonce';
+
     /** The failure code of an assertion over an unregistered credential. */
     public const FAIL_UNKNOWN_CREDENTIAL = 'unknown_credential';
 
@@ -85,6 +89,53 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     private const CHALLENGE_HKDF_INFO = 'kiwi/v1/stepup-webauthn-challenge';
 
     private const CHALLENGE_HKDF_SALT = 'kiwicaptcha/deploy-salt/v1';
+
+    /**
+     * The ceremony script body shared by the inline (nonce) and the
+     * external (same-origin file) presentations. It reads the options
+     * document from the page and drives navigator.credentials.get.
+     */
+    public const CEREMONY_SCRIPT = <<<'JS'
+            (function () {
+              var doc = JSON.parse(document.getElementById('kiwi-webauthn-options').dataset.options);
+              var opts = doc.public_key;
+              function buf(v) {
+                var b = atob(v.replace(/-/g, '+').replace(/_/g, '/'));
+                var a = new Uint8Array(b.length);
+                for (var i = 0; i < b.length; i++) { a[i] = b.charCodeAt(i); }
+                return a.buffer;
+              }
+              function b64(v) {
+                var b = '';
+                var u = new Uint8Array(v);
+                for (var i = 0; i < u.length; i++) { b += String.fromCharCode(u[i]); }
+                return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+              }
+              opts.challenge = buf(opts.challenge);
+              if (opts.allowCredentials) {
+                opts.allowCredentials = opts.allowCredentials.map(function (c) {
+                  return { id: buf(c.id), type: c.type };
+                });
+              }
+              navigator.credentials.get({ publicKey: opts }).then(function (cred) {
+                document.getElementById('kiwi-webauthn-credential').value = JSON.stringify({
+                  id: cred.id,
+                  rawId: b64(cred.rawId),
+                  type: cred.type,
+                  response: {
+                    clientDataJSON: b64(cred.response.clientDataJSON),
+                    authenticatorData: b64(cred.response.authenticatorData),
+                    signature: b64(cred.response.signature),
+                    userHandle: cred.response.userHandle ? b64(cred.response.userHandle) : null
+                  }
+                });
+                document.getElementById('kiwi-webauthn-form').submit();
+              }).catch(function (e) {
+                document.getElementById('kiwi-webauthn-status').textContent =
+                  'Security key failed: ' + (e && e.message ? e.message : String(e));
+              });
+            })();
+            JS;
 
     private readonly string $challengeKey;
 
@@ -116,6 +167,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         private readonly array $allowedOrigins = [],
         private readonly ?StepUpLockoutGuard $lockout = null,
         private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
+        private readonly ?string $cspNonce = null,
+        private readonly ?string $scriptSrc = null,
     ) {
         if (\strlen($master) < 32) {
             throw new \InvalidArgumentException('The WebAuthn handler master must be at least 32 bytes (the same floor as secret_key)');
@@ -176,7 +229,13 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 'risk.step_up.webauthn.rp_id and risk.step_up.webauthn.allowed_origins must be configured before the WebAuthn handler can run.',
             );
         }
-        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        // The cross-challenge brute-force budget: while the requesting
+        // context (or the shared account/target backstops) is locked,
+        // no fresh challenge is minted. A WebAuthn begin for an
+        // enrolled principal is the stronger-factor path: it bypasses
+        // the shared locks (the assertion to come is the owner's proof).
+        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, true) ?? 0;
         if ($retryAfter > 0) {
             return $this->refusal(
                 $context,
@@ -213,17 +272,22 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             $this->maxAttempts,
             $this->challengeHash($challengeBytes),
             $ceremony,
+            StepUpSessionBinding::sessionId($request),
+            $context->targetOwned,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
-        return $this->presentation($context, $challenge, $challengeBytes, $enrolled, $ceremony, $this->configuredHost());
+        return $this->presentation($context, $challenge, $challengeBytes, $enrolled, $ceremony, $this->configuredHost(), $this->cspNonceOf($request));
     }
 
     private string $boundSessionId = '';
 
+    private string $boundContextKey = '';
+
     public function complete(Request $request): StepUpResult
     {
         $this->boundSessionId = StepUpSessionBinding::sessionId($request);
+        $this->boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -242,7 +306,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         if (!StepUpSessionBinding::matches($request, $challenge)) {
             return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
         }
-        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        // A WebAuthn assertion presentation is the stronger-factor
+        // path: it bypasses the shared (account/target) locks. The
+        // requesting context's own budget still applies.
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $this->boundContextKey, true) ?? 0;
         if ($retryAfter > 0) {
             return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
@@ -270,12 +337,16 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         if (!hash_equals($challenge->codeHash, $this->challengeHash($presentedChallenge))) {
             return $this->failedAttempt($challenge);
         }
-        $host = $this->configuredHost();
-        if ($host === '') {
-            return $this->failedAttempt($challenge);
-        }
         $presentedOrigin = strtolower(rtrim((string) $response->clientDataJSON->origin, '/'));
         if (!$this->originIsAllowed($presentedOrigin)) {
+            return $this->failedAttempt($challenge);
+        }
+        // The validator receives the host the ceremony actually ran on
+        // (the presented, allow-listed origin's host) — never the first
+        // configured origin's host. A login on a second configured
+        // origin must validate against that origin.
+        $host = (string) (parse_url($presentedOrigin, \PHP_URL_HOST) ?: '');
+        if ($host === '') {
             return $this->failedAttempt($challenge);
         }
         try {
@@ -331,7 +402,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
-        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $this->boundContextKey);
 
         return $this->credit($challenge);
     }
@@ -418,7 +489,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
-        return $this->presentation($context, $challenge, $challengeBytes, $enrolled, self::CEREMONY_CREATION, $this->configuredHost());
+        return $this->presentation($context, $challenge, $challengeBytes, $enrolled, self::CEREMONY_CREATION, $this->configuredHost(), $this->cspNonceOf($request));
     }
 
     /**
@@ -474,14 +545,20 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         if (!$this->originIsAllowed($origin)) {
             return $this->failedAttempt($challenge);
         }
+        // As in complete(): the validator receives the presented,
+        // allow-listed origin's host, never the first configured one.
+        $host = (string) (parse_url($origin, \PHP_URL_HOST) ?: '');
+        if ($host === '') {
+            return $this->failedAttempt($challenge);
+        }
         try {
             if (!$response->attestationObject->authData->isUserVerified()) {
                 return $this->failedAttempt($challenge);
             }
             $source = $this->creationValidator->check(
                 $response,
-                $this->creationOptions($challenge, $presentedChallenge, $this->configuredHost()),
-                $this->configuredHost(),
+                $this->creationOptions($challenge, $presentedChallenge, $host),
+                $host,
             );
             $this->registry->saveCredentialSource($source);
             try {
@@ -510,6 +587,26 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return \is_string($host) ? $host : '';
     }
 
+    /**
+     * The CSP nonce of the presentation: a per-request nonce the
+     * application's CSP layer stashes on the request attributes
+     * (`csp_nonce` / `_csp_nonce` — server-set, never a client header)
+     * wins over the configured `nonce` / `csp_nonce` default. Null when
+     * none is available (the page then relies on the external script
+     * or a non-nonce CSP).
+     */
+    private function cspNonceOf(Request $request): ?string
+    {
+        foreach ([self::NONCE_ATTRIBUTE, self::NONCE_ATTRIBUTE_ALT] as $attribute) {
+            $value = $request->attributes->get($attribute);
+            if (\is_string($value) && $value !== '') {
+                return $value;
+            }
+        }
+
+        return $this->cspNonce !== '' ? $this->cspNonce : null;
+    }
+
     /** Whether the presented origin is one of the configured allowed origins. */
     private function originIsAllowed(string $presentedOrigin): bool
     {
@@ -534,7 +631,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     {
         // Every rejected verification feeds the cross-challenge
         // brute-force budget before the per-challenge attempt cap.
-        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $this->boundContextKey);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);
@@ -600,8 +697,13 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      * mode, and the same document embedded in a page for the html mode.
      *
      * @param list<PublicKeyCredentialSource> $enrolled
+     * @param string|null                     $nonce the CSP nonce for
+     *                                                the inline script
+     *                                                (configured
+     *                                                default or a
+     *                                                per-request one)
      */
-    private function presentation(StepUpContext $context, StepUpChallenge $challenge, string $challengeBytes, array $enrolled, string $ceremony, string $host): Response
+    private function presentation(StepUpContext $context, StepUpChallenge $challenge, string $challengeBytes, array $enrolled, string $ceremony, string $host, ?string $nonce = null): Response
     {
         $ticket = $this->ticket->issue($challenge->id, $challenge->expiresAt);
         $expiresIn = max(0, $challenge->expiresAt - $this->now());
@@ -635,6 +737,18 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $ticketField = htmlspecialchars(self::TICKET_FIELD, ENT_QUOTES);
         $ticketValue = htmlspecialchars($ticket, ENT_QUOTES);
         $credentialField = htmlspecialchars(self::CREDENTIAL_FIELD, ENT_QUOTES);
+        // The ceremony script runs under a strict script-src either as
+        // an external same-origin file (script_src configured) or as an
+        // inline block carrying the configured CSP nonce.
+        $nonceAttr = $nonce !== null && $nonce !== ''
+            ? ' nonce="'.htmlspecialchars($nonce, ENT_QUOTES).'"'
+            : '';
+        $scriptOpen = $this->scriptSrc !== null && $this->scriptSrc !== ''
+            ? '<script src="'.htmlspecialchars($this->scriptSrc, ENT_QUOTES).'"'.$nonceAttr.'>'
+            : '<script'.$nonceAttr.'>';
+        $scriptBody = $this->scriptSrc !== null && $this->scriptSrc !== ''
+            ? ''
+            : self::CEREMONY_SCRIPT;
         $html = <<<HTML
             <!DOCTYPE html>
             <html lang="en">
@@ -652,46 +766,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             <button type="submit">Continue</button>
             </form>
             </main>
-            <script>
-            (function () {
-              var doc = JSON.parse(document.getElementById('kiwi-webauthn-options').dataset.options);
-              var opts = doc.public_key;
-              function buf(v) {
-                var b = atob(v.replace(/-/g, '+').replace(/_/g, '/'));
-                var a = new Uint8Array(b.length);
-                for (var i = 0; i < b.length; i++) { a[i] = b.charCodeAt(i); }
-                return a.buffer;
-              }
-              function b64(v) {
-                var b = '';
-                var u = new Uint8Array(v);
-                for (var i = 0; i < u.length; i++) { b += String.fromCharCode(u[i]); }
-                return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-              }
-              opts.challenge = buf(opts.challenge);
-              if (opts.allowCredentials) {
-                opts.allowCredentials = opts.allowCredentials.map(function (c) {
-                  return { id: buf(c.id), type: c.type };
-                });
-              }
-              navigator.credentials.get({ publicKey: opts }).then(function (cred) {
-                document.getElementById('kiwi-webauthn-credential').value = JSON.stringify({
-                  id: cred.id,
-                  rawId: b64(cred.rawId),
-                  type: cred.type,
-                  response: {
-                    clientDataJSON: b64(cred.response.clientDataJSON),
-                    authenticatorData: b64(cred.response.authenticatorData),
-                    signature: b64(cred.response.signature),
-                    userHandle: cred.response.userHandle ? b64(cred.response.userHandle) : null
-                  }
-                });
-                document.getElementById('kiwi-webauthn-form').submit();
-              }).catch(function (e) {
-                document.getElementById('kiwi-webauthn-status').textContent =
-                  'Security key failed: ' + (e && e.message ? e.message : String(e));
-              });
-            })();
+            {$scriptOpen}
+            {$scriptBody}
             </script>
             </body>
             </html>

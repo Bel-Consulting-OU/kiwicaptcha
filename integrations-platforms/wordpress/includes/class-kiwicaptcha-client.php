@@ -70,7 +70,11 @@ final class KiwiCaptcha_Client
         if (!is_array($body)) {
             return ['ok' => false, 'code' => 'verify_unreadable', 'status' => 503];
         }
-        if (($body['success'] ?? false) === true) {
+        // A pass requires the upstream to say success on a 2xx status:
+        // a redirect (3xx) or any other non-2xx carrying a
+        // success-shaped body is a status/body mismatch and fails
+        // closed.
+        if ($status >= 200 && $status <= 299 && ($body['success'] ?? false) === true) {
             return ['ok' => true, 'code' => 'verified', 'status' => 200];
         }
 
@@ -98,8 +102,7 @@ final class KiwiCaptcha_Client
             }
         }
         if (is_string($rawBody) && trim($rawBody) !== ''
-            && is_string($server['CONTENT_TYPE'] ?? null)
-            && strpos((string) $server['CONTENT_TYPE'], 'application/json') !== false) {
+            && self::isJsonContentType($server)) {
             $parsed = json_decode($rawBody, true);
             foreach (self::JSON_TOKEN_FIELDS as $field) {
                 $value = is_array($parsed) ? ($parsed[$field] ?? null) : null;
@@ -114,6 +117,25 @@ final class KiwiCaptcha_Client
         }
 
         return null;
+    }
+
+    /**
+     * The strict JSON media-type check of the body parser: the media
+     * type must be exactly application/json (case-insensitive,
+     * parameters such as "; charset=utf-8" allowed) — substrings like
+     * application/jsonp never qualify.
+     *
+     * @param array<string, mixed> $server
+     */
+    public static function isJsonContentType(array $server): bool
+    {
+        $contentType = $server['CONTENT_TYPE'] ?? null;
+        if (!is_string($contentType)) {
+            return false;
+        }
+        $media = strtolower(trim(explode(';', $contentType, 2)[0]));
+
+        return $media === 'application/json';
     }
 
     /**
@@ -162,8 +184,10 @@ final class KiwiCaptcha_Client
      */
     public static function clientIp(array $server, array $settings = []): string
     {
+        // A missing socket peer fails closed (the shared helper
+        // resolves it to '', never a fabricated loopback identity).
         return kiwi_captcha_client_ip(
-            $server['REMOTE_ADDR'] ?? '127.0.0.1',
+            $server['REMOTE_ADDR'] ?? '',
             $server['HTTP_X_FORWARDED_FOR'] ?? null,
             $server['HTTP_X_REAL_IP'] ?? null,
             kiwi_captcha_parse_cidrs((string) ($settings['trusted_proxies'] ?? '')),

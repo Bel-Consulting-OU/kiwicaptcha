@@ -1,7 +1,16 @@
 (function() {
   // Idempotency guard: the first copy owns the API, bridge and scan.
-  if (typeof window !== "undefined" && window.__kiwiDriverLoaded) {
-    window.__kiwiDriverReused = (window.__kiwiDriverReused || 0) + 1;
+  // The flag lives on a Symbol key, never a string-named window property:
+  // DOM clobbering (`<img name="__kiwiDriverLoaded">`) installs a named
+  // element property that a plain truthiness read cannot distinguish from
+  // our own marker, which would skip initialization and leave the widget
+  // dead on any page where such markup exists. Symbols are unreachable
+  // from DOM named properties, and Symbol.for shares the key across
+  // script copies in the same realm.
+  var KIWI_BOOT = Symbol.for("kiwicaptcha.driver-loaded");
+  var KIWI_BOOT_REUSE = Symbol.for("kiwicaptcha.driver-reused");
+  if (typeof window !== "undefined" && window[KIWI_BOOT]) {
+    window[KIWI_BOOT_REUSE] = (window[KIWI_BOOT_REUSE] || 0) + 1;
     // Turbo/htmx re-executes body scripts after replacing the body: the
     // new DOM may hold widgets the first scan never saw, so rescan
     // through the bridge instead of returning silently (a login form
@@ -12,7 +21,7 @@
     }
     return;
   }
-  if (typeof window !== "undefined") window.__kiwiDriverLoaded = true;
+  if (typeof window !== "undefined") window[KIWI_BOOT] = true;
   var encoder = new TextEncoder();
 
   // ── Solver PROTOCOL id ──
@@ -1776,7 +1785,12 @@
     }
     delete kiwiWidgets[id];
   }
-  window.KiwiCaptcha = {
+  // Installed as an own property (defineProperty), not a plain
+  // assignment: a clobbering element with id/name "KiwiCaptcha" is a
+  // Window named property that a later plain write can leave shadowed on
+  // read, so the provider API would appear missing. defineProperty
+  // materializes an ordinary own property that wins over the named one.
+  var kiwiPublicApi = {
     render: kiwiRender,
     reset: kiwiReset,
     getResponse: kiwiGetResponse,
@@ -1791,6 +1805,16 @@
     observe: kiwiObserve,
     destroy: kiwiDestroy
   };
+  try {
+    Object.defineProperty(window, "KiwiCaptcha", {
+      value: kiwiPublicApi,
+      writable: true,
+      configurable: true,
+      enumerable: true
+    });
+  } catch (e) {
+    window.KiwiCaptcha = kiwiPublicApi;
+  }
   // Null-prototype dictionaries: module kind strings are compared and
   // stored by name, so a plain {} would be pollutable via "__proto__".
   var kiwiModuleApis = Object.create(null);
@@ -2022,7 +2046,20 @@
       scan: kiwiScan
     }
   };
-  window.__kiwiCaptchaCore = kiwiBridge;
+  // Same own-property install as the public API: a clobbered
+  // `__kiwiCaptchaCore` named property must never shadow the real bridge
+  // on read (lazy modules would fall back to their degraded paths and the
+  // worker tier would silently disappear).
+  try {
+    Object.defineProperty(window, "__kiwiCaptchaCore", {
+      value: kiwiBridge,
+      writable: true,
+      configurable: true,
+      enumerable: true
+    });
+  } catch (e) {
+    window.__kiwiCaptchaCore = kiwiBridge;
+  }
   function kiwiScan(root) {
     // Turbo/htmx navigation swaps the DOM without destroy(): a widget
     // element removed from the document keeps its registry record, so an

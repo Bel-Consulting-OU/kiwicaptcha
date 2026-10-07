@@ -11,6 +11,7 @@ use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\Evidence\DecoyEscalation;
 use KiwiCaptcha\Risk\Evidence\DecoyEscalationReaderInterface;
 use KiwiCaptcha\Risk\Evidence\EvidenceModel;
+use KiwiCaptcha\Risk\Marks\FirstAttemptEvidence;
 use KiwiCaptcha\Risk\Marks\MarksEscalation;
 use KiwiCaptcha\Risk\Marks\MarksReaderInterface;
 use KiwiCaptcha\Risk\Marks\MarksRequest;
@@ -124,6 +125,7 @@ final class AdaptiveRiskEngine
         private readonly ?PriceContextSourceInterface $priceContext = null,
         private readonly ?DecoyEscalationReaderInterface $decoyEscalationReader = null,
         private readonly ?AsnDataset $asnDataset = null,
+        private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
     ) {
         // The timing configuration is validated at the construction
         // boundary: a zero epoch divides by zero in the observation
@@ -401,7 +403,8 @@ final class AdaptiveRiskEngine
         $globalLevel = null;
         $cooldownUntilMs = null;
         $targetFailures = 0;
-        $targetSpread = 0;
+        $targetSpreadSources = 0;
+        $targetSpreadAsns = 0;
         try {
             if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
                 // Consolidated assessment: ONE atomic script call runs the
@@ -424,7 +427,8 @@ final class AdaptiveRiskEngine
                     $existingContextTag = $reply->existingContextTag;
                     $existingTlsTag = $reply->existingTlsTag;
                     $targetFailures = (int) ($reply->targetFailures ?? 0);
-                    $targetSpread = (int) ($reply->targetSpread ?? 0);
+                    $targetSpreadSources = (int) ($reply->targetSpreadSources ?? 0);
+                    $targetSpreadAsns = (int) ($reply->targetSpreadAsns ?? 0);
                 } else {
                     [$vector, $existingContextTag, $existingTlsTag, $_registered] = $this->store->assessV2(
                         $observation,
@@ -496,7 +500,7 @@ final class AdaptiveRiskEngine
         $v2Signals = null;
         if ($v2 !== null) {
             $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
-                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpread)
+                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns)
                 : $this->buildV2Signals($v2, $c, $observation);
         }
         $score = $v2Signals !== null
@@ -629,6 +633,7 @@ final class AdaptiveRiskEngine
             principal: $observation->principalId,
         );
         $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
+        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision);
         try {
             $view = $this->marksReader->requestMarks($request);
         } catch (\Throwable) {
@@ -637,13 +642,97 @@ final class AdaptiveRiskEngine
 
         return MarksEscalation::apply(
             $decision,
-            $view,
+            $view->withFirstAttempt($firstAttempt),
             MarksEscalation::corroborated($vector, $decoyEvidence),
             $nowMs,
             $this->marksReader->markTtlMs(),
             $c->resources,
             true,
         );
+    }
+
+    /**
+     * The first-attempt prevention evidence (P0-1) of one assessment:
+     * the signals that stop a VALID stolen credential before any failure
+     * has accumulated anywhere (Rust mirror:
+     * RiskEngine::first_attempt_evidence).
+     *
+     * - novelNetwork: on an AuthenticationSuccess / first login, the
+     *   principal has never been seen from this network bucket (/64 for
+     *   IPv6, the IPv4 itself) OR the account carries no prior trusted
+     *   network. A store without the record surface degrades to neutral
+     *   (never novel), like the session tags.
+     * - breachedCredential: the caller's v2 context asserts a
+     *   known-breached credential (the same step-up-worthy shape as
+     *   honeypot evidence).
+     * - scopePressure: global pressure is enabled and the scope
+     *   failure-ratio pressure is running at/above
+     *   MarksEscalation::SCOPE_PRESSURE_FLOOR / SCOPE_PRESSURE_LEVEL —
+     *   every first-attempt login escalates, not only the attacked
+     *   target's.
+     */
+    private function firstAttemptEvidence(
+        RiskContext $c,
+        RiskObservation $observation,
+        SignalVector $vector,
+        ?RiskV2Context $v2,
+        RiskDecision $decision,
+    ): FirstAttemptEvidence {
+        $isLogin = $c->event === RiskEventKind::AuthenticationSuccess
+            || $c->event === RiskEventKind::AuthenticationFailure;
+        $novelNetwork = false;
+        $scopePressure = false;
+        if ($isLogin) {
+            if ($this->principalNetworks !== null && $observation->principalId !== null) {
+                $network = self::networkBucket($c->sourceIp);
+                try {
+                    $seen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                    $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
+                } catch (\Throwable) {
+                    $seen = null;
+                    $trusted = null;
+                }
+                // Novel when either first-attempt condition holds and
+                // the store answers definitively; neutral never fires.
+                $novelNetwork = ($seen === false) || ($trusted === false);
+            }
+            if (
+                $this->enableGlobalPressure
+                && $decision->globalLevel >= MarksEscalation::SCOPE_PRESSURE_LEVEL
+            ) {
+                $scopePressure = true;
+            }
+            if (
+                $this->enableGlobalPressure
+                && $vector->globalPressure >= MarksEscalation::SCOPE_PRESSURE_FLOOR
+            ) {
+                $scopePressure = true;
+            }
+        }
+
+        return new FirstAttemptEvidence(
+            novelNetwork: $novelNetwork,
+            breachedCredential: $v2?->breachedCredential ?? false,
+            scopePressure: $scopePressure,
+        );
+    }
+
+    /**
+     * The network bucket of a source address for the novel-network gate:
+     * the IPv4 address itself, or the IPv6 /64 prefix. Stable spelling
+     * (family byte + masked packed bytes, hex), byte-identical with the
+     * Rust network_bucket().
+     */
+    public static function networkBucket(string $ip): string
+    {
+        $packed = inet_pton($ip);
+        if ($packed === false) {
+            return '';
+        }
+        if (\strlen($packed) === 4) {
+            return bin2hex("\x04".$packed);
+        }
+        return bin2hex("\x06".substr($packed, 0, 8));
     }
 
     /**
@@ -763,32 +852,43 @@ final class AdaptiveRiskEngine
 
     /**
      * The spread elements one outcome report contributes to the target
-     * dimension's HLLs. They are the source pseudonym of the reporting
-     * context and the source address's ASN bucket.
+     * dimension's HLLs: a NON-ROTATING element scoped to the target.
      *
-     * The source is the current epoch's id, the same one the feedback
-     * observation books. The ASN is the attached dataset's lookup, else
-     * the unlisted-namespace bucket. See {@see AsnBucket::forUnlistedIp()}.
-     * An absent context records no spread element. Rust mirror:
+     * The source element is HMAC(spread_key, target_id || '/' ||
+     * /64-or-IPv4) (the full IPv4 address, or the IPv6 /64) and the ASN
+     * element HMAC(spread_key, target_id || '/' || asn_bucket). Both are
+     * keyed by the target-dimension HKDF key. The elements never rotate
+     * with the 15-minute source epoch, so one IP cannot mint a fresh
+     * "distinct source" every epoch and inflate the spread into an
+     * elapsed-time meter. The ASN bucket is the attached dataset's
+     * lookup, else the unlisted-namespace bucket. See
+     * {@see AsnBucket::forUnlistedIp()}. An absent context records no
+     * spread element. Rust mirror:
      * `RiskEngine::target_spread_elements`.
      *
      * @internal reserved for the Outcomes facade
      *
      * @return array{string, string} [source, asn]
      */
-    public function targetSpreadElements(?RiskContext $c): array
+    public function targetSpreadElements(string $targetId, ?RiskContext $c): array
     {
         if ($c === null) {
             return ['', ''];
         }
-        $nowMs = (int) floor(microtime(true) * 1000);
-        $srcEpoch = intdiv(intdiv($nowMs, 1000), $this->sourceEpochSecs);
-        $source = $this->identityFactory->sourceIdForEpoch($c, $srcEpoch);
-        $asn = $this->asnDataset !== null
+        $net = $this->identityFactory->maskIp($c->sourceIp, 32, 64);
+        $source = $this->spreadElement($targetId . '/' . $net);
+        $asnBucket = $this->asnDataset !== null
             ? $this->asnDataset->bucketId($c->sourceIp)
             : AsnBucket::forUnlistedIp($c->sourceIp);
+        $asn = $this->spreadElement($targetId . '/' . $asnBucket);
 
         return [$source, $asn];
+    }
+
+    /** The hex HLL element of one target-spread contribution. */
+    private function spreadElement(string $message): string
+    {
+        return bin2hex(substr(hash_hmac('sha256', $message, $this->keys->target, true), 0, 16));
     }
 
     /**
@@ -1130,13 +1230,13 @@ final class AdaptiveRiskEngine
      *   It is 0 when no record exists (first request), the tag is absent,
      *   or the record read failed (neutral degradation).
      */
-    private function deriveV2SignalsFromRecords(RiskV2Context $v2, RiskContext $c, ?string $existingContextTag, ?string $existingTlsTag, int $targetFailures = 0, int $targetSpread = 0): RiskV2Signals
+    private function deriveV2SignalsFromRecords(RiskV2Context $v2, RiskContext $c, ?string $existingContextTag, ?string $existingTlsTag, int $targetFailures = 0, int $targetSpreadSources = 0, int $targetSpreadAsns = 0): RiskV2Signals
     {
         $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
         $inconsistent = ($existingContextTag !== null && $existingContextTag !== '' && $existingContextTag !== $v2->clientContextTag) ? 1000 : 0;
         $tlsInconsistent = ($existingTlsTag !== null && $existingTlsTag !== '' && $existingTlsTag !== $v2->tlsTag) ? 1000 : 0;
 
-        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal($targetSpread));
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal(max($targetSpreadSources, $targetSpreadAsns)));
     }
 
     /**
@@ -1161,7 +1261,7 @@ final class AdaptiveRiskEngine
      *   fails (neutral degradation), or the store lacks the optional
      *   SessionTlsTagStoreInterface capability.
      */
-    private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation, int $targetFailures = 0, int $targetSpread = 0): RiskV2Signals
+    private function buildV2Signals(RiskV2Context $v2, RiskContext $c, RiskObservation $observation, int $targetFailures = 0, int $targetSpreadSources = 0, int $targetSpreadAsns = 0): RiskV2Signals
     {
         $honeypot = ($v2->honeypotHit || $c->event->isHoneypot()) ? 1000 : 0;
         $inconsistent = 0;
@@ -1200,7 +1300,7 @@ final class AdaptiveRiskEngine
             }
         }
 
-        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal($targetSpread));
+        return new RiskV2Signals(honeypot: $honeypot, sessionInconsistency: $inconsistent, tlsInconsistency: $tlsInconsistent, targetFailurePressure: self::targetPressureSignal($targetFailures), targetSpread: self::targetSpreadSignal(max($targetSpreadSources, $targetSpreadAsns)));
     }
 
 

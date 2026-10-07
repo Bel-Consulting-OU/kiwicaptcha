@@ -73,6 +73,13 @@ check('garbage hop fails closed', client::client_ip(['REMOTE_ADDR' => '10.0.0.1'
 check('success verifies', client::decide(200, '{"success":true}') === ['ok' => true, 'code' => 'verified']);
 check('failure denies', client::decide(200, '{"success":false}') === ['ok' => false, 'code' => 'challenge_failed']);
 check('5xx is a fault', client::decide(503, '')['code'] === 'verify_unavailable');
+check('302 with success body fails closed', client::decide(302, '{"success":true}')['code'] === 'challenge_failed');
+check('403 with success body fails closed', client::decide(403, '{"success":true}')['code'] === 'challenge_failed');
+check('429 with success body fails closed', client::decide(429, '{"success":true}')['code'] === 'challenge_failed');
+check('199 with success body fails closed', client::decide(199, '{"success":true}')['code'] === 'challenge_failed');
+check('204 with success body passes', client::decide(204, '{"success":true}') === ['ok' => true, 'code' => 'verified']);
+check('missing peer fails closed', client::client_ip([]) === '');
+check('garbage peer fails closed', client::client_ip(['REMOTE_ADDR' => 'not-an-ip']) === '');
 check('garbage body is unreadable', client::decide(200, '<html>')['code'] === 'verify_unreadable');
 
 // Token extraction.

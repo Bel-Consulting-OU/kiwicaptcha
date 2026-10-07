@@ -39,6 +39,12 @@ kiwi_captcha:
   no credentials, no path, no query, no fragment.
   An invalid resolved origin fails closed with an error naming
   `kiwi_captcha.public_base_url`.
+  The verified-agents plane reconstructs `@target-uri` as this value
+  concatenated with the request URI (never the request Host header).
+  Behind a reverse proxy that strips an external mount prefix before
+  the request reaches the application, `public_base_url` must include
+  that mount prefix so the reconstruction matches the absolute URI the
+  agent signed; a base without the prefix fails the signature.
 - Predis is a direct dependency of the bundle, so the DSN path works
   out of the box; no separate client install is needed.
 - The Flex recipe ships this exact file; see

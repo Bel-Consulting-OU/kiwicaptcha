@@ -42,18 +42,28 @@ defmodule Kiwicaptcha.ExecutionPolicy do
   `{:ok, :ok}` or `{:deny, code}` where the code is the shared wire
   vocabulary carried verbatim; the transport failures fail closed
   (`:storage_unavailable` keeps the retry disposition with the record
-  intact).
+  intact). The caller's telemetry posture and operation identity ride
+  along so a sidecar that enforces either never sees a watered-down
+  request.
   """
-  @spec delegate(t(), String.t(), String.t(), String.t() | nil) :: {:ok, :ok} | {:deny, atom() | String.t()}
-  def delegate(%__MODULE__{} = policy, raw_token, scope, client_ip) do
-    Sidecar.post_verify(policy, raw_token, scope, client_ip)
+  @spec delegate(t(), String.t(), String.t(), String.t() | nil, boolean(), String.t() | nil) ::
+          {:ok, :ok} | {:deny, atom() | String.t()}
+  def delegate(
+        %__MODULE__{} = policy,
+        raw_token,
+        scope,
+        client_ip,
+        enforce_telemetry \\ false,
+        operation_identity \\ nil
+      ) do
+    Sidecar.post_verify(policy, raw_token, scope, client_ip, enforce_telemetry, operation_identity)
   end
 end
 
 defmodule Kiwicaptcha.Sidecar do
   @moduledoc false
 
-  def post_verify(policy, raw_token, scope, client_ip) do
+  def post_verify(policy, raw_token, scope, client_ip, enforce_telemetry \\ false, operation_identity \\ nil) do
     base = String.trim_trailing(String.trim(policy.sidecar_url || ""), "/")
     url = base <> "/verify"
 
@@ -61,7 +71,9 @@ defmodule Kiwicaptcha.Sidecar do
       Kiwicaptcha.Json.encode!(%{
         token: raw_token,
         scope: scope,
-        remoteip: client_ip
+        remoteip: client_ip,
+        enforce_telemetry: enforce_telemetry == true,
+        operation_identity: operation_identity
       })
 
     headers =

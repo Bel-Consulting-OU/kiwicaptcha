@@ -10,7 +10,7 @@ sys.path.insert(0, ".")
 from tests.support import NOW, mint_v2_record
 
 from kiwicaptcha import argon2 as argon2_backend
-from kiwicaptcha.config import Settings, argon_rung_verifiable
+from kiwicaptcha.config import PROFILE_ARGON_PARAMS, Settings, argon_rung_verifiable
 from kiwicaptcha.errors import VerifyError
 from kiwicaptcha.stores.memory import MemoryStorage
 from kiwicaptcha.tokens import SolutionToken
@@ -145,6 +145,25 @@ class IssuerGuardTest(unittest.TestCase):
         wide = ArgonAdmissionGate(max_memory_kib=65_536, max_time_cost=16)
         self.assertTrue(argon_rung_verifiable(16 * 1024, 3, wide))
         self.assertTrue(argon_rung_verifiable(64 * 1024, 3, wide))
+
+    def test_argon_memory_profile_space_is_powers_of_two(self):
+        from kiwicaptcha.config import valid_argon_memory_kib
+
+        self.assertTrue(valid_argon_memory_kib(8))
+        self.assertTrue(valid_argon_memory_kib(16 * 1024))
+        self.assertTrue(valid_argon_memory_kib(64 * 1024))
+        self.assertFalse(valid_argon_memory_kib(100))
+        self.assertFalse(valid_argon_memory_kib(10_000))
+        self.assertFalse(valid_argon_memory_kib(0))
+        self.assertFalse(valid_argon_memory_kib(7))
+        self.assertFalse(valid_argon_memory_kib(65_537))
+        # The config gate refuses non-power-of-two rungs at
+        # configuration time, never per request.
+        wide = ArgonAdmissionGate(max_memory_kib=65_536, max_time_cost=16)
+        self.assertFalse(argon_rung_verifiable(100, 3, wide))
+        self.assertTrue(argon_rung_verifiable(16 * 1024, 3, wide))
+        for rung in PROFILE_ARGON_PARAMS.values():
+            self.assertTrue(valid_argon_memory_kib(rung[0]), rung)
 
     def test_settings_refuse_a_rung_the_verifier_cannot_verify(self):
         from kiwicaptcha.config import PROFILE_ARGON_PARAMS

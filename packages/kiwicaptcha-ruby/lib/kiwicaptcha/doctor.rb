@@ -52,11 +52,19 @@ module KiwiCaptcha
 
       argon_ok = Pow.argon2_available?
       argon_required = Settings::ARGON_RUNG_PROFILES.include?(profile.to_s) || profile.nil?
+      rungs_in_space = Settings::ARGON_RUNG_MEMORY_KIB.all? do |m_kib|
+        Settings.valid_argon_memory_kib?(m_kib)
+      end
       checks << DoctorCheck.new(
         name: 'argon2',
-        ok: argon_ok || !argon_required,
-        detail: if argon_ok
-                  'native Argon2id binding present (argon2 gem); argon rungs verify'
+        ok: (argon_ok || !argon_required) && rungs_in_space,
+        detail: if !rungs_in_space
+                  'an argon2id rung budget is outside the protocol profile space ' \
+                  '(powers of two within 8..=65536 KiB); refused at configuration ' \
+                  'time, never per request'
+                elsif argon_ok
+                  'native Argon2id binding present (argon2 gem); argon rungs verify ' \
+                  '(protocol profile space: powers of two within 8..=65536 KiB)'
                 elsif argon_required
                   'native Argon2id binding missing: the priced ladder issues argon2id ' \
                   'rungs that refuse with unsupported_argon2_params (install the argon2 ' \

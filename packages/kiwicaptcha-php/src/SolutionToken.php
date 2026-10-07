@@ -79,9 +79,23 @@ final class SolutionToken
      * @param string|null          $rswProof         512-lowercase-hex rsw final
      *                                              value, or null for every
      *                                              other shape
+     *
+     * @throws \InvalidArgumentException when the execution evidence is a
+     *                                   partial pair: the wire grammar rides
+     *                                   the trace behind the digest
+     *                                   (`digest:trace`), so a trace without
+     *                                   a digest cannot be represented and
+     *                                   must never be silently dropped (the
+     *                                   submission would fall back to the
+     *                                   plain shape and grant as an unarmed
+     *                                   solution carrying no evidence).
      */
     public static function create(string $nonce, int $counter, int $durationMs, array $telemetry, ?string $executionDigest = null, ?string $executionTrace = null, ?string $rswProof = null): self
     {
+        if ($executionTrace !== null && $executionDigest === null) {
+            throw new \InvalidArgumentException('an execution trace must ride behind its digest (digest:trace): a trace without a digest is not representable on the wire');
+        }
+
         return new self($nonce, $counter, $durationMs, $telemetry, $executionDigest, $executionTrace, $rswProof);
     }
 

@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from stages.kiwi.stage import (  # noqa: E402
+    SCORE_DISABLED,
     CaptchaStageSettings,
     StageConfigError,
     build_stage_settings,
@@ -52,7 +53,32 @@ check(
     sorted(settings.stage_fields()) == ["api_url", "js_url", "private_key", "public_key"],
 )
 payload = settings.admin_api_payload("Kiwi")
-check("admin payload carries the name and four fields", payload["name"] == "Kiwi" and len(payload) == 5)
+check("admin payload carries the name", payload["name"] == "Kiwi")
+check(
+    "admin payload pins score and interactive explicitly",
+    payload["interactive"] is True
+    and payload["score_min_threshold"] == SCORE_DISABLED
+    and payload["score_max_threshold"] == SCORE_DISABLED
+    and payload["error_on_invalid_score"] is True,
+)
+check(
+    "admin payload shape is pinned (name + 4 fields + score/interactive)",
+    sorted(payload) == [
+        "api_url",
+        "error_on_invalid_score",
+        "interactive",
+        "js_url",
+        "name",
+        "private_key",
+        "public_key",
+        "score_max_threshold",
+        "score_min_threshold",
+    ],
+)
+check(
+    "score gate is disabled at both ends (siteverify returns no score)",
+    SCORE_DISABLED == -1.0 and payload["score_min_threshold"] <= -1 and payload["score_max_threshold"] <= -1,
+)
 
 custom = build_stage_settings(
     "https://captcha.example.com:8443/",

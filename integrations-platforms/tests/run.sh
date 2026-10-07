@@ -170,6 +170,20 @@ compat_gate=http://127.0.0.1:$gate_compat_port/kiwi-verify.php
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Kiwi-Token: good' "$compat_gate")
 check "$([ "$code" = 204 ]; echo $?)" "compat mode verifies against the provider surface (got $code)"
 
+echo "== raw-http attack script (node) =="
+if command -v node >/dev/null 2>&1; then
+    if node "$HERE/attack-gate.mjs" >/tmp/kiwi-attack-$$ 2>&1; then
+        echo "ok: attack-gate (raw HTTP shapes)"
+    else
+        echo "FAIL: attack-gate" >&2
+        cat /tmp/kiwi-attack-$$ >&2
+        failures=$((failures + 1))
+    fi
+    rm -f /tmp/kiwi-attack-$$
+else
+    echo "skip: node not installed"
+fi
+
 echo ""
 if [ "$failures" -eq 0 ]; then
     echo "ALL GREEN"

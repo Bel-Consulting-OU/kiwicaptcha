@@ -33,8 +33,8 @@ final class StrictParserTest extends TestCase
             't' => 1,
             'p' => 1,
             'target_bits' => 8,
-            'salt' => 'c2FsdA==',
-            'prefix' => 'prefix',
+            'salt' => 'c2FsdHNhbHRzYWx0c2FsdA==',
+            'prefix' => 'challenge|c2FsdHNhbHRzYWx0c2FsdA==|',
             'challenge' => 'challenge',
             'min_duration_ms' => 0,
             'issued_at_ns' => 1_800_000_000_000_000,
@@ -604,14 +604,34 @@ final class StrictParserTest extends TestCase
         self::assertInstanceOf(ChallengeRecord::class, ChallengeRecord::fromArray($v4Both));
     }
 
-    public function testBase64IsNotValidatedAtParseTime(): void
+    public function testNonceSaltShapesAreValidatedAtParseTime(): void
     {
-        // serde treats nonce/salt as plain strings — the differential fuzz
-        // corpus pins both parsers to the same acceptance split, so a
-        // non-canonical base64 string must still parse here.
-        $record = ChallengeRecord::fromArray(self::mutate('salt', 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY'));
-
-        self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
+        // The decode boundary applies the full structural contract on
+        // both sides of the wire (the Rust serde reconstruction calls
+        // `validate_record` before any typed record surfaces — see
+        // packages/kiwicaptcha/tests/corpus.rs, which pins that no
+        // corpus mutation decodes). A nonce that is not the 44-char
+        // standard-base64 encoding of 32 bytes, or a salt that is not
+        // the 24-char encoding of 16 bytes, is corrupt or foreign and
+        // must be refused here exactly like Rust refuses it — the old
+        // "plain strings at parse" split was a parser differential.
+        foreach ([
+            'salt' => ['QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', '44-char salt (32 bytes)'],
+            'salt-short' => ['c2FsdA==', '8-char salt'],
+            'nonce-short' => [str_repeat('A', 43), '43-char nonce'],
+        ] as $label => [$value, $what]) {
+            $key = str_starts_with($label, 'nonce') ? 'nonce' : 'salt';
+            try {
+                ChallengeRecord::fromArray(self::mutate($key, $value));
+                self::fail("a {$what} must be refused at the parse boundary");
+            } catch (MalformedRecordException) {
+                self::assertTrue(true);
+            }
+        }
+        // The wire-valid shapes parse byte-exactly.
+        $record = ChallengeRecord::fromArray(self::base());
+        self::assertSame(self::base()['salt'], $record->salt);
+        self::assertSame(self::base()['nonce'], $record->nonce);
     }
 
     public function testWireKeySetIsPinnedTo29(): void

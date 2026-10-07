@@ -46,15 +46,24 @@ class VerifySignupMiddleware implements MiddlewareInterface
 
     public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
+        // Trailing-slash normalization: /register/ must gate exactly
+        // like /register so no spelling of the sign-up path slips past.
+        $path = $request->getUri()->getPath();
+        if ($path !== '/') {
+            $path = rtrim($path, '/');
+        }
         if (empty($this->settings->get(self::ENABLED_SETTING))
             || $request->getMethod() !== 'POST'
-            || $request->getUri()->getPath() !== '/register') {
+            || $path !== '/register') {
             return $handler->handle($request);
         }
 
         $serverParams = $request->getServerParams();
+        // A missing socket peer flows through as an empty string and
+        // the shared resolver fails closed (never a fabricated
+        // loopback identity).
         $server = [
-            'REMOTE_ADDR' => $serverParams['REMOTE_ADDR'] ?? '127.0.0.1',
+            'REMOTE_ADDR' => $serverParams['REMOTE_ADDR'] ?? '',
             'HTTP_X_FORWARDED_FOR' => $serverParams['HTTP_X_FORWARDED_FOR'] ?? null,
             'HTTP_X_REAL_IP' => $serverParams['HTTP_X_REAL_IP'] ?? null,
         ];

@@ -329,23 +329,33 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * The target-dimension state keys of one target pseudonym: the
-     * failure hash plus the source/asn spread HLLs, byte-identical with
-     * the keys assess_v2.lua maintains (KEYS[14..16]).
+     * failure hash plus the source/asn spread HLLs, on the target id's
+     * own family slot ({kiwi:<ns>:target:<hex2>}) — byte-identical with
+     * the keys assess_v2.lua maintains (KEYS[14..16]) and the Rust
+     * `keyspace::target_state_keys`. A stuffing storm against one target
+     * then hits that target's slot, never the shared {kiwi:<ns>}
+     * primary.
      *
      * @return list<string>
      */
     private function targetStateKeys(string $targetId): array
     {
         self::assertKeySafeIdentifier('targetId', $targetId);
+        $hex2 = substr($targetId, 0, 2);
 
         return [
-            "{kiwi:{$this->namespace}}:risk:tgt:{$targetId}",
-            "{kiwi:{$this->namespace}}:risk:tgt:src:{$targetId}",
-            "{kiwi:{$this->namespace}}:risk:tgt:asn:{$targetId}",
+            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:{$targetId}",
+            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:src:{$targetId}",
+            "{kiwi:{$this->namespace}:target:{$hex2}}:risk:tgt:asn:{$targetId}",
         ];
     }
 
-    /** One target_failure.lua op, returning {fails, spread, first_ms, last_ms}. */
+    /**
+     * One target_failure.lua op, returning
+     * {fails, spread_sources, spread_asns, first_ms, last_ms}.
+     *
+     * @return array{fails: int, spread_sources: int, spread_asns: int, first_ms: int, last_ms: int}
+     */
     private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
     {
         $keys = $this->targetStateKeys($targetId);
@@ -354,15 +364,16 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             [$op, $source, $asn, (string) $this->principalTtlSecs],
             self::loadOutcomeScript('target_failure.lua'),
         );
-        if (!\is_array($result) || \count($result) < 4) {
-            throw new RiskStoreException('the target_failure reply is not a 4-slot array');
+        if (!\is_array($result) || \count($result) < 5) {
+            throw new RiskStoreException('the target_failure reply is not a 5-slot array');
         }
 
         return [
             'fails' => self::scriptInteger($result[0], 'target fails'),
-            'spread' => self::scriptInteger($result[1], 'target spread'),
-            'first_ms' => self::scriptInteger($result[2], 'target first_ms'),
-            'last_ms' => self::scriptInteger($result[3], 'target last_ms'),
+            'spread_sources' => self::scriptInteger($result[1], 'target spread sources'),
+            'spread_asns' => self::scriptInteger($result[2], 'target spread asns'),
+            'first_ms' => self::scriptInteger($result[3], 'target first_ms'),
+            'last_ms' => self::scriptInteger($result[4], 'target last_ms'),
         ];
     }
 
@@ -423,8 +434,17 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             throw new \InvalidArgumentException('nowMs must be >= 0');
         }
         // KEYS[2] is the event-id dedupe marker on the same slot; with
-        // dedupe disabled the script never touches it.
-        $marker = $eventId === '' ? $key : "mark:{kiwi:{$this->namespace}}:dd:{$eventId}";
+        // dedupe disabled the script never touches it. The marker is
+        // scoped to THIS mark (dimension + id), so a reused event id on
+        // another dimension can never suppress a different mark. The
+        // event id itself must be a safe key component. The marker TTL
+        // is the script's retry horizon (24 h), not the mark's long
+        // TTL: one marker key per event id must not pin the keyspace
+        // for the whole mark life.
+        if ($eventId !== '') {
+            self::assertKeySafeIdentifier('eventId', $eventId);
+        }
+        $marker = $eventId === '' ? $key : "{$key}:dd:{$eventId}";
         $result = $this->runScript(
             [$key, $marker],
             [$kind, $nowMs, $this->markTtlSecs * 1000, $eventId],
@@ -800,7 +820,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
         $result = $this->runScript($keys, $args, $this->assessV2Script);
 
-        if (!is_array($result) || count($result) < 21) {
+        if (!is_array($result) || count($result) < 22) {
             throw new RiskStoreException('Risk script returned an unexpected payload');
         }
 
@@ -813,7 +833,8 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             existingTlsTag: self::scriptTag($result[17], 'TLS tag'),
             registrationStatus: self::scriptInteger($result[18], 'registration status') !== 0,
             targetFailures: self::scriptInteger($result[19], 'target failures'),
-            targetSpread: self::scriptInteger($result[20], 'target spread'),
+            targetSpreadSources: self::scriptInteger($result[20], 'target spread sources'),
+            targetSpreadAsns: self::scriptInteger($result[21], 'target spread asns'),
         );
     }
 
@@ -1151,28 +1172,27 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     }
 
     /**
-     * Asserts every key hashes to the same Redis Cluster slot (all share the
-     * hash tag {kiwi:<ns>}).
+     * Asserts every key carries a known family hash tag: either the
+     * shared {kiwi:<ns>} tag or the target family {kiwi:<ns>:target:<hex2>}
+     * (the target failure hash and its spread HLLs ride their own slot so
+     * a stuffing storm never hammers the shared primary).
      *
      * @param list<string> $keys
-     * @throws \LogicException on slot mismatch
+     * @throws \LogicException on an unknown or missing hash tag
      */
     public function assertSameSlot(array $keys): void
     {
-        $slot = null;
+        $shared = "{kiwi:{$this->namespace}}";
+        $targetFamily = "{kiwi:{$this->namespace}:target:";
         foreach ($keys as $key) {
-            $open = strpos($key, '{');
-            $close = $open === false ? false : strpos($key, '}', $open);
-            if ($open === false || $close === false) {
-                throw new \LogicException(sprintf('Key %s has no hash tag', $key));
+            if (str_starts_with($key, $shared) || str_starts_with($key, $targetFamily)) {
+                continue;
             }
-            $tag = substr($key, $open + 1, $close - $open - 1);
-            $s = self::crc16($tag) & 0x3FFF;
-            if ($slot === null) {
-                $slot = $s;
-            } elseif ($s !== $slot) {
-                throw new \LogicException(sprintf('Key %s slots to %d, expected %d', $key, $s, $slot));
-            }
+            throw new \LogicException(sprintf(
+                'Key %s does not carry the %s hash tag or the target family',
+                $key,
+                $shared,
+            ));
         }
     }
 

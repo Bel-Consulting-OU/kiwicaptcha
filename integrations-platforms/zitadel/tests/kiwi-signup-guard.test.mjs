@@ -41,6 +41,21 @@ check("5xx is a fault", () => {
 check("garbage body is unreadable", () => {
   assert.deepEqual(guard.decide(200, "<html>"), { ok: false, code: "verify_unreadable" });
 });
+check("302 with success body fails closed", () => {
+  assert.deepEqual(guard.decide(302, '{"success":true}'), { ok: false, code: "challenge_failed" });
+});
+check("403 with success body fails closed", () => {
+  assert.deepEqual(guard.decide(403, '{"success":true}'), { ok: false, code: "challenge_failed" });
+});
+check("429 with success body fails closed", () => {
+  assert.deepEqual(guard.decide(429, '{"success":true}'), { ok: false, code: "challenge_failed" });
+});
+check("199 with success body fails closed", () => {
+  assert.deepEqual(guard.decide(199, '{"success":true}'), { ok: false, code: "challenge_failed" });
+});
+check("204 with success body passes", () => {
+  assert.deepEqual(guard.decide(204, '{"success":true}'), { ok: true, code: "verified" });
+});
 
 // verify() against a stubbed fetch.
 function stubFetch(status, body, capture) {
@@ -94,6 +109,30 @@ check("verify transport failure", async () => {
 check("missing token short circuits", async () => {
   const result = await guard.verify(guard.KIWI_VERIFY_URL, "", "  ", "signup", "192.0.2.6");
   assert.deepEqual(result, { ok: false, code: "missing_token" });
+});
+
+check("missing client ip refuses with missing_client_ip", async () => {
+  const result = await guard.verify(guard.KIWI_VERIFY_URL, "", "good", "signup", "");
+  assert.deepEqual(result, { ok: false, code: "missing_client_ip" });
+});
+
+check("blank client ip refuses with missing_client_ip (never 127.0.0.1)", async () => {
+  const result = await guard.verify(guard.KIWI_VERIFY_URL, "", "good", "signup", "   ");
+  assert.deepEqual(result, { ok: false, code: "missing_client_ip" });
+});
+
+check("guard aborts with missing_client_ip when the request has no ip", async () => {
+  const restore = stubFetch(200, '{"success":true}');
+  const aborts = [];
+  try {
+    await guard.guardPreCreation(
+      { request: { kiwiToken: "good" } },
+      { abort: (message) => aborts.push(message) },
+    );
+    assert.equal(aborts.length, 1);
+  } finally {
+    restore();
+  }
 });
 
 // The guard flow over the stub: abort on failure, continue on success.

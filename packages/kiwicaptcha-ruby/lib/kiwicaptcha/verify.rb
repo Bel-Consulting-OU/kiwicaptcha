@@ -61,6 +61,98 @@ module KiwiCaptcha
       keyword_init: true
     )
 
+    # The admission-gate seam, mirroring VerificationAdmissionGate.
+    # acquire returns a lease when a slot was granted, or nil on
+    # exhaustion. release returns the lease; a failing release must
+    # never break the verification (the challenge is already
+    # consumed). admits? answers whether the gate's budget covers a
+    # record's signed parameters at all — the hard refuse for absurd
+    # profiles, checked before any slot is taken.
+    class AdmissionGate
+      def acquire
+        Object.new
+      end
+
+      def release(_lease); end
+
+      def admits?(_record)
+        true
+      end
+    end
+
+    # The shipped default: bounded concurrency plus a hard params
+    # budget. A 16-64 MiB derivation costs real memory per request, so
+    # the default refuses any profile whose memory or time cost leaves
+    # the configured budget before a slot is handed out (admits? is
+    # false; the verifier answers unsupported_argon2_params, never a
+    # silent downgrade). Exhaustion of the bounded pool answers
+    # capacity_exceeded and the record stays retryable.
+    class ArgonAdmissionGate < AdmissionGate
+      # Worst-case tight budget when no native binding is present.
+      PURE_MAX_MEMORY_KIB = 8_192
+      PURE_MAX_TIME = 3
+
+      attr_reader :max_concurrent, :max_memory_kib, :max_time_cost
+
+      def initialize(max_concurrent: 2, max_memory_kib: nil, max_time_cost: nil)
+        raise ArgumentError, 'max_concurrent must be at least 1' if max_concurrent < 1
+
+        budget_memory, budget_time =
+          if max_memory_kib.nil? || max_time_cost.nil?
+            if Pow.argon2_available?
+              [MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME]
+            else
+              [PURE_MAX_MEMORY_KIB, PURE_MAX_TIME]
+            end
+          else
+            [max_memory_kib, max_time_cost]
+          end
+        raise ArgumentError, 'the argon gate budget must be positive' if budget_memory < 1 || budget_time < 1
+
+        @max_concurrent = max_concurrent
+        @max_memory_kib = budget_memory
+        @max_time_cost = budget_time
+        @lock = Mutex.new
+        @free = max_concurrent
+      end
+
+      def admits?(record)
+        admits_params?(record.m_kib.to_i, record.t.to_i)
+      end
+
+      def admits_params?(m_kib, t_cost)
+        m_kib <= @max_memory_kib && t_cost <= @max_time_cost
+      end
+
+      def acquire
+        granted = @lock.synchronize do
+          if @free > 0
+            @free -= 1
+            true
+          else
+            false
+          end
+        end
+        granted ? Object.new : nil
+      end
+
+      def release(_lease)
+        @lock.synchronize { @free += 1 }
+      rescue StandardError
+        nil
+      end
+    end
+
+    # The process-wide default gate, built once on first use so the
+    # bounded pool spans concurrent verifications of one deployment.
+    DEFAULT_ARGON_GATE_LOCK = Mutex.new
+
+    def self.default_argon_gate
+      DEFAULT_ARGON_GATE_LOCK.synchronize do
+        @default_argon_gate ||= ArgonAdmissionGate.new
+      end
+    end
+
     # The verify options of one call. Every field except storage and
     # secret_key carries the documented default.
     VerifyOptions = Struct.new(
@@ -68,7 +160,7 @@ module KiwiCaptcha
       :enforce_telemetry, :operation_identity, :expected_request_binding,
       :binding_expectation, :expected_policy_version, :policy_version_floor,
       :region, :expected_issuer, :secrets_by_kid, :revoked_kids,
-      :tenant_id, :accept_legacy_v1, :rsw, :execution_policy,
+      :tenant_id, :accept_legacy_v1, :rsw, :execution_policy, :argon_gate,
       keyword_init: true
     ) do
       # The scope option is REQUIRED: the keyword has no default, so a
@@ -83,7 +175,7 @@ module KiwiCaptcha
           expected_policy_version: nil, policy_version_floor: nil,
           region: nil, expected_issuer: nil, secrets_by_kid: {},
           revoked_kids: [].freeze, tenant_id: nil, accept_legacy_v1: false,
-          rsw: nil, execution_policy: nil
+          rsw: nil, execution_policy: nil, argon_gate: nil
         }.merge(kwargs)
         super(expected_scope: expected_scope, **opts)
       end
@@ -193,9 +285,25 @@ module KiwiCaptcha
         delegate_execution = !policy.nil? && policy.enabled? && peek.execution_program.to_s != ''
         failure = cheap_phase_check(options, secrets, legacy_secret, peek, token, true, receipt_ns, delegate_execution)
         if failure.nil? && delegate_execution
-          ok, code = policy.delegate(raw_token, options.expected_scope, options.client_ip)
+          # The opt-in telemetry gate runs locally first: the
+          # delegation must never widen acceptance past the gate the
+          # local path enforces.
+          gate_outcome = telemetry_gate_outcome(options, secrets, legacy_secret, peek, token, runtime, receipt_ns)
+          return gate_outcome if gate_outcome
+
+          ok, code = policy.delegate(
+            raw_token, options.expected_scope, options.client_ip,
+            enforce_telemetry: options.enforce_telemetry,
+            operation_identity: options.operation_identity
+          )
           if ok
-            return valid(peek.nonce, ladder_rung(peek), peek.request_binding, true, nil, peek.decoy_field)
+            # The sidecar's acceptance is a fresh full-core derivation
+            # of this very submission, never a replay of a stored
+            # result.
+            return valid(
+              peek.nonce, ladder_rung(peek), peek.request_binding, false,
+              measurable_solve_duration_ms(peek, receipt_ns), peek.decoy_field
+            )
           end
           return invalid(code)
         end
@@ -239,22 +347,8 @@ module KiwiCaptcha
         # The opt-in telemetry gate: client-controlled evidence about
         # the original solve, replay-exempt, deletion only for a
         # pending record.
-        if options.enforce_telemetry &&
-           (token.telemetry.empty? || Telemetry.bot_signal?(token.telemetry, token.duration_ms)) &&
-           runtime.kind != 'consumed'
-          cleanup = begin
-            storage.delete_if_pending(token.nonce)
-          rescue StandardError
-            return invalid(VerifyError::STORAGE_UNAVAILABLE)
-          end
-          if cleanup.kind != 'consumed'
-            return invalid(VerifyError::TELEMETRY_REJECTED)
-          end
-          hard = replay_security_check(options, secrets, legacy_secret, peek, token, receipt_ns)
-          return invalid(hard) if hard
-
-          return resolve_consumed_record(options, secrets, legacy_secret, cleanup.consumed, token.nonce, options.operation_identity)
-        end
+        gate_outcome = telemetry_gate_outcome(options, secrets, legacy_secret, peek, token, runtime, receipt_ns)
+        return gate_outcome if gate_outcome
 
         # Terminal-state resolution before the consume: a cancelled or
         # already-consumed record never burns the proof phase.
@@ -263,78 +357,134 @@ module KiwiCaptcha
           return resolve_consumed_record(options, secrets, legacy_secret, runtime.consumed, token.nonce, options.operation_identity)
         end
 
-        # The one-shot consume and the proof re-derivation.
-        consumed = begin
-          Store.validated_operation_identity(options.operation_identity)
-          storage.consume(token.nonce, options.operation_identity)
+        # The argon admission gate: the record's signed parameters
+        # must fit the gate's budget before any slot is taken (the
+        # hard refuse for absurd profiles) and a slot must be granted
+        # before the one-shot consume. Exhaustion answers
+        # capacity_exceeded and the record stays retryable.
+        gate = options.argon_gate || default_argon_gate
+        lease = nil
+        if peek.algorithm == 'argon2id'
+          return invalid(VerifyError::UNSUPPORTED_ARGON2_PARAMS) unless gate_admits?(gate, peek)
+
+          begin
+            lease = gate.acquire
+          rescue StandardError
+            return invalid(VerifyError::ADMISSION_UNAVAILABLE)
+          end
+          return invalid(VerifyError::CAPACITY_EXCEEDED) if lease.nil?
+        end
+
+        begin
+          # The one-shot consume and the proof re-derivation.
+          consumed = begin
+            Store.validated_operation_identity(options.operation_identity)
+            storage.consume(token.nonce, options.operation_identity)
+          rescue StandardError
+            # A lost transition response is ambiguous: the challenge may
+            # or may not have been consumed.
+            return invalid(VerifyError::CONSUME_INDETERMINATE)
+          end
+          return invalid(VerifyError::RECORD_NOT_FOUND) if consumed.nil?
+          if consumed.consumed_before
+            return resolve_consumed_record(options, secrets, legacy_secret, consumed, token.nonce, options.operation_identity)
+          end
+          record = consumed.record
+
+          # The consumed instance must be the challenge that was
+          # validated and signed-checked via the peek: a swapped record
+          # fails closed.
+          consumed_secret = secret_for_key(secrets, record, legacy_secret)
+          if record.nonce != token.nonce ||
+             peek.challenge != record.challenge ||
+             secrets[:revoked].include?(record.kid) ||
+             consumed_secret.nil? ||
+             !validate_record(record) ||
+             !verify_record_signature(options, record, consumed_secret)
+            return invalid(VerifyError::MALFORMED_RECORD)
+          end
+          return invalid(VerifyError::UNSUPPORTED_ARGON2_PARAMS) unless argon2_ceilings_ok?(record)
+          return invalid(VerifyError::UNSUPPORTED_RSW_PARAMS) unless rsw_params_ok?(record)
+          return invalid(VerifyError::WRONG_POLICY_VERSION) unless policy_version_accepted?(options, record.policy_version)
+          if !options.expected_issuer.nil? && record.issuer != options.expected_issuer
+            return invalid(VerifyError::WRONG_ISSUER)
+          end
+
+          valid_proof = recompute_valid_proof(options, record, token)
+          if valid_proof.nil?
+            # Authentic but unrepresentable by this verifier: the
+            # per-algorithm mapping of the cores.
+            mapped = if record.algorithm == 'rsw'
+                       VerifyError::UNSUPPORTED_RSW_PARAMS
+                     elsif record.algorithm == 'argon2id'
+                       VerifyError::UNSUPPORTED_ARGON2_PARAMS
+                     else
+                       VerifyError::MALFORMED_RECORD
+                     end
+            return invalid(mapped)
+          end
+
+          # Post-derive final revalidation against the current clock and
+          # the current expectations, for both valid and invalid
+          # derivations.
+          now = now_secs(options)
+          return invalid(VerifyError::EXPIRED) if now >= record.expires_at
+          return invalid(VerifyError::WRONG_POLICY_VERSION) unless policy_version_accepted?(options, record.policy_version)
+          return invalid(VerifyError::WRONG_REGION) if !options.region.nil? && record.region != options.region
+          if !options.expected_issuer.nil? && record.issuer != options.expected_issuer
+            return invalid(VerifyError::WRONG_ISSUER)
+          end
+
+          unless valid_proof
+            best_effort_commit(options, secrets, legacy_secret, storage, consumed, false)
+            return invalid(VerifyError::INSUFFICIENT_WORK)
+          end
+          best_effort_commit(options, secrets, legacy_secret, storage, consumed, true)
+          valid(
+            record.nonce,
+            ladder_rung(record),
+            record.request_binding,
+            false,
+            measurable_solve_duration_ms(record, receipt_ns),
+            record.decoy_field
+          )
+        ensure
+          begin
+            gate.release(lease) if lease
+          rescue StandardError
+            nil
+          end
+        end
+      end
+
+      # The additive params-admission check; a gate without the method
+      # admits everything (the pure acquire/release seam stays intact).
+      def gate_admits?(gate, record)
+        return true unless gate.respond_to?(:admits?)
+
+        gate.admits?(record)
+      end
+
+      # The opt-in telemetry gate. Nil falls through un-rejected; a
+      # rejected pending record is burned exactly like the one-shot
+      # model demands, and an already-consumed record resolves through
+      # the compositional replay gate.
+      def telemetry_gate_outcome(options, secrets, legacy_secret, peek, token, runtime, receipt_ns)
+        return nil unless options.enforce_telemetry &&
+                          (token.telemetry.empty? || Telemetry.bot_signal?(token.telemetry, token.duration_ms)) &&
+                          runtime.kind != 'consumed'
+
+        cleanup = begin
+          options.storage.delete_if_pending(token.nonce)
         rescue StandardError
-          # A lost transition response is ambiguous: the challenge may
-          # or may not have been consumed.
-          return invalid(VerifyError::CONSUME_INDETERMINATE)
+          return invalid(VerifyError::STORAGE_UNAVAILABLE)
         end
-        return invalid(VerifyError::RECORD_NOT_FOUND) if consumed.nil?
-        if consumed.consumed_before
-          return resolve_consumed_record(options, secrets, legacy_secret, consumed, token.nonce, options.operation_identity)
-        end
-        record = consumed.record
+        return invalid(VerifyError::TELEMETRY_REJECTED) if cleanup.kind != 'consumed'
 
-        # The consumed instance must be the challenge that was
-        # validated and signed-checked via the peek: a swapped record
-        # fails closed.
-        consumed_secret = secret_for_key(secrets, record, legacy_secret)
-        if record.nonce != token.nonce ||
-           peek.challenge != record.challenge ||
-           secrets[:revoked].include?(record.kid) ||
-           consumed_secret.nil? ||
-           !validate_record(record) ||
-           !verify_record_signature(options, record, consumed_secret)
-          return invalid(VerifyError::MALFORMED_RECORD)
-        end
-        return invalid(VerifyError::UNSUPPORTED_ARGON2_PARAMS) unless argon2_ceilings_ok?(record)
-        return invalid(VerifyError::UNSUPPORTED_RSW_PARAMS) unless rsw_params_ok?(record)
-        return invalid(VerifyError::WRONG_POLICY_VERSION) unless policy_version_accepted?(options, record.policy_version)
-        if !options.expected_issuer.nil? && record.issuer != options.expected_issuer
-          return invalid(VerifyError::WRONG_ISSUER)
-        end
+        hard = replay_security_check(options, secrets, legacy_secret, peek, token, receipt_ns)
+        return invalid(hard) if hard
 
-        valid_proof = recompute_valid_proof(options, record, token)
-        if valid_proof.nil?
-          # Authentic but unrepresentable by this verifier: the
-          # per-algorithm mapping of the cores.
-          mapped = if record.algorithm == 'rsw'
-                     VerifyError::UNSUPPORTED_RSW_PARAMS
-                   elsif record.algorithm == 'argon2id'
-                     VerifyError::UNSUPPORTED_ARGON2_PARAMS
-                   else
-                     VerifyError::MALFORMED_RECORD
-                   end
-          return invalid(mapped)
-        end
-
-        # Post-derive final revalidation against the current clock and
-        # the current expectations, for both valid and invalid
-        # derivations.
-        now = now_secs(options)
-        return invalid(VerifyError::EXPIRED) if now >= record.expires_at
-        return invalid(VerifyError::WRONG_POLICY_VERSION) unless policy_version_accepted?(options, record.policy_version)
-        return invalid(VerifyError::WRONG_REGION) if !options.region.nil? && record.region != options.region
-        if !options.expected_issuer.nil? && record.issuer != options.expected_issuer
-          return invalid(VerifyError::WRONG_ISSUER)
-        end
-
-        unless valid_proof
-          best_effort_commit(options, secrets, legacy_secret, storage, consumed, false)
-          return invalid(VerifyError::INSUFFICIENT_WORK)
-        end
-        best_effort_commit(options, secrets, legacy_secret, storage, consumed, true)
-        valid(
-          record.nonce,
-          ladder_rung(record),
-          record.request_binding,
-          false,
-          measurable_solve_duration_ms(record, receipt_ns),
-          record.decoy_field
-        )
+        resolve_consumed_record(options, secrets, legacy_secret, cleanup.consumed, token.nonce, options.operation_identity)
       end
 
       def cheap_phase_check(options, secrets, legacy_secret, record, token, check_timing, now_ns, delegate_execution = false)

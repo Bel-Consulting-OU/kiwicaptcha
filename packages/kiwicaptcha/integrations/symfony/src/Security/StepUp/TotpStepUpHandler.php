@@ -18,10 +18,15 @@ use Symfony\Component\HttpFoundation\Response;
  * Enrollment surface: enroll() generates a fresh 160-bit secret,
  * persists it server-side keyed by the principal pseudonym and answers
  * its base32 form for the application to render. A QR label is the
- * application's own surface. The secret is stored in the step-up store
- * in the clear on the server side; encryption at rest is out of scope
- * for this plane. It belongs to the deployment's Redis protection, the
- * same boundary as every other risk-side state.
+ * application's own surface. The secret is sealed at rest with
+ * XSalsa20-Poly1305 (sodium_crypto_secretbox) under a seal key derived
+ * from the step-up master and bound to the owning principal's
+ * pseudonym, so a ciphertext copied across principal slots never
+ * decrypts; only the sealed blob is ever persisted. Unsealing a value
+ * this key cannot open (data predating the seal, a tampered store, a
+ * cross-principal transplant) fails closed with the typed
+ * {@see TotpSecretUnsealException}, which complete() maps to a typed
+ * failure verdict — never an uncaught error.
  *
  * The completion credit runs through {@see StepUpCompletionCredit} on
  * the one consumed record, exactly once per challenge.
@@ -32,6 +37,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     public const CODE_FIELD = 'kiwi_step_up_code';
 
     private const SECRET_BYTES = 20;
+
+    /** How far back a completed session step-up may authorize enrollment. */
+    private const ENROLLMENT_LOOKBACK_SECS = 900;
 
     public function __construct(
         private readonly StepUpChallengeStore $store,
@@ -65,47 +73,70 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     }
 
     /**
-     * Enroll (or re-enroll) the principal: a fresh 160-bit secret is
-     * generated, stored keyed by the principal pseudonym and answered
-     * in base32 for the application's provisioning surface (a QR code,
-     * a manual-entry block). Re-enrollment overwrites the stored
-     * secret, sealed at rest; the replay guard is left untouched.
+     * The at-rest seal key: HKDF over the step-up master, purpose-
+     * separated AND bound to the owning principal's pseudonym (the
+     * pseudonym rides the HKDF info), so a sealed secret transplanted
+     * into another principal's record slot never decrypts.
      */
-    /** The at-rest seal key: HKDF over the step-up master, purpose-separated. */
-    private function sealKey(): string
+    private function sealKey(string $principalPseudonym): string
     {
-        return hash_hkdf('sha256', $this->master, 32, 'kiwi/v2/totp-seal', 'kiwicaptcha/deploy-salt/v1');
-    }
-
-    /** Seal a fresh secret: base64(nonce || ciphertext), never plaintext at rest. */
-    private function seal(string $secret): string
-    {
-        $nonce = random_bytes(\SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-
-        return base64_encode($nonce.sodium_crypto_secretbox($secret, $nonce, $this->sealKey()));
+        return hash_hkdf('sha256', $this->master, 32, 'kiwi/v2/totp-seal|'.$principalPseudonym, 'kiwicaptcha/deploy-salt/v1');
     }
 
     /**
-     * Unseal a stored secret. A value this key cannot open (data
-     * written before sealing existed, or a tampered store) fails
-     * loudly: the operator re-enrolls the account rather than the
-     * deployment silently downgrading to plaintext.
+     * Seal a fresh secret for its owning principal: base64(nonce ||
+     * ciphertext), never plaintext at rest.
      */
-    private function unseal(string $sealed): string
+    private function seal(string $secret, string $principalPseudonym): string
+    {
+        $nonce = random_bytes(\SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        return base64_encode($nonce.sodium_crypto_secretbox($secret, $nonce, $this->sealKey($principalPseudonym)));
+    }
+
+    /**
+     * Unseal a stored secret under the owning principal's key. A value
+     * this key cannot open (data written before sealing existed, a
+     * tampered store, or a ciphertext copied across principal slots)
+     * fails closed with the typed {@see TotpSecretUnsealException}: the
+     * operator re-enrolls the account rather than the deployment
+     * silently downgrading to plaintext or erroring as a 500.
+     *
+     * @throws TotpSecretUnsealException when the stored value cannot be decrypted for this principal
+     */
+    private function unseal(string $sealed, string $principalPseudonym): string
     {
         $blob = base64_decode($sealed, true);
         if (\is_string($blob) && \strlen($blob) > \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) {
             $nonce = substr($blob, 0, \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-            $plain = sodium_crypto_secretbox_open(substr($blob, \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), $nonce, $this->sealKey());
+            $plain = sodium_crypto_secretbox_open(substr($blob, \SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), $nonce, $this->sealKey($principalPseudonym));
             if ($plain !== false) {
                 return $plain;
             }
         }
 
-        throw new \RuntimeException('The stored time-based secret could not be decrypted; the account must re-enroll its passcode (legacy plaintext data predates the at-rest seal)');
+        throw new TotpSecretUnsealException('The stored time-based secret could not be decrypted for this principal; the account must re-enroll its passcode (legacy plaintext data, tampered record, or a cross-principal transplant)');
     }
 
     /**
+     * Enroll (or re-enroll) the principal: a fresh 160-bit secret is
+     * generated, stored keyed by the principal pseudonym and answered
+     * in base32 for the application's provisioning surface (a QR code,
+     * a manual-entry block). Re-enrollment overwrites the stored
+     * secret, sealed at rest; the replay guard is left untouched.
+     *
+     * Every enrollment (first OR re-enroll) demands a step-up completed
+     * in THIS session within the lookback window — the same rule as the
+     * WebAuthn enrollment surface. A first enrollment with no step-up is
+     * exactly the credential-stuffing takeover path (a stolen password
+     * plants the attacker's own authenticator), so it is refused like a
+     * cross-session re-enroll. The factor floor is strongest-factor:
+     * re-enrollment must prove with the current TOTP factor, a first
+     * enrollment with any already-established factor (email_otp is the
+     * weakest, so `minFactor = 'email_otp'` accepts any enrolled
+     * factor). A principal-level success marker never authorizes
+     * enrollment — only the session-scoped one does.
+     *
      * @param string|null $sessionId the PHP session requesting enrollment;
      *                               required for any enrollment (first or
      *                               re-enroll) so only that session's own
@@ -117,21 +148,17 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         $sessionId = (string) $sessionId;
         $now = $this->now();
         $hasSecret = $this->store->findTotpSecret($principalPseudonym) !== null;
-        // Re-enrollment swaps the victim's second factor and demands a
-        // step-up completed in this session with the current factor
-        // (strongest-factor floor). A first enrollment from an already-
-        // authenticated session is allowed and notifies the owner; a
-        // principal-level success marker never authorizes a re-enroll.
-        if ($hasSecret) {
-            if ($sessionId === ''
-                || !$this->store->recentSessionStepUpSuccess($sessionId, $principalPseudonym, 'totp', 900, $now)) {
-                throw new \RuntimeException(
-                    'Re-enrolling the time-based passcode needs a step-up completed in this session with the current factor first.',
-                );
-            }
+        $minFactor = $hasSecret ? 'totp' : 'email_otp';
+        if ($sessionId === ''
+            || !$this->store->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+            throw new \RuntimeException(
+                $hasSecret
+                    ? 'Re-enrolling the time-based passcode needs a step-up completed in this session with the current factor first.'
+                    : 'Enrolling the time-based passcode needs a step-up completed in this session with an already-established factor first.',
+            );
         }
         $secret = random_bytes(self::SECRET_BYTES);
-        $this->store->saveTotpSecret($principalPseudonym, $this->seal($secret));
+        $this->store->saveTotpSecret($principalPseudonym, $this->seal($secret, $principalPseudonym));
         try {
             $this->ownerNotifier?->notifyFactorEnrolled($principalPseudonym, 'totp');
         } catch (\Throwable) {
@@ -159,7 +186,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
                 'This account has no enrolled authenticator; enroll one before step-up.',
             );
         }
-        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now) ?? 0;
+        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $trusted = $this->lockout?->isTrustedContext($request, $context->principalPseudonym, $now) ?? false;
+        $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
             return $this->refusal(
                 $context,
@@ -192,6 +221,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             $this->challengeTtlSecs,
             $this->maxAttempts,
             null,
+            null,
+            StepUpSessionBinding::sessionId($request),
+            $context->targetOwned,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
@@ -200,9 +232,12 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
     private string $boundSessionId = '';
 
+    private string $boundContextKey = '';
+
     public function complete(Request $request): StepUpResult
     {
         $this->boundSessionId = StepUpSessionBinding::sessionId($request);
+        $this->boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -221,7 +256,8 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if (!StepUpSessionBinding::matches($request, $challenge)) {
             return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
         }
-        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now) ?? 0;
+        $trusted = $this->lockout?->isTrustedContext($request, $challenge->principalPseudonym, $now) ?? false;
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $this->boundContextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
             return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
@@ -236,7 +272,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_NOT_ENROLLED, $challenge->id);
         }
-        $secret = $this->unseal($stored);
+        try {
+            $secret = $this->unseal($stored, $challenge->principalPseudonym);
+        } catch (TotpSecretUnsealException) {
+            // Fail closed as a typed verdict: an unopenable stored
+            // secret is an unusable factor (re-enroll required), never
+            // an uncaught error bubbling out as a 500.
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed(StepUpResult::FAIL_SECRET_UNUSABLE, $challenge->id);
+        }
         $code = (string) $request->request->get(self::CODE_FIELD, '');
         $step = $this->matchingStep($secret, $code, TotpCode::stepOf($now));
         if ($step === null) {
@@ -255,7 +300,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
-        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $this->boundContextKey);
 
         return $this->credit($challenge);
     }
@@ -292,7 +337,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     {
         // Every rejected code feeds the cross-challenge brute-force
         // budget before the per-challenge attempt cap.
-        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym);
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $this->boundContextKey);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);

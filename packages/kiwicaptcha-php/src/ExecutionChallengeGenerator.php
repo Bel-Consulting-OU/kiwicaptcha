@@ -115,15 +115,20 @@ namespace KiwiCaptcha;
  * machinery still gate, and an armed challenge without a valid digest
  * fails with the deterministic ExecutionMismatch outcome.
  *
- * The evidence class is rung-scoped. Versions 1-5 remain reproducible
- * by a pure implementation of the public interpreter semantics (the
- * forgeability oracle pins that on purpose). Version 6 is not. Its
- * five probes read computed style over real layout, observer delivery
- * order, the real event path, Range line boxes and intersection
- * thresholds, and the verifier checks every entry against an
- * operand-derived envelope, so a browserless forgery fails closed.
- * The fail harness under tests/browser/execution-v6 measures the
- * rejection rates and the emulation cost.
+ * The evidence class is rung-scoped and uniformly non-attesting. Every
+ * version's trace is reproducible by a pure implementation of the
+ * public semantics plus the published acceptance envelopes. Versions
+ * 1-5 need only the interpreter semantics (the forgeability oracle
+ * pins that on purpose). Version 6 additionally checks entries against
+ * operand-derived envelopes — which are deterministic functions of the
+ * operands that ship with the program and are published in this class.
+ * A full-knowledge forger who reads the source reimplements those five
+ * functions and emits passing traces WITHOUT any browser (the white-box
+ * forger, WhiteBoxEnvelopeForger, measures a 100 percent pass rate).
+ * Version 6 therefore costs an attacker one reading of the source, the
+ * same class as versions 1-5. It is supplementary evidence, NOT a
+ * browser boundary. The naive oracle's rejection on version 6 is real
+ * only for forgers who never implemented the envelopes.
  */
 final class ExecutionChallengeGenerator
 {

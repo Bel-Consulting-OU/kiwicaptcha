@@ -86,7 +86,13 @@ final class StepUpKernelTest extends TestCase
         $principal = $this->principalPseudonym();
         /** @var TotpStepUpHandler $totp */
         $totp = $container->get(TotpStepUpHandler::class);
-        $secret32 = $totp->enroll($principal);
+        // First enrollment is gated: only a session-scoped step-up
+        // completed in the enrolling session authorizes it (the
+        // stuffing-takeover fix), so the test books that proof first.
+        $store = $container->get('kiwi_captcha.step_up.store');
+        \assert($store instanceof \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore);
+        $store->markSessionStepUpSuccess('sess-kernel', $principal, 'email_otp', 900, time());
+        $secret32 = $totp->enroll($principal, 'sess-kernel');
 
         $client = $this->client();
         $client->request('GET', '/kiwi/step-up/begin?handler=totp&mode=json');
@@ -145,7 +151,23 @@ final class StepUpKernelTest extends TestCase
         $this->kernel ??= new StepUpTestKernel('test', true, true);
         $this->kernel->boot();
 
-        return new HttpKernelBrowser($this->kernel);
+        // Every request in a kernel flow carries the SAME started
+        // session: the completion is bound to the session that began the
+        // challenge, so a sessionless request is refused (fail closed).
+        return new class ($this->kernel) extends HttpKernelBrowser {
+            protected function filterRequest(\Symfony\Component\BrowserKit\Request $request): \Symfony\Component\HttpFoundation\Request
+            {
+                $httpRequest = parent::filterRequest($request);
+                $session = new \Symfony\Component\HttpFoundation\Session\Session(
+                    new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage(),
+                );
+                $session->setId('sess-kernel-http-000000000001');
+                $session->start();
+                $httpRequest->setSession($session);
+
+                return $httpRequest;
+            }
+        };
     }
 
     private function container(): \Symfony\Component\DependencyInjection\ContainerInterface

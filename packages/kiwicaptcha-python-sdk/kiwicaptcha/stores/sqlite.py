@@ -12,6 +12,7 @@ adapters can share one database file.
 
 import json
 import sqlite3
+import threading
 import time
 from typing import Any, Callable, Optional
 
@@ -84,6 +85,12 @@ class SqliteStorage:
     the adapter resolves the connection's main database file and opens a
     dedicated connection to that file instead. An in-memory database has
     no shareable file and is refused with a configuration error.
+
+    The connection is shared by every thread of the host process (the
+    WSGI singleton pattern): ``check_same_thread`` is off and every
+    access runs under one re-entrant lock, so a verification on a
+    request thread never trips the interpreter's cross-thread guard
+    and the ``BEGIN IMMEDIATE`` write transitions stay serialized.
     """
 
     def __init__(
@@ -99,6 +106,7 @@ class SqliteStorage:
             raise ValueError("ttl_margin_secs must be >= 0")
         self._ttl_margin = ttl_margin_secs
         self._now = now
+        self._lock = threading.RLock()
         if isinstance(connection_or_path, str):
             path = connection_or_path
         else:
@@ -110,23 +118,27 @@ class SqliteStorage:
                     " connection to a file-backed database)"
                 )
         self._owns_connection = True
-        self.conn = sqlite3.connect(path, timeout=busy_timeout_ms / 1000.0)
+        self.conn = sqlite3.connect(
+            path, timeout=busy_timeout_ms / 1000.0, check_same_thread=False
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.isolation_level = None
-        self.conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
-        try:
-            self.conn.execute("PRAGMA journal_mode = WAL").fetchone()
-        except sqlite3.Error as exc:
-            raise self._failure("schema initialization", exc) from exc
-        try:
-            self._initialize_schema()
-        except sqlite3.Error as exc:
-            raise self._failure("schema initialization", exc) from exc
+        with self._lock:
+            self.conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+            try:
+                self.conn.execute("PRAGMA journal_mode = WAL").fetchone()
+            except sqlite3.Error as exc:
+                raise self._failure("schema initialization", exc) from exc
+            try:
+                self._initialize_schema()
+            except sqlite3.Error as exc:
+                raise self._failure("schema initialization", exc) from exc
 
     def close(self) -> None:
         """Close the connection when this adapter opened it."""
         if self._owns_connection:
-            self.conn.close()
+            with self._lock:
+                self.conn.close()
 
     # ---- schema -------------------------------------------------------------
 
@@ -166,20 +178,21 @@ class SqliteStorage:
     # ---- transitions ---------------------------------------------------------
 
     def _write_transition(self, body: Callable[[], Any]) -> Any:
-        try:
-            self.conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.Error as exc:
-            raise self._failure("the write transition", exc) from exc
-        try:
-            result = body()
-            self.conn.execute("COMMIT")
-            return result
-        except sqlite3.Error as exc:
-            self._safe_rollback()
-            raise self._failure("the write transition", exc) from exc
-        except BaseException:
-            self._safe_rollback()
-            raise
+        with self._lock:
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                raise self._failure("the write transition", exc) from exc
+            try:
+                result = body()
+                self.conn.execute("COMMIT")
+                return result
+            except sqlite3.Error as exc:
+                self._safe_rollback()
+                raise self._failure("the write transition", exc) from exc
+            except BaseException:
+                self._safe_rollback()
+                raise
 
     def _safe_rollback(self) -> None:
         try:
@@ -205,7 +218,8 @@ class SqliteStorage:
     # ---- row helpers -----------------------------------------------------------
 
     def _row(self, nonce: str) -> Optional[sqlite3.Row]:
-        return self.conn.execute(_SELECT_ROW, (nonce,)).fetchone()
+        with self._lock:
+            return self.conn.execute(_SELECT_ROW, (nonce,)).fetchone()
 
     def _live_row(self, nonce: str) -> Optional[sqlite3.Row]:
         row = self._row(nonce)

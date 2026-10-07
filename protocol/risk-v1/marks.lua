@@ -32,8 +32,10 @@
 -- IDEMPOTENCY: with a non-empty event id the write is exactly once per
 -- id (the marker is SET NX PX inside this script, the ledger-script
 -- rule). A retried report returns the mark's count unchanged. The
--- marker lives as long as the mark window, so a retry can never
--- double-count inside it.
+-- marker lives for the retry horizon (24 h — a retried report is a
+-- same-day delivery concern), not the mark window: the mark itself
+-- keeps its long TTL, but one marker key per event id must not pin a
+-- keyspace entry for the whole 90-day mark life.
 --
 -- Every argument is validated BEFORE the first write, like the sibling
 -- outcome-ledger scripts: a hostile kind or TTL must error with the
@@ -41,6 +43,10 @@
 -- not roll back). The clock comes from Redis TIME, so a hostile caller
 -- timestamp can never backdate or future-date a mark.
 local EXPIRY_CEILING_MS = 2147483647 * 1000
+-- The dedupe-marker retry horizon: a report is retried within the
+-- delivery window, so a marker only has to outlive the retry budget.
+-- The mark hash keeps its own (much longer) ttl_ms.
+local RETRY_HORIZON_MS = 86400000
 
 if ARGV[1] == nil or ARGV[1] == '' or #ARGV[1] > 64 then
     return redis.error_reply('marks: kind must be a non-empty value of at most 64 bytes')
@@ -76,7 +82,7 @@ if event_id ~= '' then
         local count = redis.call('HGET', KEYS[1], 'count')
         return tonumber(count) or 0
     end
-    redis.call('SET', KEYS[2], '1', 'PX', ttl_ms)
+    redis.call('SET', KEYS[2], '1', 'PX', RETRY_HORIZON_MS)
 end
 
 local new_rank = SEVERITY[ARGV[1]] or 0

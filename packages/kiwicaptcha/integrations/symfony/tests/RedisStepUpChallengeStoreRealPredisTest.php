@@ -99,7 +99,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
 
     public function testBeginThroughCompleteWorksEndToEndOnTheRealClient(): void
     {
-        $base32 = $this->handler->enroll(self::PRINCIPAL);
+        $base32 = $this->enrollFirstTime();
         $secretRaw = (string) TotpCode::base32Decode($base32);
 
         $response = $this->handler->begin(
@@ -120,7 +120,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
 
     public function testTheConsumedRecordStaysSingleUseOnTheRealClient(): void
     {
-        $this->handler->enroll(self::PRINCIPAL);
+        $this->enrollFirstTime();
         $response = $this->handler->begin(
             Request::create('https://captcha.example.com/kiwi/step-up/begin'),
             new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_JSON),
@@ -140,6 +140,19 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->store->create($this->challenge($id), 300);
         $this->expectException(\RuntimeException::class);
         $this->store->create($this->challenge($id), 300);
+    }
+
+    /**
+     * First-time TOTP enrollment under the enrollment gate: the handler
+     * refuses it without a session-scoped step-up completed in the
+     * enrolling session, so the test books that proof first (the
+     * established-factor floor accepts the email_otp completion).
+     */
+    private function enrollFirstTime(): string
+    {
+        $this->store->markSessionStepUpSuccess('sess-real', self::PRINCIPAL, 'email_otp', 900, self::NOW);
+
+        return $this->handler->enroll(self::PRINCIPAL, 'sess-real');
     }
 
     private function challengeIdOf(string $ticket): string

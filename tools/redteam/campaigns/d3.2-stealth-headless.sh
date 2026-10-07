@@ -26,6 +26,13 @@
 #   spoof    a forged perfect-human telemetry payload scores as
 #            interaction and solve anomaly evidence, never as human
 #   marks    a marked session is denied by the marks stage
+#   whitebox the full-knowledge execution-envelope forger (no browser):
+#            reimplements the five published v6 envelopes from the
+#            open-source verifier and forges traces for real armed
+#            programs issued by this wire. Its pass rate is the honest
+#            full-knowledge number — version 6 is supplementary evidence
+#            that costs one reading of the source, NOT a browser
+#            boundary (the risk engine never weights it as one).
 #
 # Ports: 6470 this campaign's wire instance, 6471 the page and asset
 # server. The profile target supplies the Redis the risk plane reads.
@@ -159,6 +166,33 @@ if [ "$SPOOF_ESC" -lt 1 ]; then
     rt_report_fail "spoofed telemetry never escalated"
 fi
 
+# ---------- the white-box execution-envelope forger (full knowledge) ----------
+# The adversary has read the published verifier and reimplements the five
+# version-6 envelopes. No browser. Against REAL armed programs from this
+# wire the forger must be measured honestly: its pass rate is the true
+# number. Version 6 is NOT a browser boundary.
+WB_OUT=$(KIWI_RT_PHP_AUTOLOAD="$REPO_ROOT/packages/kiwicaptcha-php/vendor/autoload.php" \
+    php "$RT_DIR/campaigns/lib/d32.whitebox.php" "http://127.0.0.1:$WIRE_PORT" "$N" "$EXEC_KEY" \
+    2>"$RT_DIR/runs/env/d32-whitebox.err")
+WB_RC=$?
+echo "$WB_OUT"
+if [ "$WB_RC" != 0 ]; then
+    rt_report_fail "the white-box execution forger stage failed (see runs/env/d32-whitebox.err)"
+    rt_finish
+fi
+WB_ATTEMPTED=$(printf '%s' "$WB_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["whitebox_attempted"])')
+WB_PASSED=$(printf '%s' "$WB_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["whitebox_passed"])')
+WB_RATE=$(printf '%s' "$WB_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["whitebox_pass_rate"])')
+if [ "$WB_ATTEMPTED" -lt 1 ]; then
+    rt_report_fail "the white-box forger attempted no programs"
+fi
+# The honest assertion: the full-knowledge forger PASSES. That is the
+# hole this stage exists to measure — never to hide. A pass rate of 1.0
+# means v6 costs one source reading and is supplementary evidence only.
+if [ "$WB_PASSED" != "$WB_ATTEMPTED" ]; then
+    rt_report_fail "white-box forger pass rate $WB_RATE ($WB_PASSED/$WB_ATTEMPTED) — expected the full-knowledge forger to pass every armed program; the envelopes are public functions of the shipped operands"
+fi
+
 # ---------- human baseline (the false-positive guard) ----------
 BASELINE=$(KIWI_RT_BASE="$PROFILE_BASE" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PYBASE'
 import os, sys
@@ -175,7 +209,10 @@ rt_assert_eq "$BASELINE" "allowed" "human baseline: an honest native solve is ac
 
 rt_metric "solves=$SOLVE_N accepted=$ACCEPTED spoof_escalated=$SPOOF_ESC decoy_engine_escalations=$DECOY_ESC decoy_fills=$DECOY_FILLED solve_p95_ms=$SOLVE_P95"
 rt_metric "downscale=25_of_100000_per_day factor=4000x wire_instance_port=$WIRE_PORT"
-printf 'ECONOMIC: %s %s cost_per_accepted_abuse=unbounded accepted_abuses=0 solve_p95_ms=%s\n' \
-    "$RT_CAMPAIGN" "$RT_PROFILE" "$SOLVE_P95"
+rt_metric "whitebox_attempted=$WB_ATTEMPTED whitebox_passed=$WB_PASSED whitebox_pass_rate=$WB_RATE whitebox_class=full_knowledge_envelope_forger"
+printf 'ECONOMIC: %s %s cost_per_accepted_abuse=unbounded accepted_abuses=0 solve_p95_ms=%s whitebox_pass_rate=%s\n' \
+    "$RT_CAMPAIGN" "$RT_PROFILE" "$SOLVE_P95" "$WB_RATE"
+printf 'WHITEBOX: full-knowledge execution-envelope forger pass_rate=%s (%s/%s) — v6 envelopes are public functions of the shipped operands; version 6 is supplementary evidence costing one source reading, NOT a browser boundary\n' \
+    "$WB_RATE" "$WB_PASSED" "$WB_ATTEMPTED"
 
 rt_finish

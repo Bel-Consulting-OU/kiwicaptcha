@@ -84,7 +84,8 @@ defmodule Kiwicaptcha.Verify do
           revoked_kids: [pos_integer()],
           tenant_id: String.t() | nil,
           accept_legacy_v1: boolean(),
-          rsw: rsw_config() | nil
+          rsw: rsw_config() | nil,
+          argon_gate: Kiwicaptcha.ArgonAdmissionGate.t() | nil
         }
 
   @doc "The wire ceilings the verifier enforces."
@@ -123,7 +124,8 @@ defmodule Kiwicaptcha.Verify do
       revoked_kids: [],
       tenant_id: nil,
       accept_legacy_v1: false,
-      rsw: nil
+      rsw: nil,
+      argon_gate: nil
     }
   end
 
@@ -288,18 +290,44 @@ defmodule Kiwicaptcha.Verify do
          ) do
       nil ->
         if delegate_execution do
-          case Kiwicaptcha.ExecutionPolicy.delegate(policy, raw_token, Map.get(options, :expected_scope), Map.get(options, :client_ip)) do
-            {:ok, :ok} ->
-              valid(peek.nonce, ladder_rung(peek), peek.request_binding, true, nil, peek.decoy_field)
+          # The opt-in telemetry gate runs locally first: the
+          # delegation must never widen acceptance past the gate the
+          # local path enforces.
+          case telemetry_rejection(state, peek, token, options, secrets, legacy_secret) do
+            nil ->
+              case Kiwicaptcha.ExecutionPolicy.delegate(
+                     policy,
+                     raw_token,
+                     Map.get(options, :expected_scope),
+                     Map.get(options, :client_ip),
+                     Map.get(options, :enforce_telemetry, false),
+                     Map.get(options, :operation_identity)
+                   ) do
+                {:ok, :ok} ->
+                  # The sidecar's acceptance is a fresh full-core
+                  # derivation of this very submission, never a replay
+                  # of a stored result.
+                  valid(
+                    peek.nonce,
+                    ladder_rung(peek),
+                    peek.request_binding,
+                    false,
+                    measurable_solve_duration_ms(peek, now_micros(options)),
+                    peek.decoy_field
+                  )
 
-            {:deny, code} ->
-              # A known wire code maps onto the vocabulary atoms; an
-              # unknown one stays the deterministic deny (never widened).
-              if is_atom(code) and code != nil do
-                invalid(code)
-              else
-                invalid(:execution_mismatch)
+                {:deny, code} ->
+                  # A known wire code maps onto the vocabulary atoms; an
+                  # unknown one stays the deterministic deny (never widened).
+                  if is_atom(code) and code != nil do
+                    invalid(code)
+                  else
+                    invalid(:execution_mismatch)
+                  end
               end
+
+            outcome ->
+              outcome
           end
         else
           telemetry_gate(state, peek, token, options, secrets, legacy_secret)
@@ -399,6 +427,17 @@ defmodule Kiwicaptcha.Verify do
   end
 
   defp telemetry_gate(state, peek, token, options, secrets, legacy_secret) do
+    case telemetry_rejection(state, peek, token, options, secrets, legacy_secret) do
+      nil -> terminal_state(state, peek, token, options, secrets, legacy_secret)
+      outcome -> outcome
+    end
+  end
+
+  # The opt-in telemetry gate: nil falls through un-rejected; a
+  # rejected pending record is burned exactly like the one-shot model
+  # demands, and an already-consumed record resolves through the
+  # compositional replay gate.
+  defp telemetry_rejection(state, peek, token, options, secrets, legacy_secret) do
     bot_signal =
       token.telemetry == %{} or
         Kiwicaptcha.Telemetry.bot_signal?(token.telemetry, token.duration_ms)
@@ -435,11 +474,11 @@ defmodule Kiwicaptcha.Verify do
           invalid(:telemetry_rejected)
       end
     else
-      terminal_state(state, token, options, secrets, legacy_secret)
+      nil
     end
   end
 
-  defp terminal_state(state, token, options, secrets, legacy_secret) do
+  defp terminal_state(state, peek, token, options, secrets, legacy_secret) do
     cond do
       state.kind == :cancelled ->
         invalid(:record_not_found)
@@ -455,8 +494,48 @@ defmodule Kiwicaptcha.Verify do
         )
 
       true ->
-        consume_and_prove(token, options, secrets, legacy_secret)
+        admit_and_consume(peek, token, options, secrets, legacy_secret)
     end
+  end
+
+  # The argon admission gate: the record's signed parameters must fit
+  # the gate's budget before any slot is taken (the hard refuse for
+  # absurd profiles) and a slot must be granted before the one-shot
+  # consume. Exhaustion answers capacity_exceeded and the record stays
+  # retryable.
+  defp admit_and_consume(peek, token, options, secrets, legacy_secret) do
+    gate = options[:argon_gate] || Kiwicaptcha.ArgonAdmissionGate.default()
+
+    if peek.algorithm == "argon2id" do
+      if not Kiwicaptcha.ArgonAdmissionGate.admits?(gate, peek) do
+        # The record's signed parameters leave the gate's budget:
+        # refuse loudly, never derive and never silently downgrade.
+        invalid(:unsupported_argon2_params)
+      else
+        case acquire_gate(gate) do
+          {:ok, lease} ->
+            try do
+              consume_and_prove(token, options, secrets, legacy_secret)
+            after
+              Kiwicaptcha.ArgonAdmissionGate.release(gate, lease)
+            end
+
+          :error ->
+            invalid(:capacity_exceeded)
+
+          {:error, :unavailable} ->
+            invalid(:admission_unavailable)
+        end
+      end
+    else
+      consume_and_prove(token, options, secrets, legacy_secret)
+    end
+  end
+
+  defp acquire_gate(gate) do
+    Kiwicaptcha.ArgonAdmissionGate.acquire(gate)
+  rescue
+    _ -> {:error, :unavailable}
   end
 
   defp consume_and_prove(token, options, secrets, legacy_secret) do

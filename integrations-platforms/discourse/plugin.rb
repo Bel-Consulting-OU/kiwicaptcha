@@ -64,11 +64,19 @@ class KiwiSignupGate
     method = env["REQUEST_METHOD"].to_s.upcase
     return false unless method == "POST"
 
-    path = env["PATH_INFO"].to_s
+    # Normalize both sides: a trailing slash (/u/ vs /u) must never
+    # let a sign-up request slip past the configured gate path, and a
+    # ".json" variant of a normalized path stays gated too.
+    normalize = lambda do |p|
+      p = p.to_s
+      p == "/" || p.empty? ? p : p.chomp("/")
+    end
+    path = normalize.call(env["PATH_INFO"].to_s)
     SiteSetting.kiwi_signup_paths
       .split("|")
       .map(&:strip)
       .reject(&:empty?)
+      .map { |candidate| normalize.call(candidate) }
       .any? { |candidate| path == candidate || path == "#{candidate}.json" }
   end
 

@@ -132,16 +132,22 @@
 //! node into it, read the observed byte back, checksum or rotate
 //! over it) and real-DOM probes whose ids reference the constructed
 //! node. An armed challenge always exercises real browser DOM and
-//! layout work. The evidence class is rung-scoped: versions 1-5
-//! remain reproducible by a pure implementation of the public
-//! interpreter semantics (the forgeability oracle pins that on
-//! purpose), while the version-6 real-platform rung is not — its
-//! five probes read computed style over real layout, observer
-//! delivery order, the real event path, Range line boxes and
-//! intersection thresholds, and the verifier checks every entry
-//! against an operand-derived envelope, so a browserless forgery
-//! fails closed (the fail harness under tests/browser/execution-v6
-//! measures the rejection rates and the emulation cost).
+//! layout work when a browser runs it. The evidence class is
+//! rung-scoped and uniformly non-attesting: every version's trace is
+//! reproducible by a pure implementation of the public semantics plus
+//! the published envelopes. Versions 1-5 need only the interpreter
+//! semantics (the forgeability oracle pins that on purpose). Version 6
+//! additionally needs the five operand-derived acceptance envelopes —
+//! which are deterministic functions of the operands that ship with the
+//! program, published in this module. A full-knowledge forger who reads
+//! the source reimplements those five functions and emits passing
+//! traces WITHOUT any browser (the white-box forger,
+//! `fixtures::white_box_envelope_forgery_solver`, measures a 100
+//! percent pass rate). Version 6 therefore costs an attacker one
+//! reading of the source — the same class as versions 1-5 — and is
+//! supplementary evidence, NOT a browser boundary. The naive oracle's
+//! rejection on version 6 is real only for forgers who never
+//! implemented the envelopes.
 //!
 //! The execution digest binds the program, the challenge context and
 //! the trace:
@@ -2301,6 +2307,29 @@ pub mod fixtures {
         program: &Program,
         observed_height: u8,
     ) -> String {
+        build_trace(program, observed_height, false)
+    }
+
+    /// The white-box envelope forger: the same state machine as
+    /// [`executed_trace_for_with_observed_height`], but the five
+    /// version-6 probe entries are synthesized INSIDE the published
+    /// operand-derived envelopes instead of the pure-sim placeholders.
+    /// Every reported observation is written through into the u8 state
+    /// exactly as the verifier replays it, so later checksum/read
+    /// entries stay coherent.
+    ///
+    /// This is the full-knowledge adversary's forge: one reading of the
+    /// open-source verifier yields the five envelope functions, and
+    /// every acceptance band is a deterministic function of the operands
+    /// that ship with the program. The naive oracle above is rejected on
+    /// version 6 only because it emits placeholders — that rejection
+    /// rate is not a full-knowledge number. Version 6 is supplementary
+    /// evidence that costs one source reading, NOT a browser boundary.
+    pub fn white_box_envelope_forgery_solver(program: &Program, observed_height: u8) -> String {
+        build_trace(program, observed_height, true)
+    }
+
+    fn build_trace(program: &Program, observed_height: u8, white_box: bool) -> String {
         assert!(
             (1..=255).contains(&observed_height),
             "the fabricated observed height must stay within 1..255"
@@ -2388,6 +2417,66 @@ pub mod fixtures {
                 // predicts), so the synthesizer fabricates the fixed
                 // reference digest above.
                 entries.push(format!("durlc({FABRICATED_URL_DIGEST})"));
+            } else if white_box && op.opcode == OP_CSS_GEOM {
+                // White-box: the computed-geometry envelope is a pure
+                // function of the drawn seed. Emit the exact font size
+                // and the interval floor as the height — no layout ran.
+                let (fs_lo, _fs_hi, h_lo, _h_hi) =
+                    css_geom_envelope(operand_int(op, "seed") as u32);
+                entries.push(format!("dcsgeom({fs_lo},{h_lo})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = h_lo as u8;
+                }
+            } else if white_box && op.opcode == OP_MUT_ORDER {
+                // White-box: the mutation record-type string is fully
+                // determined by the churn operands.
+                let (expected, records) =
+                    mut_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                entries.push(format!("dmutord({expected})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = records as u8;
+                }
+            } else if white_box && op.opcode == OP_EV_PHASE_FULL {
+                // White-box: the full-phase body is the published
+                // constant "1234:3" for every program.
+                entries.push("devphf(1234:3)".into());
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = 4;
+                }
+            } else if white_box && op.opcode == OP_RANGE_ORDER {
+                // White-box: the range string length is exact and the
+                // fragment count band admits the floor.
+                let (t_exact, rects_lo, _rects_hi) =
+                    range_order_envelope(operand_int(op, "b0") as u32, operand_int(op, "b1") as u32);
+                entries.push(format!("drange({t_exact},{rects_lo},1)"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = rects_lo as u8;
+                }
+            } else if white_box && op.opcode == OP_INT_OBS {
+                // White-box: the intersection band is seed-derived; the
+                // isIntersecting flag is chosen against the drawn
+                // threshold inside the walker's two-percent slack.
+                let seed = operand_int(op, "seed") as u32;
+                let (q_lo, q_hi, t0_pct) = int_obs_envelope(seed);
+                let m = 5 + (seed % 36) as i64;
+                let q = (40 - m).clamp(0, 20) * 5;
+                let q = q.clamp(q_lo, q_hi);
+                let is_int = if q >= t0_pct + 2 {
+                    1
+                } else if q <= t0_pct - 2 {
+                    0
+                } else {
+                    i64::from(q >= t0_pct)
+                };
+                entries.push(format!("dintobs(1,{q},{is_int})"));
+                let cell = operand_int(op, "cell") as usize;
+                if cell < u8arr.len() {
+                    u8arr[cell] = q as u8;
+                }
             } else {
                 let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
                 entries.push(format!("{}({result})", trace_name(op.opcode)));
@@ -2409,14 +2498,14 @@ pub mod fixtures {
     /// The oracle is the forgeability regression benchmark, preserved
     /// on purpose: the tests sweep 100 generated programs of each
     /// pure-semantics version and assert every forged trace verifies
-    /// and digests, then sweep the version-6 real-platform rung and
-    /// assert a 100 percent rejection rate. The trace of versions
-    /// 1-5 is supplementary evidence, reproducible by a pure
-    /// implementation of the public semantics. The version-6 envelope
-    /// is the environment boundary: extending this solver across it
-    /// would take real Web Platform semantics (computed layout,
-    /// observer delivery, the event path, Range geometry, intersection
-    /// thresholds), never a shadow model.
+    /// and digests, then sweep the version-6 rung and assert this naive
+    /// solver (which emits pure-sim placeholders) is rejected. That
+    /// rejection is NOT a full-knowledge number: the white-box forger
+    /// ([`white_box_envelope_forgery_solver`]) reimplements the five
+    /// published envelopes and passes every version-6 program without a
+    /// browser. Versions 1-5 and version 6 alike cost an attacker one
+    /// reading of the source; the whole ladder is supplementary
+    /// evidence, never a browser boundary.
     pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
         assert!(
             (1..=255).contains(&observed_height),
@@ -2922,7 +3011,7 @@ mod tests {
     // feature-gated test-fixtures module (see `fixtures`); the self
     // dev-dependency in Cargo.toml enables `test-fixtures` for every
     // test build, so the unit tests reach it here.
-    use super::fixtures::{browserless_forgery_solver, executed_trace_for};
+    use super::fixtures::{browserless_forgery_solver, executed_trace_for, white_box_envelope_forgery_solver};
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
@@ -4070,6 +4159,47 @@ mod tests {
         assert_eq!(
             attempted, rejected,
             "the browserless oracle must fail on every version-6 program (a 100 percent rejection rate)"
+        );
+    }
+
+    #[test]
+    fn white_box_envelope_forger_passes_every_version6_program() {
+        // The honest full-knowledge measurement, the mirror of the PHP
+        // WhiteBoxExecutionForgeryTest: a forger who reimplements the
+        // five published envelopes (they are deterministic functions of
+        // the operands that ship with the program) emits a passing trace
+        // for every version-6 program without ever opening a browser.
+        // The pass rate is 100 percent — that is the true number to
+        // publish. Version 6 costs one reading of the source, the same
+        // class as versions 1-5; it is supplementary evidence, NOT a
+        // browser boundary.
+        let mut attempted = 0u64;
+        let mut passed = 0u64;
+        for i in 0..100u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(
+                format!("whitebox-forger-v6-{i}").as_bytes(),
+            ));
+            let p = generate(KEY, &nonce, "login", "login-action", 6).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            assert_eq!(
+                program.op_version, 6,
+                "the corpus stays on the real-platform rung"
+            );
+            let trace = white_box_envelope_forgery_solver(&program, 17);
+            attempted += 1;
+            if verify_executed_trace(&p, &nonce, &trace).is_some() {
+                assert!(
+                    expected_digest_over_trace(&p, &nonce, &trace).is_some(),
+                    "a forged trace that verifies must also digest"
+                );
+                passed += 1;
+            }
+        }
+        assert_eq!(attempted, 100, "the sweep attempted every program");
+        assert_eq!(
+            passed, attempted,
+            "WHITE-BOX PASS RATE: the full-knowledge forger must pass every version-6 program \
+             without a browser (pass rate 1.0, rejection rate 0.0)"
         );
     }
 }

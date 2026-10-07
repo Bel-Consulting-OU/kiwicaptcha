@@ -43,6 +43,10 @@ class client
                 'body' => $request['body'],
                 'timeout' => 5,
                 'http_errors' => false,
+                // The verify call must land on the configured endpoint
+                // exactly: a 3xx from the network path can never
+                // re-point it at a third party.
+                'allow_redirects' => false,
             ]);
         } catch (GuzzleException $e) {
             return ['ok' => false, 'code' => 'verify_unavailable'];
@@ -105,7 +109,11 @@ class client
         if (!is_array($parsed)) {
             return ['ok' => false, 'code' => 'verify_unreadable'];
         }
-        if (($parsed['success'] ?? false) === true) {
+        // A pass requires the upstream to say success on a 2xx status:
+        // a redirect (3xx) or any other non-2xx carrying a
+        // success-shaped body is a status/body mismatch and fails
+        // closed.
+        if ($status >= 200 && $status <= 299 && ($parsed['success'] ?? false) === true) {
             return ['ok' => true, 'code' => 'verified'];
         }
 
@@ -131,31 +139,37 @@ class client
                 $cidrs[] = $candidate;
             }
         }
-        $peer = (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
-        if ($cidrs === []) {
-            return $peer;
+        $peer_canonical = self::canonical_ip((string) ($server['REMOTE_ADDR'] ?? ''));
+        if ($peer_canonical === null) {
+            // Fail closed: a missing or unparsable socket peer is not a
+            // loopback client. The caller refuses the request rather
+            // than inventing 127.0.0.1 or forwarding a fabricated
+            // identity.
+            return '';
         }
-        $peer_canonical = self::canonical_ip($peer);
-        $peer_trusted = $peer_canonical !== null && self::in_trusted($peer_canonical, $cidrs);
+        if ($cidrs === []) {
+            return $peer_canonical;
+        }
+        $peer_trusted = self::in_trusted($peer_canonical, $cidrs);
         $forwarded = isset($server['HTTP_X_FORWARDED_FOR']) && is_string($server['HTTP_X_FORWARDED_FOR'])
             ? trim($server['HTTP_X_FORWARDED_FOR'])
             : '';
         if ($forwarded === '') {
             if (!$peer_trusted) {
-                return $peer;
+                return $peer_canonical;
             }
             $real_ip = isset($server['HTTP_X_REAL_IP']) && is_string($server['HTTP_X_REAL_IP'])
                 ? trim($server['HTTP_X_REAL_IP'])
                 : '';
             if ($real_ip === '' || preg_match('/[\x00-\x1F\x7F]/', $real_ip) === 1) {
-                return $peer;
+                return $peer_canonical;
             }
             $canonical = self::canonical_ip($real_ip);
 
-            return $canonical ?? $peer;
+            return $canonical ?? $peer_canonical;
         }
         if (preg_match('/[\x00-\x1F\x7F]/', $forwarded) === 1 || !$peer_trusted) {
-            return $peer;
+            return $peer_canonical;
         }
         foreach (array_reverse(array_map('trim', explode(',', $forwarded))) as $hop) {
             $canonical = self::canonical_ip($hop);
@@ -163,14 +177,14 @@ class client
                 // An unparsable hop terminates the trust chain: who
                 // lies beyond it cannot be established, so the peer
                 // falls back.
-                return $peer;
+                return $peer_canonical;
             }
             if (!self::in_trusted($canonical, $cidrs)) {
                 return $canonical;
             }
         }
 
-        return $peer;
+        return $peer_canonical;
     }
 
     /**

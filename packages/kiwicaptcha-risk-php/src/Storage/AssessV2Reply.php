@@ -40,8 +40,11 @@ final class AssessV2Reply
         public readonly bool $registrationStatus,
         /** Decayed target failure count at assessment time (0 without a target). */
         public readonly int $targetFailures = 0,
-        /** Distinct source+asn spread of target failures (0 without a target). */
-        public readonly int $targetSpread = 0,
+        /** Distinct-source spread of target failures (0 without a target).
+         * Kept separate from the ASN spread — the two are never summed. */
+        public readonly int $targetSpreadSources = 0,
+        /** Distinct-ASN spread of target failures (0 without a target). */
+        public readonly int $targetSpreadAsns = 0,
     ) {
     }
 }

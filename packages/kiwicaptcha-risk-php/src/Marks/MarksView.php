@@ -19,10 +19,12 @@ final class MarksView
     /**
      * @param array<string, array{kind: string, count: int, first_ms: int, last_ms: int}> $own marks keyed by mark dimension
      * @param array{kind: string, count: int, first_ms: int, last_ms: int}|null $target
+     * @param FirstAttemptEvidence          $firstAttempt          first-attempt prevention evidence (P0-1), neutral by default
      */
     private function __construct(
         private readonly array $own,
         private readonly ?array $target,
+        private readonly FirstAttemptEvidence $firstAttempt = new FirstAttemptEvidence(),
     ) {
     }
 
@@ -52,7 +54,19 @@ final class MarksView
      */
     public function withTarget(?array $target): self
     {
-        return new self($this->own, $target);
+        return new self($this->own, $target, $this->firstAttempt);
+    }
+
+    /** Attaches the first-attempt prevention evidence (P0-1). */
+    public function withFirstAttempt(FirstAttemptEvidence $evidence): self
+    {
+        return new self($this->own, $this->target, $evidence);
+    }
+
+    /** The attached first-attempt evidence (neutral when none). */
+    public function firstAttempt(): FirstAttemptEvidence
+    {
+        return $this->firstAttempt;
     }
 
     /**

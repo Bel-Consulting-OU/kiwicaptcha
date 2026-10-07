@@ -152,12 +152,14 @@ describe('the sidecar delegation plane', () => {
     assert.equal(native.ok, true, `the native walker accepts: ${JSON.stringify(native)}`);
 
     // The sidecar policy: the delegation accepts and the verdict
-    // merges into this SDK's result shape.
+    // merges into this SDK's result shape. A fresh delegated success is
+    // a fresh result, never a stored one.
     const accepted = await verify(token, await makeOptions({
       executionPolicy: { sidecarUrl: sidecar.url },
     }));
     assert.equal(accepted.ok, true, `the delegation must accept: ${JSON.stringify(accepted)}`);
     assert.equal(accepted.disposition, 'allow');
+    assert.equal(accepted.fromStoredResult, false, 'a fresh delegated success must not claim a stored result');
 
     // Single-use: the sidecar consumed; a replay never re-accepts.
     const replay = await verify(token, await makeOptions({

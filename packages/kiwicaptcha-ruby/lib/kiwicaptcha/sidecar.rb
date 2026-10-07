@@ -46,13 +46,18 @@ module KiwiCaptcha
     # failure maps the sidecar's kiwi-code (the shared wire vocabulary)
     # through verbatim, with the transport failures fail-closed
     # (storage_unavailable keeps the retry disposition, the record
-    # intact).
-    def delegate(raw_token, scope, client_ip)
+    # intact). The caller's telemetry posture and operation identity
+    # ride along so a sidecar that enforces either never sees a
+    # watered-down request.
+    def delegate(raw_token, scope, client_ip, enforce_telemetry: false, operation_identity: nil)
       uri = URI.parse(sidecar_url.strip.sub(%r{/+\z}, '') + '/verify')
       request = Net::HTTP::Post.new(uri)
       request['content-type'] = 'application/json'
       request['authorization'] = "Bearer #{bearer_token}" if bearer_token && !bearer_token.empty?
-      request.body = JSON.generate(token: raw_token, scope: scope, remoteip: client_ip)
+      request.body = JSON.generate(
+        token: raw_token, scope: scope, remoteip: client_ip,
+        enforce_telemetry: !!enforce_telemetry, operation_identity: operation_identity
+      )
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = uri.instance_of?(URI::HTTPS)
       http.open_timeout = timeout_ms / 1000.0

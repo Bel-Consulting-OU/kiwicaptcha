@@ -85,6 +85,12 @@ check('transport throw is a fault', KiwiVerifyLogic::decide($settings, 't', 'log
 check('5xx is a fault', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 502, 'body' => ''])['code'] === 'verify_unavailable');
 check('401 is a fault', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 401, 'body' => '{}'])['code'] === 'verify_unavailable');
 check('garbage body is a fault', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 200, 'body' => '<html>'])['code'] === 'verify_unreadable');
+check('302 with success body fails closed', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 302, 'body' => '{"success":true}'])['code'] === 'challenge_failed');
+check('403 with success body fails closed', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 403, 'body' => '{"success":true}'])['code'] === 'challenge_failed');
+check('199 with success body fails closed', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 199, 'body' => '{"success":true}'])['code'] === 'challenge_failed');
+check('204 with success body passes', KiwiVerifyLogic::decide($settings, 't', 'login', [], fn () => ['status' => 204, 'body' => '{"success":true}']) === ['ok' => true, 'code' => 'verified']);
+check('missing peer fails closed', KiwiVerifyLogic::clientIp([]) === '');
+check('garbage peer fails closed', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => 'not-an-ip']) === '');
 
 // Markup.
 $element = KiwiMarkup::renderElement('comment');

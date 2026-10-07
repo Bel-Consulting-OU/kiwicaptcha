@@ -145,6 +145,21 @@ impl Response {
     }
 }
 
+/// Parse one Content-Length value under the canonical decimal grammar
+/// `0 | [1-9][0-9]*`: no leading zeros, no sign, no whitespace inside.
+/// Anything else is a framing ambiguity and refuses the request.
+fn parse_canonical_content_length(value: &str) -> Result<usize, ReadFailure> {
+    if value.is_empty()
+        || !value.bytes().all(|b| b.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(ReadFailure::Malformed("bad content-length".to_string()));
+    }
+    value
+        .parse()
+        .map_err(|_| ReadFailure::Malformed("bad content-length".to_string()))
+}
+
 /// Read one HTTP/1.1 request from the stream (request line, headers,
 /// Content-Length body). The reader never allocates beyond the two
 /// bounded caps, and every blocking read carries the stream's timeout.
@@ -189,6 +204,7 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
     let target = parts.next().unwrap_or("").to_string();
     let path = target.split('?').next().unwrap_or("").to_string();
     let mut content_length = 0usize;
+    let mut content_length_seen = false;
     let mut authorization = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -197,11 +213,33 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim();
         if name == "content-length" {
-            content_length = value
-                .parse()
-                .map_err(|_| ReadFailure::Malformed("bad content-length".to_string()))?;
+            // Framing contract: one canonical decimal integer only.
+            // Duplicate Content-Length values and non-canonical forms
+            // (leading zeros, a plus sign) are refused so a fronting
+            // proxy and this reader can never disagree on the body
+            // boundary (the CL.TE / CL.CL request-smuggling family).
+            if content_length_seen {
+                return Err(ReadFailure::Malformed("duplicate content-length".to_string()));
+            }
+            content_length_seen = true;
+            content_length = parse_canonical_content_length(value)?;
         } else if name == "authorization" {
+            if authorization.is_some() {
+                return Err(ReadFailure::Malformed(
+                    "duplicate authorization".to_string(),
+                ));
+            }
             authorization = Some(value.to_string());
+        } else if name == "transfer-encoding" {
+            // The reader understands only identity framing. A
+            // Transfer-Encoding (chunked or otherwise) is refused
+            // outright instead of being silently ignored: ignoring it
+            // while honoring Content-Length is exactly the CL.TE
+            // smuggling shape through any proxy in front of this
+            // sidecar.
+            return Err(ReadFailure::Malformed(
+                "transfer-encoding unsupported".to_string(),
+            ));
         }
     }
     if content_length > MAX_BODY_BYTES {

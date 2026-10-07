@@ -9,7 +9,7 @@ use KiwiCaptcha\Tests\Support\BrowserlessForgerySolver;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The browserless execution forgery regression oracle.
+ * The browserless execution forgery regression oracle (LAZY FORGER).
  *
  * The shadow solver must succeed on every pure-semantics grammar the
  * generator emits, versions 1 through 5, the causal object-graph rung
@@ -19,13 +19,14 @@ use PHPUnit\Framework\TestCase;
  * of versions 1-5 is supplementary evidence, reproducible by any
  * implementation of the public semantics, never a browser attestation.
  *
- * Version 6, the real-platform rung, sits above that boundary by
- * design. Its five probes read computed style over real layout,
- * MutationObserver delivery order, the full event phases, Range line
- * boxes and Selection state, and IntersectionObserver thresholds. The
- * browserless solver cannot reproduce a verifiable trace, and every
- * forged attempt fails closed: the second test sweeps a deterministic
- * v6 corpus and requires a 100 percent rejection rate.
+ * Version 6 is rejected by THIS solver only because it emits the
+ * pure-sim placeholders rather than the operand-derived envelope
+ * entries. That 100 percent rejection is a lazy-forger number, NOT a
+ * full-knowledge number. The white-box forger (WhiteBoxExecutionForgeryTest
+ * / WhiteBoxEnvelopeForger) reimplements the five published envelopes
+ * and passes every version-6 program without a browser — version 6
+ * costs one reading of the source, the same class as versions 1-5, and
+ * is NOT a browser boundary.
  */
 final class BrowserlessExecutionForgeryTest extends TestCase
 {

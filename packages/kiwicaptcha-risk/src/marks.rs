@@ -75,6 +75,17 @@ pub const CORROBORATION_FLOOR: u16 = 300;
 /// login claiming it sees the interactive step-up (never a lockout).
 pub const TARGET_ATTACK_THRESHOLD: u32 = 5;
 
+/// The scope failure-ratio pressure floor for first-attempt login
+/// escalation: at/above this `global_pressure` signal (or global level
+/// [`SCOPE_PRESSURE_LEVEL`]) every login escalates to the interactive
+/// step-up, not only the attacked target's.
+pub const SCOPE_PRESSURE_FLOOR: u16 = 300;
+
+/// The global hysteresis level at which scope pressure escalates
+/// first-attempt logins (the ratchet's first rung already means the
+/// scope failure ratio is running hot).
+pub const SCOPE_PRESSURE_LEVEL: u8 = 1;
+
 /// Below this argon capacity the strongest rung re-escalates to StepUp
 /// (the policy's own capacity check, applied to the mark rung too).
 const ARGON_CAPACITY_FLOOR: u16 = 300;
@@ -90,13 +101,20 @@ const ARGON_CAPACITY_FLOOR: u16 = 300;
 pub struct MarksView {
     own: Vec<(MarkDimension, MarkRecord)>,
     target: Option<MarkRecord>,
+    /// First-attempt prevention evidence (P0-1): a valid credential on
+    /// its first attempt, with no marks anywhere. Default neutral.
+    first_attempt: FirstAttemptEvidence,
 }
 
 impl MarksView {
     /// The view from already-resolved marks: own entries keep the given
     /// dimension order.
     pub fn from_parts(own: Vec<(MarkDimension, MarkRecord)>, target: Option<MarkRecord>) -> Self {
-        MarksView { own, target }
+        MarksView {
+            own,
+            target,
+            first_attempt: FirstAttemptEvidence::zero(),
+        }
     }
 
     /// Replaces the target entry with a reader-derived record: the shape
@@ -105,6 +123,17 @@ impl MarksView {
     pub fn with_target(mut self, target: Option<MarkRecord>) -> Self {
         self.target = target;
         self
+    }
+
+    /// Attaches the first-attempt prevention evidence (P0-1).
+    pub fn with_first_attempt(mut self, evidence: FirstAttemptEvidence) -> Self {
+        self.first_attempt = evidence;
+        self
+    }
+
+    /// The attached first-attempt evidence (neutral when none).
+    pub fn first_attempt(&self) -> &FirstAttemptEvidence {
+        &self.first_attempt
     }
 
     /// Reads the view from a marks store: one lookup per own dimension
@@ -148,7 +177,11 @@ impl MarksView {
                 }
             },
         };
-        Ok(MarksView { own: marks, target })
+        Ok(MarksView {
+            own: marks,
+            target,
+            first_attempt: FirstAttemptEvidence::zero(),
+        })
     }
 
     /// The own-dimension marks still inside their TTL window.
@@ -205,6 +238,40 @@ pub struct MarksRequest {
     /// The principal pseudonym (32 hex chars), or `None` when the request
     /// is unauthenticated.
     pub principal: Option<String>,
+}
+
+/// The first-attempt prevention evidence (D3.5 P0-1): the signals that
+/// must stop a VALID stolen credential on its very first attempt, before
+/// any failure has accumulated anywhere. Each flag is independent
+/// evidence for the interactive step-up (never a deny — the legitimate
+/// owner must always be able to finish the login):
+///
+/// - `novel_network`: the principal has never been seen from this
+///   network bucket (/64 or IPv4) and the account has no prior trusted
+///   network, so the login cannot be vouched for by any network history.
+/// - `breached_credential`: the presented credential is known-breached
+///   (caller-supplied corpus verdict — same step-up-worthy shape as
+///   honeypot evidence).
+/// - `scope_pressure`: the scope failure-ratio pressure is running at or
+///   above [`SCOPE_PRESSURE_FLOOR`] / [`SCOPE_PRESSURE_LEVEL`], so every
+///   first-attempt login escalates — not only the attacked target's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FirstAttemptEvidence {
+    pub novel_network: bool,
+    pub breached_credential: bool,
+    pub scope_pressure: bool,
+}
+
+impl FirstAttemptEvidence {
+    /// Neutral: no first-attempt evidence at all.
+    pub fn zero() -> FirstAttemptEvidence {
+        FirstAttemptEvidence::default()
+    }
+
+    /// True when any first-attempt prevention signal fired.
+    pub fn requires_step_up(&self) -> bool {
+        self.novel_network || self.breached_credential || self.scope_pressure
+    }
 }
 
 /// The marks reader seam of the engine wiring: given the identity picture
@@ -377,6 +444,30 @@ pub fn apply(
             decision.action = RiskAction::StepUp;
         }
         stage_reasons.push(RiskReason::TargetUnderAttack);
+    }
+
+    // Rule 4: first-attempt prevention (P0-1). A VALID credential on its
+    // very first attempt carries no marks and no target history, so rules
+    // 1-3 stay silent — exactly the D3.5 hole. Any of the three signals
+    // (novel network with no prior trusted network, a known-breached
+    // credential, or scope failure-ratio pressure at/above the floor)
+    // forces the interactive step-up before any session credit, and tops
+    // out at StepUp like target evidence: the legitimate owner must
+    // always be able to finish the login (never Deny, never a rung).
+    if view.first_attempt.requires_step_up() {
+        quarantined = false;
+        if decision.action.rank() < RiskAction::StepUp.rank() {
+            decision.action = RiskAction::StepUp;
+        }
+        if view.first_attempt.novel_network {
+            stage_reasons.push(RiskReason::NovelNetwork);
+        }
+        if view.first_attempt.breached_credential {
+            stage_reasons.push(RiskReason::BreachedCredential);
+        }
+        if view.first_attempt.scope_pressure {
+            stage_reasons.push(RiskReason::GlobalAttack);
+        }
     }
 
     merge_stage_reasons(&mut decision, stage_reasons);

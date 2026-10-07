@@ -6,8 +6,15 @@ PATH
 GEM
   remote: https://rubygems.org/
   specs:
+    argon2 (2.3.3)
+      ffi (~> 1.15)
+      ffi-compiler (~> 1.0)
     base64 (0.3.0)
     connection_pool (3.0.2)
+    ffi (1.17.4-arm64-darwin)
+    ffi-compiler (1.4.2)
+      ffi (>= 1.15.5)
+      rake
     logger (1.7.0)
     minitest (6.0.0)
       prism (~> 1.5)
@@ -40,6 +47,7 @@ PLATFORMS
   arm64-darwin
 
 DEPENDENCIES
+  argon2
   kiwicaptcha!
   minitest (>= 5.20)
   rack
@@ -49,8 +57,11 @@ DEPENDENCIES
   sqlite3
 
 CHECKSUMS
+  argon2 (2.3.3)
   base64 (0.3.0)
   connection_pool (3.0.2)
+  ffi (1.17.4-arm64-darwin)
+  ffi-compiler (1.4.2)
   kiwicaptcha (1.0.0)
   logger (1.7.0)
   minitest (6.0.0)

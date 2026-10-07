@@ -45,6 +45,11 @@ from typing import Any, Dict, Optional
 DEFAULT_ROUTE_PREFIX = "/kiwi-captcha"
 DEFAULT_COMPAT = "recaptcha"
 
+# The stock stage's score gate is disabled at both ends: its threshold
+# checks run only above -1 (`score > -1` guards), and Kiwi's siteverify
+# returns no `score` key at all.
+SCORE_DISABLED: float = -1.0
+
 # The compat tiers the deployment's api.js loader speaks. The tier
 # must match the captcha global the Authentik web UI calls into.
 COMPAT_TIERS = ("recaptcha", "hcaptcha", "turnstile")
@@ -61,7 +66,17 @@ class StageConfigError(ValueError):
 
 @dataclass(frozen=True)
 class CaptchaStageSettings:
-    """The four fields of Authentik's stock Captcha stage."""
+    """The four fields of Authentik's stock Captcha stage.
+
+    Also carries the score/interactive pins: the stock stage's score
+    gate is threshold-based and only fires when the siteverify body
+    contains a "score" key. Kiwi's siteverify returns no score, so the
+    thresholds are pinned to -1 (the stage's documented "disabled"
+    sentinel, `score > -1` guards) — a score-less success can then
+    never be rejected by a score gate, on any stage version. `interactive`
+    is pinned explicitly because the stock CaptchaChallenge sends it to
+    the frontend as a required field.
+    """
 
     public_key: str
     private_key: str
@@ -77,12 +92,34 @@ class CaptchaStageSettings:
             "api_url": self.api_url,
         }
 
+    def score_and_interactive_fields(self) -> Dict[str, Any]:
+        """The score/interactive pins, set explicitly (never defaulted).
+
+        `interactive`: the kiwi widget is an interactive challenge the
+        user solves, so the stock stage must not render as invisible.
+        `score_min_threshold` / `score_max_threshold`: both -1 disables
+        the stock stage's score gate (its checks run only above -1),
+        which is the correct posture for a siteverify body without a
+        `score` key. `error_on_invalid_score` stays on: a failed
+        siteverify must still fail the stage.
+        """
+        return {
+            "interactive": True,
+            "score_min_threshold": SCORE_DISABLED,
+            "score_max_threshold": SCORE_DISABLED,
+            "error_on_invalid_score": True,
+        }
+
     def admin_api_payload(self, name: str = "KiwiCaptcha") -> Dict[str, Any]:
         """The Authentik admin-API body that creates this stage
         (POST /api/v3/stages/captcha/)."""
         if not isinstance(name, str) or name.strip() == "":
             raise StageConfigError("the stage name must be a non-empty string")
-        return {"name": name.strip(), **self.stage_fields()}
+        return {
+            "name": name.strip(),
+            **self.stage_fields(),
+            **self.score_and_interactive_fields(),
+        }
 
 
 def build_stage_settings(

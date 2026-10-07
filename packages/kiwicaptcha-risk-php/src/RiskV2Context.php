@@ -53,6 +53,7 @@ final class RiskV2Context
         public readonly ?string $telemetryPayload = null,
         public readonly ?int $solveMs = null,
         public readonly ?string $solveRung = null,
+        public readonly bool $breachedCredential = false,
     ) {
     }
 
@@ -64,6 +65,7 @@ final class RiskV2Context
             && $this->tlsTag === null
             && $this->telemetryPayload === null
             && $this->solveMs === null
-            && $this->solveRung === null;
+            && $this->solveRung === null
+            && !$this->breachedCredential;
     }
 }

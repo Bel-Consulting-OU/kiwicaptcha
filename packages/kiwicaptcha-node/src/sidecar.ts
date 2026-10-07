@@ -63,6 +63,8 @@ export async function delegateToSidecar(
   clientIp: string | null,
   policy: ExecutionPolicy,
   expectedRequestBinding: string | null,
+  enforceTelemetry = false,
+  operationIdentity: string | null = null,
 ): Promise<{ ok: boolean; code: VerifyErrorCode | string }> {
   const base = policy.sidecarUrl!.trim().replace(/\/+$/, '');
   const controller = new AbortController();
@@ -80,6 +82,10 @@ export async function delegateToSidecar(
         scope,
         remoteip: clientIp ?? undefined,
         expected_request_binding: expectedRequestBinding ?? '',
+        // Forwarded for wire completeness; the sidecar currently ignores
+        // them and the SDK runs the telemetry gate locally first.
+        enforce_telemetry: enforceTelemetry,
+        operation_identity: operationIdentity ?? undefined,
       }),
       signal: controller.signal,
     });

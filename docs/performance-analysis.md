@@ -682,27 +682,34 @@ cost.
 
 ## Plane 8: the version-6 emulator cost measurement
 
-The version-6 execution rung requires web-platform semantics a pure
-reimplementation cannot shortcut, so its evidence is the first rung
-whose forgery resistance can be measured rather than asserted. The
-fail harness (tests/browser/execution-v6, the design record
+The version-6 execution rung adds web-platform-shaped probes checked
+against operand-derived envelopes. Full-knowledge honesty (see
+docs/execution-v6-design.md): every envelope is a deterministic
+function of the operands that ship with the program, so a forger who
+reads the open-source verifier passes without any browser. The fail
+harness (tests/browser/execution-v6, the design record
 docs/execution-v6-design.md) drives a deterministic 100,000-program
 synthetic corpus (the real generator at the real-platform rung,
-nonces derived from sha256 over the corpus index) through three
-legs, every attempt judged by the real PHP envelope walker:
+nonces derived from sha256 over the corpus index) through four legs,
+every attempt judged by the real PHP envelope walker:
 
-| leg | attempts | produced | rejected | rejection rate | ms per attempt |
-|---|---|---|---|---|---|
-| browserless oracle (the unchanged pure solver) | 100,000 | 100,000 | 100,000 | 100.000% | 0.099 |
-| jsdom emulation of the unmodified asset | 100,000 | 100,000 | 100,000 | 100.000% | 9.57 |
-| happy-dom emulation of the unmodified asset | 100,000 | 100,000 | 100,000 | 100.000% | 3.26 |
+| leg | attempts | produced | rejected | rejection rate | pass rate | ms per attempt |
+|---|---|---|---|---|---|---|
+| browserless oracle (the unchanged pure solver, naive placeholders) | 100,000 | 100,000 | 100,000 | 100.000% | 0.000% | 0.099 |
+| white-box envelope forger (full knowledge, no browser) | 100,000 | 100,000 | 0 | 0.000% | 100.000% | 0.15 |
+| jsdom emulation of the unmodified asset | 100,000 | 100,000 | 100,000 | 100.000% | 0.000% | 9.57 |
+| happy-dom emulation of the unmodified asset | 100,000 | 100,000 | 100,000 | 100.000% | 0.000% | 3.26 |
 
 The oracle leg re-runs the same forgeability oracle that mints
 verifier-accepted traces for every program of versions 1-5; against
-the version-6 envelope every forged trace is rejected (the shard
-timing above is the measured 5x20,000-shard wall cost, about ten
-seconds of machine time). The emulator legs load the unmodified
-interpreter asset into a fresh jsdom or happy-dom window per
+the version-6 envelope its placeholder entries are rejected (the
+shard timing above is the measured 5x20,000-shard wall cost, about
+ten seconds of machine time). That 100% rejection is a LAZY-FORGER
+number only. The white-box leg is the full-knowledge adversary: it
+reimplements the five published envelopes and passes every program
+without a browser — the honest figure is a 100% pass rate, proving
+version 6 is not a browser boundary. The emulator legs load the
+unmodified interpreter asset into a fresh jsdom or happy-dom window per
 program, enter it exactly as the driver enters it (the exposed
 parseProgram plus runProgram pair, the returned promise awaited so
 the asynchronous platform probes run to completion), and submit the
@@ -711,7 +718,7 @@ verifiable trace: the jsdom attempts report a computed-style height
 of zero (no layout), no Range client rects and no intersection
 delivery; the happy-dom attempts add a missing observer delivery.
 Both fail far above the 99.9 percent bar while staying fully
-deterministic.
+deterministic — for forgers that do not implement the envelopes.
 
 The per-attempt cost column is the measured cost of a full-fidelity
 headless emulation attempt at the real-platform rung: about 9.6 ms
@@ -719,11 +726,11 @@ headless emulation attempt at the real-platform rung: about 9.6 ms
 machine of the section above, dominated by fresh-window construction
 rather than the interpreter run (the v6 run itself stays near the
 0.1 ms of the synchronous rungs plus two animation frames in a real
-engine). An attacker willing to pay that cost still receives no
-verifiable evidence, which is the economic point the rung makes: the
-cost of the cheapest failing forgery attempt is now measurable,
-published, and bounded away from acceptance by the envelope walker
-rather than by obscurity. Real-engine qualification runs the other
+engine). The white-box forger costs about 0.15 ms per attempt and
+passes — the envelope walker is not a barrier for a forger who knows
+the envelopes. What the rung buys is a raise against lazy forgers who
+do not read the source, plus emulator-quality signals; it does not
+buy a browser boundary. Real-engine qualification runs the other
 way: the three-engine lane (Chromium, Firefox and WebKit) executes
 fresh armed version-6 lifecycles end to end through the fixture
 verifier and passes 100 percent of them

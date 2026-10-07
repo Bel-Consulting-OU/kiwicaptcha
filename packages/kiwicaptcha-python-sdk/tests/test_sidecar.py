@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock
 import urllib.request
 
 from kiwicaptcha.records import ChallengeRecord
@@ -23,7 +24,7 @@ from kiwicaptcha.stores.memory import MemoryStorage
 from kiwicaptcha.sidecar import ExecutionPolicy
 from kiwicaptcha.tokens import SolutionToken
 from kiwicaptcha.verify import Verifier, VerifierConfig, VerifyOptions
-from tests.support import CLIENT_IP, solve_sha
+from tests.support import CLIENT_IP, NOW, minimal_program_b64, mint_v2_record, solve_sha
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 SIDECAR_BIN = os.path.join(REPO_ROOT, "target", "debug", "kiwicaptcha-verifier")
@@ -168,6 +169,90 @@ class SidecarDelegationTest(unittest.TestCase):
         down = verifier3.verify(token3, options3)
         self.assertFalse(down.is_ok())
         self.assertEqual(down.code, "storage_unavailable")
+
+
+class DelegationVerdictTest(unittest.TestCase):
+    """The delegation verdict contract, without the sidecar binary.
+
+    The sidecar call itself is stood in for: the contract under test
+    is the SDK's own. A fresh acceptance is a fresh result (never a
+    stored-result replay), the opt-in telemetry gate runs before the
+    delegation, and the caller's telemetry posture and operation
+    identity ride along instead of being dropped at the seam.
+    """
+
+    def _armed_setup(
+        self, telemetry=None, enforce_telemetry=False, operation_identity=None
+    ):
+        program = minimal_program_b64()
+        record = mint_v2_record(
+            secret=SECRET, protocol_version=4, execution_program=program
+        )
+        storage = MemoryStorage(now=lambda: NOW)
+        storage.store(record)
+        verifier = Verifier(storage, VerifierConfig(now_provider=lambda: NOW))
+        counter = solve_sha(record.prefix, record.salt, record.target_bits)
+        token = SolutionToken.create(
+            record.nonce,
+            counter,
+            5000,
+            {} if telemetry is None else telemetry,
+            execution_digest="a" * 64,
+            execution_trace="Zm9v",
+        ).encode()
+        options = VerifyOptions(
+            secret_key=SECRET,
+            expected_scope="login",
+            client_ip=CLIENT_IP,
+            enforce_telemetry=enforce_telemetry,
+            operation_identity=operation_identity,
+            execution_policy=ExecutionPolicy(sidecar_url="http://127.0.0.1:9"),
+        )
+        return verifier, token, options
+
+    def test_fresh_delegation_success_is_a_fresh_result(self):
+        verifier, token, options = self._armed_setup()
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ) as stub:
+            outcome = verifier.verify(token, options)
+        self.assertTrue(outcome.is_ok(), outcome.code)
+        self.assertFalse(outcome.from_stored_result)
+        stub.assert_called_once()
+
+    def test_delegation_runs_the_telemetry_gate_first(self):
+        verifier, token, options = self._armed_setup(
+            telemetry={"wd": True}, enforce_telemetry=True
+        )
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ) as stub:
+            outcome = verifier.verify(token, options)
+        self.assertFalse(outcome.is_ok())
+        self.assertEqual("telemetry_rejected", outcome.code)
+        stub.assert_not_called()
+        # Opt-out: the same bot token delegates when the gate is off.
+        verifier2, token2, options2 = self._armed_setup(telemetry={"wd": True})
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ):
+            accepted = verifier2.verify(token2, options2)
+        self.assertTrue(accepted.is_ok(), accepted.code)
+
+    def test_delegation_forwards_telemetry_and_operation_identity(self):
+        verifier, token, options = self._armed_setup(
+            telemetry={"et": [0, 12, 40]},
+            enforce_telemetry=True,
+            operation_identity="order-123",
+        )
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ) as stub:
+            outcome = verifier.verify(token, options)
+        self.assertTrue(outcome.is_ok(), outcome.code)
+        kwargs = stub.call_args.kwargs
+        self.assertTrue(kwargs.get("enforce_telemetry"))
+        self.assertEqual("order-123", kwargs.get("operation_identity"))
 
 
 if __name__ == "__main__":

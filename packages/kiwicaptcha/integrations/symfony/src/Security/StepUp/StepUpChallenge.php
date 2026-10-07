@@ -33,6 +33,8 @@ final class StepUpChallenge
         public readonly int $attempts,
         public readonly ?string $codeHash,
         public readonly ?string $ceremony = null,
+        public readonly ?string $sessionHash = null,
+        public readonly bool $targetOwned = false,
     ) {
     }
 
@@ -42,6 +44,11 @@ final class StepUpChallenge
      * shape. The optional ceremony names the WebAuthn ceremony the
      * handler begun (creation or assertion); the other handlers carry
      * none.
+     *
+     * `$sessionId` binds the challenge to the session that began it
+     * (stored as a hash, never the raw id). `$targetOwned` is the
+     * caller's assertion that the principal owns the named target; only
+     * then may completion clear the target's failure/lockout state.
      */
     public static function begin(
         string $id,
@@ -56,6 +63,8 @@ final class StepUpChallenge
         int $maxAttempts,
         ?string $codeHash,
         ?string $ceremony = null,
+        ?string $sessionId = null,
+        bool $targetOwned = false,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
@@ -84,7 +93,19 @@ final class StepUpChallenge
             0,
             $codeHash,
             $ceremony,
+            self::sessionHash($sessionId),
+            $targetOwned && $targetPseudonym !== null,
         );
+    }
+
+    /** The keyed hash of a session id (never the raw id on the wire). */
+    public static function sessionHash(?string $sessionId): ?string
+    {
+        if ($sessionId === null || $sessionId === '') {
+            return null;
+        }
+
+        return hash('sha256', $sessionId);
     }
 
     /**
@@ -113,6 +134,8 @@ final class StepUpChallenge
             $attempts,
             $this->codeHash,
             $this->ceremony,
+            $this->sessionHash,
+            $this->targetOwned,
         );
     }
 
@@ -144,6 +167,8 @@ final class StepUpChallenge
             'max_attempts' => $this->maxAttempts,
             'code_hash' => $this->codeHash,
             'ceremony' => $this->ceremony,
+            'session_hash' => $this->sessionHash,
+            'target_owned' => $this->targetOwned,
         ];
     }
 
@@ -191,9 +216,37 @@ final class StepUpChallenge
                 \is_int($record['max_attempts'] ?? null) ? $record['max_attempts'] : 0,
                 \is_string($record['code_hash'] ?? null) && $record['code_hash'] !== '' ? $record['code_hash'] : null,
                 ($record['ceremony'] ?? null) === null ? null : (is_string($record['ceremony']) ? $record['ceremony'] : 'not-a-string'),
+                null,
+                ($record['target_owned'] ?? false) === true,
             );
         } catch (\InvalidArgumentException $e) {
             throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
+        }
+        // Restore the recorded session binding verbatim (the hash is
+        // opaque; begin() would have re-hashed a raw id). A malformed
+        // hash shape fails closed.
+        $sessionHash = $record['session_hash'] ?? null;
+        if ($sessionHash !== null) {
+            if (!\is_string($sessionHash) || preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
+                throw $fail('session_hash must be a 64-char lowercase hex digest');
+            }
+            $challenge = new self(
+                $challenge->id,
+                $challenge->kind,
+                $challenge->principalPseudonym,
+                $challenge->targetPseudonym,
+                $challenge->scope,
+                $challenge->returnPath,
+                $challenge->reason,
+                $challenge->createdAt,
+                $challenge->expiresAt,
+                $challenge->maxAttempts,
+                $challenge->attempts,
+                $challenge->codeHash,
+                $challenge->ceremony,
+                $sessionHash,
+                $challenge->targetOwned,
+            );
         }
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {

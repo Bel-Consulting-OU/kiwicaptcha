@@ -83,6 +83,11 @@ check('bearer header', ($request['headers']['Authorization'] ?? '') === 'Bearer 
 check('decision success', KiwiVerifier::decide(200, '{"success":true}') === ['ok' => true, 'code' => 'verified']);
 check('decision failure', KiwiVerifier::decide(200, '{"success":false}')['code'] === 'challenge_failed');
 check('decision fault', KiwiVerifier::decide(502, '')['code'] === 'verify_unavailable');
+check('302 with success body fails closed', KiwiVerifier::decide(302, '{"success":true}')['code'] === 'challenge_failed');
+check('403 with success body fails closed', KiwiVerifier::decide(403, '{"success":true}')['code'] === 'challenge_failed');
+check('429 with success body fails closed', KiwiVerifier::decide(429, '{"success":true}')['code'] === 'challenge_failed');
+check('199 with success body fails closed', KiwiVerifier::decide(199, '{"success":true}')['code'] === 'challenge_failed');
+check('204 with success body passes', KiwiVerifier::decide(204, '{"success":true}') === ['ok' => true, 'code' => 'verified']);
 check('header token', KiwiVerifier::extractToken(' hdr ', [], []) === 'hdr');
 check('form token', KiwiVerifier::extractToken('', ['cf-turnstile-response' => 'cf'], []) === 'cf');
 check('cookie token', KiwiVerifier::extractToken('', [], ['kiwi_token' => 'ck']) === 'ck');

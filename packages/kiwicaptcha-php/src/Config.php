@@ -124,6 +124,10 @@ final class Config
      * @param string   $secretKey           HMAC secret key (min 32 bytes).
      * @param PoWAlgorithm $algorithm       Proof-of-work algorithm to issue.
      * @param int      $mKib                Argon2id memory cost in KiB (0 for SHA-256).
+     *                                      Protocol profile space: a power of two
+     *                                      within 8..=65536, so every verifier —
+     *                                      including log2-only bindings — can
+     *                                      rederive what a profile mints.
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
      * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
@@ -273,6 +277,21 @@ final class Config
         }
         if ($mKib > 65536) {
             throw new \InvalidArgumentException('Argon2id m_kib exceeds the browser-solvable ceiling (65536)');
+        }
+        // The protocol Argon2id memory profile space is powers of two
+        // within 8..=65536 KiB (16384/32768/65536 for the named rungs,
+        // 8192 for the low-memory profile): every verifier — including
+        // log2-only bindings — must be able to rederive what a profile
+        // mints. Rejected here at configuration time, never per
+        // request. Doctor note: an m_kib outside the space is a
+        // misconfiguration, never a tunable.
+        if ($algorithm === PoWAlgorithm::Argon2id && !self::isPowerOfTwo($mKib)) {
+            throw new \InvalidArgumentException(
+                sprintf(
+                    'Argon2id memory m_kib must be a power of two within 8..65536 (got %d) — the protocol profile space, so every verifier can rederive what a profile mints',
+                    $mKib
+                )
+            );
         }
         // 0 bits is rejected: it means "no work at all" and cannot be
         // distinguished from a misconfiguration (e.g. an uninitialized
@@ -479,5 +498,18 @@ final class Config
         return $len >= 1
             && $len <= 64
             && \preg_match('/^[A-Za-z0-9_-]+$/D', $value) === 1;
+    }
+
+    /**
+     * Whether $value is a power of two: the shape of the protocol
+     * Argon2id memory profile space (powers of two within 8..=65536
+     * KiB). Config-time only — the verifier's structural ceilings keep
+     * accepting any signed 8..=65536 record, but no profile is ever
+     * configured or issued outside the space every binding can
+     * rederive.
+     */
+    public static function isPowerOfTwo(int $value): bool
+    {
+        return $value > 0 && ($value & ($value - 1)) === 0;
     }
 }

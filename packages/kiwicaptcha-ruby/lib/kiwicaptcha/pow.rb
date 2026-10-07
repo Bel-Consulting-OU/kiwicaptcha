@@ -34,18 +34,28 @@ module KiwiCaptcha
       Digest::SHA256.digest("#{prefix}#{counter}".b + salt_bytes)
     end
 
-    # Whether the native Argon2id binding (the argon2 gem) is loaded.
-    # The gem vendors libargon2 behind FFI; nothing else in this SDK
-    # requires it.
+    # Whether the native Argon2id binding (the argon2 gem) is loaded
+    # and carries the raw derivation entry point. The gem vendors
+    # libargon2 behind FFI; nothing else in this SDK requires it. The
+    # probe asks for the method, not just the module: a gem build
+    # whose Argon2::Ext lacks argon2id_hash_raw can never derive, so
+    # it must never report healthy to the doctor or the issuer guard.
     def argon2_available?
       return @argon2_available unless @argon2_available.nil?
 
       @argon2_available = begin
         require 'argon2'
-        defined?(::Argon2::Ext) ? true : false
+        defined?(::Argon2::Ext) ? argon2_entry_point?(::Argon2::Ext) : false
       rescue LoadError, StandardError
         false
       end
+    end
+
+    # Whether the binding module exposes the raw Argon2id derivation
+    # this SDK calls. Split out so the probe is testable without a
+    # half-broken gem build.
+    def argon2_entry_point?(ext)
+      !ext.nil? && ext.respond_to?(:argon2id_hash_raw)
     end
 
     # Derive the Argon2id proof hash of a record at one counter value

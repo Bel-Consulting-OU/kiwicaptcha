@@ -46,7 +46,10 @@ function decide(status, body) {
   if (!parsed || typeof parsed !== "object") {
     return { ok: false, code: "verify_unreadable" };
   }
-  return parsed.success === true
+  // A pass requires the upstream to say success on a 2xx status: a
+  // redirect (3xx) or any other non-2xx carrying a success-shaped
+  // body is a status/body mismatch and fails closed.
+  return status >= 200 && status <= 299 && parsed.success === true
     ? { ok: true, code: "verified" }
     : { ok: false, code: "challenge_failed" };
 }
@@ -55,6 +58,12 @@ async function verify(url, bearer, token, scope, ip) {
   if (!token || !String(token).trim()) {
     return { ok: false, code: "missing_token" };
   }
+  // Fail closed on a missing client identity: never invent 127.0.0.1
+  // (the remoteip is the binding key of the challenge) and never call
+  // the verifier without it.
+  if (!ip || !String(ip).trim()) {
+    return { ok: false, code: "missing_client_ip" };
+  }
   const request = buildRequest(url, String(token).trim(), scope, ip, bearer);
   let response;
   try {
@@ -62,6 +71,10 @@ async function verify(url, bearer, token, scope, ip) {
       method: "POST",
       headers: request.headers,
       body: request.body,
+      // The verify call must land on the configured endpoint exactly:
+      // a 3xx from the network path can never re-point it at a third
+      // party (fetch would otherwise follow the redirect).
+      redirect: "error",
     });
   } catch (e) {
     return { ok: false, code: "verify_unavailable" };
@@ -94,7 +107,9 @@ async function guardPreCreation(ctx, api) {
     payload.kiwiToken ||
     (payload.data && payload.data.kiwiToken) ||
     (ctx && ctx.headers && ctx.headers["x-kiwi-token"]);
-  const ip = (ctx && ctx.request && ctx.request.ipAddress) || "127.0.0.1";
+  // Fail closed on a missing client identity: never invent
+  // 127.0.0.1 (the remoteip is the binding key of the challenge).
+  const ip = (ctx && ctx.request && ctx.request.ipAddress) || "";
 
   const result = await verify(KIWI_VERIFY_URL, KIWI_BEARER, token, KIWI_SCOPE, ip);
   if (result.ok) {

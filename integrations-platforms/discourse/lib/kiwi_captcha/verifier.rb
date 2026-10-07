@@ -22,7 +22,10 @@ module KiwiCaptcha
 
     # The decision table over a transport answer { status:, body: }.
     # A transport failure, a 5xx or a 401/404 is a gate fault
-    # (:unavailable); everything else answers the challenge verdict.
+    # (:unavailable); a pass requires the upstream to say success on a
+    # 2xx status (a redirect or other non-2xx carrying a success-shaped
+    # body is a status/body mismatch and fails closed); everything else
+    # answers the challenge verdict.
     #
     # Returns { ok:, code: } with code in verified / challenge_failed /
     # unavailable / unreadable.
@@ -35,7 +38,12 @@ module KiwiCaptcha
         ip: ip,
         bearer: settings[:bearer],
       )
-      answer = transport.call(request)
+      answer = begin
+        transport.call(request)
+      rescue StandardError
+        # A raising transport is a gate fault, never an open gate.
+        { status: 0, body: "" }
+      end
       status = answer[:status].to_i
       return { ok: false, code: :unavailable } if status.zero? || status >= 500 || status == 401 || status == 404
 
@@ -46,7 +54,7 @@ module KiwiCaptcha
       end
       return { ok: false, code: :unreadable } unless parsed.is_a?(Hash)
 
-      return { ok: true, code: :verified } if parsed["success"] == true
+      return { ok: true, code: :verified } if status.between?(200, 299) && parsed["success"] == true
 
       { ok: false, code: :challenge_failed }
     end
@@ -73,31 +81,34 @@ module KiwiCaptcha
     # implemented here explicitly.
     def self.client_ip(server, trusted_proxies = nil)
       cidrs = Array(trusted_proxies).map { |c| c.to_s.strip }.reject(&:empty?)
-      peer = server["REMOTE_ADDR"] || "127.0.0.1"
-      return peer if cidrs.empty?
+      peer_canonical = canonical_ip(server["REMOTE_ADDR"].to_s)
+      # Fail closed: a missing or unparsable socket peer is not a
+      # loopback client. The caller refuses the request rather than
+      # inventing 127.0.0.1 or forwarding a fabricated identity.
+      return "" if peer_canonical.nil?
+      return peer_canonical if cidrs.empty?
 
-      peer_canonical = canonical_ip(peer)
-      peer_trusted = !peer_canonical.nil? && in_trusted?(peer_canonical, cidrs)
+      peer_trusted = in_trusted?(peer_canonical, cidrs)
       forwarded = (server["HTTP_X_FORWARDED_FOR"] || server["X-Forwarded-For"]).to_s.strip
       if forwarded.empty?
-        return peer unless peer_trusted
+        return peer_canonical unless peer_trusted
 
         real_ip = server["HTTP_X_REAL_IP"].to_s.strip
-        return peer if real_ip.empty? || real_ip.match?(/[\u0000-\u001F\u007F]/)
+        return peer_canonical if real_ip.empty? || real_ip.match?(/[\u0000-\u001F\u007F]/)
 
         canonical = canonical_ip(real_ip)
-        return canonical || peer
+        return canonical || peer_canonical
       end
-      return peer if forwarded.match?(/[\u0000-\u001F\u007F]/) || !peer_trusted
+      return peer_canonical if forwarded.match?(/[\u0000-\u001F\u007F]/) || !peer_trusted
 
       forwarded.split(",").reverse_each do |hop|
         canonical = canonical_ip(hop)
         # An unparsable hop terminates the trust chain: who lies
         # beyond it cannot be established, so the peer falls back.
-        return peer if canonical.nil?
+        return peer_canonical if canonical.nil?
         return canonical unless in_trusted?(canonical, cidrs)
       end
-      peer
+      peer_canonical
     end
 
     # The canonical text of one forwarded node, or nil when the node

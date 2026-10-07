@@ -27,7 +27,10 @@
 -- by the constants above regardless of traffic volume.
 --
 -- One atomic assessment: read → decay → apply event → aggregate → normalize,
--- across (all keys share the hash tag {kiwi:<deployment>} — Redis Cluster safe):
+-- across (KEYS[1..13] share the hash tag {kiwi:<deployment>}; the target
+-- slots KEYS[14..16] ride their own family tag
+-- {kiwi:<deployment>:target:<hex2>} so a stuffing storm never hammers
+-- the shared primary):
 --   KEYS[1]  source current-epoch state (hash)   — updated
 --   KEYS[2]  source epoch-1 state (hash)         — read-only (boundary)
 --   KEYS[3]  source epoch+1 state (hash)         — read-only (boundary)
@@ -47,11 +50,12 @@
 --            outcome_register.lua byte-for-byte)
 --   KEYS[14] target failure state (hash: ts, fails, first_ms, last_ms) —
 --            the leaky-bucket auth-failure counter of the target
---            dimension (change.md 3.2.1), touched when ARGV[48]=1
+--            dimension (change.md 3.2.1), touched when ARGV[48]=1;
+--            on the target family tag
 --   KEYS[15] target source-spread HyperLogLog — PFADD of the failing
---            source on a target failure
+--            source on a target failure (target family tag)
 --   KEYS[16] target asn-spread HyperLogLog — PFADD of the failing asn
---            bucket on a target failure
+--            bucket on a target failure (target family tag)
 --
 -- ARGV:
 --   [1]  event             RiskEventKind int (1..21)
@@ -124,8 +128,10 @@
 --   ('' when none), registration_status (0/1; 0 when no registration
 --   requested or the decision is already registered), target_failures
 --   (the decayed failure count of the target dimension; 0 without a
---   target), target_spread (the distinct source+asn spread of the
---   target dimension; 0 without a target)
+--   target), target_spread_sources (the distinct-source spread of the
+--   target dimension; 0 without a target), target_spread_asns (the
+--   distinct-ASN spread; 0 without a target — the two counts are kept
+--   separate, never summed)
 --
 -- Event semantics (risk-v1 v3):
 --   PreIssue (1)            → request velocity + scope-hopping
@@ -612,7 +618,8 @@ local sig_principal_credit = normalize(prin.trust, tonumber(ARGV[18]))
 -- feed the ledger score so the numeric decision reacts to a stuffed
 -- target, not only the policy stage.
 local target_failures = 0
-local target_spread = 0
+local target_spread_sources = 0
+local target_spread_asns = 0
 if has_target then
     local LEAK_MS = 60000
     local v = redis.call('HMGET', KEYS[14], 'ts', 'fails')
@@ -621,12 +628,20 @@ if has_target then
     if ts > 0 then
         local elapsed = now - ts
         if elapsed < 0 then elapsed = 0 end
-        fails = fails - math.floor(elapsed / LEAK_MS)
+        -- The leak watermark advances only by whole leaked minutes
+        -- (ts + leaked * LEAK_MS), never to `now`: resetting it on
+        -- every failure would erase the sub-minute remainder and
+        -- suspend the leak for as long as failures keep arriving less
+        -- than a minute apart (mirror of target_failure.lua).
+        local leaked = math.floor(elapsed / LEAK_MS)
+        fails = fails - leaked
         if fails < 0 then fails = 0 end
+        ts = ts + leaked * LEAK_MS
     end
     if event == 11 and not is_duplicate then
         fails = fails + 1
-        redis.call('HSET', KEYS[14], 'ts', now, 'fails', fails, 'last_ms', now)
+        if ts == 0 then ts = now end
+        redis.call('HSET', KEYS[14], 'ts', ts, 'fails', fails, 'last_ms', now)
         redis.call('HSETNX', KEYS[14], 'first_ms', now)
         redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
         if ARGV[49] and ARGV[49] ~= '' then
@@ -639,7 +654,10 @@ if has_target then
         end
     end
     target_failures = fails
-    target_spread = redis.call('PFCOUNT', KEYS[15]) + redis.call('PFCOUNT', KEYS[16])
+    -- The source and ASN spreads are kept separate: summing them would
+    -- let one dimension's growth masquerade as the other's.
+    target_spread_sources = redis.call('PFCOUNT', KEYS[15])
+    target_spread_asns = redis.call('PFCOUNT', KEYS[16])
 end
 
 local registration_status = 0
@@ -678,8 +696,10 @@ if ARGV[25] ~= '' then
     risk = risk + weighted(v2_tls, tonumber(ARGV[47]))
     -- Target pressure and spread: five failures or twenty distinct
     -- sources saturate at 1000, matching the engine's target helpers.
+    -- The scored spread is the wider of the two dimensions (never the
+    -- sum: sources+asns would double-count one campaign's growth).
     local v2_tfail = normalize(target_failures, 5)
-    local v2_tspread = normalize(target_spread, 20)
+    local v2_tspread = normalize(math.max(target_spread_sources, target_spread_asns), 20)
     risk = risk + weighted(v2_tfail, tonumber(ARGV[52] or '0'))
     risk = risk + weighted(v2_tspread, tonumber(ARGV[53] or '0'))
     if risk < 0 then risk = 0 elseif risk > 1000 then risk = 1000 end
@@ -716,5 +736,6 @@ return {
     existing_tls,
     registration_status,
     target_failures,
-    target_spread
+    target_spread_sources,
+    target_spread_asns
 }

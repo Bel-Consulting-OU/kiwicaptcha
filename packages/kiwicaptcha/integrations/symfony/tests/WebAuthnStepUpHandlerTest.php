@@ -412,7 +412,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private function context(string $mode = StepUpContext::MODE_HTML): StepUpContext
     {
-        return new StepUpContext(self::PRINCIPAL, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode);
+        return new StepUpContext(self::PRINCIPAL, self::TARGET, 'login', '/back', 'post_solve_step_up_required', $mode, true);
     }
 
     private function beginRequest(): Request

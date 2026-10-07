@@ -68,10 +68,55 @@ const KIWI_VERIFY_JSON_TOKEN_FIELDS = [
     'captcha_response',
 ];
 
+/** Hard ceiling for a request body the endpoint will ever materialize. */
+const KIWI_MAX_BODY_BYTES = 65536;
+
+/** Hard ceiling for one extracted token candidate. */
+const KIWI_MAX_TOKEN_BYTES = 65536;
+
+/** The scope grammar of the shared wire contract (the deploy app's identifier pattern). */
+const KIWI_SCOPE_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
+
+/**
+ * The config character floor: a configuration value that reaches an
+ * HTTP header or the upstream request line must never carry a control
+ * character (CRLF in the bearer or the redirect target would split
+ * headers on the upstream request or the deny response).
+ */
+function kiwi_verify_has_control(string $value): bool
+{
+    return preg_match('/[\x00-\x1F\x7F]/', $value) === 1;
+}
+
+/**
+ * The strict JSON media-type check of the body parser. The media type
+ * must be exactly application/json (case-insensitive, parameters such
+ * as "; charset=utf-8" allowed): substrings like application/jsonp or
+ * application/json-seq never qualify, so a content-type confusion can
+ * not smuggle a body into the JSON token source.
+ */
+function kiwi_verify_is_json_content_type(array $server): bool
+{
+    $contentType = $server['CONTENT_TYPE'] ?? null;
+    if (!is_string($contentType)) {
+        return false;
+    }
+    $media = strtolower(trim(explode(';', $contentType, 2)[0]));
+
+    return $media === 'application/json';
+}
+
 /**
  * The effective configuration. $_SERVER wins over the process
  * environment so an nginx fastcgi_param or an FPM pool env directive
- * configures the endpoint without touching the process env.
+ * configures the endpoint without touching the process env. These are
+ * deployment knobs, never request data: in every standard SAPI a
+ * request header lands under an HTTP_ prefixed key and can not reach
+ * these names. The values still get validated at read time (scheme,
+ * control characters, scope grammar, timeout bounds) so even a
+ * mis-injected knob can not turn into an SSRF target, a response
+ * split or an upstream header injection; a broken knob sets
+ * `config_error` and the gate then fails closed on every request.
  */
 function kiwi_verify_config(): array
 {
@@ -85,16 +130,56 @@ function kiwi_verify_config(): array
         return is_string($fromEnv) && $fromEnv !== '' ? $fromEnv : $default;
     };
 
+    $verifyUrl = $env('KIWI_VERIFY_URL', 'http://127.0.0.1:7371/verify');
+    $bearer = $env('KIWI_BEARER', '');
+    $scope = $env('KIWI_SCOPE', 'login');
+    $redirect = $env('KIWI_REDIRECT', '');
+    // The timeout parses as a float and is bounded below: the empty
+    // value already fell back to the default inside $env, and a
+    // falsy-but-set "0" must fail the audit rather than silently
+    // re-arming the default.
+    $timeout = (float) $env('KIWI_TIMEOUT', '5');
+
     return [
-        'verify_url' => $env('KIWI_VERIFY_URL', 'http://127.0.0.1:7371/verify'),
-        'bearer' => $env('KIWI_BEARER', ''),
-        'scope' => $env('KIWI_SCOPE', 'login'),
+        'verify_url' => $verifyUrl,
+        'bearer' => $bearer,
+        'scope' => $scope,
         'mode' => $env('KIWI_VERIFY_MODE', 'json') === 'compat' ? 'compat' : 'json',
         'trusted_proxies' => kiwi_verify_parse_cidrs($env('KIWI_TRUSTED_PROXIES', '')),
-        'deny_redirect' => $env('KIWI_DENY', '403') === '302' && $env('KIWI_REDIRECT', '') !== '',
-        'redirect' => $env('KIWI_REDIRECT', ''),
-        'timeout' => (float) ($env('KIWI_TIMEOUT', '5') ?: '5'),
+        'deny_redirect' => $env('KIWI_DENY', '403') === '302' && $redirect !== '',
+        'redirect' => $redirect,
+        'timeout' => $timeout,
+        'config_error' => kiwi_verify_validate_config($verifyUrl, $bearer, $scope, $redirect, $timeout),
     ];
+}
+
+/**
+ * The configuration audit: null when every knob is safe to use, a
+ * human-readable reason otherwise. The verify URL must be an http(s)
+ * URL without control characters or whitespace (a file:// or php://
+ * target would turn the verify call into a local-file oracle, a
+ * scheme the SSRF contract refuses at the config boundary), and the
+ * bearer, scope and redirect must never carry a control character
+ * (each reaches an HTTP header or the upstream request).
+ */
+function kiwi_verify_validate_config(string $verifyUrl, string $bearer, string $scope, string $redirect, float $timeout): ?string
+{
+    foreach (['KIWI_VERIFY_URL' => $verifyUrl, 'KIWI_BEARER' => $bearer, 'KIWI_SCOPE' => $scope, 'KIWI_REDIRECT' => $redirect] as $name => $value) {
+        if (kiwi_verify_has_control($value)) {
+            return $name.' must not carry control characters';
+        }
+    }
+    if (preg_match('#^https?://[^\s]+$#i', $verifyUrl) !== 1) {
+        return 'KIWI_VERIFY_URL must be one absolute http(s) URL without whitespace';
+    }
+    if (preg_match(KIWI_SCOPE_PATTERN, $scope) !== 1) {
+        return 'KIWI_SCOPE must be 1-128 characters of [A-Za-z0-9._:-]';
+    }
+    if ($timeout <= 0.0 || $timeout > 120.0) {
+        return 'KIWI_TIMEOUT must be within (0, 120] seconds';
+    }
+
+    return null;
 }
 
 /**
@@ -117,7 +202,37 @@ function kiwi_verify_parse_cidrs(string $csv): array
 }
 
 /**
- * The first present token from the shared source list, or null.
+ * The bounded request-body read of the POST path. At most
+ * KIWI_MAX_BODY_BYTES + 1 bytes are ever materialized (a multi-MB or
+ * gzip-bomb body never balloons memory), and an oversized body
+ * contributes no token source at all — the header and cookie sources
+ * still decide the request, and a body-only token then denies.
+ */
+function kiwi_verify_read_body(): ?string
+{
+    $stream = @fopen('php://input', 'rb');
+    if ($stream === false) {
+        return null;
+    }
+    $raw = stream_get_contents($stream, KIWI_MAX_BODY_BYTES + 1);
+    fclose($stream);
+    if ($raw === false || strlen($raw) > KIWI_MAX_BODY_BYTES) {
+        return null;
+    }
+
+    return $raw;
+}
+
+/**
+ * The first present token from the CLOSED source list, or null. Only
+ * the documented carriers are ever consulted: the X-Kiwi-Token header,
+ * the documented form fields on a form POST, the namespaced JSON body
+ * keys under an exact application/json media type (never the bare
+ * "token" key, which is the application's own wire field and would
+ * forward app secrets into the verify call), and the kiwi_token
+ * cookie. Query strings, paths and every other header or field are
+ * not token sources. A candidate beyond the token ceiling is skipped
+ * (never forwarded upstream).
  */
 function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?string $rawBody = null): ?string
 {
@@ -133,8 +248,7 @@ function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?s
         }
     }
     if ($rawBody !== null && trim($rawBody) !== ''
-        && is_string($server['CONTENT_TYPE'] ?? null)
-        && str_contains((string) $server['CONTENT_TYPE'], 'application/json')) {
+        && kiwi_verify_is_json_content_type($server)) {
         $parsed = json_decode($rawBody, true);
         foreach (KIWI_VERIFY_JSON_TOKEN_FIELDS as $field) {
             $value = is_array($parsed) ? ($parsed[$field] ?? null) : null;
@@ -150,7 +264,7 @@ function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?s
     }
 
     foreach ($candidates as $candidate) {
-        if ($candidate !== '') {
+        if ($candidate !== '' && strlen($candidate) <= KIWI_MAX_TOKEN_BYTES) {
             return $candidate;
         }
     }
@@ -165,40 +279,45 @@ function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?s
  * binding. With a trusted peer the forwarded chain is walked right to
  * left through the trusted hops (the Symfony ClientIpResolver
  * trusted-chain walk), and X-Real-IP is honored only when the peer is
- * trusted and no chain exists.
+ * trusted and no chain exists. A missing or unparsable socket peer
+ * resolves to '' (fail closed): the caller refuses the request rather
+ * than inventing an address, and a peer string that is not a genuine
+ * IP (control characters, unicode, an obfuscated token) is never
+ * forwarded upstream as a client identity.
  */
 function kiwi_verify_client_ip(array $server, array $trustedCidrs): string
 {
     $peer = (string) ($server['REMOTE_ADDR'] ?? '');
-    if ($peer === '') {
-        // Fail closed: a missing socket peer is not a loopback client.
-        // The caller refuses the request rather than trusting 127.0.0.1.
+    $peerCanonical = kiwi_verify_canonical_ip($peer);
+    if ($peerCanonical === null) {
+        // Fail closed: a missing or malformed socket peer is not a
+        // loopback client. The caller refuses the request rather than
+        // trusting 127.0.0.1.
         return '';
     }
     if ($trustedCidrs === []) {
-        return $peer;
+        return $peerCanonical;
     }
-    $peerCanonical = kiwi_verify_canonical_ip($peer);
-    $peerTrusted = $peerCanonical !== null && kiwi_verify_in_trusted($peerCanonical, $trustedCidrs);
+    $peerTrusted = kiwi_verify_in_trusted($peerCanonical, $trustedCidrs);
     $forwarded = $server['HTTP_X_FORWARDED_FOR'] ?? null;
     if (!is_string($forwarded) || trim($forwarded) === '') {
         if (!$peerTrusted) {
-            return $peer;
+            return $peerCanonical;
         }
         $realIp = $server['HTTP_X_REAL_IP'] ?? null;
         if (!is_string($realIp)) {
-            return $peer;
+            return $peerCanonical;
         }
         $realIp = trim($realIp);
-        if ($realIp === '' || preg_match('/[\x00-\x1F\x7F]/', $realIp) === 1) {
-            return $peer;
+        if ($realIp === '' || kiwi_verify_has_control($realIp)) {
+            return $peerCanonical;
         }
         $canonical = kiwi_verify_canonical_ip($realIp);
 
-        return $canonical ?? $peer;
+        return $canonical ?? $peerCanonical;
     }
-    if (preg_match('/[\x00-\x1F\x7F]/', $forwarded) === 1 || !$peerTrusted) {
-        return $peer;
+    if (kiwi_verify_has_control($forwarded) || !$peerTrusted) {
+        return $peerCanonical;
     }
     $hops = array_reverse(array_map('trim', explode(',', $forwarded)));
     foreach ($hops as $hop) {
@@ -206,14 +325,14 @@ function kiwi_verify_client_ip(array $server, array $trustedCidrs): string
         if ($canonical === null) {
             // An unparsable hop terminates the trust chain: who lies
             // beyond it cannot be established, so the peer falls back.
-            return $peer;
+            return $peerCanonical;
         }
         if (!kiwi_verify_in_trusted($canonical, $trustedCidrs)) {
             return $canonical;
         }
     }
 
-    return $peer;
+    return $peerCanonical;
 }
 
 /**
@@ -379,8 +498,9 @@ function kiwi_verify_call(string $verifyUrl, string $token, string $scope, strin
     $status = 0;
     foreach (($http_response_header ?? []) as $line) {
         if (preg_match('#^HTTP/\S+\s+(\d{3})#', $line, $m) === 1) {
+            // The last status line wins: an informational 1xx or an
+            // intermediate hop must never mask the final answer status.
             $status = (int) $m[1];
-            break;
         }
     }
     $success = false;
@@ -403,8 +523,11 @@ function kiwi_verify_call(string $verifyUrl, string $token, string $scope, strin
  * The pure gate decision: the endpoint status for a token candidate
  * and an upstream answer. Missing token denies. A transport failure,
  * a 5xx or a 401/404 kiwi answer is a gate fault and answers 503 (fail
- * closed, and the client is not at fault). Everything else denies with
- * 403 unless the upstream said success.
+ * closed, and the client is not at fault). A pass requires the
+ * upstream to say success on a 2xx status: a redirect (3xx) or any
+ * other non-2xx answer carrying a success-shaped body never opens the
+ * gate (status/body mismatches fail closed). Everything else denies
+ * with 403 unless the upstream said success.
  *
  * @return array{0: int, 1: array<string, string>} status plus headers
  */
@@ -416,7 +539,7 @@ function kiwi_verify_decide(?string $token, array $upstream, array $cfg): array
     if ($upstream['http'] === 0 || $upstream['http'] >= 500 || $upstream['http'] === 401 || $upstream['http'] === 404) {
         return [503, ['X-Kiwi-Gate-Fault' => '1']];
     }
-    if ($upstream['success'] === true) {
+    if ($upstream['success'] === true && $upstream['http'] >= 200 && $upstream['http'] <= 299) {
         return [204, []];
     }
 
@@ -426,12 +549,17 @@ function kiwi_verify_decide(?string $token, array $upstream, array $cfg): array
 /**
  * The deny response shape: 403 with the deny marker by default, or a
  * 302 to the configured redirect target (the gateway then forwards the
- * browser; for nginx use error_page, see nginx/README.md).
+ * browser; for nginx use error_page, see nginx/README.md). A redirect
+ * target that carries a control character is never emitted (no
+ * response splitting), and the request then denies with 403.
  */
 function kiwi_verify_deny(array $cfg): array
 {
-    if ($cfg['deny_redirect']) {
-        return [302, ['Location' => $cfg['redirect'], 'X-Kiwi-Deny' => '1']];
+    $redirect = (string) ($cfg['redirect'] ?? '');
+    if (($cfg['deny_redirect'] ?? false) === true
+        && $redirect !== ''
+        && !kiwi_verify_has_control($redirect)) {
+        return [302, ['Location' => $redirect, 'X-Kiwi-Deny' => '1']];
     }
 
     return [403, ['X-Kiwi-Deny' => '1', 'Content-Type' => 'application/json']];
@@ -440,24 +568,35 @@ function kiwi_verify_deny(array $cfg): array
 if (!defined('KIWI_VERIFY_LIBRARY')) {
     $cfg = kiwi_verify_config();
     $method = (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET');
-    if ($method === 'GET' && str_ends_with((string) ($_SERVER['REQUEST_URI'] ?? ''), '/healthz')) {
-        http_response_code(200);
+    $requestPath = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
+    if ($method === 'GET' && $requestPath === '/healthz') {
+        // Exact path match (a suffix like /admin/healthz is not this
+        // endpoint) and the scope is JSON-encoded (a configured scope
+        // can never break out of the document).
+        $healthy = $cfg['config_error'] === null;
+        http_response_code($healthy ? 200 : 503);
         header('Content-Type: application/json');
-        echo "{\"status\":\"ok\",\"scope\":\"{$cfg['scope']}\"}\n";
+        echo json_encode([
+            'status' => $healthy ? 'ok' : 'error',
+            'scope' => $cfg['scope'],
+        ], JSON_UNESCAPED_SLASHES)."\n";
         exit;
     }
-    $rawBody = $method === 'POST' ? (string) file_get_contents('php://input') : null;
-    $jsonPost = [];
-    if ($rawBody !== null && str_contains((string) ($_SERVER['CONTENT_TYPE'] ?? ''), 'application/json')) {
-        $decoded = json_decode($rawBody, true);
-        if (is_array($decoded)) {
-            $jsonPost = $decoded;
-        }
+    if ($cfg['config_error'] !== null) {
+        // Fail closed: a gate whose own configuration is unsafe (a
+        // non-http(s) verify target, a CRLF-bearing knob, an out of
+        // grammar scope) never answers a pass.
+        error_log('kiwicaptcha gateway: configuration error: '.$cfg['config_error']);
+        http_response_code(503);
+        header('X-Kiwi-Gate-Fault: 1');
+        exit;
     }
-    $token = kiwi_verify_extract_token($_SERVER, $_POST + $jsonPost, $_COOKIE, $rawBody);
+    $rawBody = $method === 'POST' ? kiwi_verify_read_body() : null;
+    $token = kiwi_verify_extract_token($_SERVER, $_POST, $_COOKIE, $rawBody);
     $clientIp = kiwi_verify_client_ip($_SERVER, $cfg['trusted_proxies']);
     if ($token === null || $clientIp === '') {
-        // A missing socket peer fails closed: never invent 127.0.0.1.
+        // A missing or malformed socket peer fails closed: never
+        // invent 127.0.0.1.
         [$status, $headers] = kiwi_verify_deny($cfg);
     } else {
         $upstream = kiwi_verify_call(

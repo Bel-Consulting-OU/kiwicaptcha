@@ -8,15 +8,19 @@ your store adapter are the only inputs, and no call ever reaches a
 network service.
 
 The core is pure standard library. SHA-256, Argon2id (RFC 9106) and the
-optional RSW time-lock algorithm are implemented in-tree, so the
-package installs with zero dependencies. The Redis store adapter is the
-one optional extra: it speaks RESP through a narrow client surface and
-runs the exact Lua transition scripts of the PHP adapter.
+optional RSW time-lock algorithm are implemented in-tree. `argon2-cffi`
+is a required dependency so a default install gets the full Argon ladder
+at native speed; the pure-stdlib Argon2id path remains as a last resort
+when the wheel is missing, and the verifier then answers
+`unsupported_argon2_params` (never a silent downgrade) for any rung that
+exceeds its tight pure-Python admission budget. The Redis store adapter
+is the one optional extra: it speaks RESP through a narrow client
+surface and runs the exact Lua transition scripts of the PHP adapter.
 
 ## Install
 
 ```
-pip install kiwicaptcha            # zero dependencies
+pip install kiwicaptcha            # includes argon2-cffi (full Argon ladder)
 pip install "kiwicaptcha[redis]"   # add the Redis client for redis:// stores
 ```
 

@@ -62,7 +62,17 @@ KiwiClient::$testTransport = fn (): array => ['status' => 200, 'body' => json_en
 check('failed challenge denies', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'challenge_failed');
 KiwiClient::$testTransport = fn (): array => ['status' => 502, 'body' => ''];
 check('5xx is a fault', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'verify_unavailable');
+KiwiClient::$testTransport = fn (): array => ['status' => 302, 'body' => json_encode(['success' => true])];
+check('302 with success body fails closed', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'challenge_failed');
+KiwiClient::$testTransport = fn (): array => ['status' => 403, 'body' => json_encode(['success' => true])];
+check('403 with success body fails closed', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'challenge_failed');
+KiwiClient::$testTransport = fn (): array => ['status' => 199, 'body' => json_encode(['success' => true])];
+check('199 with success body fails closed', KiwiClient::verify(['verify_url' => 'x'], 't', 'login')['code'] === 'challenge_failed');
+KiwiClient::$testTransport = fn (): array => ['status' => 204, 'body' => json_encode(['success' => true])];
+check('204 with success body passes', KiwiClient::verify(['verify_url' => 'x'], 't', 'login') === ['ok' => true, 'code' => 'verified']);
 KiwiClient::$testTransport = null;
+check('missing peer fails closed', KiwiClient::clientIp([]) === '');
+check('garbage peer fails closed', KiwiClient::clientIp(['REMOTE_ADDR' => 'not-an-ip']) === '');
 
 // The plugin contract.
 $params = new TestParams([

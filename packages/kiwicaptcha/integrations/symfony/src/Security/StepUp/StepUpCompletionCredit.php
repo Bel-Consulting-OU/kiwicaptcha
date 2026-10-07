@@ -65,7 +65,11 @@ final class StepUpCompletionCredit
             $this->idempotencyKey('principal', $challengeId),
         );
         $creditedTarget = false;
-        if ($challenge->targetPseudonym !== null) {
+        // Target credit (and the risk-side failure clear) only runs when
+        // the challenge asserts the principal owns the target. A
+        // challenge that merely *named* a victim target must never
+        // clear that target's failure counter or lockout.
+        if ($challenge->targetPseudonym !== null && $challenge->targetOwned) {
             $this->reporter->report(
                 Outcome::StepUpCompleted,
                 OutcomeHandle::target(TargetMarkKey::of($challenge->targetPseudonym)),

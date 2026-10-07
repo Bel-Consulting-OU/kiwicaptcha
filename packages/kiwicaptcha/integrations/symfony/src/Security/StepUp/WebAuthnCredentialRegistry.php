@@ -88,8 +88,29 @@ final class WebAuthnCredentialRegistry implements PublicKeyCredentialSourceRepos
 
     public function saveCredentialSource(PublicKeyCredentialSource $publicKeyCredentialSource): void
     {
+        $key = $this->key($publicKeyCredentialSource->publicKeyCredentialId);
+        // Counter rollback guard: a write that would lower the stored
+        // sign count is refused (fail-closed). A cloned or raced
+        // authenticator can then never rewind the counter and re-use an
+        // old assertion slot.
+        $existingJson = $this->redis->get($key);
+        if (\is_string($existingJson) && $existingJson !== '') {
+            $existing = json_decode($existingJson, true);
+            if (\is_array($existing)) {
+                try {
+                    $existingSource = PublicKeyCredentialSource::createFromArray($existing);
+                    if ($publicKeyCredentialSource->counter < $existingSource->counter) {
+                        return;
+                    }
+                } catch (\Throwable) {
+                    // Unreadable prior record: fall through and overwrite
+                    // with the validated source (fail-closed on the
+                    // counter is impossible without a readable prior).
+                }
+            }
+        }
         $this->redis->setex(
-            $this->key($publicKeyCredentialSource->publicKeyCredentialId),
+            $key,
             $this->ttlSecs,
             (string) json_encode($publicKeyCredentialSource, JSON_THROW_ON_ERROR),
         );

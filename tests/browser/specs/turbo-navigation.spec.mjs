@@ -15,6 +15,13 @@ async function driverSrc(page) {
   });
 }
 
+// The reuse counter lives on a Symbol key (a string-named window property
+// is DOM-clobberable and must never carry the boot state). Read it
+// through the same Symbol.for key the driver installs.
+async function driverReuseCount(page) {
+  return page.evaluate(() => window[Symbol.for('kiwicaptcha.driver-reused')] || 0);
+}
+
 // A Turbo/htmx navigation replaces the container with the server's
 // rendered markup (endpoint/runtime/module attributes AND the widget
 // skeleton: status, hint, token input). Clone the live container's
@@ -55,7 +62,7 @@ test.describe('driver reuse under Turbo/htmx navigation', () => {
     await expect(page.locator('#kiwicaptcha-turbo [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
     const token = await page.locator('#kiwicaptcha-turbo [data-kiwi-token]').inputValue();
     expect(token.length, 'the navigated widget must write a real token, never submit empty').toBeGreaterThan(0);
-    expect(await page.evaluate(() => window.__kiwiDriverReused), 'the guard must have taken the reuse branch').toBe(1);
+    expect(await driverReuseCount(page), 'the guard must have taken the reuse branch').toBe(1);
     // The original widget is untouched and still verified.
     expect(await page.locator('#kiwicaptcha-root [data-kiwi-widget]').getAttribute('data-state')).toBe('done');
     expect(pageErrors).toEqual([]);
@@ -83,7 +90,7 @@ test.describe('driver reuse under Turbo/htmx navigation', () => {
     await expect(page.locator('#kiwicaptcha-htmx [data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
     const token = await page.locator('#kiwicaptcha-htmx [data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
-    expect(await page.evaluate(() => window.__kiwiDriverReused)).toBe(1);
+    expect(await driverReuseCount(page)).toBe(1);
   });
 
   // A navigation that lands while a solve is still in flight is the
@@ -159,7 +166,7 @@ test.describe('driver reuse under Turbo/htmx navigation', () => {
     const src = await driverSrc(page);
     expect(src, 'the files-mode page must emit a driver script src').toBeTruthy();
     await page.addScriptTag({ url: src });
-    await page.waitForFunction(() => window.__kiwiDriverReused === 1, null, { timeout: 30_000 });
+    await page.waitForFunction(() => window[Symbol.for('kiwicaptcha.driver-reused')] === 1, null, { timeout: 30_000 });
 
     // The scan's pre-pass cancelled and deleted the dead record before
     // initializing the new widget, so the registry count equals the

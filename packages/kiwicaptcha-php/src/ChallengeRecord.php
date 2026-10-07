@@ -779,6 +779,52 @@ final class ChallengeRecord
             $serverMac = $data['server_mac'];
         }
 
+        // The remaining structural contract of the Rust `validate_record`
+        // (the twin of the Rust serde decode boundary, which applies the
+        // full structural authority before any typed record surfaces):
+        // the scope identifier alphabet, the difficulty floor/ceiling,
+        // the exact nonce/salt wire shapes, the lifetime bounds and the
+        // derived prefix. The checks above already cover the protocol
+        // grammar, the identifier alphabets of the optional deployment
+        // fields, the execution triplet, the decoy/rsw shapes and the
+        // server_mac shape. A record violating any of these is corrupt
+        // or foreign — refused here exactly like the Rust Deserialize
+        // boundary, so both parsers accept exactly one record language.
+        if (!Config::isValidIdentifier($data['scope'], 128)) {
+            throw MalformedRecordException::invalidIdentifier('scope');
+        }
+        self::requireInt($data['target_bits'], 'target_bits', Config::MIN_DIFFICULTY, Config::MAX_DIFFICULTY);
+        // The nonce is the 44-char standard-base64 encoding of 32 bytes
+        // and the salt the 24-char encoding of 16 bytes (the exact
+        // issuer wire shapes; the length pre-bound keeps oversized
+        // attacker text from driving a decode buffer).
+        if (\strlen($data['nonce']) !== 44) {
+            throw MalformedRecordException::wrongType('nonce', '44 base64 characters of a 32-byte nonce', $data['nonce']);
+        }
+        $nonceBytes = base64_decode($data['nonce'], true);
+        if ($nonceBytes === false || \strlen($nonceBytes) !== 32) {
+            throw MalformedRecordException::wrongType('nonce', '44 base64 characters of a 32-byte nonce', $data['nonce']);
+        }
+        if (\strlen($data['salt']) !== 24) {
+            throw MalformedRecordException::wrongType('salt', '24 base64 characters of a 16-byte salt', $data['salt']);
+        }
+        $saltBytes = base64_decode($data['salt'], true);
+        if ($saltBytes === false || \strlen($saltBytes) !== 16) {
+            throw MalformedRecordException::wrongType('salt', '24 base64 characters of a 16-byte salt', $data['salt']);
+        }
+        // The lifetime is strictly positive and bounded by the protocol
+        // TTL ceiling (the verifier refuses longer spans as malformed).
+        if ($data['expires_at'] <= $data['issued_at']) {
+            throw MalformedRecordException::for('expires_at must be greater than issued_at');
+        }
+        if ($data['expires_at'] - $data['issued_at'] > Config::MAX_TTL_SECS) {
+            throw MalformedRecordException::for('challenge lifetime exceeds the protocol TTL ceiling of '.Config::MAX_TTL_SECS.' seconds');
+        }
+        // The prefix is a derived field: exactly `challenge|salt|`.
+        if ($data['prefix'] !== $data['challenge'].'|'.$data['salt'].'|') {
+            throw MalformedRecordException::for('prefix must equal challenge|salt|');
+        }
+
         return new self(
             nonce: $data['nonce'],
             scope: $data['scope'],
