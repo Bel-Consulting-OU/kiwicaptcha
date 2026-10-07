@@ -21,9 +21,10 @@ interface AuthOutcomeWindowInterface
     public function recordSuccess(string $sessionPseudonym): void;
 
     /**
-     * The failure ratio f / (f + s) over the window, 0.0 when the
-     * identity has only successes, or null when the window is
-     * unreadable (the gate then refuses credit, fail closed).
+     * The failure ratio f / (f + s) over the window, or null when the
+     * window is unreadable OR empty. An empty window is not a clean
+     * history: the gate refuses credit so a brand-new identity never
+     * earns trust from a single success (fail closed).
      */
     public function failureRatio(string $sessionPseudonym): ?float;
 }

@@ -34,8 +34,16 @@ final class StoreBackedOutcomeTrustGate implements OutcomeTrustGateInterface
         if ($sessionPseudonym === null || $sessionPseudonym === '') {
             return false;
         }
+        // Both the session and the principal must carry a readable,
+        // clean history. A brand-new session (no window) earns nothing
+        // from one success, and a principal whose other sessions are
+        // failing never earns credit here.
         $ratio = $this->window->failureRatio($sessionPseudonym);
         if ($ratio === null || $ratio >= $this->theta) {
+            return false;
+        }
+        $principalRatio = $this->window->failureRatio($principalPseudonym);
+        if ($principalRatio === null || $principalRatio >= $this->theta) {
             return false;
         }
         if ($targetPseudonym !== null && $targetPseudonym !== '' && $this->targetMarkRead !== null) {

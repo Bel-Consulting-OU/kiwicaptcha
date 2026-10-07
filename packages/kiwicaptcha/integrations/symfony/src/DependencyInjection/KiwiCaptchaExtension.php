@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\StepUpController;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaMigrateCommand;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
@@ -1809,6 +1810,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$trustRequestIdHeader', (bool) ($riskConfig['outcomes']['trust_request_id_header'] ?? false))
                     ->setArgument('$authWindow', $authWindowRef)
+                    ->addTag('kernel.event_subscriber')
+                    ->setPublic(true));
+
+                // The post-credential, pre-session first-attempt gate
+                // (P0-1): runs the engine pipeline on LoginSuccessEvent
+                // so novel-network / breached-credential / scope-pressure
+                // can demand step-up BEFORE the session is granted.
+                $container->setDefinition(FirstAttemptLoginGuard::class, (new Definition(FirstAttemptLoginGuard::class, [
+                    new Reference(RiskGateway::class),
+                    new Reference('kiwi_captcha.risk.identity_factory'),
+                    $outcomesScopeName,
+                ]))
+                    ->setArgument('$stepUpPath', (string) ($riskConfig['step_up']['path'] ?? '/kiwi/step-up/begin'))
+                    ->setArgument('$logger', $loggerRef)
+                    ->setArgument('$enabled', true)
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
             }

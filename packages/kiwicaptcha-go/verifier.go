@@ -923,6 +923,15 @@ func (v *Verifier) Verify(rawToken string, options VerifyOptions) VerifyOutcome 
 	delegateExecution := delegateExecutionFor(peek, options)
 	failure := v.cheapPhaseCheck(peek, token.Nonce, secretKey, options.ExpectedScope, options.ClientIP, true, receiptNs, receiptSet, expectation, evidence, delegateExecution)
 	if failure == "" && delegateExecution {
+		// The opt-in telemetry gate runs locally BEFORE the delegation
+		// return: the sidecar's /verify API does not accept
+		// enforce_telemetry, so skipping it here would drop the
+		// caller's gate entirely.
+		if options.EnforceTelemetry &&
+			(token.Telemetry == nil || token.Telemetry.Len() == 0 || ScoreTelemetry(token.Telemetry, token.DurationMs)) &&
+			!(hasRuntime && runtimeState.Kind == RuntimeConsumed) {
+			return InvalidOutcome(ErrCodeTelemetryRejected)
+		}
 		return delegateExecutionVerify(rawToken, peek, options, options.ExecutionPolicy)
 	}
 	if failure != "" {

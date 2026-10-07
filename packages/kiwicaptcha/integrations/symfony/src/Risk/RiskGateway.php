@@ -108,7 +108,7 @@ use Symfony\Component\HttpFoundation\RequestStack;
  * {@see resolveDecisionForNonce()}. The mapping carries only the decision
  * id, no IP and no identity.
  */
-final class RiskGateway
+final class RiskGateway implements LoginDecisionGate
 {
     /** Request attribute holding the current request's decision id. */
     private const DECISION_ATTRIBUTE = '_kiwi_risk_decision_id';
@@ -518,6 +518,37 @@ final class RiskGateway
             sessionId: $session,
             principalId: $principal ?? $this->resolvePrincipal($scope),
             event: RiskEventKind::SolveSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+        );
+        $decision = $this->engine->reassess($context, $idempotencyKey);
+        $this->setCurrentDecisionId($decision->decisionId);
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
+    /**
+     * Post-credential, pre-session decision: a fresh assessment with the
+     * AuthenticationSuccess event and the resolved principal id. This is
+     * the first-attempt stuffing gate (P0-1): the engine's
+     * firstAttemptEvidence (novel network, breached credential, scope
+     * pressure) only runs inside the pipeline, so the login path must
+     * reach it here — the feedback paths never do. A StepUp decision
+     * means the caller must NOT grant the session yet.
+     */
+    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal,
+            event: RiskEventKind::AuthenticationSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
         );

@@ -42,41 +42,46 @@
     "provenance": "public cloud spot pricing indices, one core-hour, rounded down in the defender's disfavor",
     "calibration": {
       "margin_divisor": 10,
-      "anchor": "the D3.3 campaign bench measurement of the attacker cost per 1000 solves on the release bench host (the this_cpu_usd column of the bench's dollar table, tools/redteam/runs/env/d33-economics-<profile>.json)",
-      "rule": "declared_abuse_value_usd_per_1000 = anchor_usd_per_1000[rung] / margin_divisor, rounded down to the clean money figure at or below it; the 10x margin plus the downward rounding keeps ordinary hardware, build-profile and load variance from ever flipping a pricing verdict on a re-measurement",
-      "as_of": "2026-10",
+      "rule": "declared_abuse_value is an independent per-account stake (public resale reporting). anchor_usd_per_1000 is the measured attacker cost and is the ceiling: a declared stake above the ceiling means PoW cannot price the scope and the disposition must escalate.",
+      "note": "The previous rule (declared = anchor/10) was circular: cost > cost/10 always held, so D3.3 could never fail.",
       "anchor_usd_per_1000": {
         "sha16": 0.000937,
         "sha18": 0.001962,
         "argon16": 0.001225,
         "argon64": 0.00421
       }
-    }
+    },
+    "statement": "Every figure below is a conservative class value compiled from free, public sources, rounded in the defender's disfavor. The declared abuse values are INDEPENDENT stake anchors (public credential/account resale reporting), never a function of the attacker's own solve cost \u2014 deriving the stake from the cost would make the D3.3 check circular.",
+    "refresh_note": "Refresh by re-checking the source classes above, re-running the D3.3 campaign on the release bench host, and re-validating the independent stake anchors; bump as_of. Stale entries must be replaced, never silently kept."
   },
   "value_classes": [
     {
       "class": "low",
       "rung": "sha16",
-      "declared_abuse_value_usd_per_1000": 0.00005,
-      "provenance": "measured-cost-derived: the sha16 anchor 0.000937 per 1000 divided by the 10x calibration margin, rounded down to 0.00005 (economics.calibration); adopters override it per scope in their doctor configuration"
+      "declared_abuse_value_usd_per_1000": 10.0,
+      "provenance": "independent stake: low-value account class (public resale reporting \u2248 $0.01/account)",
+      "declared_abuse_value_usd_per_account": 0.01
     },
     {
       "class": "standard",
       "rung": "sha18",
-      "declared_abuse_value_usd_per_1000": 0.0001,
-      "provenance": "measured-cost-derived: the sha18 anchor 0.001962 per 1000 divided by the 10x calibration margin, rounded down to 0.0001 (economics.calibration); adopters override it per scope in their doctor configuration"
+      "declared_abuse_value_usd_per_1000": 500.0,
+      "provenance": "independent stake: standard consumer account class (\u2248 $0.50/account)",
+      "declared_abuse_value_usd_per_account": 0.5
     },
     {
       "class": "high",
       "rung": "argon16",
-      "declared_abuse_value_usd_per_1000": 0.0001,
-      "provenance": "measured-cost-derived: the argon16 anchor 0.001225 per 1000 divided by the 10x calibration margin, rounded down to 0.0001 (economics.calibration); adopters override it per scope in their doctor configuration"
+      "declared_abuse_value_usd_per_1000": 5000.0,
+      "provenance": "independent stake: financial-adjacent account class (\u2248 $5/account)",
+      "declared_abuse_value_usd_per_account": 5.0
     },
     {
       "class": "critical",
       "rung": "argon64",
-      "declared_abuse_value_usd_per_1000": 0.0002,
-      "provenance": "measured-cost-derived: the argon64 anchor 0.00421 per 1000 divided by the 10x calibration margin, rounded down to 0.0002 (economics.calibration); a scope whose real stake exceeds the rung ceiling cannot be priced by raw PoW and escalates to a step_up or deny disposition minimum"
+      "declared_abuse_value_usd_per_1000": 50000.0,
+      "provenance": "independent stake: admin/banking account class (\u2248 $50/account)",
+      "declared_abuse_value_usd_per_account": 50.0
     }
   ]
 }

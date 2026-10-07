@@ -163,10 +163,20 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                 ? $this->continuityCookie->read($request)
                 : null;
             $sessionPseudonym = $sessionRaw !== null ? $this->identityFactory->sessionId($sessionRaw) : null;
+            // Evaluate the gate BEFORE recording this success: a
+            // record-then-check order hands every fresh session a clean
+            // ratio and lets a stuffer mint session/source trust on
+            // every stolen login.
+            $credit = $this->trustGate?->allowsSessionSourceCredit($principalPseudonym, $sessionPseudonym, $targetPseudonym) === true;
             if ($sessionPseudonym !== null) {
                 $this->authWindow?->recordSuccess($sessionPseudonym);
             }
-            if ($this->trustGate?->allowsSessionSourceCredit($principalPseudonym, $sessionPseudonym, $targetPseudonym) === true) {
+            if ($this->authWindow !== null) {
+                // The principal window accumulates across sessions so a
+                // cross-session stuffer cannot reset the ratio.
+                $this->authWindow->recordSuccess($principalPseudonym);
+            }
+            if ($credit) {
                 // keep $sessionRaw: the gate approved session/source credit
             } else {
                 $sessionRaw = null;
@@ -193,6 +203,14 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             $sessionRaw = $this->sessionRaw($request);
             if ($sessionRaw !== null) {
                 $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
+            }
+            if ($username !== null && $username !== '') {
+                try {
+                    $this->authWindow?->recordFailure($this->identityFactory->principalId($username));
+                } catch (\Throwable) {
+                    // A claimed id that cannot be pseudonymized never
+                    // enters the window.
+                }
             }
             $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
             $idempotencyKey = $this->idempotencyKeyOf($request);

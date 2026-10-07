@@ -39,11 +39,14 @@ final class MemoryAuthOutcomeWindow implements AuthOutcomeWindowInterface
     {
         $entry = $this->counts[$sessionPseudonym] ?? null;
         if ($entry === null || $this->now() - $entry['at'] > $this->windowSecs) {
-            return 0.0;
+            // No readable history is not a clean history: the gate
+            // refuses credit (a brand-new session earns nothing from a
+            // single success).
+            return null;
         }
         $total = $entry['f'] + $entry['s'];
 
-        return $total === 0 ? 0.0 : $entry['f'] / $total;
+        return $total === 0 ? null : $entry['f'] / $total;
     }
 
     private function record(string $sessionPseudonym, string $field): void

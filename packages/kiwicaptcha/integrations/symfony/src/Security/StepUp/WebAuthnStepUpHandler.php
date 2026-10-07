@@ -280,14 +280,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return $this->presentation($context, $challenge, $challengeBytes, $enrolled, $ceremony, $this->configuredHost(), $this->cspNonceOf($request));
     }
 
-    private string $boundSessionId = '';
-
-    private string $boundContextKey = '';
-
     public function complete(Request $request): StepUpResult
     {
-        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
-        $this->boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundSessionId = StepUpSessionBinding::sessionId($request);
+        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -309,7 +305,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // A WebAuthn assertion presentation is the stronger-factor
         // path: it bypasses the shared (account/target) locks. The
         // requesting context's own budget still applies.
-        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $this->boundContextKey, true) ?? 0;
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $boundContextKey, true) ?? 0;
         if ($retryAfter > 0) {
             return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
@@ -326,20 +322,20 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             $decoded = json_decode($payload, true, 64, JSON_THROW_ON_ERROR);
             $credential = $this->loader->loadArray(\is_array($decoded) ? $decoded : []);
         } catch (\Throwable $e) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         $response = $credential->response;
         try {
             $presentedChallenge = (string) $response->clientDataJSON->challenge;
         } catch (\Throwable) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         if (!hash_equals($challenge->codeHash, $this->challengeHash($presentedChallenge))) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         $presentedOrigin = strtolower(rtrim((string) $response->clientDataJSON->origin, '/'));
         if (!$this->originIsAllowed($presentedOrigin)) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         // The validator receives the host the ceremony actually ran on
         // (the presented, allow-listed origin's host) — never the first
@@ -347,21 +343,21 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // origin must validate against that origin.
         $host = (string) (parse_url($presentedOrigin, \PHP_URL_HOST) ?: '');
         if ($host === '') {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         try {
             if ($response instanceof AuthenticatorAttestationResponse) {
                 // Step-up never enrolls. The creation ceremony only
                 // exists on the enrollment entry points, so an
                 // attestation answer here is a protocol violation.
-                return $this->failedAttempt($challenge);
+                return $this->failedAttempt($challenge, $boundContextKey);
             }
             if ($response instanceof AuthenticatorAssertionResponse) {
                 if ($challenge->ceremony !== self::CEREMONY_ASSERTION) {
-                    return $this->failedAttempt($challenge);
+                    return $this->failedAttempt($challenge, $boundContextKey);
                 }
                 if (!$response->authenticatorData->isUserVerified()) {
-                    return $this->failedAttempt($challenge);
+                    return $this->failedAttempt($challenge, $boundContextKey);
                 }
                 $source = $this->registry->findOneByCredentialId($credential->rawId);
                 if ($source === null) {
@@ -384,7 +380,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                     // The signature verified but the sign count failed
                     // to advance: a cloned or replayed authenticator.
                     // It spends an attempt like every other failure.
-                    $verdict = $this->failedAttempt($challenge);
+                    $verdict = $this->failedAttempt($challenge, $boundContextKey);
                     if ($verdict->status !== StepUpResultStatus::Pending) {
                         return $verdict;
                     }
@@ -392,19 +388,19 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                     return StepUpResult::failed(StepUpResult::FAIL_REPLAYED_STEP, $challenge->id);
                 }
             } else {
-                return $this->failedAttempt($challenge);
+                return $this->failedAttempt($challenge, $boundContextKey);
             }
         } catch (\Throwable $e) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
 
         $consumed = $this->store->consume($challenge->id);
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
-        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $this->boundContextKey);
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge);
+        return $this->credit($challenge, $boundSessionId);
     }
 
     private function creationOptions(StepUpChallenge $challenge, string $challengeBytes, string $host): PublicKeyCredentialCreationOptions
@@ -448,8 +444,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function enrollBegin(Request $request, StepUpContext $context): Response
     {
         $now = $this->now();
-        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
-        $sessionId = $this->boundSessionId;
+        $boundSessionId = StepUpSessionBinding::sessionId($request);
+        $sessionId = $boundSessionId;
         $enrolledNow = $this->registry->registeredCredentialsOf($context->principalPseudonym);
         // Strongest-factor floor: a principal that already holds a
         // security key must prove with that key to add another.
@@ -500,7 +496,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      */
     public function enrollComplete(Request $request): StepUpResult
     {
-        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
+        $boundSessionId = StepUpSessionBinding::sessionId($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired || $resolved === null) {
@@ -515,7 +511,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        $sessionId = $this->boundSessionId !== '' ? $this->boundSessionId : StepUpSessionBinding::sessionId($request);
+        $sessionId = $boundSessionId !== '' ? $boundSessionId : StepUpSessionBinding::sessionId($request);
         $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
         if (!$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
@@ -531,29 +527,29 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             $decoded = json_decode($payload, true, 64, JSON_THROW_ON_ERROR);
             $credential = $this->loader->loadArray(\is_array($decoded) ? $decoded : []);
         } catch (\Throwable) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         $response = $credential->response;
         if (!$response instanceof AuthenticatorAttestationResponse) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         $presentedChallenge = (string) ($response->clientDataJSON->challenge ?? '');
         if ($presentedChallenge === '' || !hash_equals($challenge->codeHash, $this->challengeHash($presentedChallenge))) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         $origin = strtolower(rtrim((string) $response->clientDataJSON->origin, '/'));
         if (!$this->originIsAllowed($origin)) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         // As in complete(): the validator receives the presented,
         // allow-listed origin's host, never the first configured one.
         $host = (string) (parse_url($origin, \PHP_URL_HOST) ?: '');
         if ($host === '') {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         try {
             if (!$response->attestationObject->authData->isUserVerified()) {
-                return $this->failedAttempt($challenge);
+                return $this->failedAttempt($challenge, $boundContextKey);
             }
             $source = $this->creationValidator->check(
                 $response,
@@ -567,7 +563,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 // Notification is best effort; enrollment already landed.
             }
         } catch (\Throwable) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         if ($this->store->consume($challenge->id) === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
@@ -627,11 +623,11 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return hash_hmac('sha256', $challengeBytes, $this->challengeKey);
     }
 
-    private function failedAttempt(StepUpChallenge $challenge): StepUpResult
+    private function failedAttempt(StepUpChallenge $challenge, string $contextKey = ''): StepUpResult
     {
         // Every rejected verification feeds the cross-challenge
         // brute-force budget before the per-challenge attempt cap.
-        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $this->boundContextKey);
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $contextKey);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);
@@ -667,7 +663,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge): StepUpResult
+    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
     {
         try {
             $result = $this->credit->credit($challenge->id, $challenge);
@@ -680,7 +676,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             // step-up may enroll a factor. A principal-level marker is
             // never enough (N1).
             $this->store->markSessionStepUpSuccess(
-                $this->boundSessionId,
+                $boundSessionId,
                 $challenge->principalPseudonym,
                 'webauthn',
                 900,

@@ -11,36 +11,40 @@ Reference class provenance: Every figure below is a conservative class value com
 
 ## The value-class table
 
-What a solved request is worth per value class, against what the
-rung costs an attacker. Declared abuse values are the calibration
-defaults from `packages/kiwicaptcha-solver/reference-costs.json`
-(`economics.calibration`): each one is the bench-measured attacker
-cost per 1,000 solves of its rung, divided by the documented 10×
-margin and rounded down to the clean money figure at or below it.
-Adopters override the declared value per scope in their doctor
-configuration.
+What one successful abuse is WORTH to an attacker per value class,
+against what the rung costs them. The declared abuse value is an
+independent stake estimate (the underground resale value of one
+compromised account of that class, from public reporting), never a
+function of the attacker's own solve cost. Deriving the stake from
+the cost would make the D3.3 check circular (cost > cost/10 always
+holds). Adopters override the declared value per scope in their
+doctor configuration.
 
-| Value class | Rung | Declared abuse value (USD / 1,000 solves) | Measured attacker anchor (USD / 1,000 solves) | Margin |
-| --- | --- | --- | --- | --- |
-| low | sha16 | $0.00005 | $0.000937 | anchor ÷ 10, rounded down |
-| standard | sha18 | $0.0001 | $0.001962 | anchor ÷ 10, rounded down |
-| high | argon16 | $0.0001 | $0.001225 | anchor ÷ 10, rounded down |
-| critical | argon64 | $0.0002 | $0.00421 | anchor ÷ 10, rounded down |
+| Value class | Rung | Declared abuse value (USD / account) | Measured attacker cost (USD / 1,000 solves) | Cost per 1 solve | Verdict at the default rung |
+| --- | --- | --- | --- | --- | --- |
+| low | sha16 | $0.01 | $0.000937 | $0.00000094 | cost < value: escalate |
+| standard | sha18 | $0.50 | $0.001962 | $0.000002 | cost < value: escalate |
+| high | argon16 | $5.00 | $0.001225 | $0.000001 | cost < value: escalate |
+| critical | argon64 | $50.00 | $0.00421 | $0.000004 | cost < value: escalate |
 
-Provenance: anchors are the `this_cpu_usd` column of the bench's
-dollar table (the D3.3 campaign measurement on the release bench
-host, `tools/redteam/runs/env/d33-economics-<profile>.json`); the
-declared values follow `economics.calibration` exactly
-(`reference-costs.json`). Every default prices inside its rung on
-the honest anchor, so the D3.3 gate row measures the margin rather
-than a wish.
+Provenance: the declared values are independent stake anchors from
+public credential/account resale reporting (order-of-magnitude,
+rounded in the defender's favor: low-value forum/bot accounts ≈
+$0.01, standard consumer accounts ≈ $0.50, financial-adjacent ≈
+$5, admin/banking ≈ $50 per account). The measured attacker cost
+anchors are the `this_cpu_usd` column of the bench's dollar table
+(the D3.3 campaign measurement on the release bench host,
+`tools/redteam/runs/env/d33-economics-<profile>.json`).
 
-The ceiling statement is the honest finding the calibration makes
-visible: raw proof of work cannot price a stake above its rung's
-measured cost at any difficulty. A scope whose real stake exceeds
-its rung's ceiling is answered by the doctor with exactly that
-verdict and the enforcement knob — raise the scope's disposition
-minimum (`risk.scopes.<name>.minimum`) to `step_up` or `deny`.
+The honest conclusion is the one the calibration was hiding: raw
+proof of work cannot price a stake of any real value at any
+difficulty that a browser can meet. Every default rung's cost per
+solve is orders of magnitude below the account's worth, so D3.3
+correctly reports `cost < value: escalate` and the enforcement knob
+is mandatory — raise the scope's disposition minimum
+(`risk.scopes.<name>.minimum`) to `step_up` or `deny`. A D3.3 row
+that claims green at these stake levels without escalation is
+wrong.
 
 ## Hardware classes the attacker rents
 

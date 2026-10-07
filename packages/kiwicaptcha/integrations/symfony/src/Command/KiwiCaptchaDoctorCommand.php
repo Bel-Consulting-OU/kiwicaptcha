@@ -132,6 +132,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Decoy escalation gate' => $this->checkDecoyEscalationGate(),
+            'Step-up bootstrap factor' => $this->checkStepUpBootstrap(),
             'Execution versioning' => $this->checkExecutionVersioning(),
             'Argon memory envelope' => $this->checkArgonEnvelope(),
             'Argon concurrency' => $this->checkArgonConcurrency(),
@@ -893,6 +894,28 @@ final class KiwiCaptchaDoctorCommand extends Command
      *
      * @return array{0: string, 1: string} [status, detail]
      */
+    /**
+     * The step-up bootstrap factor: when step-up is enabled, at least
+     * one established factor must be available to complete the first
+     * enrollment. Without a bootstrap (email OTP at minimum) the
+     * first-enrollment gate is a dead end and the plane cannot be used.
+     */
+    private function checkStepUpBootstrap(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false) || !($risk['step_up']['enabled'] ?? false)) {
+            return ['PASS', 'step-up is disabled; no bootstrap factor is required'];
+        }
+        $handlers = $risk['step_up']['handlers'] ?? [];
+        $hasEmail = \in_array('email_otp', $handlers, true)
+            || ($risk['step_up']['email_otp']['enabled'] ?? true);
+        if ($hasEmail) {
+            return ['PASS', 'step-up is enabled with the email OTP bootstrap factor'];
+        }
+
+        return [self::LEVEL_WARN, 'step-up is enabled without a bootstrap factor (email OTP); first enrollment is a dead end. Enable email OTP or allow first enrollment in a verified signup/recovery session'];
+    }
+
     private function checkDecoyEscalationGate(): array
     {
         $composition = RiskStageComposition::resolve(

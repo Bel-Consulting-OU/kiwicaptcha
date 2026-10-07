@@ -66,6 +66,11 @@ type sidecarVerifyRequest struct {
 	// unbound; a non-empty string must match the record's signed
 	// request_binding exactly.
 	ExpectedRequestBinding *string `json:"expected_request_binding,omitempty"`
+	// EnforceTelemetry and OperationIdentity are forwarded for wire
+	// completeness; the sidecar currently ignores them and the SDK runs
+	// the telemetry gate locally first.
+	EnforceTelemetry   bool   `json:"enforce_telemetry,omitempty"`
+	OperationIdentity  string `json:"operation_identity,omitempty"`
 }
 
 // sidecarExpectedBinding maps the SDK verification context onto the
@@ -119,6 +124,8 @@ func delegateExecutionVerify(rawToken string, record *ChallengeRecord, options V
 		Scope:                  options.ExpectedScope,
 		RemoteIP:               options.ClientIP,
 		ExpectedRequestBinding: sidecarExpectedBinding(record, options),
+		EnforceTelemetry:       options.EnforceTelemetry,
+		OperationIdentity:      options.OperationIdentity,
 	})
 	if err != nil {
 		return InvalidOutcome(ErrCodeExecutionMismatch)
@@ -161,7 +168,8 @@ func delegateExecutionVerify(rawToken string, record *ChallengeRecord, options V
 		// supplies the binding the application re-checks. The nonce is
 		// the decision handle the outcomes ledger addresses, so it must
 		// be the verified nonce, never the binding.
-		return ValidOutcome(record.Nonce, record.RequestBinding, true, 0, false, record.DecoyField)
+		// A fresh delegated success is a fresh result, never a stored one.
+		return ValidOutcome(record.Nonce, record.RequestBinding, false, 0, false, record.DecoyField)
 	}
 	// The sidecar's kiwi-code IS the shared wire vocabulary; a code
 	// this SDK does not know stays a deny with the code carried

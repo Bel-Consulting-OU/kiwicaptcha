@@ -267,7 +267,15 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
         $request = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_PORT' => '54321'], ['__Host-kiwi-session' => $session]);
         $dispatcher = $this->dispatcher($this->subscriber(trustGate: $gate, authWindow: $window));
 
+        // A brand-new session earns nothing from the first success.
         $dispatcher->dispatch(new LoginSuccessEvent($request, $this->user('user-42')), LoginSuccessEvent::class);
+        self::assertCount(1, $this->reporter->reports);
+        self::assertNull($this->reporter->reports[0]['context']?->sessionId, 'a brand-new session earns no credit from one success');
+
+        // After a clean history the same session earns the credit.
+        $this->reporter->reports = [];
+        $seeded = $this->request(['REQUEST_TIME_FLOAT' => 1234567890.0, 'REMOTE_PORT' => '54320'], ['__Host-kiwi-session' => $session]);
+        $dispatcher->dispatch(new LoginSuccessEvent($seeded, $this->user('user-42')), LoginSuccessEvent::class);
         self::assertCount(1, $this->reporter->reports);
         self::assertNotNull($this->reporter->reports[0]['context']?->sessionId, 'a clean session earns the session credit');
 

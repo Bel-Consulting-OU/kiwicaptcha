@@ -61,14 +61,16 @@ LUA;
             return null;
         }
         if (!\is_array($answer) || \count($answer) !== 2 || $answer === [false]) {
-            // Absent window: no observed failures, a clean identity.
-            return \is_array($answer) && $answer === [false] ? 0.0 : null;
+            // Absent window: no readable history is not a clean
+            // history. The gate refuses credit so a brand-new session
+            // never earns trust from a single success.
+            return null;
         }
         $failures = (int) $answer[0];
         $successes = (int) $answer[1];
         $total = $failures + $successes;
 
-        return $total === 0 ? 0.0 : $failures / $total;
+        return $total === 0 ? null : $failures / $total;
     }
 
     private function key(string $sessionPseudonym): string

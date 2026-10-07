@@ -24,9 +24,31 @@ final class StoreBackedOutcomeTrustGateTest extends TestCase
     {
         $window = new MemoryAuthOutcomeWindow();
         $window->recordSuccess(self::SESSION);
+        $window->recordSuccess('principal');
         $gate = new StoreBackedOutcomeTrustGate($window);
 
         self::assertTrue($gate->allowsSessionSourceCredit('principal', self::SESSION, 'target'));
+    }
+
+    public function testAFreshSessionEarnsNothingFromOneSuccess(): void
+    {
+        $window = new MemoryAuthOutcomeWindow();
+        $window->recordSuccess('principal');
+        $gate = new StoreBackedOutcomeTrustGate($window);
+
+        self::assertFalse($gate->allowsSessionSourceCredit('principal', 'brand-new-session', 'target'));
+    }
+
+    public function testAFailingPrincipalRefusesCreditOnACleanSession(): void
+    {
+        $window = new MemoryAuthOutcomeWindow();
+        $window->recordSuccess(self::SESSION);
+        $window->recordFailure('principal');
+        $window->recordFailure('principal');
+        $window->recordSuccess('principal');
+        $gate = new StoreBackedOutcomeTrustGate($window, null, 0.25);
+
+        self::assertFalse($gate->allowsSessionSourceCredit('principal', self::SESSION, 'target'));
     }
 
     public function testAFailureHeavyIdentityIsRefused(): void
@@ -34,6 +56,7 @@ final class StoreBackedOutcomeTrustGateTest extends TestCase
         $window = new MemoryAuthOutcomeWindow();
         $window->recordFailure(self::SESSION);
         $window->recordSuccess(self::SESSION);
+        $window->recordSuccess('principal');
         $gate = new StoreBackedOutcomeTrustGate($window, null, 0.25);
 
         self::assertFalse($gate->allowsSessionSourceCredit('principal', self::SESSION, 'target'), 'a ratio at the ceiling is not below it');
@@ -43,6 +66,7 @@ final class StoreBackedOutcomeTrustGateTest extends TestCase
         $window2->recordFailure(self::SESSION);
         foreach (range(1, 8) as $_) {
             $window2->recordSuccess(self::SESSION);
+            $window2->recordSuccess('principal');
         }
         $gate2 = new StoreBackedOutcomeTrustGate($window2, null, 0.05);
         self::assertFalse($gate2->allowsSessionSourceCredit('principal', self::SESSION, 'target'), '0.2 is above the default ceiling');
@@ -52,6 +76,7 @@ final class StoreBackedOutcomeTrustGateTest extends TestCase
     {
         $window = new MemoryAuthOutcomeWindow();
         $window->recordSuccess(self::SESSION);
+        $window->recordSuccess('principal');
         $gate = new StoreBackedOutcomeTrustGate($window, static fn (string $target): bool => $target === 'marked-target');
 
         self::assertFalse($gate->allowsSessionSourceCredit('principal', self::SESSION, 'marked-target'));
@@ -91,6 +116,7 @@ final class StoreBackedOutcomeTrustGateTest extends TestCase
     {
         $window = new MemoryAuthOutcomeWindow();
         $window->recordSuccess(self::SESSION);
+        $window->recordSuccess('principal');
         $gate = new StoreBackedOutcomeTrustGate($window, static function (string $target): bool {
             throw new \RuntimeException('marks unreachable');
         });

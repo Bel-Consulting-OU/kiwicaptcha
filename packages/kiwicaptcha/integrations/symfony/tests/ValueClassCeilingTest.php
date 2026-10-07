@@ -24,7 +24,7 @@ final class ValueClassCeilingTest extends TestCase
         $reference = json_decode((string) file_get_contents($path), true);
         self::assertIsArray($reference);
         $anchors = $reference['economics']['calibration']['anchor_usd_per_1000'] ?? null;
-        self::assertIsArray($anchors, 'the solver table carries the measured-cost calibration');
+        self::assertIsArray($anchors, 'the solver table carries the measured-cost anchors');
 
         $byClass = [];
         foreach ($reference['value_classes'] as $class) {
@@ -38,12 +38,16 @@ final class ValueClassCeilingTest extends TestCase
         }
     }
 
-    public function testEveryCalibratedDefaultPricesInsideItsRung(): void
+    public function testEveryDefaultStakeIsIndependentAndDrawsEscalation(): void
     {
+        // The declared stakes are independent (account resale class),
+        // never anchor/10. At those stakes raw PoW cannot price any
+        // class, so every default verdict is the escalation answer —
+        // that is the honest result, and the one D3.3 now measures.
         foreach (ValueClassCeiling::PRICING as $class => $row) {
             [$status, $detail] = ValueClassCeiling::verdict($class, 'allow');
-            self::assertSame('PASS', $status, "the shipped $class default prices: ".$detail);
-            self::assertStringContainsString('inside the measured ceiling', $detail);
+            self::assertSame('WARN', $status, "the shipped $class stake is beyond PoW: ".$detail);
+            self::assertStringContainsString('Escalate', $detail);
         }
     }
 

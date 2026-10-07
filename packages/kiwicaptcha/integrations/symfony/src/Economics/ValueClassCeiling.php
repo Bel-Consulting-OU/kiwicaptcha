@@ -30,10 +30,10 @@ final class ValueClassCeiling
      * from), all dollars per 1000 solves.
      */
     public const PRICING = [
-        'low' => ['rung' => 'sha16', 'declared_usd_per_1000' => 0.00005, 'ceiling_usd_per_1000' => 0.000937],
-        'standard' => ['rung' => 'sha18', 'declared_usd_per_1000' => 0.0001, 'ceiling_usd_per_1000' => 0.001962],
-        'high' => ['rung' => 'argon16', 'declared_usd_per_1000' => 0.0001, 'ceiling_usd_per_1000' => 0.001225],
-        'critical' => ['rung' => 'argon64', 'declared_usd_per_1000' => 0.0002, 'ceiling_usd_per_1000' => 0.00421],
+        'low' => ['rung' => 'sha16', 'declared_usd_per_1000' => 10.0, 'ceiling_usd_per_1000' => 0.000937],
+        'standard' => ['rung' => 'sha18', 'declared_usd_per_1000' => 500.0, 'ceiling_usd_per_1000' => 0.001962],
+        'high' => ['rung' => 'argon16', 'declared_usd_per_1000' => 5000.0, 'ceiling_usd_per_1000' => 0.001225],
+        'critical' => ['rung' => 'argon64', 'declared_usd_per_1000' => 50000.0, 'ceiling_usd_per_1000' => 0.00421],
     ];
 
     /**

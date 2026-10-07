@@ -684,17 +684,37 @@ final class AdaptiveRiskEngine
         $scopePressure = false;
         if ($isLogin) {
             if ($this->principalNetworks !== null && $observation->principalId !== null) {
+                // Novelty is judged on the ASN bucket first: carriers
+                // rotate IPv6 /64s and CGNAT addresses per connection,
+                // so a /64 key alone would step up most mobile logins.
+                // A known ASN is never novel; an unknown ASN is novel.
+                // The /64 bucket is a contributing signal only (it can
+                // raise novelty when the principal has no trusted
+                // network at all, never on its own against a known ASN).
                 $network = self::networkBucket($c->sourceIp);
+                $asn = $this->asnBucketOf($c->sourceIp);
                 try {
-                    $seen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                    $asnSeen = $asn !== '' && $asn !== '0'
+                        ? $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn)
+                        : null;
                     $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
+                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
                 } catch (\Throwable) {
-                    $seen = null;
+                    $asnSeen = null;
                     $trusted = null;
+                    $netSeen = null;
                 }
-                // Novel when either first-attempt condition holds and
-                // the store answers definitively; neutral never fires.
-                $novelNetwork = ($seen === false) || ($trusted === false);
+                if ($asnSeen === false) {
+                    // Never-seen ASN: novel regardless of the /64.
+                    $novelNetwork = true;
+                } elseif ($asnSeen === true) {
+                    // Known ASN: /64 novelty alone never fires.
+                    $novelNetwork = false;
+                } else {
+                    // No ASN data: fall back to the /64 bucket, and to
+                    // the no-trusted-network condition.
+                    $novelNetwork = ($netSeen === false) || ($trusted === false);
+                }
             }
             if (
                 $this->enableGlobalPressure
@@ -733,6 +753,21 @@ final class AdaptiveRiskEngine
             return bin2hex("\x04".$packed);
         }
         return bin2hex("\x06".substr($packed, 0, 8));
+    }
+
+    /** The ASN bucket of a source address, '' when no dataset is wired. */
+    private function asnBucketOf(string $ip): string
+    {
+        if ($this->asnDataset === null) {
+            return '';
+        }
+        try {
+            $info = $this->asnDataset->lookup($ip);
+
+            return (string) ($info->asn ?? $info->bucket);
+        } catch (\Throwable) {
+            return '';
+        }
     }
 
     /**

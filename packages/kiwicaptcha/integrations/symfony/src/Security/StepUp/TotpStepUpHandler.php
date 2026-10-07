@@ -230,14 +230,10 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return $this->presentation($context, $challenge, $now);
     }
 
-    private string $boundSessionId = '';
-
-    private string $boundContextKey = '';
-
     public function complete(Request $request): StepUpResult
     {
-        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
-        $this->boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundSessionId = StepUpSessionBinding::sessionId($request);
+        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -257,7 +253,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
         }
         $trusted = $this->lockout?->isTrustedContext($request, $challenge->principalPseudonym, $now) ?? false;
-        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $this->boundContextKey, $trusted) ?? 0;
+        $retryAfter = $this->lockout?->retryAfterSecs($challenge->principalPseudonym, $challenge->targetPseudonym, $now, $boundContextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
             return StepUpResult::failed(StepUpResult::FAIL_LOCKED_OUT, $challenge->id);
         }
@@ -285,7 +281,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         $code = (string) $request->request->get(self::CODE_FIELD, '');
         $step = $this->matchingStep($secret, $code, TotpCode::stepOf($now));
         if ($step === null) {
-            return $this->failedAttempt($challenge);
+            return $this->failedAttempt($challenge, $boundContextKey);
         }
         // The replay guard: the first presentation of a time-step wins;
         // the same step can never verify twice.
@@ -300,9 +296,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if ($consumed === null) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
-        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $this->boundContextKey);
+        $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge);
+        return $this->credit($challenge, $boundSessionId);
     }
 
     /**
@@ -333,11 +329,11 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return null;
     }
 
-    private function failedAttempt(StepUpChallenge $challenge): StepUpResult
+    private function failedAttempt(StepUpChallenge $challenge, string $contextKey = ''): StepUpResult
     {
         // Every rejected code feeds the cross-challenge brute-force
         // budget before the per-challenge attempt cap.
-        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $this->boundContextKey);
+        $this->lockout?->registerFailure($challenge->principalPseudonym, $challenge->targetPseudonym, $contextKey);
         $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
         if ($answer === 0) {
             return StepUpResult::failed(StepUpResult::FAIL_TOO_MANY_ATTEMPTS, $challenge->id);
@@ -373,13 +369,13 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge): StepUpResult
+    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
     {
         $result = $this->creditOnce($challenge);
         if ($result->status === StepUpResultStatus::Succeeded) {
             $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
             $this->store->markSessionStepUpSuccess(
-                $this->boundSessionId,
+                $boundSessionId,
                 $challenge->principalPseudonym,
                 'totp',
                 900,

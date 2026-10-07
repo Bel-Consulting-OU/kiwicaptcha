@@ -234,7 +234,7 @@ elif [ -f "$D33_JSON" ]; then
     fails=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(",".join(d["fail_rows"]) or "-")' "$D33_JSON")
     complete=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["table_complete"]).lower())' "$D33_JSON")
     if [ "$complete" = "true" ] && [ "$fails" = "-" ]; then
-        record value-class-costs d3.3 GREEN "every value class priced above its declared abuse value (measured-cost-derived, calibration margin stated in the table) or escalated to the documented disposition path"
+        record value-class-costs d3.3 GREEN "every value class priced above its independent declared stake or escalated to the documented disposition path"
     elif [ "$complete" != "true" ]; then
         record value-class-costs d3.3 RED "the measured table is incomplete"
     else
