@@ -234,6 +234,50 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return \is_string($value) && $value !== '' && ($now - (int) $value) <= $withinSecs;
     }
 
+    public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void
+    {
+        if ($sessionId === '' || $principalPseudonym === '') {
+            return;
+        }
+        $this->redis->set(
+            $this->prefix.'stepup-sess:'.hash('sha256', $sessionId."\0".$principalPseudonym),
+            $now.'|'.$factor,
+            'EX',
+            max(1, $ttlSecs),
+        );
+    }
+
+    public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool
+    {
+        if ($sessionId === '' || $principalPseudonym === '') {
+            return false;
+        }
+        $value = $this->redis->get($this->prefix.'stepup-sess:'.hash('sha256', $sessionId."\0".$principalPseudonym));
+        if (!\is_string($value) || $value === '') {
+            return false;
+        }
+        [$at, $factor] = array_pad(explode('|', $value, 2), 2, '');
+        if (($now - (int) $at) > $withinSecs) {
+            return false;
+        }
+        if ($minFactor !== null && self::factorRank($factor) < self::factorRank($minFactor)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /** webauthn > totp > email_otp > unknown. */
+    private static function factorRank(string $factor): int
+    {
+        return match ($factor) {
+            'webauthn' => 3,
+            'totp' => 2,
+            'email_otp' => 1,
+            default => 0,
+        };
+    }
+
     public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
     {
         $answer = $this->redis->eval(

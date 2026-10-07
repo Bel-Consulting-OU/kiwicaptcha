@@ -24,6 +24,13 @@ namespace KiwiCaptcha\Risk\Evidence;
  * A missing, malformed or unreadable matrix closes the gate
  * (fail-closed in the user-safe direction: the escalation is an
  * additive price raise, so an unreadable record must never arm it).
+ *
+ * The matrix alone must not be the only way to open the gate: a
+ * runtime security decision cannot depend solely on tests/ QA data.
+ * An explicit configuration value (the `armed` flag, see
+ * {@see self::fromConfiguration()}) opens the gate as a deliberate
+ * operator decision, and a deployment may point the matrix/registry
+ * pair at a versioned asset outside tests/ that the doctor validates.
  */
 final class AutofillQualificationGate
 {
@@ -35,16 +42,25 @@ final class AutofillQualificationGate
     /** Cached verdict of the current matrix (the gate is asked per hit). */
     private ?bool $verdict = null;
 
+    /**
+     * @param bool $explicitlyArmed the explicit configuration value: when
+     *                              true the gate is open without consulting
+     *                              any matrix (the operator has taken
+     *                              responsibility for the autofill surfaces)
+     */
     public function __construct(
         private readonly string $matrixPath,
         private readonly string $registryPath,
         private readonly int $windowDays = self::QUALIFICATION_WINDOW_DAYS,
+        private readonly bool $explicitlyArmed = false,
     ) {
     }
 
     /**
      * The gate over the committed matrix paths (repo-root relative),
-     * the canonical runtime surface.
+     * the canonical matrix-driven runtime surface. Fail-closed: the
+     * committed matrix carries no passing rows until real qualification
+     * lands.
      */
     public static function committed(): self
     {
@@ -54,9 +70,55 @@ final class AutofillQualificationGate
         );
     }
 
-    /** True when every required surface of the registry is qualified. */
+    /**
+     * The configuration-driven gate (the Symfony wiring surface). An
+     * explicit `armed` value opens the gate with no matrix dependency;
+     * otherwise the given (or committed) matrix pair decides, fail-closed.
+     */
+    public static function fromConfiguration(
+        bool $explicitlyArmed = false,
+        ?string $matrixPath = null,
+        ?string $registryPath = null,
+        int $windowDays = self::QUALIFICATION_WINDOW_DAYS,
+    ): self {
+        if ($explicitlyArmed) {
+            return new self($matrixPath ?? '', $registryPath ?? '', $windowDays, true);
+        }
+        $committed = self::committed();
+
+        return new self(
+            $matrixPath ?? $committed->matrixPath,
+            $registryPath ?? $committed->registryPath,
+            $windowDays,
+        );
+    }
+
+    /** True when the operator explicitly armed the gate by configuration. */
+    public function isExplicitlyArmed(): bool
+    {
+        return $this->explicitlyArmed;
+    }
+
+    /**
+     * The matrix asset paths this gate reads ('' when explicitly armed
+     * with no asset). The doctor validates a configured pair.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public function assetPaths(): array
+    {
+        return [$this->matrixPath, $this->registryPath];
+    }
+
+    /**
+     * True when the gate is open: the explicit configuration value, or
+     * every required surface of the registry qualified.
+     */
     public function isOpen(): bool
     {
+        if ($this->explicitlyArmed) {
+            return true;
+        }
         if ($this->verdict === null) {
             $this->verdict = $this->evaluate();
         }

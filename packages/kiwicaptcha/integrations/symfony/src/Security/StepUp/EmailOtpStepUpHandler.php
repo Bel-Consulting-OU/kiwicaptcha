@@ -131,8 +131,11 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         return $this->presentation($context, $challenge, $now);
     }
 
+    private string $boundSessionId = '';
+
     public function complete(Request $request): StepUpResult
     {
+        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -228,6 +231,13 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         $result = $this->creditOnce($challenge);
         if ($result->status === StepUpResultStatus::Succeeded) {
             $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
+            $this->store->markSessionStepUpSuccess(
+                $this->boundSessionId,
+                $challenge->principalPseudonym,
+                'email_otp',
+                900,
+                $this->now(),
+            );
         }
 
         return $result;

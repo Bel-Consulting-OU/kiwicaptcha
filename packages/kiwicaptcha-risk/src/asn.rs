@@ -152,6 +152,25 @@ pub fn unlisted_v6_bucket(first_four_bytes: [u8; 4]) -> String {
     format!("u6/{}", hex::encode(first_four_bytes))
 }
 
+/// The unlisted-namespace bucket id of one address, dataset-free: the
+/// bucket a lookup falls back to when no dataset row covers the address
+/// (and the bucket every address resolves to when no dataset is attached
+/// at all). IPv4-mapped and IPv4-compatible IPv6 normalize to their
+/// IPv4 form first, exactly like [`AsnDataset::lookup`].
+pub fn unlisted_bucket_for(ip: IpAddr) -> String {
+    let key = ip_key_from(ip);
+    if key.family == 4 {
+        unlisted_v4_bucket([(key.key >> 24) as u8, (key.key >> 16) as u8])
+    } else {
+        unlisted_v6_bucket([
+            (key.key >> 120) as u8,
+            (key.key >> 112) as u8,
+            (key.key >> 104) as u8,
+            (key.key >> 96) as u8,
+        ])
+    }
+}
+
 /// True when `bucket` is a canonical bucket id of the grammar above:
 /// `a` plus the decimal ASN without leading zeros, `u4/` plus the
 /// decimal prefix without leading zeros, or `u6/` plus exactly 8

@@ -29,4 +29,13 @@ final class LoggingStepUpOwnerNotifier implements StepUpOwnerNotifier
             'until' => $untilSecs,
         ]);
     }
+
+    public function notifyFactorEnrolled(string $principalPseudonym, string $factor, array $context = []): void
+    {
+        $this->logger?->warning('KiwiCaptcha second factor {factor} enrolled on an account; the owner should confirm this was intentional.', [
+            'factor' => $factor,
+            'pseudonym' => $principalPseudonym,
+            'context' => $context,
+        ]);
+    }
 }

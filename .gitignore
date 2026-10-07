@@ -21,3 +21,4 @@ __pycache__/
 *.pyc
 _build/
 sqlite3_nif.so
+packages/kiwicaptcha-elixir/deps/

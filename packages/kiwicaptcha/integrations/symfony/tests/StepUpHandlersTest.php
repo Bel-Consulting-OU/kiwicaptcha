@@ -164,6 +164,16 @@ final class StepUpHandlersTest extends TestCase
                 $this->inner->markStepUpSuccess($principalPseudonym, $ttlSecs, $now);
             }
 
+            public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void
+            {
+                $this->inner->markSessionStepUpSuccess($sessionId, $principalPseudonym, $factor, $ttlSecs, $now);
+            }
+
+            public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool
+            {
+                return $this->inner->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, $withinSecs, $now);
+            }
+
             public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
             {
                 return $this->inner->recentStepUpSuccess($principalPseudonym, $withinSecs, $now);
@@ -271,10 +281,51 @@ final class StepUpHandlersTest extends TestCase
         self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $handler->complete($this->completeRequest($ticket, '000000'))->failureCode);
     }
 
+    public function testAnOtpTicketOrCodeInTheQueryStringIsIgnored(): void
+    {
+        // Secrets ride the POST body only: a query-string ticket/code
+        // never resolves a challenge (the handler reads $request->request).
+        $handler = $this->otpHandler();
+        $response = $handler->begin($this->beginRequest(), $this->context());
+        $ticket = $this->ticketOf($response);
+
+        $queryOnly = Request::create(
+            'https://example.com/kiwi/step-up/complete?'.http_build_query([
+                EmailOtpStepUpHandler::TICKET_FIELD => $ticket,
+                EmailOtpStepUpHandler::CODE_FIELD => (string) $this->sender->lastCode(),
+            ]),
+        );
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($queryOnly, self::PRINCIPAL);
+        $result = $handler->complete($queryOnly);
+        self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $result->failureCode, 'OTP secrets ride the POST body only');
+    }
+
+    public function testATotpTicketOrCodeInTheQueryStringIsIgnored(): void
+    {
+        // Secrets ride the POST body only: a query-string ticket/code
+        // never resolves a challenge (the handler reads $request->request).
+        $handler = $this->totpHandler();
+        $this->store->markSessionStepUpSuccess('sess-totp', self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $secret = TotpCode::base32Decode($handler->enroll(self::PRINCIPAL, 'sess-totp'));
+        $response = $handler->begin($this->beginRequest(), $this->contextNoTarget());
+        $ticket = $this->ticketOf($response);
+
+        $queryOnly = Request::create(
+            'https://example.com/kiwi/step-up/complete?'.http_build_query([
+                TotpStepUpHandler::TICKET_FIELD => $ticket,
+                TotpStepUpHandler::CODE_FIELD => TotpCode::at((string) $secret, TotpCode::stepOf($this->now)),
+            ]),
+        );
+        \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($queryOnly, self::PRINCIPAL);
+        $result = $handler->complete($queryOnly);
+        self::assertSame(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $result->failureCode, 'TOTP secrets ride the POST body only');
+    }
+
     public function testTheTotpFlowEnrollsVerifiesAndGuardsReplay(): void
     {
         $handler = $this->totpHandler();
-        $secret32 = $handler->enroll(self::PRINCIPAL);
+        $this->store->markSessionStepUpSuccess('sess-totp', self::PRINCIPAL, 'totp', 900, $this->now);
+        $secret32 = $handler->enroll(self::PRINCIPAL, 'sess-totp');
         self::assertMatchesRegularExpression('/^[A-Z2-7]{32}$/D', $secret32);
         $secret = TotpCode::base32Decode($secret32);
         self::assertNotNull($secret);
@@ -312,7 +363,8 @@ final class StepUpHandlersTest extends TestCase
         $response = $handler->begin($this->beginRequest(), $this->context());
         self::assertSame(409, $response->getStatusCode(), 'an unenrolled principal cannot begin');
 
-        $handler->enroll(self::PRINCIPAL);
+        $this->store->markSessionStepUpSuccess('sess-totp', self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $handler->enroll(self::PRINCIPAL, 'sess-totp');
         $response = $handler->begin($this->beginRequest(), $this->context());
         $farStep = TotpCode::stepOf($this->now) + 5;
         $result = $handler->complete($this->completeRequest($this->ticketOf($response), TotpCode::at('12345678901234567890', $farStep)));

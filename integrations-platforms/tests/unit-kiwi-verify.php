@@ -52,7 +52,7 @@ check('forged leftmost never wins on an untrusted peer', kiwi_verify_client_ip([
 check('garbage hop fails closed', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_FORWARDED_FOR' => '203.0.113.7, garbage!!, 10.0.0.9'], ['10.0.0.0/24']) === '10.0.0.9');
 check('real ip when trusted and no xff', kiwi_verify_client_ip(['REMOTE_ADDR' => '10.0.0.9', 'HTTP_X_REAL_IP' => '198.51.100.4'], ['10.0.0.0/24']) === '198.51.100.4');
 check('ipv6 chain through the trusted hop', kiwi_verify_client_ip(['REMOTE_ADDR' => '2001:db8::9', 'HTTP_X_FORWARDED_FOR' => '2001:db8:1::50, 2001:db8::9'], ['2001:db8::/64']) === '2001:db8:1::50');
-check('missing peer falls back to loopback', kiwi_verify_client_ip([], []) === '127.0.0.1');
+check('missing peer fails closed (never invents loopback)', kiwi_verify_client_ip([], []) === '');
 check('cidr csv parses and drops blanks', kiwi_verify_parse_cidrs(' 10.0.0.0/24 , , 2001:db8::/32 ') === ['10.0.0.0/24', '2001:db8::/32']);
 
 // The gate decision table.

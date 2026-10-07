@@ -642,9 +642,10 @@ where
             if handle.dimension == HandleDimension::Target {
                 match outcome {
                     Outcome::AuthenticationFailure => {
-                        let source = self.engine.target_spread_source(context.as_ref());
+                        let (source, asn) =
+                            self.engine.target_spread_elements(context.as_ref());
                         self.engine
-                            .register_target_failure(&handle.id, &source, "")?;
+                            .register_target_failure(&handle.id, &source, &asn)?;
                     }
                     Outcome::StepUpCompleted => {
                         self.engine.clear_target_failures(&handle.id)?;
@@ -730,6 +731,7 @@ mod tests {
     use crate::resources::ResourcePressure;
     use crate::signals::SignalVector;
     use crate::store::Observed;
+    use crate::store::TargetState;
     use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -764,6 +766,7 @@ mod tests {
         ledger: std::sync::Arc<Mutex<HashMap<String, Option<bool>>>>,
         marks: std::sync::Arc<Mutex<HashMap<String, MarkRecord>>>,
         seen_mark_events: std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
+        target_spread: std::sync::Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
     }
 
     impl StubStore {
@@ -835,6 +838,45 @@ mod tests {
                 }
                 _ => Ok(false),
             }
+        }
+
+        fn register_target_failure(
+            &self,
+            target_id: &str,
+            source: &str,
+            asn: &str,
+        ) -> Result<TargetState, RiskStoreError> {
+            let mut guard = self.target_spread.lock().unwrap();
+            let set = guard.entry(target_id.to_string()).or_default();
+            if !source.is_empty() {
+                set.insert(format!("src:{source}"));
+            }
+            if !asn.is_empty() {
+                set.insert(format!("asn:{asn}"));
+            }
+            let spread = set.len() as u32;
+            Ok(TargetState {
+                fails: 1,
+                first_ms: 0,
+                last_ms: 0,
+                spread,
+            })
+        }
+
+        fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskStoreError> {
+            let spread = self
+                .target_spread
+                .lock()
+                .unwrap()
+                .get(target_id)
+                .map(|s| s.len() as u32)
+                .unwrap_or(0);
+            Ok(TargetState {
+                fails: 0,
+                first_ms: 0,
+                last_ms: 0,
+                spread,
+            })
         }
     }
 
@@ -1208,6 +1250,53 @@ mod tests {
             store.read_mark("session", SESSION).unwrap().is_none(),
             "authenticationFailure writes no mark"
         );
+    }
+
+    #[test]
+    fn target_failures_from_distinct_asns_spread() {
+        let store = StubStore::default();
+        let engine = engine(store.clone()).with_asn_dataset(std::sync::Arc::new(
+            crate::asn::AsnDataset::open(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../protocol/asn/sample-asn.tsv"),
+            )
+            .expect("sample dataset opens"),
+        ));
+        let outcomes = KiwiOutcomes::new(&engine, &store);
+
+        // 192.0.2.0/24 is AS64496 and 203.0.113.0/27 is AS64500 in the
+        // shared sample dataset: two failures from those origins must
+        // contribute two distinct asn spread elements.
+        for ip in ["192.0.2.7", "203.0.113.9"] {
+            let ctx = RiskContext::new(
+                1,
+                ip.parse().unwrap(),
+                None,
+                None,
+                RiskEventKind::AuthenticationFailure,
+                NetworkFlags::default(),
+                ResourcePressure::default(),
+            );
+            outcomes
+                .report(
+                    Outcome::AuthenticationFailure,
+                    &OutcomeHandle::target(TARGET).unwrap(),
+                    None,
+                    Some(ctx),
+                )
+                .unwrap();
+        }
+
+        let state = RiskStateStore::read_target_state(&store, TARGET).unwrap();
+        assert!(
+            state.spread >= 2,
+            "two distinct ASNs must spread at least 2 (got {})",
+            state.spread
+        );
+        let spread = store.target_spread.lock().unwrap();
+        let elements = spread.get(TARGET).expect("spread recorded");
+        assert!(elements.contains("asn:a64496"), "got {elements:?}");
+        assert!(elements.contains("asn:a64500"), "got {elements:?}");
     }
 
     #[test]

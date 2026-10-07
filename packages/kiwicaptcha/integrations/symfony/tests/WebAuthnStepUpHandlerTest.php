@@ -33,6 +33,8 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 {
     private const MASTER = '0123456789abcdef0123456789abcdef';
 
+    private const SESSION = 'test-session-id-0000000000000001';
+
     private const PRINCIPAL = '00112233445566778899aabbccddeeff';
 
     private const TARGET = 'ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100';
@@ -87,7 +89,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     public function testTheEnrollmentEntryPointCompletesAndEnrolls(): void
     {
         $handler = $this->handler();
-        $this->store->markStepUpSuccess(self::PRINCIPAL, 900, $this->now);
+        $this->store->markSessionStepUpSuccess(self::SESSION, self::PRINCIPAL, 'email_otp', 900, $this->now);
         $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
         self::assertSame('webauthn', $document['handler']);
@@ -115,7 +117,18 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $handler = $this->handler();
         $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         self::assertSame(Response::HTTP_FORBIDDEN, $begin->getStatusCode());
-        self::assertStringContainsString('step_up_enrollment_requires_step_up', (string) $begin->getContent());
+        self::assertStringContainsString('step_up_enrollment_requires_session_step_up', (string) $begin->getContent());
+    }
+
+    public function testEnrollmentRefusesAnotherSessionOfTheSamePrincipal(): void
+    {
+        // The victim completed step-up in session A; session B of the
+        // same account must not enroll a factor (N1).
+        $handler = $this->handler();
+        $this->store->markSessionStepUpSuccess('session-A', self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        self::assertSame(Response::HTTP_FORBIDDEN, $begin->getStatusCode());
+        self::assertStringContainsString('step_up_enrollment_requires_session_step_up', (string) $begin->getContent());
     }
 
     public function testTheOptionsNeverHonorTheHostHeader(): void
@@ -345,7 +358,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         // The enrollment precondition: a completed step-up for the same
         // principal within the lookback. A fresh principal earns it the
         // way every other handler grants it, through a completion.
-        $this->store->markStepUpSuccess(self::PRINCIPAL, 900, $this->now);
+        $this->store->markSessionStepUpSuccess(self::SESSION, self::PRINCIPAL, 'email_otp', 900, $this->now);
         $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
         self::assertSame('creation', $document['ceremony'], 'the enrollment entry point issues the creation ceremony');
@@ -404,18 +417,30 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private function beginRequest(): Request
     {
-        return Request::create('https://'.self::HOST.'/kiwi/step-up/begin');
+        return $this->withSession(Request::create('https://'.self::HOST.'/kiwi/step-up/begin'));
     }
 
     private function completeRequest(string $ticket, string $credentialJson): Request
     {
-        $request = Request::create('https://'.self::HOST.'/kiwi/step-up/complete', 'POST', [
+        $request = $this->withSession(Request::create('https://'.self::HOST.'/kiwi/step-up/complete', 'POST', [
             WebAuthnStepUpHandler::TICKET_FIELD => $ticket,
             WebAuthnStepUpHandler::CREDENTIAL_FIELD => $credentialJson,
-        ]);
+        ]));
         // The controller binds the re-resolved principal before the
         // handler runs; direct handler calls bind it the same way.
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
+
+        return $request;
+    }
+
+    /** A request carrying a started session with the test session id. */
+    private function withSession(Request $request): Request
+    {
+        $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+        $storage->setId(self::SESSION);
+        $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
+        $session->start();
+        $request->setSession($session);
 
         return $request;
     }

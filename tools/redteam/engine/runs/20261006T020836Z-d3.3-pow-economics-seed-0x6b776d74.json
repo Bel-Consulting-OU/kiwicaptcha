@@ -9,8 +9,8 @@
   "result": "PASS",
   "detail": "rsw suite green: sequential squaring semantics pinned (1 tests ok)",
   "metrics": {
-    "raw": "table_complete=true accepted=3 fail_rows=low,standard,high,critical",
+    "raw": "table_complete=true honest_solves_verified=3 accepted_abuses=0 fail_rows=low,standard,high,critical",
     "sha16_solve_us": null
   },
-  "economic": "cost_per_accepted_abuse=unbounded value_class_fails=low,standard,high,critical table=/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/d33-economics-redis.json"
+  "economic": "cost_per_accepted_abuse=unbounded value_class_fails=low,standard,high,critical table=tools/redteam/runs/env/d33-economics-redis.json"
 }

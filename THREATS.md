@@ -22,7 +22,7 @@ The closed synthesis loop: the synthesis corpus was consumed end to end: 39 cand
 | --- | --- | --- | --- |
 | D3.1 commodity no-JS bots | cost_per_accepted_abuse=unbounded accepted=0 | GREEN | measured: attempts=600 downscaled_from=100000; wall 2s |
 | D3.2 stealth headless | cost_per_accepted_abuse=unbounded accepted_abuses=0 solve_p95_ms=284 | GREEN | measured: downscale=25_of_100000_per_day factor=4000x wire_instance_port=6470; downscale stated: 25_of_100000_per_day; wall 9s |
-| D3.3 PoW farm economics | cost_per_accepted_abuse=unbounded value_class_fails=- table=/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/d33-economics-redis.json | GREEN | measured: table_complete=true accepted=3 fail_rows=-; wall 19s |
+| D3.3 PoW farm economics | cost_per_accepted_abuse=unbounded value_class_fails=- table=tools/redteam/runs/env/d33-economics-redis.json | GREEN | measured: table_complete=true accepted=3 fail_rows=-; wall 19s |
 | D3.4 proxy pools | cost_per_accepted_abuse=unbounded accepted=0 pool_ips=10000 | GREEN | measured: downscale=10000_of_1000000 factor=100x wire_sample=66_requests; downscale stated: 10000_of_1000000; wall 2s |
 | D3.5 credential stuffing | cost_per_compromised_account=0.0003 spend_usd=0.093613 blocked_valid_prevented=645 cost_per_prevented_compromise=0.000145 | GREEN | measured: downscale=rows_are_100000 the_engine_is_the_real_one valid_rate=1percent corpus=10000_local; downscale stated: rows_are_100000; wall 23s |
 | D3.6 token brokering | cost_per_accepted_relayed_abuse=unbounded accepted_relays=0 resale_value_of_solved_token=0 | GREEN | measured: relays_refused=4 stock_issued=30 embed_token_reads=; wall 3s |

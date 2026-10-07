@@ -111,6 +111,22 @@ interface StepUpChallengeStore
     public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool;
 
     /**
+     * Record a session-scoped step-up proof: the success marker is keyed
+     * by both the session id and the principal, so another session of
+     * the same account can never spend it. The $factor names the method
+     * that completed the step-up (email_otp, totp, webauthn) and is the
+     * strongest-factor floor for later enrollment.
+     */
+    public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void;
+
+    /**
+     * Whether this session completed a step-up within $withinSecs with
+     * a factor at least as strong as $minFactor (null accepts any).
+     * A principal-only marker never satisfies this.
+     */
+    public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool;
+
+    /**
      * Count one failed verification for the (dimension, pseudonym)
      * budget key inside the fixed window and answer the window's new
      * failure count. The dimension is "principal" or "target"; the

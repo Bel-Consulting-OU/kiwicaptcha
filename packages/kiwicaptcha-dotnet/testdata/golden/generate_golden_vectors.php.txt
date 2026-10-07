@@ -9,7 +9,7 @@ declare(strict_types=1);
 // is solved here with the PHP sodium gate (lanes 1, the profile the
 // cores verify) and pins a verify-able proof end to end.
 
-require '/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/packages/kiwicaptcha-php/vendor/autoload.php';
+require __DIR__ . '/../../../../kiwicaptcha-php/vendor/autoload.php';
 
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\BindingMode;

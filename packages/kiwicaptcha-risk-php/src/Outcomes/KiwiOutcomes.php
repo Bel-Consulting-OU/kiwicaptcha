@@ -96,7 +96,8 @@ final class KiwiOutcomes
             // a completed step-up clears the counter (change.md 3.4.2).
             if ($handle->dimension === OutcomeHandleDimension::Target && $this->marks instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface) {
                 if ($outcome === Outcome::AuthenticationFailure) {
-                    $this->marks->registerTargetFailure($handle->id, '', '');
+                    [$source, $asn] = $this->engine->targetSpreadElements($context);
+                    $this->marks->registerTargetFailure($handle->id, $source, $asn);
                 } elseif ($outcome === Outcome::StepUpCompleted) {
                     $this->marks->clearTargetFailures($handle->id);
                 }

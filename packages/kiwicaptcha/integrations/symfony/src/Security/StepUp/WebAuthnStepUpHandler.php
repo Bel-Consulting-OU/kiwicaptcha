@@ -115,6 +115,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         private readonly string $rpId = '',
         private readonly array $allowedOrigins = [],
         private readonly ?StepUpLockoutGuard $lockout = null,
+        private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
     ) {
         if (\strlen($master) < 32) {
             throw new \InvalidArgumentException('The WebAuthn handler master must be at least 32 bytes (the same floor as secret_key)');
@@ -218,8 +219,11 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return $this->presentation($context, $challenge, $challengeBytes, $enrolled, $ceremony, $this->configuredHost());
     }
 
+    private string $boundSessionId = '';
+
     public function complete(Request $request): StepUpResult
     {
+        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -373,12 +377,19 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function enrollBegin(Request $request, StepUpContext $context): Response
     {
         $now = $this->now();
-        if (!$this->store->recentStepUpSuccess($context->principalPseudonym, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
+        $sessionId = $this->boundSessionId;
+        $enrolledNow = $this->registry->registeredCredentialsOf($context->principalPseudonym);
+        // Strongest-factor floor: a principal that already holds a
+        // security key must prove with that key to add another.
+        $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
+        if ($sessionId === ''
+            || !$this->store->recentSessionStepUpSuccess($sessionId, $context->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
             return $this->refusal(
                 $context,
                 Response::HTTP_FORBIDDEN,
-                'step_up_enrollment_requires_step_up',
-                'Enrolling a security key needs a completed step-up for this account first; complete one with email OTP or TOTP and try again.',
+                'step_up_enrollment_requires_session_step_up',
+                'Enrolling a security key needs a step-up completed in THIS session with an already-enrolled factor. Another session of the same account cannot authorize enrollment.',
             );
         }
         if ($this->rpId === '' || $this->allowedOrigins === []) {
@@ -418,6 +429,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      */
     public function enrollComplete(Request $request): StepUpResult
     {
+        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired || $resolved === null) {
@@ -432,10 +444,13 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        if (!$this->store->recentStepUpSuccess($challenge->principalPseudonym, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+        $sessionId = $this->boundSessionId !== '' ? $this->boundSessionId : StepUpSessionBinding::sessionId($request);
+        $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
+        $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
+        if (!$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
             $this->store->consume($challenge->id);
 
-            return StepUpResult::failed('step_up_enrollment_requires_step_up', $challenge->id);
+            return StepUpResult::failed('step_up_enrollment_requires_session_step_up', $challenge->id);
         }
         $payload = (string) $request->request->get(self::CREDENTIAL_FIELD, '');
         if ($payload === '') {
@@ -469,6 +484,11 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 $this->configuredHost(),
             );
             $this->registry->saveCredentialSource($source);
+            try {
+                $this->ownerNotifier?->notifyFactorEnrolled($challenge->principalPseudonym, 'webauthn', ['ceremony' => 'creation']);
+            } catch (\Throwable) {
+                // Notification is best effort; enrollment already landed.
+            }
         } catch (\Throwable) {
             return $this->failedAttempt($challenge);
         }
@@ -559,6 +579,16 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
         if ($result->status === StepUpResultStatus::Succeeded) {
             $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
+            // Session-scoped proof: only the session that completed the
+            // step-up may enroll a factor. A principal-level marker is
+            // never enough (N1).
+            $this->store->markSessionStepUpSuccess(
+                $this->boundSessionId,
+                $challenge->principalPseudonym,
+                'webauthn',
+                900,
+                $this->now(),
+            );
         }
 
         return $result;

@@ -67,6 +67,25 @@ final class AsnBucket
     }
 
     /**
+     * The unlisted-namespace bucket id of one address, dataset-free: the
+     * bucket a lookup falls back to when no dataset row covers the
+     * address (and the bucket every address resolves to when no dataset
+     * is attached at all). IPv4-mapped and IPv4-compatible IPv6
+     * normalize to their IPv4 form first, exactly like
+     * {@see \KiwiCaptcha\Risk\Asn\AsnDataset::lookup}. Rust mirror:
+     * `asn::unlisted_bucket_for`.
+     */
+    public static function forUnlistedIp(string $ip): string
+    {
+        $canonical = \KiwiCaptcha\Issuer::canonicalIpFamily($ip);
+        $bytes = substr($canonical, 1);
+
+        return $canonical[0] === "\x04"
+            ? self::forUnlistedV4(substr($bytes, 0, 2))
+            : self::forUnlistedV6(substr($bytes, 0, 4));
+    }
+
+    /**
      * True when the value is a canonical bucket id of the grammar above.
      * Anything else is refused before it can reach a Redis key (fail
      * closed).

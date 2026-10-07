@@ -98,6 +98,11 @@ final class StepUpHardeningTest extends TestCase
             {
                 $this->notifications[] = [$dimension, $pseudonym, $untilSecs, $failures];
             }
+
+            public function notifyFactorEnrolled(string $principalPseudonym, string $factor, array $context = []): void
+            {
+                $this->notifications[] = ['factor', $principalPseudonym, 0, 0];
+            }
         };
         $guard = new StepUpLockoutGuard(
             $this->store,

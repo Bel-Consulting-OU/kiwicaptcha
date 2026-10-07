@@ -125,7 +125,12 @@ final class EvidenceStageWiringTest extends TestCase
         self::assertSame('kiwi_captcha.risk.autofill_gate', (string) $args[1]);
         self::assertSame('evidence-wiring', $args[2], 'the store namespace is the derived deployment namespace');
         $gate = $container->getDefinition('kiwi_captcha.risk.autofill_gate');
-        self::assertSame([AutofillQualificationGate::class, 'committed'], $gate->getFactory());
+        self::assertSame([AutofillQualificationGate::class, 'fromConfiguration'], $gate->getFactory());
+        self::assertSame(
+            [false, null, null],
+            $gate->getArguments(),
+            'the default gate is the fail-closed matrix path (armed false, committed asset pair)',
+        );
         $runner = $container->getDefinition('kiwi_captcha.risk.decoy_script_runner');
         self::assertSame(DecoyEscalationScriptRunner::class, $runner->getClass());
 

@@ -119,8 +119,12 @@ else
     rt_report_pass "every value class priced above its declared abuse value, or escalated to the documented disposition path"
 fi
 
-rt_metric "table_complete=$TABLE_COMPLETE accepted=$ACCEPTED fail_rows=$FAIL_ROWS"
-printf 'ECONOMIC: %s %s cost_per_accepted_abuse=unbounded value_class_fails=%s table=%s\n' \
-    "$RT_CAMPAIGN" "$RT_PROFILE" "$FAIL_ROWS" "$D33_OUT"
+# The metric names the honest-baseline count as what it is: those three
+# are verified honest solves, NOT accepted abuses. Restating them as
+# "accepted=3" beside cost_per_accepted_abuse=unbounded was the
+# contradiction this line exists to prevent.
+rt_metric "table_complete=$TABLE_COMPLETE honest_solves_verified=$ACCEPTED accepted_abuses=0 fail_rows=$FAIL_ROWS"
+printf 'ECONOMIC: %s %s cost_per_accepted_abuse=unbounded accepted_abuses=0 honest_solves_verified=%s value_class_fails=%s table=tools/redteam/runs/env/d33-economics-%s.json\n' \
+    "$RT_CAMPAIGN" "$RT_PROFILE" "$ACCEPTED" "$FAIL_ROWS" "$RT_PROFILE"
 
 rt_finish

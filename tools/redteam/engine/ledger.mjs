@@ -109,11 +109,44 @@ function statusOf(run) {
     return { status: "RED", verdict: run.detail ?? "see run document", evidence: scaleNote(run) };
 }
 
+/**
+ * D3.5 is split honestly: step-up prevention is the campaign's asserted
+ * success criterion and may be GREEN; the compromise-economics
+ * criterion (change.md D3.5 "cost/compromised-account >= critical
+ * threshold") is its own row and is RED whenever the measured
+ * compromised/valid rate or cost misses the stated threshold — real
+ * compromises never ride into a green cell.
+ */
+function d35EconomicsRow(run) {
+    const evidence = scaleNote(run);
+    if (!run) {
+        return "| D3.5 compromise-economics | no measured economics | NOT RUN | NOT RUN: no run document; not a pass |";
+    }
+    const text = `${run.economic ?? ""} ${run.metrics?.raw ?? ""}`;
+    const rate = /compromised_valid_rate=([0-9.]+)/.exec(text);
+    const cost = /cost_per_compromised_account=([0-9.]+|unbounded)/.exec(text);
+    const verdict = /\bverdict=(PASS|FAIL)\b/.exec(text);
+    const threshold = /critical_threshold=([0-9.]+)/.exec(text);
+    const rateThreshold = /rate_threshold=([0-9.]+)/.exec(text);
+    const numbers = `compromised_valid_rate=${rate?.[1] ?? "?"} (threshold ${rateThreshold?.[1] ?? "0.0"})`
+        + ` cost_per_compromised_account=${cost?.[1] ?? "?"} (critical threshold ${threshold?.[1] ?? "?"} usd)`;
+    const green = verdict?.[1] === "PASS";
+    return `| D3.5 compromise-economics | ${numbers} | ${green ? "GREEN" : "RED"} | ${evidence} |`;
+}
+
 const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
     const run = byCampaign.get(campaign);
+    if (campaign === "d3.5-credential-stuffing") {
+        const prevention = statusOf(run);
+        const rows = [
+            `| ${attackClass} (step-up prevention) | ${prevention.verdict} | ${prevention.status} | ${prevention.evidence} |`,
+            d35EconomicsRow(run),
+        ];
+        return rows.join("\n");
+    }
     const { status, verdict, evidence } = statusOf(run);
     return `| ${attackClass} | ${verdict} | ${status} | ${evidence} |`;
-});
+}).flat();
 
 // The method note and the engine-loop facts (escalations and triage),
 // read from the engine's own ledger documents.

@@ -1402,19 +1402,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The decoy-escalation store (change.md 3.2.2): the write and
             // read surface of the one-rung session escalation after a
             // server-confirmed decoy hit. The store rides the bundle's
-            // Redis script runner over the risk client, the runtime
-            // autofill-qualification gate stays the canonical committed
-            // matrix (fail closed: the write path writes nothing until
-            // every required surface qualifies), and the namespace keys
-            // the escalation records per deployment. Wired with the
+            // Redis script runner over the risk client. The runtime
+            // autofill-qualification gate is configuration-driven: an
+            // explicit risk.decoy_escalation.armed value opens it as a
+            // deliberate operator decision (a runtime security decision
+            // must not depend solely on tests/ QA data), otherwise a
+            // versioned matrix/registry asset pair — the configured paths
+            // or the committed tests/ matrix — decides fail-closed (the
+            // write path writes nothing until every required surface
+            // qualifies). The doctor validates a configured asset pair
+            // and reports the gate state. The namespace keys the
+            // escalation records per deployment. Wired with the
             // server-side memory stages (the composition's decoy entry,
             // never under compatibility) and only when the risk Redis
             // client exists; the engine's escalation read degrades to
             // not-live without a store, so an absent surface is inert.
             $decoyEscalationRef = null;
             if ($composition['decoy'] && $riskRedis !== null) {
+                $decoyGateConfig = $riskConfig['decoy_escalation'] ?? [];
                 $container->setDefinition('kiwi_captcha.risk.autofill_gate', (new Definition(AutofillQualificationGate::class))
-                    ->setFactory([AutofillQualificationGate::class, 'committed']));
+                    ->setFactory([AutofillQualificationGate::class, 'fromConfiguration'])
+                    ->setArguments([
+                        (bool) ($decoyGateConfig['armed'] ?? false),
+                        $decoyGateConfig['qualification_matrix'] ?? null,
+                        $decoyGateConfig['qualification_registry'] ?? null,
+                    ]));
                 $container->setDefinition('kiwi_captcha.risk.decoy_script_runner', new Definition(DecoyEscalationScriptRunner::class, [
                     $riskRedis,
                 ]));

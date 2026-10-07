@@ -269,6 +269,19 @@ $webauthn = new WebAuthnStepUpHandler(
     ['https://' . HOST],
 );
 $waStore->markStepUpSuccess(PRINCIPAL, 900, $now);
+// Session-scoped proof (N1): only the session that completed the
+// step-up may enroll a factor. The campaign uses one fixed session.
+$sessionA = 'rt37-session-honest';
+$waStore->markSessionStepUpSuccess($sessionA, PRINCIPAL, 'email_otp', 900, $now);
+$sessionB = 'rt37-session-attacker';
+$withSession = static function (Request $request, string $sessionId): Request {
+    $storage = new Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+    $storage->setId($sessionId);
+    $session = new Symfony\Component\HttpFoundation\Session\Session($storage);
+    $session->start();
+    $request->setSession($session);
+    return $request;
+};
 
 $vectors = 'BelConsulting\KiwiCaptchaBundle\Tests\WebAuthnTestVectors';
 $attestationOf = static function (string $challengeB64, string $credentialId, string $origin, string $rpId) use ($vectors): string {
@@ -291,13 +304,13 @@ $assertionOf = static function (string $challengeB64, string $credentialId, int 
 // Enrollment first (the creation ceremony lives on the enrollment
 // entry points): the honest origin registers the security key.
 $enrollBegin = $webauthn->enrollBegin(
-    Request::create('https://' . HOST . '/kiwi/step-up/begin'),
+    $withSession(Request::create('https://' . HOST . '/kiwi/step-up/begin'), $sessionA),
     $context(PRINCIPAL),
 );
 $enrollDoc = json_decode((string) $enrollBegin->getContent(), true) ?? [];
 $enrollTicket = $ticketOf($enrollBegin);
 $attestation = $attestationOf((string) ($enrollDoc['public_key']['challenge'] ?? ''), 'cred-rt37', 'https://' . HOST, HOST);
-$registration = $webauthn->enrollComplete($waCompleteRequest($enrollTicket, $attestation));
+$registration = $webauthn->enrollComplete($withSession($waCompleteRequest($enrollTicket, $attestation), $sessionA));
 $registrationOk = $registration->status === StepUpResultStatus::Succeeded;
 
 // The phishing origin: the same user is tricked into completing on

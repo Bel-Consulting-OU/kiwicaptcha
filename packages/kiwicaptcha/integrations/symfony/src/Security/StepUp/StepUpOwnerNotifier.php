@@ -21,4 +21,12 @@ interface StepUpOwnerNotifier
      * @param int    $failures   the windowed failure count that escalated
      */
     public function notifyLockout(string $dimension, string $pseudonym, int $untilSecs, int $failures): void;
+
+    /**
+     * Out-of-band owner notification whenever a second factor is
+     * enrolled or replaced on an account.
+     *
+     * @param array<string, mixed> $context
+     */
+    public function notifyFactorEnrolled(string $principalPseudonym, string $factor, array $context = []): void;
 }

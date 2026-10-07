@@ -8,7 +8,7 @@ declare(strict_types=1);
 // Regenerate with:
 //   php /tmp/kiwi-golden/gen_golden.php > golden-php-vectors.json
 
-require '/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/packages/kiwicaptcha-php/vendor/autoload.php';
+require __DIR__ . '/../../kiwicaptcha-php/vendor/autoload.php';
 
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\BindingMode;

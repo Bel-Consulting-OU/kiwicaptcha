@@ -8,26 +8,26 @@
  * is therefore visible in every triage report.
  */
 
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+// Script paths are REPO-ROOT-RELATIVE on purpose: run documents and
+// triage reports must never carry a host-absolute path. Callers
+// resolve them against the repo root (triage.mjs).
+const REPROS = "tools/redteam/engine/repros";
 
-const REPROS = join(dirname(fileURLToPath(import.meta.url)), "repros");
-
-export const HARNESS_LIBRARY_VERSION = 1;
+export const HARNESS_LIBRARY_VERSION = 2;
 
 export const HARNESS_LIBRARY = {
-    "forged-token": { script: join(REPROS, "forged-token.sh"), proves: "a structurally valid token that never paid the proof of work is refused" },
-    "replay": { script: join(REPROS, "replay.sh"), proves: "the one-shot consume refuses the in-TTL replay" },
-    "framing-ambiguity": { script: join(REPROS, "framing-ambiguity.sh"), proves: "the framing contract refuses contradictory length framing" },
-    "duplicate-key": { script: join(REPROS, "duplicate-key.sh"), proves: "duplicate JSON keys are refused on the raw document" },
-    "scope-confusable": { script: join(REPROS, "scope-confusable.sh"), proves: "a case-variant scope is not the configured scope" },
-    "binding-relabel": { script: join(REPROS, "binding-relabel.sh"), proves: "the binding anti-oracle burns the record on a wrong binding" },
-    "record-tamper": { script: join(REPROS, "record-tamper.sh"), proves: "a flipped byte breaks the MAC and the record" },
-    "epoch-manipulation": { script: join(REPROS, "epoch-manipulation.sh"), proves: "an expired record is refused after its TTL" },
-    "clock-skew": { script: join(REPROS, "clock-skew.sh"), proves: "a fabricated below-floor solve duration is refused" },
-    "issuance-burst": { script: join(REPROS, "issuance-burst.sh"), proves: "the burst shape yields no acceptance (the cap plane is d3.11's)" },
-    "wire-differential": { script: join(REPROS, "wire-differential.sh"), proves: "two wire spellings of one document decide identically" },
-    "privacy-canary": { script: join(REPROS, "privacy-canary.sh"), proves: "the canary identity is recoverable from nothing persisted" },
+    "forged-token": { script: `${REPROS}/forged-token.sh`, proves: "a structurally valid token that never paid the proof of work is refused" },
+    "replay": { script: `${REPROS}/replay.sh`, proves: "the one-shot consume refuses the in-TTL replay" },
+    "framing-ambiguity": { script: `${REPROS}/framing-ambiguity.sh`, proves: "the framing contract refuses contradictory length framing" },
+    "duplicate-key": { script: `${REPROS}/duplicate-key.sh`, proves: "duplicate JSON keys are refused on the raw document" },
+    "scope-confusable": { script: `${REPROS}/scope-confusable.sh`, proves: "a case-variant scope is not the configured scope" },
+    "binding-relabel": { script: `${REPROS}/binding-relabel.sh`, proves: "the binding anti-oracle burns the record on a wrong binding" },
+    "record-tamper": { script: `${REPROS}/record-tamper.sh`, proves: "a flipped byte breaks the MAC and the record" },
+    "epoch-manipulation": { script: `${REPROS}/epoch-manipulation.sh`, proves: "an expired record is refused after its TTL" },
+    "clock-skew": { script: `${REPROS}/clock-skew.sh`, proves: "a fabricated below-floor solve duration is refused" },
+    "issuance-burst": { script: `${REPROS}/issuance-burst.sh`, proves: "the burst shape yields no acceptance (the cap plane is d3.11's)" },
+    "wire-differential": { script: `${REPROS}/wire-differential.sh`, proves: "two wire spellings of one document decide identically" },
+    "privacy-canary": { script: `${REPROS}/privacy-canary.sh`, proves: "the canary identity is recoverable from nothing persisted" },
 };
 
 export function harnessForClass(attackClass) {

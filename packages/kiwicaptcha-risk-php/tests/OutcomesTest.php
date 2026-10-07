@@ -365,6 +365,44 @@ final class OutcomesTest extends TestCase
         self::assertSame(0, $store->readTargetState($target)['fails']);
     }
 
+    public function testTargetFailuresFromDistinctAsnsSpread(): void
+    {
+        $store = new class extends RiskStateStoreStub {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+        };
+        $dataset = \KiwiCaptcha\Risk\Asn\AsnDataset::open(dirname(__DIR__) . '/../../protocol/asn/sample-asn.tsv');
+        $outcomes = new KiwiOutcomes($this->engine($store, $dataset), $store);
+        $target = self::TARGET;
+
+        // 192.0.2.0/24 is AS64496 and 203.0.113.0/27 is AS64500 in the
+        // shared sample dataset: two failures from those origins must
+        // contribute two distinct asn spread elements.
+        foreach (['192.0.2.7', '203.0.113.9'] as $ip) {
+            $outcomes->report(
+                Outcome::AuthenticationFailure,
+                OutcomeHandle::target($target),
+                null,
+                new RiskContext(
+                    scope: 1,
+                    sourceIp: $ip,
+                    sessionId: null,
+                    principalId: null,
+                    event: RiskEventKind::PreIssue,
+                    networkFlags: (new CidrNetworkClassifier([]))->classify($ip),
+                    resources: new ResourcePressure(1000, 1000),
+                ),
+            );
+        }
+
+        $state = $store->readTargetState($target);
+        self::assertGreaterThanOrEqual(2, $state['spread'], 'two distinct ASNs must spread at least 2');
+        self::assertArrayHasKey('asn:a64496', $store->targetSpread[$target]);
+        self::assertArrayHasKey('asn:a64500', $store->targetSpread[$target]);
+    }
+
     public function testReportRejectsUnmappedHandleDimensions(): void
     {
         $store = new class extends RiskStateStoreStub {
@@ -451,7 +489,7 @@ final class OutcomesTest extends TestCase
         );
     }
 
-    private function engine(OutcomeMarksStoreInterface $store): AdaptiveRiskEngine
+    private function engine(OutcomeMarksStoreInterface $store, ?\KiwiCaptcha\Risk\Asn\AsnDataset $asnDataset = null): AdaptiveRiskEngine
     {
         $keys = RiskKeys::fromMaster(str_repeat(chr(0x42), 32));
 
@@ -469,6 +507,7 @@ final class OutcomesTest extends TestCase
                 'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             ]),
             keys: $keys,
+            asnDataset: $asnDataset,
         );
     }
 }

@@ -48,6 +48,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         private readonly ?\Closure $now = null,
         private readonly string $master = '',
         private readonly ?StepUpLockoutGuard $lockout = null,
+        private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
     ) {
         if ($master === '') {
             throw new \InvalidArgumentException('The time-based handler needs the step-up master so enrollment secrets are sealed at rest; pass the same master the ticket service uses');
@@ -104,18 +105,37 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         throw new \RuntimeException('The stored time-based secret could not be decrypted; the account must re-enroll its passcode (legacy plaintext data predates the at-rest seal)');
     }
 
-    public function enroll(string $principalPseudonym): string
+    /**
+     * @param string|null $sessionId the PHP session requesting enrollment;
+     *                               required for any enrollment (first or
+     *                               re-enroll) so only that session's own
+     *                               completed step-up can authorize it.
+     */
+    public function enroll(string $principalPseudonym, ?string $sessionId = null): string
     {
         self::assertPseudonym($principalPseudonym);
-        if ($this->store->findTotpSecret($principalPseudonym) !== null
-            && !$this->store->recentStepUpSuccess($principalPseudonym, 900, $this->now())) {
-            // Re-enrollment swaps the victim's second factor, so it
-            // demands a step-up completed against the current factor
-            // first; an attacker with stolen credentials never has one.
-            throw new \RuntimeException('Re-enrolling the time-based passcode needs a completed step-up for this account first; verify with the current factor before replacing it.');
+        $sessionId = (string) $sessionId;
+        $now = $this->now();
+        $hasSecret = $this->store->findTotpSecret($principalPseudonym) !== null;
+        // Re-enrollment swaps the victim's second factor and demands a
+        // step-up completed in this session with the current factor
+        // (strongest-factor floor). A first enrollment from an already-
+        // authenticated session is allowed and notifies the owner; a
+        // principal-level success marker never authorizes a re-enroll.
+        if ($hasSecret) {
+            if ($sessionId === ''
+                || !$this->store->recentSessionStepUpSuccess($sessionId, $principalPseudonym, 'totp', 900, $now)) {
+                throw new \RuntimeException(
+                    'Re-enrolling the time-based passcode needs a step-up completed in this session with the current factor first.',
+                );
+            }
         }
         $secret = random_bytes(self::SECRET_BYTES);
         $this->store->saveTotpSecret($principalPseudonym, $this->seal($secret));
+        try {
+            $this->ownerNotifier?->notifyFactorEnrolled($principalPseudonym, 'totp');
+        } catch (\Throwable) {
+        }
 
         return TotpCode::base32Encode($secret);
     }
@@ -178,8 +198,11 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return $this->presentation($context, $challenge, $now);
     }
 
+    private string $boundSessionId = '';
+
     public function complete(Request $request): StepUpResult
     {
+        $this->boundSessionId = StepUpSessionBinding::sessionId($request);
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -310,6 +333,13 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         $result = $this->creditOnce($challenge);
         if ($result->status === StepUpResultStatus::Succeeded) {
             $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
+            $this->store->markSessionStepUpSuccess(
+                $this->boundSessionId,
+                $challenge->principalPseudonym,
+                'totp',
+                900,
+                $this->now(),
+            );
         }
 
         return $result;

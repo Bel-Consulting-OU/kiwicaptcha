@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk;
 
+use KiwiCaptcha\Risk\Asn\AsnBucket;
+use KiwiCaptcha\Risk\Asn\AsnDataset;
 use KiwiCaptcha\Risk\Breaker\CircuitBreaker;
 use KiwiCaptcha\Risk\Calibration\CalibrationStore;
 use KiwiCaptcha\Risk\Evidence\DecoyEscalation;
@@ -121,6 +123,7 @@ final class AdaptiveRiskEngine
         private readonly ?MarksReaderInterface $marksReader = null,
         private readonly ?PriceContextSourceInterface $priceContext = null,
         private readonly ?DecoyEscalationReaderInterface $decoyEscalationReader = null,
+        private readonly ?AsnDataset $asnDataset = null,
     ) {
         // The timing configuration is validated at the construction
         // boundary: a zero epoch divides by zero in the observation
@@ -756,6 +759,36 @@ final class AdaptiveRiskEngine
         }
 
         return $this->normalizeEventId($event, $scope, $idempotencyKey);
+    }
+
+    /**
+     * The spread elements one outcome report contributes to the target
+     * dimension's HLLs. They are the source pseudonym of the reporting
+     * context and the source address's ASN bucket.
+     *
+     * The source is the current epoch's id, the same one the feedback
+     * observation books. The ASN is the attached dataset's lookup, else
+     * the unlisted-namespace bucket. See {@see AsnBucket::forUnlistedIp()}.
+     * An absent context records no spread element. Rust mirror:
+     * `RiskEngine::target_spread_elements`.
+     *
+     * @internal reserved for the Outcomes facade
+     *
+     * @return array{string, string} [source, asn]
+     */
+    public function targetSpreadElements(?RiskContext $c): array
+    {
+        if ($c === null) {
+            return ['', ''];
+        }
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $srcEpoch = intdiv(intdiv($nowMs, 1000), $this->sourceEpochSecs);
+        $source = $this->identityFactory->sourceIdForEpoch($c, $srcEpoch);
+        $asn = $this->asnDataset !== null
+            ? $this->asnDataset->bucketId($c->sourceIp)
+            : AsnBucket::forUnlistedIp($c->sourceIp);
+
+        return [$source, $asn];
     }
 
     /**

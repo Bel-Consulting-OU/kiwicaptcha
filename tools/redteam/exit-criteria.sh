@@ -12,6 +12,21 @@
 #                       declared abuse value (the D3.3 measured table)
 #   d3.5-targets        zero victim lockouts, the spread bound, the
 #                       attacker denial bound, the corpus blocking
+#                       (step-up prevention; the campaign's asserted
+#                       success criterion)
+#   d3.5-economics      the compromise-economics criterion: measured
+#                       compromised/valid rate and cost_per_compromised
+#                       against the stated thresholds (rate 0.0 and the
+#                       critical declared abuse value from
+#                       reference-costs.json). A miss is RED with the
+#                       numbers, never green — and when prevention is
+#                       green the rows split honestly instead of one
+#                       green cell hiding real compromises
+#   llm-red-team        the Part 10 LLM agent loop really consulted a
+#                       model (consulted:true evidence). GREEN only
+#                       with a recorded consulted run; otherwise
+#                       TOOLCHAIN-ABSENT (non-green) — offline mode is
+#                       never a pass
 #   confirmed-legit     confirmed-legitimate escalation <= 0.1% and
 #                       denial = 0, measured live by this gate (100
 #                       honest solves through the real deployment)
@@ -230,6 +245,9 @@ else
 fi
 
 # ---------- 9.5: the D3.5 targets (lockouts, spread, denials, corpus) ----------
+# This row is the step-up PREVENTION criterion (the campaign's asserted
+# success results). The compromise-economics criterion is its own row
+# below: real compromises must never ride into a green cell here.
 D35_SUMMARY="$RT_DIR/runs/env/d35-summary-$KIWI_RT_PROFILE.json"
 if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record d3.5-targets d3.5 SKIP "skipped with the battery"
@@ -261,6 +279,52 @@ else
     record d3.5-targets d3.5 RED "no D3.5 summary at $D35_SUMMARY"
 fi
 
+# ---------- 9.5 / D3.5: the compromise-economics criterion ----------
+# change.md D3.5: cost/compromised-account >= critical threshold. The
+# measured numbers come from this invocation's summary; the critical
+# threshold is the critical value class's declared abuse value read
+# from packages/kiwicaptcha-solver/reference-costs.json (never a
+# hardcoded guess). The stated rate threshold is 0.0: zero
+# valid-account compromise. A miss prints RED with the numbers and
+# gates — the row must never be green while real compromises stand.
+D35_REF="$REPO_ROOT/packages/kiwicaptcha-solver/reference-costs.json"
+if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
+    record d3.5-economics d3.5 SKIP "skipped with the battery"
+elif ! did_run_this_invocation d3.5-credential-stuffing; then
+    record d3.5-economics d3.5 RED "MISSING: d3.5-credential-stuffing did not run this invocation; a leftover summary is not evidence"
+elif [ -f "$D35_SUMMARY" ] && [ -f "$D35_REF" ]; then
+    ECON_LINE=$(python3 - "$D35_SUMMARY" "$D35_REF" <<'PYECON'
+import json, sys
+
+doc = json.load(open(sys.argv[1]))
+ref = json.load(open(sys.argv[2]))
+critical = next(c for c in ref["value_classes"] if c["class"] == "critical")
+cost_threshold = float(critical["declared_abuse_value_usd_per_1000"])
+rate_threshold = 0.0
+
+compromised = int(float(doc.get("corpus_residual_compromised") or 0))
+valid = int(float(doc.get("valid_rows") or 0)) or 1
+spend = float(doc.get("spend_usd") or 0.0)
+cost = None if compromised == 0 else spend / compromised
+rate = compromised / valid
+cost_ok = cost is not None and cost >= cost_threshold
+rate_ok = rate <= rate_threshold
+ok = cost_ok and rate_ok
+print(("GREEN" if ok else "RED") + (
+    " compromised_valid_rate=%.4f (threshold %.1f) cost_per_compromised_account=%s (critical threshold %.6f usd)"
+    " compromised=%d valid=%d spend_usd=%.6f blocked_valid=%d (prevention row carries the step-up result)"
+    % (rate, rate_threshold,
+       "unbounded" if cost is None else "%.6f" % cost, cost_threshold,
+       compromised, valid, spend, int(doc["blocked_valid"]))))
+PYECON
+)
+    record d3.5-economics d3.5 "${ECON_LINE%% *}" "${ECON_LINE#* }"
+elif [ -f "$D35_SUMMARY" ]; then
+    record d3.5-economics d3.5 RED "the critical threshold source is missing at $D35_REF"
+else
+    record d3.5-economics d3.5 RED "no D3.5 summary at $D35_SUMMARY"
+fi
+
 # ---------- 9.5: confirmed-legitimate escalation <= 0.1% and denial = 0 ----------
 if [ "${KIWI_EC_SKIP_BASELINE:-0}" = 1 ]; then
     record confirmed-legit baseline SKIP "skipped by KIWI_EC_SKIP_BASELINE"
@@ -268,7 +332,7 @@ else
     BASE_OUT=$(BASE="$GATE_DIR" sh -c '
         KIWI_RT_DIR='"$RT_DIR"'/campaigns/lib python3 - <<PYB
 import json, os, sys
-sys.path.insert(0, "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/campaigns/lib")
+sys.path.insert(0, os.environ["KIWI_RT_DIR"])
 import rtclient as rt
 base = "'"$(cat "$RT_DIR/runs/env/$KIWI_RT_PROFILE.env" 2>/dev/null | sed -n "s/^BASE_URL=//p")"'"
 if not base:
@@ -683,6 +747,32 @@ print("run=%d escalated=%s raised_synth_count=%d prior=%d"
     fi
 else
     record escalation-ledger engine RED "no escalation ledger at $ESC_JSON"
+fi
+
+# ---------- the Part 10 LLM red-team consulted a model ----------
+# change.md Part 10: the agent loop is LLM-driven. GREEN only with a
+# real consulted run (consulted:true), measured live by this gate
+# through tools/redteam/engine/llm-consult-check.mjs. Offline mode
+# (the loop reports consulted:false) is never a pass; a missing
+# harness or node runtime is TOOLCHAIN-ABSENT and stays non-green.
+if [ "${KIWI_EC_SKIP_LLM:-0}" = 1 ]; then
+    record llm-red-team llm SKIP "skipped by KIWI_EC_SKIP_LLM"
+elif ! command -v node >/dev/null 2>&1; then
+    record llm-red-team llm TOOLCHAIN-ABSENT "node is not installed; the agent loop cannot consult a model"
+elif [ ! -f "$RT_DIR/engine/llm-consult-check.mjs" ]; then
+    record llm-red-team llm TOOLCHAIN-ABSENT "tools/redteam/engine/llm-consult-check.mjs is missing; no consulted run can be measured"
+else
+    LLM_OUT=$(node "$RT_DIR/engine/llm-consult-check.mjs" 2>&1)
+    LLM_RC=$?
+    printf '%s\n' "$LLM_OUT" | tail -n 1
+    llm_line=$(printf '%s\n' "$LLM_OUT" | grep '^LLM-CONSULT:' | tail -n 1)
+    if [ "$LLM_RC" -eq 0 ] && printf '%s' "$llm_line" | grep -q 'consulted=true'; then
+        record llm-red-team llm GREEN "${llm_line#LLM-CONSULT: }"
+    elif printf '%s' "$llm_line" | grep -q 'consulted=false'; then
+        record llm-red-team llm RED "${llm_line#LLM-CONSULT: } (consulted:false is never a pass)"
+    else
+        record llm-red-team llm TOOLCHAIN-ABSENT "the consulted run did not complete: ${llm_line:-$LLM_OUT}"
+    fi
 fi
 
 # ---------- the table ----------

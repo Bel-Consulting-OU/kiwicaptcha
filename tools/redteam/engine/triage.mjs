@@ -33,13 +33,20 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { harnessForClass, HARNESS_LIBRARY_VERSION } from "./harness-library.mjs";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
 const RT_DIR = dirname(ENGINE_DIR);
+const REPO_ROOT = dirname(dirname(RT_DIR));
 const FINDINGS_DIR = join(RT_DIR, "findings");
+
+// Harness scripts are repo-root-relative; resolve once at the edge so
+// every recorded path stays relative while execution still works.
+function resolveHarness(script) {
+    return isAbsolute(script) ? script : join(REPO_ROOT, script);
+}
 
 function argOf(name) {
     const args = process.argv.slice(2);
@@ -147,8 +154,8 @@ for (const candidate of candidates) {
     let first;
     let second;
     try {
-        first = runRepro(harness.script);
-        second = runRepro(harness.script);
+        first = runRepro(resolveHarness(harness.script));
+        second = runRepro(resolveHarness(harness.script));
     } catch (err) {
         rows.push({
             id: candidate.id,
@@ -179,7 +186,7 @@ for (const candidate of candidates) {
             disposition: "open",
             summary: `The candidate ${candidate.id} (${candidate.class} via ${candidate.mutation} against ${candidate.target}) reproduced deterministically through ${harness.script}: wire code ${verdict?.wire_code ?? "unknown"}.`,
             transcriptHash: hashA,
-            reproBody: readFileSync(join(ENGINE_DIR, harness.script), "utf8"),
+            reproBody: readFileSync(resolveHarness(harness.script), "utf8"),
             evidence: [harness.script],
         });
     }

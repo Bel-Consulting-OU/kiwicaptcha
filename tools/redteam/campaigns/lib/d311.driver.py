@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/campaigns/lib")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rtclient as rt  # noqa: E402
 
 ARGON_BASE = os.environ.get("KIWI_RT_D311_ARGON", "http://127.0.0.1:6479")

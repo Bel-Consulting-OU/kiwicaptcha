@@ -4,7 +4,7 @@
 # of derived facts on stdout. REFUTED means the wire refused the
 # attack (the expected behavior); REPRODUCED means a finding.
 set -u
-. "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/engine/repros/repro-common.sh"
+. "$(cd "$(dirname "$0")" && pwd)/repro-common.sh"
 BASE=$(repro_target)
 EPH_BASE="$BASE"
 # A one-second-TTL instance of the same core: the expired-epoch probe.

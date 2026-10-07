@@ -4,7 +4,7 @@
 # of derived facts on stdout. REFUTED means the wire refused the
 # attack (the expected behavior); REPRODUCED means a finding.
 set -u
-. "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/engine/repros/repro-common.sh"
+. "$(cd "$(dirname "$0")" && pwd)/repro-common.sh"
 BASE=$(repro_target)
 CANARY="canary-$(head -c 6 /dev/urandom | xxd -p)"
 OUT=$(KIWI_RT_BASE="$BASE" KIWI_RT_CANARY="$CANARY" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PY'

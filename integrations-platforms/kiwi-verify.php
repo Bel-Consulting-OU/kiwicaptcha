@@ -169,7 +169,12 @@ function kiwi_verify_extract_token(array $server, array $post, array $cookie, ?s
  */
 function kiwi_verify_client_ip(array $server, array $trustedCidrs): string
 {
-    $peer = (string) ($server['REMOTE_ADDR'] ?? '127.0.0.1');
+    $peer = (string) ($server['REMOTE_ADDR'] ?? '');
+    if ($peer === '') {
+        // Fail closed: a missing socket peer is not a loopback client.
+        // The caller refuses the request rather than trusting 127.0.0.1.
+        return '';
+    }
     if ($trustedCidrs === []) {
         return $peer;
     }
@@ -450,14 +455,16 @@ if (!defined('KIWI_VERIFY_LIBRARY')) {
         }
     }
     $token = kiwi_verify_extract_token($_SERVER, $_POST + $jsonPost, $_COOKIE, $rawBody);
-    if ($token === null) {
+    $clientIp = kiwi_verify_client_ip($_SERVER, $cfg['trusted_proxies']);
+    if ($token === null || $clientIp === '') {
+        // A missing socket peer fails closed: never invent 127.0.0.1.
         [$status, $headers] = kiwi_verify_deny($cfg);
     } else {
         $upstream = kiwi_verify_call(
             $cfg['verify_url'],
             $token,
             $cfg['scope'],
-            kiwi_verify_client_ip($_SERVER, $cfg['trusted_proxies']),
+            $clientIp,
             $cfg,
         );
         [$status, $headers] = kiwi_verify_decide($token, $upstream, $cfg);

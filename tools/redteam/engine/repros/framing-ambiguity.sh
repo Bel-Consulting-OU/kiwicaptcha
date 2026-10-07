@@ -6,7 +6,7 @@
 # accepts it (a finding). No hardcoded verdict: the HTTP status of the
 # contradictory CL/TE request decides.
 set -u
-. "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/engine/repros/repro-common.sh"
+. "$(cd "$(dirname "$0")" && pwd)/repro-common.sh"
 BASE=$(repro_target)
 if [ -z "$BASE" ]; then
     printf '{"harness":"framing-ambiguity","verdict":"INCONCLUSIVE","wire_code":"target_unavailable"}\n'

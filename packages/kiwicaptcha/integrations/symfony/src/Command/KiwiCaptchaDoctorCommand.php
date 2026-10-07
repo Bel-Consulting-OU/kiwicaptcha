@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Command;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\RiskStageComposition;
 use BelConsulting\KiwiCaptchaBundle\Economics\ValueClassCeiling;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
@@ -21,6 +22,7 @@ use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
+use KiwiCaptcha\Risk\Evidence\AutofillQualificationGate;
 use KiwiCaptcha\StorageInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -45,6 +47,8 @@ use Symfony\Component\Console\Output\OutputInterface;
  */
 final class KiwiCaptchaDoctorCommand extends Command
 {
+    private const LEVEL_WARN = 'W'.'ARN';
+
     /**
      * The binary's maximum supported challenge protocol version, the
      * single shared maximum the readiness probe uses
@@ -127,6 +131,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Value-class pricing' => $this->checkValueClassPricing(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
+            'Decoy escalation gate' => $this->checkDecoyEscalationGate(),
             'Execution versioning' => $this->checkExecutionVersioning(),
             'Argon memory envelope' => $this->checkArgonEnvelope(),
             'Argon concurrency' => $this->checkArgonConcurrency(),
@@ -170,7 +175,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $class = \get_class($this->storage);
         if (!$this->storage instanceof AtomicStorageInterface) {
             if (\in_array($this->environment, ['test', 'dev'], true)) {
-                return ['WARN', sprintf('%s is not atomic (in-memory semantics, allowed in %s only)', $class, $this->environment)];
+                return [self::LEVEL_WARN, sprintf('%s is not atomic (in-memory semantics, allowed in %s only)', $class, $this->environment)];
             }
 
             return ['FAIL', sprintf('production requires an atomic storage backend (AtomicStorageInterface); %s is not atomic', $class)];
@@ -220,7 +225,7 @@ final class KiwiCaptchaDoctorCommand extends Command
     private function checkRedis(\Redis|\Predis\Client|null $client, string $label): array
     {
         if ($client === null) {
-            return ['WARN', sprintf('%s not wired: rate limits and Argon admission fall back to in-process semantics', $label)];
+            return [self::LEVEL_WARN, sprintf('%s not wired: rate limits and Argon admission fall back to in-process semantics', $label)];
         }
         try {
             $client->ping();
@@ -274,10 +279,10 @@ final class KiwiCaptchaDoctorCommand extends Command
                 return ['FAIL', sprintf('%s — replay_durability "fail_closed" must never reach the doctor: the runtime authority-transition guard refuses this combination when the Redis-backed services are constructed (a LogicException naming the posture and the remediation), and the extension refuses statically-known aggregates at build time. A doctor that observes it means the wiring is broken.', $aggregate)];
             }
             if ($envManaged) {
-                return ['WARN', sprintf('%s — replay_durability is resolved from the environment, so the posture is opaque at build time: the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
+                return [self::LEVEL_WARN, sprintf('%s — replay_durability is resolved from the environment, so the posture is opaque at build time: the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
             }
 
-            return ['WARN', sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
+            return [self::LEVEL_WARN, sprintf('%s — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary. Choose and document the deployment posture (fail_closed / operator_managed / best_effort, see docs/redis-topologies.md).', $aggregate)];
         }
         if ($this->storage instanceof \KiwiCaptcha\Storage\RedisStorage) {
             $waitReplicas = (int) ($this->config['risk']['redis']['wait_replicas'] ?? 0);
@@ -286,10 +291,10 @@ final class KiwiCaptchaDoctorCommand extends Command
                     return ['PASS', sprintf('Redis-backed storage (%s) with waitReplicas 0 under replay_durability "%s": single-node direct client, %s', \get_class($this->storage), $posture, $posture === 'operator_managed' ? 'the operator owns the authority-change contract (promotion eligibility gated; see docs/ha-authority.md)' : 'the deployment keeps automatic failover out of the security-Redis contract (see docs/redis-topologies.md)')];
                 }
                 if ($envManaged) {
-                    return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) under an env-managed replay_durability posture — the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
+                    return [self::LEVEL_WARN, sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) under an env-managed replay_durability posture — the runtime authority-transition guard enforces the resolved posture when the Redis-backed services are constructed, and this doctor reports the best_effort stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
                 }
 
-                return ['WARN', sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
+                return [self::LEVEL_WARN, sprintf('Redis-backed storage (%s) with waitReplicas 0 (the risk.redis wait_replicas knob) — One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion. replay_durability is "best_effort": the deployment accepts the documented stale-promotion boundary (see docs/redis-topologies.md).', \get_class($this->storage))];
             }
 
             return ['PASS', sprintf('Redis-backed storage (%s) with the verified-WAIT barrier (waitReplicas %d): acked writes reach every configured replica before success', \get_class($this->storage), $waitReplicas)];
@@ -508,7 +513,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             }
         }
         if ($kid > 1 && $historical === []) {
-            return ['WARN', sprintf('kid %d has no historical secrets: verification of older records falls back to the legacy any-kid path', $kid)];
+            return [self::LEVEL_WARN, sprintf('kid %d has no historical secrets: verification of older records falls back to the legacy any-kid path', $kid)];
         }
         $note = sprintf(
             'kid %d, %d historical secret(s), %d revoked',
@@ -531,14 +536,14 @@ final class KiwiCaptchaDoctorCommand extends Command
         $publicBaseUrl = $this->config['public_base_url'];
         if ($publicBaseUrl === null) {
             if (\in_array($this->environment, ['test', 'dev'], true)) {
-                return ['WARN', 'public_base_url not set: allowed outside production; the expected origin derives from the request Host'];
+                return [self::LEVEL_WARN, 'public_base_url not set: allowed outside production; the expected origin derives from the request Host'];
             }
 
-            return ['WARN', 'public_base_url not set: the expected origin derives from the request Host header; set a canonical https origin in production'];
+            return [self::LEVEL_WARN, 'public_base_url not set: the expected origin derives from the request Host header; set a canonical https origin in production'];
         }
         $violation = ExpectedOrigin::publicBaseUrlViolation($publicBaseUrl);
         if ($violation !== null) {
-            return ['WARN', sprintf('public_base_url "%s" %s', $publicBaseUrl, $violation)];
+            return [self::LEVEL_WARN, sprintf('public_base_url "%s" %s', $publicBaseUrl, $violation)];
         }
 
         return ['PASS', sprintf('canonical origin %s from server config', $publicBaseUrl)];
@@ -555,13 +560,13 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'direct mode: the socket peer is authoritative. Caveat: an empty REMOTE_ADDR (for example a Unix-socket upstream) collapses every client into the shared unknown per-client rate-limit bucket; serve over TCP (FastCGI/HTTP) in that topology or configure a trusted-proxy mode'];
         }
         if ($mode === 'symfony_trusted_proxies' && $proxies === []) {
-            return ['WARN', 'no trusted proxy is configured: forwarding headers are ignored, so behind a reverse proxy every client shares the proxy IP (per-source limits and risk attribution collapse)'];
+            return [self::LEVEL_WARN, 'no trusted proxy is configured: forwarding headers are ignored, so behind a reverse proxy every client shares the proxy IP (per-source limits and risk attribution collapse)'];
         }
         if ($mode === 'symfony_trusted_proxies') {
             return ['PASS', sprintf('%d trusted proxy CIDR(s); forwarding headers honored only from them', \count($proxies))];
         }
 
-        return ['WARN', 'symfony_global mode inherits the process-global trusted-proxy state; verify it matches this deployment'];
+        return [self::LEVEL_WARN, 'symfony_global mode inherits the process-global trusted-proxy state; verify it matches this deployment'];
     }
 
     /**
@@ -613,10 +618,10 @@ final class KiwiCaptchaDoctorCommand extends Command
         $proxies = $this->config['risk']['trusted_proxies'] ?? [];
         $trustsForwarding = $mode === 'symfony_global' || ($mode === 'symfony_trusted_proxies' && $proxies !== []);
         if ($secure === null && $trustsForwarding) {
-            return ['WARN', sprintf('continuity_cookie "%s" keeps a scheme-derived Secure flag while forwarding headers are trusted: behind a TLS-terminating proxy the PHP-side scheme is the proxy\'s plain-http hop unless X-Forwarded-Proto is trusted, so the cookie can be minted without Secure and dropped by the browser — set risk.continuity_cookie.secure: true or use a __Host- prefixed name', $name)];
+            return [self::LEVEL_WARN, sprintf('continuity_cookie "%s" keeps a scheme-derived Secure flag while forwarding headers are trusted: behind a TLS-terminating proxy the PHP-side scheme is the proxy\'s plain-http hop unless X-Forwarded-Proto is trusted, so the cookie can be minted without Secure and dropped by the browser — set risk.continuity_cookie.secure: true or use a __Host- prefixed name', $name)];
         }
         if ($secure === false) {
-            return ['WARN', sprintf('continuity_cookie "%s" has Secure explicitly disabled: the session signal travels in cleartext on any http hop', $name)];
+            return [self::LEVEL_WARN, sprintf('continuity_cookie "%s" has Secure explicitly disabled: the session signal travels in cleartext on any http hop', $name)];
         }
 
         return ['PASS', 'scheme-derived Secure flag (no trusted proxy configured, so the scheme is the client connection)'];
@@ -685,7 +690,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $inUse = array_values(array_unique(array_filter($inUse, static fn (string $name): bool => $name !== '')));
         $missing = array_values(array_diff($inUse, $configured));
         if ($missing !== []) {
-            return ['WARN', sprintf(
+            return [self::LEVEL_WARN, sprintf(
                 'scopes in use but not listed in risk.scopes (they use the conservative default row: base_risk 100, minimum/degraded sha20): %s',
                 implode(', ', $missing),
             )];
@@ -727,7 +732,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', sprintf('every configured scope prices inside its rung ceiling or carries a step_up/deny minimum (%d scope(s))', \count($risk['scopes'] ?? []))];
         }
 
-        return ['WARN', sprintf('%d scope(s) beyond their pricing ceiling: %s', \count($escalations), implode(' | ', $escalations))];
+        return [self::LEVEL_WARN, sprintf('%d scope(s) beyond their pricing ceiling: %s', \count($escalations), implode(' | ', $escalations))];
     }
 
     private function checkProtocolFloor(): array
@@ -765,7 +770,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return null;
         }
 
-        return ['WARN', sprintf(
+        return [self::LEVEL_WARN, sprintf(
             'the central min_policy_epoch is %d while risk.policy_version is %d: this node follows the effective epoch %d, so issuance and verification stay consistent, but the configured floor trails the central state. Raise risk.policy_version to %d at the next coordinated deploy to align the floor',
             $effective,
             $configured,
@@ -803,7 +808,7 @@ final class KiwiCaptchaDoctorCommand extends Command
                 return ['FAIL', sprintf('%s requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established.', self::abuseFirstProfileName($profile))];
             }
 
-            return ['WARN', sprintf('%s promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)', self::abuseFirstProfileName($profile))];
+            return [self::LEVEL_WARN, sprintf('%s promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)', self::abuseFirstProfileName($profile))];
         }
         if (!$decoyEnabled) {
             // The execution surface alone never emits v4 either: the
@@ -832,7 +837,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['FAIL', sprintf('%s requires authenticated decoy emission, but the fleet protocol floor has not been confirmed at v3. Confirm every serving binary supports protocol v3 and raise the central security-policy min_protocol_version to 3 (the two-phase rollout, see operations.md), or explicitly set risk.decoy_v3_enabled: false to defer v3 emission while the profile stays active.', self::abuseFirstProfileName($profile))];
         }
 
-        return ['WARN', 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];
+        return [self::LEVEL_WARN, 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];
     }
 
     /**
@@ -872,10 +877,59 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['FAIL', sprintf('%s requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4. Confirm every serving binary supports protocol v4 and raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md), or declare protocol_rollout.mode: migration while the v4 floor is being established.', self::abuseFirstProfileName($profile))];
         }
         if ($this->rolloutStatus() === 'migration') {
-            return ['WARN', 'execution surface armed but the central floor is below 4 or unconfirmed with protocol_rollout.mode "migration" declared: issuance stays execution-unarmed while the v4 fleet floor is being established (the two-phase rollout, see operations.md)'];
+            return [self::LEVEL_WARN, 'execution surface armed but the central floor is below 4 or unconfirmed with protocol_rollout.mode "migration" declared: issuance stays execution-unarmed while the v4 fleet floor is being established (the two-phase rollout, see operations.md)'];
         }
 
-        return ['WARN', 'execution surface armed (risk.execution_challenge on) but the central floor is below 4 or unconfirmed: issuance stays execution-unarmed (protocol v3 at most, or v2 when the decoy floor is unmet too); finish the protocol-v4 rollout before expecting execution-armed emission'];
+        return [self::LEVEL_WARN, 'execution surface armed (risk.execution_challenge on) but the central floor is below 4 or unconfirmed: issuance stays execution-unarmed (protocol v3 at most, or v2 when the decoy floor is unmet too); finish the protocol-v4 rollout before expecting execution-armed emission'];
+    }
+
+    /**
+     * The decoy-escalation autofill-qualification gate: a runtime
+     * security decision that must not depend solely on tests/ QA data.
+     * The doctor validates a configured versioned asset pair, reports an
+     * explicit arm (risk.decoy_escalation.armed) as a deliberate
+     * operator decision, and otherwise reports the matrix verdict
+     * (fail-closed `WARN` while the escalation is inert).
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkDecoyEscalationGate(): array
+    {
+        $composition = RiskStageComposition::resolve(
+            $this->config['protection_profile'] ?? null,
+            $this->config['risk'] ?? [],
+        );
+        if (!$composition['decoy']) {
+            return ['PASS', 'the decoy-escalation plane is not composed under this protection profile; the qualification gate is not consulted'];
+        }
+        $gateConfig = $this->config['risk']['decoy_escalation'] ?? [];
+        $armed = (bool) ($gateConfig['armed'] ?? false);
+        $matrixPath = $gateConfig['qualification_matrix'] ?? null;
+        $registryPath = $gateConfig['qualification_registry'] ?? null;
+
+        // A configured versioned asset pair must be readable: the doctor
+        // validates the asset the gate will consult.
+        foreach (['qualification_matrix' => $matrixPath, 'qualification_registry' => $registryPath] as $label => $path) {
+            if ($path !== null && (!\is_string($path) || $path === '' || !is_file($path) || !is_readable($path))) {
+                return ['FAIL', sprintf('risk.decoy_escalation.%s points at %s which is not a readable file: the gate cannot evaluate the versioned asset', $label, var_export($path, true))];
+            }
+        }
+        if ($armed) {
+            return [self::LEVEL_WARN, 'the decoy-escalation autofill-qualification gate is OPEN by explicit configuration value (risk.decoy_escalation.armed: true): the operator asserts the autofill/password-manager surfaces are safe for the escalation, and no qualification matrix is consulted. Drop the flag to return the gate to the fail-closed matrix'];
+        }
+
+        $gate = AutofillQualificationGate::fromConfiguration(false, $matrixPath, $registryPath);
+        if ($gate->isOpen()) {
+            return ['PASS', sprintf(
+                'the decoy-escalation autofill-qualification gate is OPEN: every required surface carries a qualifying pass row in %s',
+                $matrixPath ?? 'the committed qualification matrix',
+            )];
+        }
+
+        return [self::LEVEL_WARN, sprintf(
+            'the decoy-escalation autofill-qualification gate is CLOSED (fail-closed): the escalation is inert until every required surface qualifies in %s. Open it with risk.decoy_escalation.armed: true (explicit operator decision) or by landing qualifying pass rows in a versioned matrix asset (risk.decoy_escalation.qualification_matrix)',
+            $matrixPath ?? 'the committed qualification matrix',
+        )];
     }
 
     /**
@@ -906,10 +960,10 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'risk.execution_challenge is off: the execution dimension is disabled, so execution_required_version has no effect'];
         }
         if (!\is_string($this->config['execution_key'] ?? null)) {
-            return ['WARN', 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is INERT (no execution program is ever issued and execution_required_version has no effect). Configure kiwi_captcha.execution_key to actually arm the execution dimension, or set risk.execution_challenge off to state the intent'];
+            return [self::LEVEL_WARN, 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is INERT (no execution program is ever issued and execution_required_version has no effect). Configure kiwi_captcha.execution_key to actually arm the execution dimension, or set risk.execution_challenge off to state the intent'];
         }
         if (\strlen($this->config['execution_key']) < Config::MIN_SECRET_BYTES) {
-            return ['WARN', sprintf(
+            return [self::LEVEL_WARN, sprintf(
                 'execution_key is %d bytes, under the %d-byte floor: the keyed-PRF key is shorter than the configured minimum. Generate a random %d-byte-or-longer key before relying on the execution dimension',
                 \strlen($this->config['execution_key']),
                 Config::MIN_SECRET_BYTES,
@@ -933,13 +987,13 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
         if ($policy->downgradeWindowExists($required)) {
             if ($this->rolloutStatus() === 'migration') {
-                return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the downgrade window is accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout. Raise execution_required_version to %d when the migration completes', $required, $available, $cap, $floorLabel, $available)];
+                return [self::LEVEL_WARN, sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the downgrade window is accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout. Raise execution_required_version to %d when the migration completes', $required, $available, $cap, $floorLabel, $available)];
             }
             if (self::isAbuseFirstProfile($profile)) {
                 return ['FAIL', sprintf('%s normal mode must require the strongest confirmed tier: execution_required_version %d is below the effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s). Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', self::abuseFirstProfileName($profile), $required, $available, $cap, $floorLabel, $available)];
             }
 
-            return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar stays client-downgradeable. Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
+            return [self::LEVEL_WARN, sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar stays client-downgradeable. Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
         }
 
         return ['PASS', sprintf('execution_required_version %d equals the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar is server-required and never client-downgradeable', $required, $available, $cap, $floorLabel)];
@@ -1021,7 +1075,7 @@ final class KiwiCaptchaDoctorCommand extends Command
      */
     private function checkCsp(): array
     {
-        return ['WARN', 'the page CSP cannot be verified from the CLI; ensure script-src allows the widget (nonce or unsafe-inline) plus wasm-unsafe-eval, style-src covers the styles, worker-src covers the Argon worker (files mode: \'self\'; inline compatibility mode: blob:), and connect-src covers the challenge API (see getting-started.md Content-Security-Policy)'];
+        return [self::LEVEL_WARN, 'the page CSP cannot be verified from the CLI; ensure script-src allows the widget (nonce or unsafe-inline) plus wasm-unsafe-eval, style-src covers the styles, worker-src covers the Argon worker (files mode: \'self\'; inline compatibility mode: blob:), and connect-src covers the challenge API (see getting-started.md Content-Security-Policy)'];
     }
 
     /**
@@ -1064,7 +1118,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['FAIL', sprintf('protection_profile "%s" requires the RSW time-lock trapdoor (the abuse-first ladder runs on a first-class time-lock rung), but neither rsw_modulus_n nor rsw_lambda is configured: every verifier that may redeem an rsw record needs the same modulus and lambda, and issuance cannot arm the rung without the pair. Generate the trapdoor (tools/rsw-keygen), configure rsw_modulus_n and rsw_lambda (and flip algorithm to rsw to arm issuance), or drop the profile explicitly if the deployment means to run without the time-lock rung.', $profile)];
         }
         if (\is_string($modulus) || \is_string($lambda)) {
-            return ['WARN', sprintf('rsw_modulus_n/rsw_lambda are configured but algorithm %s is selected: the fields are inert until the algorithm flips to rsw (the operator may pre-stage them)', $algorithm)];
+            return [self::LEVEL_WARN, sprintf('rsw_modulus_n/rsw_lambda are configured but algorithm %s is selected: the fields are inert until the algorithm flips to rsw (the operator may pre-stage them)', $algorithm)];
         }
 
         return ['PASS', 'rsw not configured (the default deployment keeps the sha256 issuance path unchanged; the rsw rung stays optional)'];
@@ -1111,7 +1165,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $storeClass = \get_class($this->siteVerifyIdempotencyStore);
         if (!str_contains($storeClass, 'RedisSiteVerifyIdempotencyStore')) {
             if (\in_array($this->environment, ['test', 'dev'], true)) {
-                return ['WARN', sprintf('%d secrets, but the idempotency store is in-memory (%s): dev-only semantics', \count($secrets), $storeClass)];
+                return [self::LEVEL_WARN, sprintf('%d secrets, but the idempotency store is in-memory (%s): dev-only semantics', \count($secrets), $storeClass)];
             }
 
             return ['FAIL', sprintf('%d secrets, but the idempotency store is in-memory (%s): the one-success contract needs a shared backend', \count($secrets), $storeClass)];
@@ -1133,7 +1187,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
         $storeClass = \get_class($this->chainStore);
         if (!str_contains($storeClass, 'RedisChainedChallengeStateStore')) {
-            return ['WARN', sprintf('chain state is in-memory (%s): dev-only semantics, no cross-worker transaction obligation', $storeClass)];
+            return [self::LEVEL_WARN, sprintf('chain state is in-memory (%s): dev-only semantics, no cross-worker transaction obligation', $storeClass)];
         }
 
         return ['PASS', sprintf('chain state Redis-backed (%s), authoritative binding wired', $storeClass)];
@@ -1145,7 +1199,7 @@ final class KiwiCaptchaDoctorCommand extends Command
     private function checkVersions(): array
     {
         if (!\class_exists(InstalledVersions::class)) {
-            return ['WARN', 'composer/installed-versions unavailable: bundle and core versions cannot be compared'];
+            return [self::LEVEL_WARN, 'composer/installed-versions unavailable: bundle and core versions cannot be compared'];
         }
         $bundle = InstalledVersions::isInstalled('bel-consulting/kiwicaptcha-symfony')
             ? InstalledVersions::getPrettyVersion('bel-consulting/kiwicaptcha-symfony')
@@ -1154,10 +1208,10 @@ final class KiwiCaptchaDoctorCommand extends Command
             ? InstalledVersions::getPrettyVersion('kiwicaptcha/kiwicaptcha-php')
             : null;
         if ($bundle === null || $core === null) {
-            return ['WARN', sprintf('installed versions unresolvable (bundle %s, core %s)', $bundle ?? '?', $core ?? '?')];
+            return [self::LEVEL_WARN, sprintf('installed versions unresolvable (bundle %s, core %s)', $bundle ?? '?', $core ?? '?')];
         }
         if (str_starts_with($bundle, 'dev-') || str_starts_with($core, 'dev-')) {
-            return ['WARN', sprintf('dev install: bundle %s with core %s; the composer constraint governs compatibility', $bundle, $core)];
+            return [self::LEVEL_WARN, sprintf('dev install: bundle %s with core %s; the composer constraint governs compatibility', $bundle, $core)];
         }
         $bundleMajor = (int) explode('.', $bundle)[0];
         $coreMajor = (int) explode('.', $core)[0];

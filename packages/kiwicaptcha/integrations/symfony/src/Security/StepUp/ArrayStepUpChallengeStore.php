@@ -147,6 +147,48 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return ($now - $marker['at']) <= $withinSecs;
     }
 
+    /** @var array<string, array{at: int, expires: int, factor: string}> */
+    private array $sessionStepUpSuccess = [];
+
+    public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void
+    {
+        if ($sessionId === '' || $principalPseudonym === '') {
+            return;
+        }
+        $this->sessionStepUpSuccess[$sessionId."\0".$principalPseudonym] = [
+            'at' => $now,
+            'expires' => $now + $ttlSecs,
+            'factor' => $factor,
+        ];
+    }
+
+    public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool
+    {
+        if ($sessionId === '' || $principalPseudonym === '') {
+            return false;
+        }
+        $marker = $this->sessionStepUpSuccess[$sessionId."\0".$principalPseudonym] ?? null;
+        if ($marker === null || $marker['expires'] <= $now || ($now - $marker['at']) > $withinSecs) {
+            return false;
+        }
+        if ($minFactor !== null && self::factorRank($marker['factor']) < self::factorRank($minFactor)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /** webauthn > totp > email_otp > unknown. */
+    private static function factorRank(string $factor): int
+    {
+        return match ($factor) {
+            'webauthn' => 3,
+            'totp' => 2,
+            'email_otp' => 1,
+            default => 0,
+        };
+    }
+
     public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
     {
         $key = $dimension.':'.$pseudonym;

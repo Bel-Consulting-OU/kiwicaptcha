@@ -147,6 +147,55 @@ final class DecoyEscalationTest extends TestCase
     }
 
     /**
+     * The explicit configuration value: a runtime security decision
+     * must not depend solely on tests/ QA data, so the gate opens as a
+     * deliberate operator decision with no matrix consulted.
+     */
+    public function testAnExplicitConfigurationValueOpensTheGateWithoutAnyMatrix(): void
+    {
+        $gate = AutofillQualificationGate::fromConfiguration(true);
+        self::assertTrue($gate->isExplicitlyArmed());
+        self::assertTrue($gate->isOpen());
+    }
+
+    public function testAnExplicitArmIgnoresAMissingMatrix(): void
+    {
+        $gate = AutofillQualificationGate::fromConfiguration(true, '/nonexistent/matrix.json', '/nonexistent/registry.json');
+        self::assertTrue($gate->isOpen(), 'the explicit operator decision must not fall back to a matrix');
+    }
+
+    public function testFromConfigurationWithoutAnArmStaysFailClosedOnTheCommittedMatrix(): void
+    {
+        $gate = AutofillQualificationGate::fromConfiguration(false);
+        self::assertFalse($gate->isExplicitlyArmed());
+        self::assertFalse($gate->isOpen(), 'the committed matrix carries no passing rows, so the gate stays closed');
+    }
+
+    public function testFromConfigurationRoutesACustomVersionedAssetPair(): void
+    {
+        $gate = AutofillQualificationGate::fromConfiguration(
+            false,
+            $this->writeMatrix('pass'),
+            $this->registryPath(),
+        );
+        self::assertFalse($gate->isExplicitlyArmed());
+        self::assertTrue($gate->isOpen(), 'a versioned asset outside tests/ can open the gate');
+    }
+
+    public function testTheRecordOpArmsUnderAnExplicitConfigurationValue(): void
+    {
+        $runner = new ScriptedRunner();
+        $store = new DecoyEscalationStore(
+            $runner,
+            AutofillQualificationGate::fromConfiguration(true),
+            'ns1',
+            600000,
+        );
+        self::assertSame(1, $store->recordConfirmedHit(str_repeat('a', 32), self::T0));
+        self::assertSame('1', $runner->lastArgs[2], 'the explicitly armed gate must ride as "1"');
+    }
+
+    /**
      * The scripted store: the gate rides into the script as an argument
      * and a closed gate leaves the record unwritten.
      */

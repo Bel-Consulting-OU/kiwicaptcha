@@ -571,7 +571,7 @@ final class QuarantineWireDiffTest extends TestCase
  */
 final class MarksStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, OutcomeMarksStoreInterface
 {
-    /** @var array<string, array{kind: string, count: int, first_ms: int, last_ms: int}> */
+    /** @var array<string, array{kind: string, last_kind: string, count: int, first_ms: int, last_ms: int}> */
     public array $marks = [];
 
     /** @var array<string, string> */
@@ -579,6 +579,21 @@ final class MarksStore implements RiskStateStoreInterface, SessionContextTagStor
 
     /** @var array<string, string> */
     public array $tlsTags = [];
+
+    /** @var array<string, true> event-id dedupe markers (marks.lua wire) */
+    private array $markEvents = [];
+
+    /** The frozen severity ladder of marks.lua: spam 1 < ban 2 < fraud 3 < chargeback 4. */
+    private static function markSeverity(string $kind): int
+    {
+        return match ($kind) {
+            'spamReported' => 1,
+            'accountBanned' => 2,
+            'fraudConfirmed' => 3,
+            'chargeback' => 4,
+            default => 0,
+        };
+    }
 
     public function observe(RiskObservation $observation): SignalVector
     {
@@ -615,12 +630,25 @@ final class MarksStore implements RiskStateStoreInterface, SessionContextTagStor
         return "mark:{kiwi:wire-diff}:{$dimension}:{$id}";
     }
 
-    public function writeMark(string $dimension, string $id, string $kind, int $nowMs): int
+    public function writeMark(string $dimension, string $id, string $kind, int $nowMs, string $eventId = ''): int
     {
         $key = "{$dimension}:{$id}";
+        // Event-id idempotency (marks.lua): a retried report with the
+        // same id returns the count unchanged.
+        if ($eventId !== '') {
+            if (isset($this->markEvents[$eventId])) {
+                return $this->marks[$key]['count'] ?? 0;
+            }
+            $this->markEvents[$eventId] = true;
+        }
         $existing = $this->marks[$key] ?? null;
+        $keptKind = $existing['kind'] ?? $kind;
+        if ($existing === null || self::markSeverity($kind) > self::markSeverity($existing['kind'])) {
+            $keptKind = $kind;
+        }
         $this->marks[$key] = [
-            'kind' => $kind,
+            'kind' => $keptKind,
+            'last_kind' => $kind,
             'count' => ($existing['count'] ?? 0) + 1,
             'first_ms' => $existing['first_ms'] ?? $nowMs,
             'last_ms' => $nowMs,

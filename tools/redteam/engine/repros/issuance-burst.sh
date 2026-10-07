@@ -5,7 +5,7 @@
 # attack (the expected behavior); REPRODUCED means a finding. No
 # hardcoded verdict: the observed admission count decides.
 set -u
-. "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/engine/repros/repro-common.sh"
+. "$(cd "$(dirname "$0")" && pwd)/repro-common.sh"
 BASE=$(repro_target)
 if [ -z "$BASE" ]; then
     printf '{"harness":"issuance-burst","verdict":"INCONCLUSIVE","wire_code":"target_unavailable","accepted":0}\n'

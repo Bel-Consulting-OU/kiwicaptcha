@@ -9,8 +9,8 @@
   "result": "PASS",
   "detail": "every value class priced above its declared abuse value, or escalated to the documented disposition path",
   "metrics": {
-    "raw": "table_complete=true accepted=3 fail_rows=-",
+    "raw": "table_complete=true honest_solves_verified=3 accepted_abuses=0 fail_rows=-",
     "sha16_solve_us": null
   },
-  "economic": "cost_per_accepted_abuse=unbounded value_class_fails=- table=/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/runs/env/d33-economics-redis.json"
+  "economic": "cost_per_accepted_abuse=unbounded value_class_fails=- table=tools/redteam/runs/env/d33-economics-redis.json"
 }

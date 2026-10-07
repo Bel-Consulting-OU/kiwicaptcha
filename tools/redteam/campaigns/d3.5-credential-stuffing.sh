@@ -44,6 +44,23 @@
 # price of one solve on this cpu) against the outcome; the cost per
 # compromised account finally has a denominator that can be non-zero,
 # and the corpus blocking is priced as prevented compromise beside it.
+#
+# Compromise-economics criterion (change.md D3.5
+# "cost/compromised-account >= critical threshold"), stated explicitly:
+#   - dollar form: cost_per_compromised_account (spend_usd /
+#     corpus_residual_compromised) must be >= the critical value class's
+#     declared abuse value, read from
+#     packages/kiwicaptcha-solver/reference-costs.json
+#     (value_classes[critical].declared_abuse_value_usd_per_1000) —
+#     never a hardcoded guess;
+#   - rate form: the measured compromised/valid rate
+#     (corpus_residual_compromised / valid_rows) must be <= the stated
+#     release threshold 0.0 — zero valid-account compromise. A run that
+#     measured real compromises misses this target and its
+#     compromise-economics verdict is FAIL/RED with the numbers, never
+#     green. Step-up prevention is asserted separately above; when it
+#     holds and the economics miss, the release rows split honestly
+#     (prevention green, compromise-economics red with the number).
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -89,9 +106,9 @@ done
 }
 
 # ---------- the wire sample ----------
-WIRE_OUT=$(WIRE_PORT="$WIRE_PORT" WIRE_SAMPLE="$WIRE_SAMPLE" python3 - <<'PYWIRE'
+WIRE_OUT=$(WIRE_PORT="$WIRE_PORT" WIRE_SAMPLE="$WIRE_SAMPLE" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PYWIRE'
 import json, os, sys, time
-sys.path.insert(0, "/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/campaigns/lib")
+sys.path.insert(0, os.environ["KIWI_RT_DIR"])
 import rtclient as rt
 
 port = int(os.environ["WIRE_PORT"])
@@ -188,9 +205,56 @@ import json, sys
 doc = json.load(open(sys.argv[1]))
 print("%.6f" % (doc["spend_usd"] / doc["blocked_valid"]))' "$SUMMARY_FILE")
 
+# ---------- the compromise-economics criterion ----------
+# Thresholds are stated, not invented: the critical declared abuse value
+# comes from reference-costs.json, the rate threshold (0.0) is the
+# release bar declared in this file's header.
+ECON=$(KIWI_RT_REPO_ROOT="$REPO_ROOT" python3 - "$SUMMARY_FILE" <<'PYECON'
+import json, os, sys
+
+doc = json.load(open(sys.argv[1]))
+ref_path = os.path.join(os.environ["KIWI_RT_REPO_ROOT"],
+                        "packages/kiwicaptcha-solver/reference-costs.json")
+ref = json.load(open(ref_path))
+critical = next(c for c in ref["value_classes"] if c["class"] == "critical")
+cost_threshold = float(critical["declared_abuse_value_usd_per_1000"])
+rate_threshold = 0.0
+
+compromised = int(doc["corpus_residual_compromised"])
+valid = int(doc["valid_rows"]) or 1
+spend = float(doc["spend_usd"])
+cost = None if compromised == 0 else spend / compromised
+rate = compromised / valid
+
+cost_ok = cost is not None and cost >= cost_threshold
+rate_ok = rate <= rate_threshold
+verdict = "PASS" if (cost_ok and rate_ok) else "FAIL"
+print("verdict=%s cost_per_compromised_account=%s critical_threshold=%.6f "
+      "compromised_valid_rate=%.4f rate_threshold=%.1f compromised=%d valid=%d spend_usd=%.6f"
+      % (verdict,
+         "unbounded" if cost is None else "%.6f" % cost,
+         cost_threshold, rate, rate_threshold, compromised, valid, spend))
+PYECON
+)
+ECON_VERDICT=$(printf '%s' "$ECON" | sed -n 's/^verdict=\([A-Z]*\).*/\1/p')
+printf 'COMPROMISE-ECONOMICS: %s\n' "$ECON"
+
 rt_metric "rows=$ROWS wire_sample=$WIRE_SAMPLE blocked_valid=$BLOCKED compromised=$COMPROMISED max_spread=$MAXSPREAD"
-rt_metric "downscale=rows_are_100000 the_engine_is_the_real_one valid_rate=1percent corpus=10000_local"
-printf 'ECONOMIC: %s %s cost_per_compromised_account=%s spend_usd=%s blocked_valid_prevented=%s cost_per_prevented_compromise=%s\n' \
-    "$RT_CAMPAIGN" "$RT_PROFILE" "$COST_COMPROMISED" "$SPEND" "$BLOCKED" "$COST_PREVENTED"
+# The LAST METRIC line is the one the run document keeps: fold the
+# economics verdict and measured numbers into it so the ledger and the
+# gate rows carry them.
+rt_metric "downscale=rows_are_100000 the_engine_is_the_real_one valid_rate=1percent corpus=10000_local $ECON"
+printf 'ECONOMIC: %s %s cost_per_compromised_account=%s spend_usd=%s blocked_valid_prevented=%s cost_per_prevented_compromise=%s compromised_valid_rate=%s\n' \
+    "$RT_CAMPAIGN" "$RT_PROFILE" "$COST_COMPROMISED" "$SPEND" "$BLOCKED" "$COST_PREVENTED" \
+    "$(printf '%s' "$ECON" | sed -n 's/.*compromised_valid_rate=\([0-9.]*\).*/\1/p')"
+
+# The campaign's prevention asserts above already ran. The economics
+# verdict is measured data, not a harness failure (the D3.3 pattern):
+# the campaign is green when the prevention asserts held and the
+# economics were measured and honestly classified. The dedicated gate
+# row turns red on a FAIL verdict verbatim, so the release rows split
+# honestly (prevention green, compromise-economics red with the number)
+# instead of collapsing into one green cell.
+printf 'COMPROMISE-ECONOMICS-VERDICT: %s\n' "$ECON_VERDICT"
 
 rt_finish

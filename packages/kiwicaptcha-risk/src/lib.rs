@@ -651,6 +651,13 @@ pub struct RiskEngine<
     /// instead of the aggregate channel. Absent by default so the
     /// decision path is byte-identical for existing consumers.
     context_trust: Option<Arc<dyn crate::trust::ContextTrustSource>>,
+    /// Optional ASN dataset: when attached, the target-spread asn
+    /// element of an outcome report resolves through it; absent, the
+    /// same element resolves to the unlisted-namespace bucket of the
+    /// source address ([`crate::asn::unlisted_bucket_for`]). Either way
+    /// the element is never empty when a report carries a context, so
+    /// distinct network origins count toward spread.
+    asn_dataset: Option<Arc<crate::asn::AsnDataset>>,
 }
 
 impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: NetworkClassifier>
@@ -687,6 +694,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             price_context: None,
             decoy_escalation: None,
             context_trust: None,
+            asn_dataset: None,
         }
     }
 
@@ -803,6 +811,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// unwired engine.
     pub fn with_context_trust(mut self, source: Arc<dyn crate::trust::ContextTrustSource>) -> Self {
         self.context_trust = Some(source);
+        self
+    }
+
+    /// Attaches the deployment's ASN dataset (change.md 3.1.1): the
+    /// target-spread asn element of an outcome report then resolves
+    /// through it to the source address's listed or unlisted bucket.
+    /// Without a dataset the element resolves to the unlisted-namespace
+    /// bucket of the source address, so distinct origins still spread.
+    pub fn with_asn_dataset(
+        mut self,
+        dataset: Arc<crate::asn::AsnDataset>,
+    ) -> RiskEngine<S, N> {
+        self.asn_dataset = Some(dataset);
         self
     }
 
@@ -1797,16 +1818,22 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// The spread elements one outcome report contributes to the target
     /// dimension's HLLs: the source pseudonym of the reporting context
     /// (the current epoch's id, the same one the feedback observation
-    /// books) and no asn bucket (the deployment's ASN dataset resolves
-    /// that element at its own seam). An absent context records no
-    /// spread element.
-    pub(crate) fn target_spread_source(&self, ctx: Option<&RiskContext<'_>>) -> String {
+    /// books) and the source address's ASN bucket (the attached
+    /// dataset's lookup, else the unlisted-namespace bucket — see
+    /// [`crate::asn::unlisted_bucket_for`]). An absent context records
+    /// no spread element.
+    pub(crate) fn target_spread_elements(&self, ctx: Option<&RiskContext<'_>>) -> (String, String) {
         let Some(ctx) = ctx else {
-            return String::new();
+            return (String::new(), String::new());
         };
         let now_secs = (crate::now_ms() / 1000) as i64;
         let src_epoch = now_secs.div_euclid(self.timing.source_epoch_secs() as i64);
-        self.identity.source_id_for_epoch(ctx.source_ip, src_epoch)
+        let source = self.identity.source_id_for_epoch(ctx.source_ip, src_epoch);
+        let asn = match self.asn_dataset.as_ref() {
+            Some(dataset) => dataset.bucket_id(ctx.source_ip),
+            None => crate::asn::unlisted_bucket_for(ctx.source_ip),
+        };
+        (source, asn)
     }
 
     /// Registers one authentication failure against the target
