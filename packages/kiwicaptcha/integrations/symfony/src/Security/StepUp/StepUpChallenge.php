@@ -19,6 +19,14 @@ final class StepUpChallenge
 {
     private const SCHEMA_VERSION = 1;
 
+    /**
+     * The plaintext of the client secret minted for a stateless begin.
+     * Runtime-only: it is handed to the begin presentation exactly once
+     * and never survives into {@see self::toArray()} (the only storage
+     * form). Null for a session-bound challenge (which mints none).
+     */
+    private ?string $issuedClientSecret = null;
+
     private function __construct(
         public readonly string $id,
         public readonly StepUpChallengeKind $kind,
@@ -35,11 +43,13 @@ final class StepUpChallenge
         public readonly ?string $ceremony = null,
         public readonly ?string $sessionHash = null,
         /**
-         * A per-challenge client secret for stateless callers (API
-         * clients, SPAs) that cannot carry a session cookie. The
-         * completer echoes it back instead of a session binding.
+         * The SHA-256 of a per-challenge client secret, minted ONLY for
+         * stateless begins (a begin request with no started session).
+         * A session-bound challenge stores null: each challenge has
+         * exactly one binding. The plaintext secret is returned once at
+         * begin and never stored.
          */
-        public readonly ?string $clientSecret = null,
+        public readonly ?string $clientSecretHash = null,
         public readonly bool $targetOwned = false,
     ) {
     }
@@ -85,7 +95,16 @@ final class StepUpChallenge
             throw new \InvalidArgumentException('A step-up challenge ceremony must be creation or assertion');
         }
 
-        return new self(
+        $clientSecret = null;
+        $clientSecretHash = null;
+        // Exactly one binding: a session-bound challenge carries no
+        // client secret, and a stateless begin mints one (returned once
+        // through {@see self::issuedClientSecret()}, stored hashed).
+        if ($sessionId === null || $sessionId === '') {
+            $clientSecret = self::clientSecret();
+            $clientSecretHash = self::clientSecretHash($clientSecret);
+        }
+        $challenge = new self(
             $id,
             $kind,
             self::pseudonym('principal', $principalPseudonym),
@@ -100,15 +119,42 @@ final class StepUpChallenge
             $codeHash,
             $ceremony,
             self::sessionHash($sessionId),
-            self::clientSecret(),
+            $clientSecretHash,
             $targetOwned && $targetPseudonym !== null,
         );
+        $challenge->issuedClientSecret = $clientSecret;
+
+        return $challenge;
     }
 
-    /** A per-challenge client secret: 32 hex chars, never the session. */
+    /** Mint a plaintext secret for a stateless begin (returned once). */
     public static function clientSecret(): string
     {
         return bin2hex(random_bytes(16));
+    }
+
+    /** The stored form of a client secret: SHA-256 hex, never the secret. */
+    public static function clientSecretHash(string $secret): string
+    {
+        return hash('sha256', $secret);
+    }
+
+    /**
+     * The plaintext secret minted for a stateless begin, for the begin
+     * response to return exactly once. Null for a session-bound
+     * challenge. Never persisted: {@see self::toArray()} stores only
+     * the hash.
+     */
+    public function issuedClientSecret(): ?string
+    {
+        return $this->issuedClientSecret;
+    }
+
+    /** Whether a presented plaintext secret matches the stored hash. */
+    public function clientSecretMatches(string $presented): bool
+    {
+        return $this->clientSecretHash !== null && $this->clientSecretHash !== ''
+            && hash_equals($this->clientSecretHash, self::clientSecretHash($presented));
     }
 
     public static function sessionHash(?string $sessionId): ?string
@@ -147,7 +193,7 @@ final class StepUpChallenge
             $this->codeHash,
             $this->ceremony,
             $this->sessionHash,
-            $this->clientSecret,
+            $this->clientSecretHash,
             $this->targetOwned,
         );
     }
@@ -181,7 +227,7 @@ final class StepUpChallenge
             'code_hash' => $this->codeHash,
             'ceremony' => $this->ceremony,
             'session_hash' => $this->sessionHash,
-            'client_secret' => $this->clientSecret,
+            'client_secret_hash' => $this->clientSecretHash,
             'target_owned' => $this->targetOwned,
         ];
     }
@@ -245,11 +291,17 @@ final class StepUpChallenge
                 throw $fail('session_hash must be a 64-char lowercase hex digest');
             }
         }
-        $clientSecret = $record['client_secret'] ?? null;
-        if ($clientSecret !== null) {
-            if (!\is_string($clientSecret) || preg_match('/^[0-9a-f]{32}$/D', $clientSecret) !== 1) {
-                throw $fail('client_secret must be a 32-char lowercase hex digest');
+        $clientSecretHash = $record['client_secret_hash'] ?? null;
+        if ($clientSecretHash !== null) {
+            if (!\is_string($clientSecretHash) || preg_match('/^[0-9a-f]{64}$/D', $clientSecretHash) !== 1) {
+                throw $fail('client_secret_hash must be a 64-char lowercase hex digest');
             }
+        }
+        // Exactly one binding per challenge: a record carrying both (or
+        // neither) a session hash and a client-secret hash is incoherent
+        // and refused. Fail closed on every lane.
+        if (($sessionHash !== null) === ($clientSecretHash !== null)) {
+            throw $fail('exactly one of session_hash / client_secret_hash must be present');
         }
         $challenge = new self(
             $challenge->id,
@@ -266,7 +318,7 @@ final class StepUpChallenge
             $challenge->codeHash,
             $challenge->ceremony,
             $sessionHash,
-            $clientSecret,
+            $clientSecretHash,
             $challenge->targetOwned,
         );
         $attempts = $record['attempts'] ?? null;

@@ -398,20 +398,24 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
     /**
      * The begin presentation: the code-entry form for the html mode,
-     * the challenge document for the json mode.
+     * the challenge document for the json mode. A stateless begin (no
+     * session) also returns its one-time client secret here — the only
+     * channel that ever carries the plaintext.
      */
     private function presentation(StepUpContext $context, StepUpChallenge $challenge, int $now): Response
     {
         $ticket = $this->ticket->issue($challenge->id, $challenge->expiresAt);
         $expiresIn = max(0, $challenge->expiresAt - $now);
+        $clientSecret = $challenge->issuedClientSecret();
         if ($context->mode === StepUpContext::MODE_JSON) {
-            $body = (string) json_encode([
+            $body = (string) json_encode(array_filter([
                 'handler' => 'totp',
                 'challenge' => $ticket,
                 'expires_in' => $expiresIn,
                 'digits' => $this->digits,
                 'complete_path' => $this->completePath,
-            ], JSON_UNESCAPED_SLASHES);
+                'client_secret' => $clientSecret,
+            ], static fn ($v): bool => $v !== null), JSON_UNESCAPED_SLASHES);
 
             return new Response($body, Response::HTTP_OK, ['Content-Type' => 'application/json', 'Cache-Control' => 'no-store']);
         }
@@ -419,6 +423,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         $ticketField = htmlspecialchars(self::TICKET_FIELD, ENT_QUOTES);
         $codeField = htmlspecialchars(self::CODE_FIELD, ENT_QUOTES);
         $ticketValue = htmlspecialchars($ticket, ENT_QUOTES);
+        $secretInput = $clientSecret !== null && $clientSecret !== ''
+            ? '<input type="hidden" name="'.htmlspecialchars(StepUpSessionBinding::CLIENT_SECRET_FIELD, ENT_QUOTES).'" value="'.htmlspecialchars($clientSecret, ENT_QUOTES).'">'
+            : '';
         $html = <<<HTML
             <!DOCTYPE html>
             <html lang="en">
@@ -430,6 +437,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             <p>Enter the current {$this->digits}-digit code from your authenticator app.</p>
             <form method="post" action="{$action}">
             <input type="hidden" name="{$ticketField}" value="{$ticketValue}">
+            {$secretInput}
             <label for="kiwi-step-up-code">Code</label>
             <input id="kiwi-step-up-code" name="{$codeField}" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="8">
             <button type="submit">Verify</button>
