@@ -39,6 +39,11 @@ pub struct RecordMeta {
     pub cdata: Option<String>,
     #[serde(default)]
     pub decision_id: Option<String>,
+    /// The operation identity of the winning verification (if any).
+    /// An idempotent retry carrying the same identity returns the
+    /// stored success; a different identity is a plain replay.
+    #[serde(default)]
+    pub operation_identity: Option<String>,
 }
 
 /// The atomic consume decision: the caller either owns the single
@@ -74,7 +79,7 @@ pub trait RecordStore: Send + Sync {
 
     /// The atomic pending to consumed transition. Expired records are
     /// pruned within the same call.
-    fn consume(&self, nonce: &str, now_unix: u64) -> ConsumeOutcome;
+    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome;
 
     /// Persist the derivation outcome on the consumed record. Best
     /// effort: a lost commit only degrades a later replay to the
@@ -138,11 +143,16 @@ impl MapState {
         dropped
     }
 
-    fn consume(&mut self, nonce: &str, now_unix: u64) -> ConsumeOutcome {
+    fn consume(&mut self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
         self.prune_expired(now_unix);
         if let Some(entry) = self.pending.remove(nonce) {
-            let meta = entry.meta.clone();
+            let mut meta = entry.meta.clone();
+            if let Some(identity) = operation_identity {
+                meta.operation_identity = Some(identity.to_string());
+            }
             let record = entry.record.clone();
+            let mut entry = entry;
+            entry.meta = meta.clone();
             self.consumed.insert(nonce.to_string(), entry);
             return ConsumeOutcome::Won {
                 record: Box::new(record),
@@ -194,9 +204,9 @@ impl RecordStore for MemoryStore {
         Ok(())
     }
 
-    fn consume(&self, nonce: &str, now_unix: u64) -> ConsumeOutcome {
+    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
         let mut state = self.state.lock().expect("store lock");
-        state.consume(nonce, now_unix)
+        state.consume(nonce, now_unix, operation_identity)
     }
 
     fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool) {
@@ -399,7 +409,7 @@ impl RecordStore for FileStore {
         Ok(())
     }
 
-    fn consume(&self, nonce: &str, now_unix: u64) -> ConsumeOutcome {
+    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
         let mut state = self.state.lock().expect("store lock");
         let dropped = state.prune_expired(now_unix);
         for gone in &dropped {
@@ -421,6 +431,10 @@ impl RecordStore for FileStore {
             let meta = entry.meta.clone();
             let record = entry.record.clone();
             state.consumed.insert(nonce.to_string(), entry);
+            let mut meta = meta;
+            if let Some(identity) = operation_identity {
+                meta.operation_identity = Some(identity.to_string());
+            }
             return ConsumeOutcome::Won {
                 record: Box::new(record),
                 meta,
@@ -502,7 +516,7 @@ impl RecordStore for RedisStore {
             .map_err(|e| format!("redis store failed: {e}"))
     }
 
-    fn consume(&self, nonce: &str, _now_unix: u64) -> ConsumeOutcome {
+    fn consume(&self, nonce: &str, _now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
         let meta = self
             .meta
             .lock()
@@ -510,7 +524,7 @@ impl RecordStore for RedisStore {
             .get(nonce)
             .cloned()
             .unwrap_or_default();
-        match self.inner.consume(nonce) {
+        match self.inner.consume(nonce, _now_unix, operation_identity) {
             Ok(Some(consumed)) => {
                 if consumed.first {
                     ConsumeOutcome::Won {
@@ -593,11 +607,11 @@ mod tests {
         store.put_pending(&record, RecordMeta::default()).unwrap();
         let now = now_epoch_micros() / 1_000_000;
         assert!(matches!(
-            store.consume(&nonce, now),
+            store.consume(&nonce, now, None),
             ConsumeOutcome::Won { .. }
         ));
         assert!(matches!(
-            store.consume(&nonce, now),
+            store.consume(&nonce, now, None),
             ConsumeOutcome::AlreadyConsumed { .. }
         ));
         store.commit(&nonce, &record, true);
@@ -611,7 +625,7 @@ mod tests {
         store.put_pending(&record, RecordMeta::default()).unwrap();
         let future = record.expires_at + 10;
         assert!(matches!(
-            store.consume(&record.nonce, future),
+            store.consume(&record.nonce, future, None),
             ConsumeOutcome::NotFound
         ));
         assert_eq!(store.counts(), (0, 0));
@@ -633,11 +647,12 @@ mod tests {
                         action: Some("checkout".to_string()),
                         cdata: None,
                         decision_id: None,
+                        operation_identity: None,
                     },
                 )
                 .unwrap();
             let now = now_epoch_micros() / 1_000_000;
-            match store.consume(&nonce, now) {
+            match store.consume(&nonce, now, None) {
                 ConsumeOutcome::Won { record, meta } => {
                     assert_eq!(meta.action.as_deref(), Some("checkout"));
                     store.commit(&nonce, &record, true);
@@ -649,7 +664,7 @@ mod tests {
             let reopened = FileStore::open(&dir).expect("reopen");
             let now = now_epoch_micros() / 1_000_000;
             assert!(matches!(
-                reopened.consume(&nonce, now),
+                reopened.consume(&nonce, now, None),
                 ConsumeOutcome::AlreadyConsumed { .. }
             ));
         }
@@ -672,7 +687,7 @@ mod tests {
             let reopened = FileStore::open(&dir).expect("reopen");
             let now = now_epoch_micros() / 1_000_000;
             assert!(matches!(
-                reopened.consume(&nonce, now),
+                reopened.consume(&nonce, now, None),
                 ConsumeOutcome::Won { .. }
             ));
         }

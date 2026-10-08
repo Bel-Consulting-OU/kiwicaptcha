@@ -224,6 +224,7 @@ impl SidecarState {
                 action,
                 cdata,
                 decision_id: None,
+                        operation_identity: None,
             },
         );
     }
@@ -370,6 +371,7 @@ impl SidecarState {
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             decision_id,
+            operation_identity: None,
         };
         if let Err(e) = self.store.put_pending(&issued.record, meta) {
             return self.error_response(500, "store_write_failed", &e);
@@ -447,18 +449,20 @@ impl SidecarState {
         let now_ns = now_epoch_micros();
         let now_unix = now_ns / 1_000_000;
         // 1. Consume: one short lock, the one-shot transition.
-        let (record, meta) = match self.store.consume(&decoded.nonce, now_unix) {
+        let request_identity = parsed
+            .get("operation_identity")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let (record, meta) = match self.store.consume(&decoded.nonce, now_unix, request_identity) {
             ConsumeOutcome::Won { record, meta } => (*record, meta),
             ConsumeOutcome::AlreadyConsumed { meta, succeeded } => {
                 // An idempotent retry of a delegated verification (the
                 // caller forwarded operation_identity) must return the
                 // stored success, not already_consumed. Without the
                 // identity the one-shot provider shape stands.
-                let identity = parsed
-                    .get("operation_identity")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if identity != "" && succeeded == Some(true) {
+                let identity = request_identity.unwrap_or("");
+                let stored_identity = meta.operation_identity.as_deref().unwrap_or("");
+                if identity != "" && identity == stored_identity && succeeded == Some(true) {
                     self.metrics.record_outcome("ok");
                     let mut wire = serde_json::json!({
                         "success": true,

@@ -538,3 +538,26 @@ fn header_bombs_are_capped_and_never_hang_the_pool() {
     );
     assert_eq!(status, 200, "a normal document still parses after the bomb");
 }
+
+#[test]
+fn an_idempotent_retry_with_operation_identity_returns_the_stored_success() {
+    let addr = spawn(None);
+    let token = issue_and_solve(addr, "", CLIENT_IP);
+    let body = |identity: &str| {
+        format!(
+            r#"{{"token":"{token}","scope":"login","remoteip":"{CLIENT_IP}","operation_identity":"{identity}"}}"#
+        )
+    };
+    let (status, first) = verify(addr, "", &body("op-retry-1"));
+    assert_eq!(status, 200, "{first}");
+    assert!(first.contains("success"), "{first}");
+    // The idempotent retry (same operation_identity) returns the stored
+    // success, not already_consumed.
+    let (status, retry) = verify(addr, "", &body("op-retry-1"));
+    assert_eq!(status, 200, "{retry}");
+    assert!(!retry.contains("already_consumed"), "idempotent retry must return the stored success: {retry}");
+    assert!(retry.contains("success"), "{retry}");
+    // A different identity is a plain replay.
+    let (_, other) = verify(addr, "", &body("op-other"));
+    assert!(other.contains("already_consumed") || other.contains("timeout-or-duplicate"), "{other}");
+}
