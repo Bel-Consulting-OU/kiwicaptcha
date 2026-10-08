@@ -16,7 +16,8 @@
  * the engine version is the seed, and regeneration is idempotent.
  */
 
-import { readdirSync, readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -102,35 +103,46 @@ function scaleNote(run) {
 }
 
 /**
- * A run is stale when it predates the source it measures: a GREEN row
- * backed by a run older than the newest package/protocol source file
- * is never trusted. The comparison uses file mtimes; the margin is one
- * minute to absorb clock granularity.
+ * A run is stale when the source fingerprint it recorded no longer
+ * matches the current tree. File mtimes are not usable: git does not
+ * preserve them, so a fresh clone or CI checkout gives every file
+ * roughly the same time and nothing ever looks stale. The fingerprint
+ * is a content hash of the measured source tree (packages/protocol/
+ * integrations-platforms), recorded in the run document at generation
+ * time. Any error is treated as STALE (fail closed).
  */
-function isStaleRun(run) {
-    if (!run || !run.generated_at) return true;
-    try {
-        const runMtime = statSync(run.path).mtimeMs;
-        // The measured surface: first-party source, not test fixtures.
-        const roots = ["packages", "protocol", "integrations-platforms"];
-        let newest = 0;
-        const walk = (dir) => {
-            for (const e of readdirSync(dir, { withFileTypes: true })) {
-                if (e.name === "node_modules" || e.name === "vendor" || e.name === "target" || e.name === ".git") continue;
-                const full = join(dir, e.name);
-                if (e.isDirectory()) walk(full);
-                else if (e.isFile()) {
-                    const m = statSync(full).mtimeMs;
-                    if (m > newest) newest = m;
+function sourceFingerprint() {
+    const roots = ["packages", "protocol", "integrations-platforms"];
+    const parts = [];
+    const walk = (dir) => {
+        for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+            if (["node_modules", "vendor", "target", ".git", "deps", "build"].includes(e.name)) continue;
+            const full = join(dir, e.name);
+            if (e.isDirectory()) walk(full);
+            else if (e.isFile()) {
+                try {
+                    parts.push(e.name + ":" + createHash("sha256").update(readFileSync(full)).digest("hex"));
+                } catch {
+                    parts.push(e.name + ":unreadable");
                 }
             }
-        };
-        for (const r of roots) {
-            if (existsSync(r)) walk(r);
         }
-        return newest > runMtime + 60000;
+    };
+    for (const r of roots) {
+        if (existsSync(r)) walk(r);
+    }
+    return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
+}
+
+function isStaleRun(run) {
+    if (!run) return true;
+    try {
+        const current = sourceFingerprint();
+        const recorded = run.source_fingerprint || run.sourceFingerprint;
+        if (!recorded) return true;
+        return recorded !== current;
     } catch {
-        return false;
+        return true;
     }
 }
 
@@ -177,6 +189,9 @@ function d35Row(run) {
 
 const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
     const run = byCampaign.get(campaign);
+    if (campaign === "d3.5-credential-stuffing" && isStaleRun(run)) {
+        return `| D3.5 credential stuffing | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign. |`;
+    }
     if (campaign === "d3.5-credential-stuffing") {
         return d35Row(run);
     }
@@ -186,7 +201,7 @@ const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
 
 // The method note and the engine-loop facts (escalations and triage),
 // read from the engine's own ledger documents.
-let methodNote = "the engine ran fully offline: no local model was configured (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer";
+let methodNote = "the engine method is recorded per run (see the run documents) (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer";
 let escalationNote = "no escalation record yet";
 let triageNote = "no triage report yet";
 try {
@@ -290,7 +305,7 @@ if (costIsRich) {
         );
     }
     solveCostRows.push(
-        "| sha18 | ~4x the sha16 row (16x work, minus find cost) | native sha256, single core |",
+        "| sha18 | 4x the sha16 row (2^18 / 2^16 = 4) | native sha256, single core |",
         "| sha20 | ~16x the sha16 row | native sha256, single core |",
         "| argon16..64 | memory-hard; see the bench's own table | native argon2id, single core |",
         "| rsw | inherently sequential; no hardware class buys a parallel speedup | time-lock squaring |",

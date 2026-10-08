@@ -12,7 +12,7 @@ Recorded runs: 17
 
 ## Method note
 
-the engine ran fully offline: no local model was configured (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer
+the engine method is recorded per run (see the run documents) (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer
 
 The self-escalation mandate: run 2: no new finding this run: the synthesis escalates (combined forged-token + framing-ambiguity, synthesis budget raised to 38)
 
@@ -24,7 +24,7 @@ The closed synthesis loop: the synthesis corpus was consumed end to end: 39 cand
 | D3.2 stealth headless | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
 | D3.3 PoW farm economics | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
 | D3.4 proxy pools | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
-| D3.5 credential stuffing | compromised_valid_rate=0.3550 (threshold 0.0) cost_per_compromised_account=0.0003 (critical threshold 0.000200 usd) blocked_valid_prevented=645 | RED | measured: downscale=rows_are_100000 the_engine_is_the_real_one valid_rate=1percent corpus=10000_local verdict=FAIL cost_per_compromised_account=0.000305 critical_threshold=0.000200 compromised_valid_rate=0.3550 rate_threshold=0.0 compromised=355 valid=1000 spend_usd=0.108300; downscale stated: rows_are_100000; wall 23s |
+| D3.5 credential stuffing | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign. |
 | D3.6 token brokering | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
 | D3.7 human solver farms | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
 | D3.8 AI agents | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass. |
