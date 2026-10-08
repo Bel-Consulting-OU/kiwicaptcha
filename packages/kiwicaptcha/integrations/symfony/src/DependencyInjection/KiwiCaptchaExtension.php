@@ -32,7 +32,9 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpOwnerNotifier;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
@@ -122,6 +124,7 @@ use KiwiCaptcha\Verifier;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\DependencyInjection\ChildDefinition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
@@ -1814,9 +1817,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setPublic(true));
 
                 // The post-credential, pre-session first-attempt gate
-                // (P0-1): runs the engine pipeline on LoginSuccessEvent
-                // so novel-network / breached-credential / scope-pressure
-                // can demand step-up BEFORE the session is granted.
+                // (P0-1): runs the engine pipeline on
+                // AuthenticationTokenCreatedEvent so novel-network /
+                // breached-credential / scope-pressure can demand step-up
+                // BEFORE the token is stored. Registered only when the
+                // security component is present.
+                if (class_exists(FirstAttemptLoginGuard::TOKEN_CREATED_EVENT)) {
                 $container->setDefinition(FirstAttemptLoginGuard::class, (new Definition(FirstAttemptLoginGuard::class, [
                     new Reference(RiskGateway::class),
                     new Reference('kiwi_captcha.risk.identity_factory'),
@@ -1825,8 +1831,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$enabled', true)
+                    ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
+                }
             }
 
             // The step-up plane (risk.step_up.*): reference handlers
@@ -1856,10 +1864,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $container->setDefinition(StepUpTicket::class, (new Definition(StepUpTicket::class, [
                     $stepUpMaster,
                 ]))->setPublic(true));
+                $container->setDefinition(SessionRestorer::class, (new Definition(SessionRestorer::class, []))
+                    ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
+                    ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$logger', $loggerRef)
+                    ->setPublic(true));
+                $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
+                    ->addTag('security.voter')
+                    ->setPublic(true));
                 $container->setDefinition(StepUpCompletionCredit::class, (new Definition(StepUpCompletionCredit::class, [
                     new Reference(OutcomeReporterInterface::class),
                     $stepUpMaster,
-                ]))->setPublic(true));
+                ]))
+                    ->setArgument('$sessionRestorer', new Reference(SessionRestorer::class))
+                    ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setPublic(true));
 
                 // The cross-challenge brute-force budget: escalating
                 // lockouts per principal and target, with the owner

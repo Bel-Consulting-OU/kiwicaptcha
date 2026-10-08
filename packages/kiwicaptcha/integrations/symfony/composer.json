@@ -92,5 +92,9 @@
     }
   },
   "minimum-stability": "dev",
-  "prefer-stable": true
+  "prefer-stable": true,
+  "suggest": {
+    "symfony/security-core": "Required for the step-up plane and the first-attempt login guard (TokenInterface, voters).",
+    "symfony/security-http": "Required for AuthenticationTokenCreatedEvent (the first-attempt login guard)."
+  }
 }

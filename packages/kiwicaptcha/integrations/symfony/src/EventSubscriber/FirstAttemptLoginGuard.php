@@ -12,6 +12,7 @@ use KiwiCaptcha\Risk\RiskIdentityFactory;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
  * The post-credential, pre-session first-attempt gate (P0-1).
@@ -50,6 +51,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly bool $enabled = true,
+        private readonly ?RequestStack $requestStack = null,
     ) {
     }
 
@@ -127,6 +129,12 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
     private function replaceToken(object $event, StepUpPendingToken $token): void
     {
+        // The real AuthenticationTokenCreatedEvent API.
+        if (method_exists($event, 'setAuthenticatedToken')) {
+            $event->setAuthenticatedToken($token);
+
+            return;
+        }
         if (method_exists($event, 'setToken')) {
             $event->setToken($token);
         }
@@ -147,18 +155,24 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
     private function requestOf(object $event): ?Request
     {
+        // The real AuthenticationTokenCreatedEvent carries no request;
+        // the RequestStack is the source of truth. A duck-typed event
+        // (tests) may still expose one.
         if (method_exists($event, 'getRequest')) {
             $request = $event->getRequest();
-
-            return $request instanceof Request ? $request : null;
+            if ($request instanceof Request) {
+                return $request;
+            }
         }
 
-        return null;
+        return $this->requestStack?->getCurrentRequest();
     }
 
     private function tokenOf(object $event): ?object
     {
-        foreach (['getToken', 'getAuthenticatedToken'] as $method) {
+        // The real event API is getAuthenticatedToken(); duck-typed
+        // test events may expose getToken().
+        foreach (['getAuthenticatedToken', 'getToken'] as $method) {
             if (method_exists($event, $method)) {
                 $token = $event->{$method}();
                 if ($token !== null) {

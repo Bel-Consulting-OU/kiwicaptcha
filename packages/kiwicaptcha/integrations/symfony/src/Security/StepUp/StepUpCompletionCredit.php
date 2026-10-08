@@ -42,6 +42,8 @@ final class StepUpCompletionCredit
     public function __construct(
         private readonly OutcomeReporterInterface $reporter,
         string $master,
+        private readonly ?SessionRestorer $sessionRestorer = null,
+        private readonly ?\Symfony\Component\HttpFoundation\RequestStack $requestStack = null,
     ) {
         if (\strlen($master) < 32) {
             throw new \InvalidArgumentException('The step-up idempotency master must be at least 32 bytes (the same floor as secret_key)');
@@ -77,6 +79,12 @@ final class StepUpCompletionCredit
             );
             $creditedTarget = true;
         }
+        // Restore the wrapped token and record the network bucket so
+        // the next login from the same network is no longer novel.
+        $this->sessionRestorer?->restore(
+            $challenge->principalPseudonym,
+            $this->requestStack?->getCurrentRequest(),
+        );
 
         return StepUpResult::succeeded(true, $creditedTarget);
     }

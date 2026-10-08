@@ -117,12 +117,12 @@ final class FirstAttemptLoginGuardTest extends TestCase
                 return $this->request;
             }
 
-            public function getToken(): ?object
+            public function getAuthenticatedToken(): ?object
             {
                 return $this->token;
             }
 
-            public function setToken(object $token): void
+            public function setAuthenticatedToken(object $token): void
             {
                 $this->token = $token;
             }
@@ -166,7 +166,7 @@ final class FirstAttemptLoginGuardTest extends TestCase
         $event = $this->event();
         $guard->onTokenCreated($event);
 
-        $token = $event->getToken();
+        $token = $event->getAuthenticatedToken();
         self::assertInstanceOf(StepUpPendingToken::class, $token, 'a StepUp decision must withhold the session token');
         self::assertSame([StepUpPendingToken::ROLE], $token->getRoleNames(), 'the pending token grants only the step-up role');
     }
@@ -178,7 +178,7 @@ final class FirstAttemptLoginGuardTest extends TestCase
         $event = $this->event();
         $guard->onTokenCreated($event);
 
-        self::assertNotInstanceOf(StepUpPendingToken::class, $event->getToken(), 'an Allow decision must not touch the token');
+        self::assertNotInstanceOf(StepUpPendingToken::class, $event->getAuthenticatedToken(), 'an Allow decision must not touch the token');
     }
 
     public function testAGatewayErrorFailsClosedToThePendingToken(): void
@@ -190,7 +190,7 @@ final class FirstAttemptLoginGuardTest extends TestCase
 
         self::assertInstanceOf(
             StepUpPendingToken::class,
-            $event->getToken(),
+            $event->getAuthenticatedToken(),
             'a gate error must fail closed to the pending token, never hand out a full session',
         );
     }

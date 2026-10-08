@@ -166,16 +166,17 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             // Evaluate the gate BEFORE recording this success: a
             // record-then-check order hands every fresh session a clean
             // ratio and lets a stuffer mint session/source trust on
-            // every stolen login.
-            $credit = $this->trustGate?->allowsSessionSourceCredit($principalPseudonym, $sessionPseudonym, $targetPseudonym) === true;
+            // every stolen login. The gate reads the same normalized
+            // window key the writes use (never the un-normalized
+            // principalId), so the lanes cannot diverge.
+            $windowKey = $this->principalWindowKey($identifier) ?? $principalPseudonym;
+            $credit = $this->trustGate?->allowsSessionSourceCredit($windowKey, $sessionPseudonym, $targetPseudonym) === true;
             if ($sessionPseudonym !== null) {
                 $this->authWindow?->recordSuccess($sessionPseudonym);
             }
             if ($this->authWindow !== null) {
                 // The principal window accumulates across sessions so a
-                // cross-session stuffer cannot reset the ratio. Keyed
-                // on the same normalized target as the failure lane.
-                $windowKey = $this->principalWindowKey($identifier) ?? $principalPseudonym;
+                // cross-session stuffer cannot reset the ratio.
                 $this->authWindow->recordSuccess($windowKey);
             }
             if ($credit) {
