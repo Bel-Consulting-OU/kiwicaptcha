@@ -46,12 +46,21 @@ final class ValueClassCeiling
      *
      * @return array{0: string, 1: string} [status, detail]
      */
-    public static function verdict(string $valueClass, string $minimumAction, ?array $pricing = null): array
+    public static function verdict(string $valueClass, string $minimumAction, ?array $pricing = null, ?float $stakeUsd = null): array
     {
         $pricing ??= self::PRICING;
         $row = $pricing[$valueClass] ?? null;
         if ($row === null) {
             return ['WARN', sprintf('unknown value class "%s"; the calibrated classes are %s', $valueClass, implode(', ', array_keys($pricing)))];
+        }
+        if ($stakeUsd !== null && $stakeUsd > 0) {
+            // A per-action stake override: the value of one successful
+            // abuse of THIS action replaces the class default.
+            $row = [
+                'rung' => $row['rung'],
+                'declared_usd_per_1000' => $stakeUsd * 1000,
+                'ceiling_usd_per_1000' => $row['ceiling_usd_per_1000'],
+            ];
         }
 
         $declared = sprintf('%.5g', $row['declared_usd_per_1000']);

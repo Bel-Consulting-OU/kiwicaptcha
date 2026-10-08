@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
+use KiwiCaptcha\Risk\Asn\AsnDataset;
 use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -26,6 +27,7 @@ final class SessionRestorer
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?RequestStack $requestStack = null,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?AsnDataset $asnDataset = null,
     ) {
     }
 
@@ -39,7 +41,26 @@ final class SessionRestorer
         try {
             $token = $this->tokenStorage?->getToken();
             if ($token instanceof StepUpPendingToken) {
+                // The pending token's principal must be the one that
+                // completed the step-up: a stolen ticket for another
+                // account can never upgrade THIS session.
+                $pendingPrincipal = $token->getUserIdentifier();
+                if ($principalPseudonym !== '' && $pendingPrincipal !== ''
+                    && !hash_equals($pendingPrincipal, $principalPseudonym)) {
+                    $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');
+
+                    return;
+                }
                 $this->tokenStorage?->setToken($token->getWrapped());
+                // Rotate the session id on the privilege upgrade so a
+                // fixation captured before the step-up cannot ride the
+                // new session.
+                if ($request !== null && $request->hasSession()) {
+                    $session = $request->getSession();
+                    if ($session->isStarted()) {
+                        $session->migrate(true);
+                    }
+                }
             }
             $request ??= $this->requestStack?->getCurrentRequest();
             if ($request === null || $this->principalNetworks === null || $principalPseudonym === '') {
@@ -55,7 +76,7 @@ final class SessionRestorer
             if ($network !== '') {
                 $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network);
             }
-            $asn = self::asnBucket($ip);
+            $asn = $this->asnBucket($ip);
             if ($asn !== '') {
                 $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn);
             }
@@ -80,8 +101,15 @@ final class SessionRestorer
         return bin2hex("\x06".substr($packed, 0, 8));
     }
 
-    private static function asnBucket(string $ip): string
+    private function asnBucket(string $ip): string
     {
-        return '';
+        if ($this->asnDataset === null) {
+            return '';
+        }
+        try {
+            return $this->asnDataset->bucketId($ip);
+        } catch (\Throwable) {
+            return '';
+        }
     }
 }

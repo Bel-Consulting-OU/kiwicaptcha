@@ -125,6 +125,14 @@ final class AdaptiveRiskEngine
         private readonly ?PriceContextSourceInterface $priceContext = null,
         private readonly ?DecoyEscalationReaderInterface $decoyEscalationReader = null,
         private readonly ?AsnDataset $asnDataset = null,
+        /**
+         * Novelty enforcement mode: 'learn' (default) seeds network tags
+         * on every successful login without demanding a step-up, so a
+         * rollout never locks out existing users. 'enforce' demands
+         * step-up on a genuinely novel network. Switch to 'enforce'
+         * after the learning window.
+         */
+        private readonly string $noveltyEnforcement = 'learn',
         private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
     ) {
         // The timing configuration is validated at the construction
@@ -704,17 +712,33 @@ final class AdaptiveRiskEngine
                     $trusted = null;
                     $netSeen = null;
                 }
+                $isNovel = false;
                 if ($asnSeen === false) {
                     // Never-seen ASN: novel regardless of the /64.
-                    $novelNetwork = true;
+                    $isNovel = true;
                 } elseif ($asnSeen === true) {
                     // Known ASN: /64 novelty alone never fires.
-                    $novelNetwork = false;
+                    $isNovel = false;
                 } else {
                     // No ASN data: fall back to the /64 bucket, and to
                     // the no-trusted-network condition.
-                    $novelNetwork = ($netSeen === false) || ($trusted === false);
+                    $isNovel = ($netSeen === false) || ($trusted === false);
                 }
+                // Migration grace: in 'learn' mode a novel network is
+                // recorded but never escalates. Every existing account
+                // has no network history on the day this ships; without
+                // this window every user would be stepped up at once.
+                if ($isNovel) {
+                    try {
+                        $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, $network);
+                        if ($asn !== '' && $asn !== '0') {
+                            $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, 'asn:'.$asn);
+                        }
+                    } catch (\Throwable) {
+                        // Best effort: the tag write never breaks login.
+                    }
+                }
+                $novelNetwork = $isNovel && $this->noveltyEnforcement === 'enforce';
             }
             if (
                 $this->enableGlobalPressure

@@ -33,6 +33,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpOwnerNotifier;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
@@ -1472,6 +1473,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$metrics', new Reference('kiwi_captcha.risk.metrics'))
                 ->setArgument('$calibration', $calibrationRef)
                 ->setArgument('$enableGlobalPressure', $riskConfig['global_pressure']['enabled'])
+                ->setArgument('$noveltyEnforcement', (string) ($riskConfig['novelty_enforcement'] ?? 'learn'))
                 // The per-scope target-identifier resolver (risk.scopes.*.
                 // target_field): the engine resolves the submitted form
                 // field through the versioned normalization pipeline and
@@ -1864,12 +1866,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $container->setDefinition(StepUpTicket::class, (new Definition(StepUpTicket::class, [
                     $stepUpMaster,
                 ]))->setPublic(true));
+                $container->setDefinition(StepUpBootstrapGate::class, (new Definition(StepUpBootstrapGate::class, [
+                    (bool) ($riskConfig['step_up']['allow_signup_bootstrap'] ?? false),
+                ]))
+                    ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setPublic(true));
                 $container->setDefinition(SessionRestorer::class, (new Definition(SessionRestorer::class, []))
                     ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$logger', $loggerRef)
+                    ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn_dataset', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setPublic(true));
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')

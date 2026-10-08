@@ -167,7 +167,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         private readonly array $allowedOrigins = [],
         private readonly ?StepUpLockoutGuard $lockout = null,
         private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
-        private readonly ?string $cspNonce = null,
+        private readonly ?StepUpBootstrapGate $bootstrapGate = null,
+        private readonly ?string $cspNonce = null, // deprecated: use the per-request nonce attribute
         private readonly ?string $scriptSrc = null,
     ) {
         if (\strlen($master) < 32) {
@@ -450,8 +451,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // Strongest-factor floor: a principal that already holds a
         // security key must prove with that key to add another.
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
+        $bootstrapOk = $enrolledNow === []
+            && $this->bootstrapGate?->allowsFirstEnrollment($request) === true;
         if ($sessionId === ''
-            || !$this->store->recentSessionStepUpSuccess($sessionId, $context->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+            || (!$bootstrapOk && !$this->store->recentSessionStepUpSuccess($sessionId, $context->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now))) {
             return $this->refusal(
                 $context,
                 Response::HTTP_FORBIDDEN,
@@ -592,6 +595,12 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      * none is available (the page then relies on the external script
      * or a non-nonce CSP).
      */
+    /**
+     * The CSP nonce of the presentation. Only a PER-REQUEST nonce from
+     * the server-set attribute is honored: a static configured nonce is
+     * a single-use value reused across responses and is refused. With
+     * no per-request nonce the page uses the external-script mode.
+     */
     private function cspNonceOf(Request $request): ?string
     {
         foreach ([self::NONCE_ATTRIBUTE, self::NONCE_ATTRIBUTE_ALT] as $attribute) {
@@ -601,7 +610,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             }
         }
 
-        return $this->cspNonce !== '' ? $this->cspNonce : null;
+        // The configured static nonce is no longer honored: it is
+        // reused across responses and is not a real CSP nonce.
+        return null;
     }
 
     /** Whether the presented origin is one of the configured allowed origins. */

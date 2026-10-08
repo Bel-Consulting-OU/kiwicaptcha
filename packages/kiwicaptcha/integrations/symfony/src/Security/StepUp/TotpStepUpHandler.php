@@ -57,6 +57,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         private readonly string $master = '',
         private readonly ?StepUpLockoutGuard $lockout = null,
         private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
+        private readonly ?StepUpBootstrapGate $bootstrapGate = null,
     ) {
         if ($master === '') {
             throw new \InvalidArgumentException('The time-based handler needs the step-up master so enrollment secrets are sealed at rest; pass the same master the ticket service uses');

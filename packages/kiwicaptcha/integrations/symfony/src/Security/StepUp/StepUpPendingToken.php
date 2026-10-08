@@ -50,9 +50,16 @@ final class StepUpPendingToken implements TokenInterface
         return [self::ROLE];
     }
 
+    /**
+     * Always null: a pending token is never an authenticated session.
+     * Symfony's AuthenticatedVoter treats a token with a user as fully
+     * authenticated, so returning the real user here would open every
+     * IS_AUTHENTICATED_* route to a credential stuffer holding a
+     * pending token. The wrapped token keeps the user for the restore.
+     */
     public function getUser(): ?UserInterface
     {
-        return $this->inner->getUser();
+        return null;
     }
 
     public function setUser(UserInterface $user): void

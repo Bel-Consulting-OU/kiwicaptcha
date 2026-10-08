@@ -724,6 +724,8 @@ final class KiwiCaptchaDoctorCommand extends Command
             [$status, $detail] = ValueClassCeiling::verdict(
                 (string) ($scope['value_class'] ?? 'standard'),
                 (string) ($scope['minimum'] ?? 'allow'),
+                null,
+                isset($scope['stake_usd']) ? (float) $scope['stake_usd'] : null,
             );
             if ($status !== 'PASS') {
                 $escalations[] = sprintf('%s: %s', $name, $detail);

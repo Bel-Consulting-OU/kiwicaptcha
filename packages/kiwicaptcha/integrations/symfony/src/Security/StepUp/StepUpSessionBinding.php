@@ -28,6 +28,9 @@ final class StepUpSessionBinding
     /** The request attribute carrying the session id of this request. */
     public const SESSION_ATTRIBUTE = '_kiwi_step_up_session';
 
+    /** The POST field a stateless client carries the per-challenge secret in. */
+    public const CLIENT_SECRET_FIELD = 'kiwi_step_up_client_secret';
+
     private function __construct()
     {
     }
@@ -71,6 +74,16 @@ final class StepUpSessionBinding
      * challenge, whatever the challenge recorded: the binding fails
      * closed rather than degenerating to a principal-only check.
      */
+    /**
+     * Whether the request may complete the challenge. Two bindings are
+     * accepted, both fail-closed:
+     *
+     * 1. Session binding: the completing session's hash equals the
+     *    challenge's recorded session hash.
+     * 2. Stateless binding: the request carries the challenge's own
+     *    client secret (a per-challenge value the begin response
+     *    returns), for API clients and SPAs that cannot hold a session.
+     */
     public static function matches(Request $request, StepUpChallenge $challenge): bool
     {
         $bound = $request->attributes->get(self::ATTRIBUTE);
@@ -79,6 +92,14 @@ final class StepUpSessionBinding
         }
         if (!hash_equals($challenge->principalPseudonym, $bound)) {
             return false;
+        }
+        // Stateless path: the per-challenge client secret.
+        if ($challenge->clientSecret !== null && $challenge->clientSecret !== '') {
+            $presented = $request->request->get(self::CLIENT_SECRET_FIELD, '');
+            if (\is_string($presented) && $presented !== ''
+                && hash_equals($challenge->clientSecret, $presented)) {
+                return true;
+            }
         }
         $requestSession = self::sessionId($request);
         if ($requestSession === '') {

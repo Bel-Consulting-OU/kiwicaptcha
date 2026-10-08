@@ -34,6 +34,12 @@ final class StepUpChallenge
         public readonly ?string $codeHash,
         public readonly ?string $ceremony = null,
         public readonly ?string $sessionHash = null,
+        /**
+         * A per-challenge client secret for stateless callers (API
+         * clients, SPAs) that cannot carry a session cookie. The
+         * completer echoes it back instead of a session binding.
+         */
+        public readonly ?string $clientSecret = null,
         public readonly bool $targetOwned = false,
     ) {
     }
@@ -94,11 +100,17 @@ final class StepUpChallenge
             $codeHash,
             $ceremony,
             self::sessionHash($sessionId),
+            self::clientSecret(),
             $targetOwned && $targetPseudonym !== null,
         );
     }
 
-    /** The keyed hash of a session id (never the raw id on the wire). */
+    /** A per-challenge client secret: 32 hex chars, never the session. */
+    public static function clientSecret(): string
+    {
+        return bin2hex(random_bytes(16));
+    }
+
     public static function sessionHash(?string $sessionId): ?string
     {
         if ($sessionId === null || $sessionId === '') {
@@ -135,6 +147,7 @@ final class StepUpChallenge
             $this->codeHash,
             $this->ceremony,
             $this->sessionHash,
+            $this->clientSecret,
             $this->targetOwned,
         );
     }
@@ -168,6 +181,7 @@ final class StepUpChallenge
             'code_hash' => $this->codeHash,
             'ceremony' => $this->ceremony,
             'session_hash' => $this->sessionHash,
+            'client_secret' => $this->clientSecret,
             'target_owned' => $this->targetOwned,
         ];
     }
@@ -230,24 +244,31 @@ final class StepUpChallenge
             if (!\is_string($sessionHash) || preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
                 throw $fail('session_hash must be a 64-char lowercase hex digest');
             }
-            $challenge = new self(
-                $challenge->id,
-                $challenge->kind,
-                $challenge->principalPseudonym,
-                $challenge->targetPseudonym,
-                $challenge->scope,
-                $challenge->returnPath,
-                $challenge->reason,
-                $challenge->createdAt,
-                $challenge->expiresAt,
-                $challenge->maxAttempts,
-                $challenge->attempts,
-                $challenge->codeHash,
-                $challenge->ceremony,
-                $sessionHash,
-                $challenge->targetOwned,
-            );
         }
+        $clientSecret = $record['client_secret'] ?? null;
+        if ($clientSecret !== null) {
+            if (!\is_string($clientSecret) || preg_match('/^[0-9a-f]{32}$/D', $clientSecret) !== 1) {
+                throw $fail('client_secret must be a 32-char lowercase hex digest');
+            }
+        }
+        $challenge = new self(
+            $challenge->id,
+            $challenge->kind,
+            $challenge->principalPseudonym,
+            $challenge->targetPseudonym,
+            $challenge->scope,
+            $challenge->returnPath,
+            $challenge->reason,
+            $challenge->createdAt,
+            $challenge->expiresAt,
+            $challenge->maxAttempts,
+            $challenge->attempts,
+            $challenge->codeHash,
+            $challenge->ceremony,
+            $sessionHash,
+            $clientSecret,
+            $challenge->targetOwned,
+        );
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
             throw $fail('attempts must be an integer within 0..max_attempts');

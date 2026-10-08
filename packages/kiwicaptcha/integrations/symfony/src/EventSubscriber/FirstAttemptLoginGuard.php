@@ -71,25 +71,41 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             return;
         }
         try {
-            $request = $this->requestOf($event);
             $token = $this->tokenOf($event);
-            if ($request === null || $token === null) {
+            if ($token === null || $token instanceof StepUpPendingToken) {
                 return;
             }
-            if ($token instanceof StepUpPendingToken) {
+            // Scope: only interactive (form/login) authenticators. A
+            // remember-me or stateless API token must never be swapped
+            // for a pending token the client cannot complete.
+            if (!$this->isInteractiveAuthenticator($event)) {
+                return;
+            }
+            $request = $this->requestOf($event);
+            if ($request === null) {
+                // Fail closed: without a request there is no IP to
+                // assess and no way to justify a full session.
+                $this->withhold($event, $token, 'no_request');
+
                 return;
             }
             $identifier = $this->tokenIdentifier($token);
             if ($identifier === null || $identifier === '') {
+                $this->withhold($event, $token, 'unresolvable_identifier');
+
                 return;
             }
             $principal = $this->identityFactory->principalId($identifier);
             $ip = $this->resolveIp($request);
             if ($ip === '') {
+                $this->withhold($event, $token, 'empty_client_ip');
+
                 return;
             }
             $decision = $this->gateway->loginDecision($this->scope, $ip, null, $principal, null);
             if ($decision === null) {
+                $this->withhold($event, $token, 'no_decision');
+
                 return;
             }
             if ($decision->action === RiskAction::Deny || $decision->action === RiskAction::StepUp) {
@@ -115,6 +131,59 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
                 // Last resort: the original token stands, but the error
                 // is already alerted through the log.
             }
+        }
+    }
+
+    /** Withhold the session with a named reason (always logged). */
+    private function withhold(object $event, object $token, string $reason): void
+    {
+        $this->logger?->warning('kiwi first-attempt gate withholds the session', [
+            'scope' => $this->scope,
+            'reason' => $reason,
+        ]);
+        if ($token instanceof StepUpPendingToken) {
+            return;
+        }
+        $this->replaceToken($event, new StepUpPendingToken($token));
+    }
+
+    /**
+     * Whether the event's authenticator is an interactive login. The
+     * passport's auth class tells us: UsernamePassword / FormLogin are
+     * interactive; RememberMe and JWT/Token authenticators are not.
+     */
+    private function isInteractiveAuthenticator(object $event): bool
+    {
+        if (!method_exists($event, 'getPassport')) {
+            // A duck-typed event (tests) is treated as interactive so
+            // the guard still exercises its logic.
+            return true;
+        }
+        try {
+            $passport = $event->getPassport();
+            if ($passport === null) {
+                return false;
+            }
+            $authClass = method_exists($passport, 'getAuthClass') ? (string) $passport->getAuthClass() : '';
+            if ($authClass === '') {
+                return true;
+            }
+            $interactive = [
+                'form_login',
+                'form_login_ldap',
+                'json_login',
+                'json_login_ldap',
+                'http_basic',
+                'http_basic_ldap',
+                'x509',
+                'remote_user',
+            ];
+
+            return \in_array(strtolower($authClass), $interactive, true);
+        } catch (\Throwable) {
+            // Unknown passport shape: treat as interactive (the gate
+            // is the conservative path).
+            return true;
         }
     }
 
