@@ -150,8 +150,13 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         $now = $this->now();
         $hasSecret = $this->store->findTotpSecret($principalPseudonym) !== null;
         $minFactor = $hasSecret ? 'totp' : 'email_otp';
+        // First enrollment only: a re-enroll always needs a completed
+        // step-up with the current factor. The bootstrap grant is
+        // single-use, session-scoped and expires after 15 minutes.
+        $bootstrapOk = !$hasSecret
+            && $this->bootstrapGate?->allowsFirstEnrollment(null, $principalPseudonym) === true;
         if ($sessionId === ''
-            || !$this->store->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+            || (!$bootstrapOk && !$this->store->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now))) {
             throw new \RuntimeException(
                 $hasSecret
                     ? 'Re-enrolling the time-based passcode needs a step-up completed in this session with the current factor first.'

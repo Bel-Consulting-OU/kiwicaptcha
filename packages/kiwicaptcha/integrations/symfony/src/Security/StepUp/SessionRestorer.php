@@ -23,13 +23,13 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
 final class SessionRestorer
 {
     public function __construct(
+        private readonly RiskIdentityFactory $identityFactory,
         private readonly ?TokenStorageInterface $tokenStorage = null,
         private readonly ?PrincipalNetworkTagStoreInterface $principalNetworks = null,
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?RequestStack $requestStack = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly ?AsnDataset $asnDataset = null,
-        private readonly ?RiskIdentityFactory $identityFactory = null,
     ) {
     }
 
@@ -50,9 +50,7 @@ final class SessionRestorer
                 // challenge carries the 32-hex principal pseudonym.
                 // Compare like with like or every restore fails.
                 $pendingRaw = $token->getUserIdentifier();
-                $pendingPrincipal = $this->identityFactory !== null
-                    ? $this->identityFactory->principalId($pendingRaw)
-                    : $pendingRaw;
+                $pendingPrincipal = $this->identityFactory->principalId($pendingRaw);
                 if ($principalPseudonym !== '' && $pendingPrincipal !== ''
                     && !hash_equals($pendingPrincipal, $principalPseudonym)) {
                     $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');

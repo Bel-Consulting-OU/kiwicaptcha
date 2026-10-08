@@ -168,7 +168,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         private readonly ?StepUpLockoutGuard $lockout = null,
         private readonly ?StepUpOwnerNotifier $ownerNotifier = null,
         private readonly ?StepUpBootstrapGate $bootstrapGate = null,
-        private readonly ?string $cspNonce = null, // deprecated: use the per-request nonce attribute
+        // The static CSP nonce is gone: only a per-request nonce from the
+        // server-set attribute is honored, otherwise external-script mode.
         private readonly ?string $scriptSrc = null,
     ) {
         if (\strlen($master) < 32) {
@@ -518,7 +519,12 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $sessionId = $boundSessionId !== '' ? $boundSessionId : StepUpSessionBinding::sessionId($request);
         $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
-        if (!$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
+        // The grant is consumed at enrollBegin; the completion honors
+        // it too, so a bootstrap enrollment cannot die at the finish
+        // line. A session proof also satisfies this check.
+        $bootstrapOk = $this->bootstrapGate?->allowsFirstEnrollment($request, $challenge->principalPseudonym) === true;
+        if (!$bootstrapOk
+            && !$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
             $this->store->consume($challenge->id);
 
             return StepUpResult::failed('step_up_enrollment_requires_session_step_up', $challenge->id);
@@ -612,6 +618,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
         // The configured static nonce is no longer honored: it is
         // reused across responses and is not a real CSP nonce.
+        // The configured static nonce is no longer honored.
         return null;
     }
 

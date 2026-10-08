@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
+use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 
@@ -18,26 +20,43 @@ use Symfony\Component\HttpFoundation\Request;
 final class StepUpBootstrapGateTest extends TestCase
 {
     private const PRINCIPAL = '00112233445566778899aabbccddeeff';
+    private const RAW_IDENTIFIER = 'user@example.com';
+
+    private function identity(): RiskIdentityFactory
+    {
+        return new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x42", 32)));
+    }
+
+    private function gate(): StepUpBootstrapGate
+    {
+        return new StepUpBootstrapGate(true, null, $this->identity());
+    }
+
+    /** The engine pseudonym of the raw identifier (the spelling the handlers carry). */
+    private function pseudonym(): string
+    {
+        return $this->identity()->principalId(self::RAW_IDENTIFIER);
+    }
 
     public function testTheGrantIsSingleUseAndSessionScoped(): void
     {
-        $gate = new StepUpBootstrapGate(true);
+        $gate = $this->gate();
         $request = $this->request('grant-session-00000000000000001');
-        $gate->grant($request, self::PRINCIPAL);
+        $gate->grant($request, self::RAW_IDENTIFIER);
 
-        self::assertTrue($gate->allowsFirstEnrollment($request, self::PRINCIPAL), 'the granted session may enroll');
-        self::assertFalse($gate->allowsFirstEnrollment($request, self::PRINCIPAL), 'the grant is one-time: a second attempt is refused');
+        self::assertTrue($gate->allowsFirstEnrollment($request, $this->pseudonym()), 'the granted session may enroll');
+        self::assertFalse($gate->allowsFirstEnrollment($request, $this->pseudonym()), 'the grant is one-time: a second attempt is refused');
 
         // Another session of the same principal: never (session-scoped).
         $other = $this->request('grant-session-00000000000000002');
-        self::assertFalse($gate->allowsFirstEnrollment($other, self::PRINCIPAL));
+        self::assertFalse($gate->allowsFirstEnrollment($other, $this->pseudonym()));
     }
 
     public function testTheGrantIsBoundToThePrincipal(): void
     {
-        $gate = new StepUpBootstrapGate(true);
+        $gate = $this->gate();
         $request = $this->request('grant-session-00000000000000001');
-        $gate->grant($request, self::PRINCIPAL);
+        $gate->grant($request, self::RAW_IDENTIFIER);
 
         self::assertFalse(
             $gate->allowsFirstEnrollment($request, 'ffeeddccbbaa99887766554433221100'),
@@ -45,7 +64,7 @@ final class StepUpBootstrapGateTest extends TestCase
         );
         // The refusal does not consume the grant: the right principal
         // can still use it.
-        self::assertTrue($gate->allowsFirstEnrollment($request, self::PRINCIPAL));
+        self::assertTrue($gate->allowsFirstEnrollment($request, $this->pseudonym()));
     }
 
     /**
@@ -99,5 +118,35 @@ final class StepUpBootstrapGateTest extends TestCase
         $request->setSession($session);
 
         return $request;
+    }
+
+    public function testTheRawIdentifierAndThePseudonymMayDiffer(): void
+    {
+        // The bug class: grant() takes the raw identifier (an email the
+        // signup flow verified), while the enrollment path carries the
+        // engine's 32-hex pseudonym. The gate pseudonymizes internally
+        // so the two spellings can never disagree.
+        $gate = $this->gate();
+        $request = $this->request('grant-session-00000000000000003');
+        $gate->grant($request, self::RAW_IDENTIFIER);
+        $pseudonym = $this->pseudonym();
+        self::assertNotSame(self::RAW_IDENTIFIER, $pseudonym, 'the test premise: raw and pseudonym differ');
+        self::assertTrue(
+            $gate->allowsFirstEnrollment($request, $pseudonym),
+            'grant(raw) must authorize the matching pseudonym',
+        );
+    }
+
+    public function testTheGrantExpiresAfterFifteenMinutes(): void
+    {
+        $gate = $this->gate();
+        $request = $this->request('grant-session-00000000000000004');
+        $gate->grant($request, self::RAW_IDENTIFIER);
+        // Age the grant past the TTL.
+        $session = $request->getSession();
+        $grant = $session->get('_kiwi_signup_bootstrap_grant');
+        $grant['expires'] = time() - 1;
+        $session->set('_kiwi_signup_bootstrap_grant', $grant);
+        self::assertFalse($gate->allowsFirstEnrollment($request, $this->pseudonym()), 'an expired grant is refused');
     }
 }
