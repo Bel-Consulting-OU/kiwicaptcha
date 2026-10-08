@@ -270,9 +270,17 @@ test.describe('KiwiCaptcha standalone provider shims', () => {
     const verified = await request.post('/verify', { data: { token, scope: 'login' } });
     expect((await verified.json()).ok, 'the shim token must redeem on the real endpoint').toBe(true);
 
-    // reset clears the response, then execute re-solves a fresh token.
-    await page.evaluate((id) => window.grecaptcha.reset(id), await page.evaluate(() => window.shimId));
-    await expect(page.locator('textarea#g-recaptcha-response')).toHaveValue('');
+    // Capture the cleared fields in the reset call: this visible widget
+    // auto-solves again, so a later locator poll can see the fresh token.
+    const cleared = await page.evaluate((id) => {
+      window.grecaptcha.reset(id);
+      return {
+        response: document.getElementById('g-recaptcha-response').value,
+        token: document.querySelector('#shim-box input[name="kiwi__token"]').value,
+        api: window.grecaptcha.getResponse(id),
+      };
+    }, await page.evaluate(() => window.shimId));
+    expect(cleared).toEqual({ response: '', token: '', api: '' });
     const second = await page.evaluate(async (id) => {
       const next = await window.grecaptcha.execute(id);
       return { next, after: window.grecaptcha.getResponse(id) };

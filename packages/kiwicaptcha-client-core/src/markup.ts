@@ -1,5 +1,6 @@
 import type { KiwiRenderOptions } from "./types.js";
 import { KIWI_TOKEN_FIELD_NAME } from "./types.js";
+import { KIWI_MARK_PATHS } from "./brand.js";
 
 /**
  * The canonical widget markup, built by the client and completed by the
@@ -67,16 +68,28 @@ export function buildKiwiMarkup(doc: Document, options: KiwiRenderOptions): Kiwi
   widget.setAttribute("data-kiwi-widget", "");
   widget.setAttribute("data-state", "idle");
   widget.setAttribute("role", "group");
-  widget.setAttribute("aria-label", "Security Check");
+  widget.setAttribute("aria-label", "KiwiCaptcha security check");
   for (const [name, value] of widgetAttributes(options)) {
     widget.setAttribute(name, value);
   }
 
   const icon = doc.createElement("div");
   icon.className = "kiwi-icon-wrapper";
+  icon.setAttribute("aria-hidden", "true");
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 64 64");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "6.6");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
+  for (const geometry of KIWI_MARK_PATHS) {
+    const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", geometry);
+    svg.appendChild(path);
+  }
   icon.appendChild(svg);
 
   const main = doc.createElement("div");
@@ -109,7 +122,7 @@ export function buildKiwiMarkup(doc: Document, options: KiwiRenderOptions): Kiwi
   const info = doc.createElement("p");
   info.className = "kiwi-info";
   info.setAttribute("data-kiwi-info", "");
-  info.textContent = "Protected";
+  info.textContent = "Protected by KiwiCaptcha";
   const timer = doc.createElement("span");
   timer.className = "kiwi-timer";
   timer.setAttribute("data-kiwi-timer", "");
@@ -122,6 +135,12 @@ export function buildKiwiMarkup(doc: Document, options: KiwiRenderOptions): Kiwi
 
   widget.appendChild(icon);
   widget.appendChild(main);
+  const status = doc.createElement("span");
+  status.className = "kiwi-sr-only";
+  status.setAttribute("data-kiwi-status", "");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  widget.appendChild(status);
   container.appendChild(widget);
 
   return { container, widget, tokenInput };

@@ -229,6 +229,10 @@ describe("markup builder", () => {
     const m = buildKiwiMarkup(doc, { tokenFieldName: "my_token" });
     expect(m.tokenInput.name).toBe("my_token");
     expect(m.widget.querySelector("svg")).not.toBeNull();
+    expect(m.widget.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 64 64");
+    expect(m.widget.querySelectorAll("svg path")).toHaveLength(2);
+    expect(m.widget.querySelectorAll('[data-kiwi-status][role="status"]')).toHaveLength(1);
+    expect(m.widget.querySelector(".kiwi-icon-wrapper")?.getAttribute("aria-hidden")).toBe("true");
     expect(getKiwiCaptcha(doc)).toBeNull();
   });
 });

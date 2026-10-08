@@ -99,6 +99,9 @@ export const SOURCE_FILE_PATHS = [
   'tools/client-perf/measurement-sources.mjs',
   'tools/client-perf/canonical-json.mjs',
   'tests/browser/router.php',
+  // The fixture renders the packaged primary mark, so these bytes are
+  // a served input and must travel with every immutable measurement.
+  'packages/kiwicaptcha/resources/kiwi-mark.svg',
   // The intended Node dependency version (the lockfile) and the package
   // manifest: a tracked Playwright bump must change the measurement
   // identity even before the installed tree is considered.

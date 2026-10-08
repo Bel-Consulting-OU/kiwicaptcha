@@ -44,6 +44,12 @@ responseField, execution, tokenFieldName, buildMarkup.
 
 ## Tests
 
+The markup builder includes the shared Spiral Lock geometry and a
+widget-local status announcer. `theme: "light"` and `theme: "dark"` pin
+the widget palette independently of the host page or OS theme; `"auto"`
+follows the page's `data-theme` attribute or the OS preference. Load the
+shared `widget.css` with the driver as usual.
+
 `npm test` runs the vitest suite under happy-dom with a faithful mock
 of the driver surface (render/reset/execute/getResponse/remove/
 isExpired/destroy plus the kiwi:* events): 21 tests cover the loader,
