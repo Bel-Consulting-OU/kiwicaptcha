@@ -1490,6 +1490,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // per protection profile.
                 ->setArgument('$marksReader', $marksReaderRef)
                 ->setArgument('$priceContext', $priceContextRef)
+                // The network-novelty surfaces of the first-attempt
+                // gate: the principal's established-network tags (the
+                // optional seam an application registers as
+                // kiwi_captcha.risk.principal_networks) and the ASN
+                // dataset, so "seen from this network" is judged the
+                // same way the step-up session restore records it.
+                ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                 // The decoy-escalation reader (change.md 3.2.2): the
                 // engine's post-marks escalation stage consults the
                 // session's live record through this reader; the stage
@@ -1877,7 +1885,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$logger', $loggerRef)
-                    ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn_dataset', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$identityFactory', new Reference('kiwi_captcha.risk.identity_factory'))
                     ->setPublic(true));
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')
@@ -2013,6 +2022,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $stepUpScope,
                 ]))
                     ->setArgument('$principalResolver', $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null)
+                    ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->addTag('controller.service_arguments')
                     ->setPublic(true));
             }

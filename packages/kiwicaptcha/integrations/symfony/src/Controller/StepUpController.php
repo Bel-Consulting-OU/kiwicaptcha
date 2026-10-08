@@ -10,6 +10,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use Symfony\Component\HttpFoundation\RedirectResponse;
@@ -58,12 +59,13 @@ final class StepUpController
         private readonly RiskIdentityFactory $identityFactory,
         private readonly string $scope,
         private readonly ?PrincipalResolverInterface $principalResolver = null,
+        private readonly ?\Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface $tokenStorage = null,
     ) {
     }
 
     public function begin(Request $request): Response
     {
-        $rawPrincipal = $this->principalResolver?->resolve($request, $this->scope);
+        $rawPrincipal = $this->unwrapPendingToken($request);
         if ($rawPrincipal === null || $rawPrincipal === '') {
             return self::plain('No principal is resolvable for this request; step-up is refused.', Response::HTTP_FORBIDDEN);
         }
@@ -105,7 +107,7 @@ final class StepUpController
         // at begin(), and the handler refuses a challenge that belongs
         // to anyone else. A request with no resolvable principal can
         // complete nothing.
-        $rawPrincipal = $this->principalResolver?->resolve($request, $this->scope);
+        $rawPrincipal = $this->unwrapPendingToken($request);
         if ($rawPrincipal === null || $rawPrincipal === '') {
             return self::plain('No principal is resolvable for this request; step-up completion is refused.', Response::HTTP_FORBIDDEN);
         }
@@ -136,6 +138,36 @@ final class StepUpController
             StepUpResultStatus::Pending => 'That code was not accepted; try again with the current code.',
             default => 'This verification can no longer be completed; begin a fresh challenge.',
         }, self::statusOf($result));
+    }
+
+    /**
+     * The raw principal of the request, resolved through the wired
+     * resolver with a pending token temporarily unwrapped.
+     *
+     * A {@see StepUpPendingToken} deliberately answers null from
+     * getUser() (a pending session must never pass IS_AUTHENTICATED_*
+     * checks), so the typical application resolver — $security->getUser()
+     * — resolves nothing and step-up would be refused to exactly the
+     * users who need it. The wrapped token is therefore exposed to the
+     * resolver for the duration of this resolution only, then the
+     * pending token is put back: a begin, or a failed complete, never
+     * upgrades the session. Only a completed factor does, through
+     * {@see StepUpSessionBinding} and the session restorer.
+     */
+    private function unwrapPendingToken(Request $request): ?string
+    {
+        $token = $this->tokenStorage?->getToken();
+        $pending = $token instanceof StepUpPendingToken ? $token : null;
+        if ($pending !== null) {
+            $this->tokenStorage?->setToken($pending->getWrapped());
+        }
+        try {
+            return $this->principalResolver?->resolve($request, $this->scope);
+        } finally {
+            if ($pending !== null) {
+                $this->tokenStorage?->setToken($pending);
+            }
+        }
     }
 
     /**

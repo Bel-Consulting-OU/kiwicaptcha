@@ -452,7 +452,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // security key must prove with that key to add another.
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
         $bootstrapOk = $enrolledNow === []
-            && $this->bootstrapGate?->allowsFirstEnrollment($request) === true;
+            && $this->bootstrapGate?->allowsFirstEnrollment($request, $context->principalPseudonym) === true;
         if ($sessionId === ''
             || (!$bootstrapOk && !$this->store->recentSessionStepUpSuccess($sessionId, $context->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now))) {
             return $this->refusal(
@@ -735,6 +735,13 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             'expires_in' => $expiresIn,
             'complete_path' => $this->completePath,
         ];
+        // A stateless begin (no session) also returns its one-time
+        // client secret — the only channel that ever carries the
+        // plaintext.
+        $clientSecret = $challenge->issuedClientSecret();
+        if ($clientSecret !== null && $clientSecret !== '') {
+            $document['client_secret'] = $clientSecret;
+        }
         if ($context->mode === StepUpContext::MODE_JSON) {
             $body = (string) json_encode($document, JSON_UNESCAPED_SLASHES);
 
@@ -745,6 +752,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $ticketField = htmlspecialchars(self::TICKET_FIELD, ENT_QUOTES);
         $ticketValue = htmlspecialchars($ticket, ENT_QUOTES);
         $credentialField = htmlspecialchars(self::CREDENTIAL_FIELD, ENT_QUOTES);
+        $secretInput = $clientSecret !== null && $clientSecret !== ''
+            ? '<input type="hidden" name="'.htmlspecialchars(StepUpSessionBinding::CLIENT_SECRET_FIELD, ENT_QUOTES).'" value="'.htmlspecialchars($clientSecret, ENT_QUOTES).'">'
+            : '';
         // The ceremony script runs under a strict script-src either as
         // an external same-origin file (script_src configured) or as an
         // inline block carrying the configured CSP nonce.
@@ -770,6 +780,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             <p id="kiwi-webauthn-status" role="alert" style="color:#b00020"></p>
             <form method="post" action="{$action}" id="kiwi-webauthn-form">
             <input type="hidden" name="{$ticketField}" value="{$ticketValue}">
+            {$secretInput}
             <input type="hidden" name="{$credentialField}" id="kiwi-webauthn-credential">
             <button type="submit">Continue</button>
             </form>

@@ -1,0 +1,2245 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      redis_url:
+        description: Redis URL the manual hard-ratchet benchmark runs against (defaults to the local instance)
+        required: false
+        default: redis://127.0.0.1:6399
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          # The toolchain is pinned explicitly: the repo
+          # rust-toolchain.toml also pins 1.96.0, which makes the action
+          # install it directly instead of resolving a rolling stable.
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # Both build trees: the root workspace and the standalone
+          # wasm crate (excluded from the workspace, its own target
+          # directory).
+          workspaces: |
+            . -> target
+            packages/kiwicaptcha-wasm -> packages/kiwicaptcha-wasm/target
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: quick-start end-to-end
+        # The public quick-start is an executable behavioral test
+        # (issue -> solve -> verify -> VerifyOutcome::Valid): cargo test
+        # --workspace only compiles examples; this step runs the
+        # example's #[test], so a broken quick-start can never ship.
+        run: cargo test -p kiwicaptcha --example quickstart
+      - name: wasm32 build
+        # kiwicaptcha-wasm is a standalone crate (not a workspace member), so
+        # the build runs from its own directory.
+        working-directory: packages/kiwicaptcha-wasm
+        run: cargo build --target wasm32-unknown-unknown
+      - name: cargo audit (dependency/security)
+        # cargo-audit is pinned to an exact tested version and the install
+        # fails closed (no `|| true` falling back to a pre-existing
+        # binary) — a security gate must be deterministic.
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
+
+  quick-start:
+    # The public quick-start is an executable behavioral test
+    # (issue -> solve -> verify -> VerifyOutcome::Valid) and is a
+    # standalone job: the protected-main ruleset requires it as an
+    # independent status context — a step inside the Rust job never emits
+    # a check run, so PRs could wait forever on a phantom
+    # "quick-start end-to-end" context.
+    name: quick-start end-to-end
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - name: quick-start end-to-end
+        run: cargo test -p kiwicaptcha --example quickstart
+
+  workflow-lint:
+    # A malformed workflow (duplicate `on:`) can break the release
+    # pipeline while ordinary CI stays green. CI lints its own
+    # configuration: actionlint (pinned Docker tag) validates every
+    # workflow on every push, and this job is a required status check on
+    # main, so a config regression fails CI instead of silently disabling
+    # the release system.
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # actionlint 1.7.12, digest-pinned
+        with:
+          args: -color
+
+  php:
+    name: PHP ${{ matrix.php }} core
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          # uses: steps ignore the job's defaults.run.working-directory.
+          working-directory: packages/kiwicaptcha-php
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+
+      - name: composer audit (dependency/security)
+        # Packagist's security-advisories API is occasionally flaky
+        # (502s/timeouts). The audit retries with backoff and only then
+        # fails closed — a transient packagist outage must not block
+        # unrelated CI (or the release gate), while a genuinely failing
+        # audit still blocks.
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if composer audit --locked; then
+              exit 0
+            fi
+            echo "composer audit attempt $i failed — retrying in 30s" >&2
+            sleep 30
+          done
+          echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
+          exit 1
+      - name: phpunit
+        run: vendor/bin/phpunit
+
+  php-nightly:
+    # Non-gating forward-compatibility probe on the PHP 8.6 development
+    # line: setup-php v2.37.2 maps `nightly` to 8.6, the current
+    # pre-release branch (no stable 8.6 entry exists in its version
+    # map yet; switch the pin to '8.6' when the first stable release
+    # lands). Deliberately NOT in the protected-main required-check
+    # set, mirroring the Redis 8 compatibility lane: a nightly core may
+    # change behavior before 8.6 stabilizes, and this lane surfaces
+    # that drift as a visible warning instead of blocking the release
+    # gate. The stable 8.5 lane above is the gating evidence; this lane
+    # is aspirational.
+    name: PHP 8.6 nightly core (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: 'nightly'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+      - name: phpunit
+        run: vendor/bin/phpunit
+
+  php-matrix:
+    # Stable aggregator over the PHP core version matrix (8.1..8.5): the
+    # protected-main ruleset requires ONE stable context ("PHP core
+    # supported-matrix") instead of the per-version cells, so a future
+    # matrix expansion cannot silently change the externally visible
+    # required-check names. The gate reads the matrix aggregate result,
+    # which GitHub computes from the per-cell results with the worst
+    # first ordering: failure, then cancelled, then skipped, then
+    # success. The whitelist below accepts exactly `success`: anything
+    # else — a failed cell, a cancelled cell or a skipped cell — exits
+    # 1. A lane that is legitimately non-applicable must itself execute
+    # a deterministic no-op/pass rather than being skipped (nothing in
+    # this workflow is path-filtered today, so no lane is ever skipped;
+    # a future path filter must keep that contract). The job runs even
+    # when a cell failed, via the `if: always()`. The 8.6 nightly lane
+    # is deliberately NOT in `needs`: it is non-gating by design and
+    # must stay outside the required evidence.
+    name: PHP core supported-matrix
+    needs: [php]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: every required PHP core cell succeeded
+        run: |
+          set -euo pipefail
+          case '${{ needs.php.result }}' in
+            success)
+              echo "PHP core supported-matrix OK: every required cell succeeded"
+              ;;
+            skipped)
+              echo "::error::PHP core supported-matrix: a required cell was skipped — a lane that is non-applicable must execute a deterministic no-op/pass, never skip"
+              exit 1
+              ;;
+            *)
+              echo "::error::PHP core supported-matrix: a required matrix cell failed or was cancelled"
+              exit 1
+              ;;
+          esac
+
+  php-no-gmp:
+    # The GMP optionality proof: this lane installs PHP without ext-gmp
+    # (the distro php-cli carries openssl and sodium as built-ins; the
+    # Ubuntu 24.04 distro ships no separate php-openssl or php-sodium
+    # packages), proves the premise with a dedicated step, and then
+    # runs tools/ci/no-gmp-verify.php, which exercises the whole
+    # non-RSW surface through the public API (sha256 issue+verify,
+    # argon2id issue+verify, execution issue+verify at the live grammar
+    # maximum) and asserts an rsw configuration refuses cleanly with
+    # the documented missing-extension error. The script prints one
+    # pass line per check and exits non-zero on any failure.
+    name: PHP core no-GMP
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: install the distro php without ext-gmp
+        run: >-
+          sudo apt-get update -qq &&
+          sudo apt-get install -y -qq
+          php-cli
+          php-mbstring
+          php-xml
+          php-zip
+          php-curl
+          php-bcmath
+          composer
+      - name: disable ext-gmp for no-GMP proof
+        # The ubuntu-latest runner image preinstalls a PHP that already
+        # enables ext-gmp, which would shadow the distro install and
+        # silently defeat the lane's premise. The distro php-cli has no
+        # gmp loaded by default, but the guard is required defense:
+        # phpdismod turns the extension off for the cli sapi (it also
+        # reports a non-zero exit when no ini enables it, hence the
+        # `|| true`), and the probe then fails the lane loudly if gmp
+        # is still loaded.
+        run: |
+          set -euo pipefail
+          sudo phpdismod -s cli gmp || true
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r 'if (extension_loaded("gmp")) { fwrite(STDERR, "ext-gmp is still loaded after phpdismod\n"); exit(1); }'
+      - name: prove required built-ins are loaded and ext-gmp is absent
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '
+            foreach (["openssl", "sodium"] as $extension) {
+                if (!extension_loaded($extension)) {
+                    fwrite(STDERR, "$extension missing\n");
+                    exit(1);
+                }
+            }
+          '
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r 'exit(extension_loaded("gmp") ? 1 : 0);'
+      - name: composer validate
+        run: composer validate --strict
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: composer PSR-4 layout check
+        run: bash ../kiwicaptcha/tools/check-psr4.sh
+      - name: no-GMP surface proof
+        run: php ../../tools/ci/no-gmp-verify.php
+
+  symfony:
+    name: Symfony bundle (container + KernelBrowser)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Explicit PHP pairs per Symfony line: each lane runs the
+          # PHP the line is tested against upstream. 8.5 pairs with
+          # the 8.x line only, mirroring the previous 8.4 pairing:
+          # the 6.4 lane stays on its supported line (Symfony 6.4 is
+          # tested through PHP 8.4), and the 7.x lane keeps the
+          # original 8.2 pairing.
+          - symfony: '6.4'
+            php: '8.2'
+          - symfony: '7.x'
+            php: '8.2'
+          - symfony: '8.x'
+            php: '8.4'
+          - symfony: '8.x'
+            php: '8.5'
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha/integrations/symfony
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: ${{ matrix.php }}
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+      - name: composer audit (dependency/security)
+        # Retry wrapper: packagist's advisories API is
+        # occasionally flaky; fail closed only after 5 attempts.
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if composer audit --locked; then
+              exit 0
+            fi
+            echo "composer audit attempt $i failed — retrying in 30s" >&2
+            sleep 30
+          done
+          echo "composer audit failed after 5 attempts (packagist unreachable or real advisories)" >&2
+          exit 1
+      - name: pin Symfony 8.x
+        # Only the five declared packages are pinned: --with requires the
+        # temporary constraint to be a subset of composer.json, and the
+        # transitive packages (config, dependency-injection, twig-bridge,
+        # routing, cache, property-info, error-handler) resolve to the
+        # correct 8.1 line automatically when the direct deps are pinned
+        # (unlike the 6.4 lane, whose older validator forces explicit
+        # transitive pins to prevent 8.x transitive drift).
+        if: matrix.symfony == '8.x'
+        run: composer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*
+      - name: pin Symfony 6.4
+        if: matrix.symfony == '6.4'
+        # `--with` (temporary constraints) is required: a wildcard
+        # `composer update "symfony/*:6.4.*"` does NOT constrain anything.
+        # The transitive packages (property-info, error-handler) are also
+        # pinned — Symfony 6.4's validator loader is incompatible with the
+        # 8.x line they would otherwise resolve to.
+        run: composer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.* --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*
+      - name: phpunit (container compilation + KernelBrowser + router)
+        run: vendor/bin/phpunit
+
+  symfony-matrix:
+    # Stable aggregator over the Symfony bundle matrix (6.4/8.2,
+    # 7.x/8.2, 8.x/8.4, 8.x/8.5): the protected-main ruleset requires
+    # ONE stable context ("Symfony supported-matrix") instead of the
+    # per-cell names, so a future matrix expansion cannot silently
+    # change the externally visible required-check names. The gate
+    # reads the matrix aggregate result, which GitHub computes from the
+    # per-cell results with the worst first ordering: failure, then
+    # cancelled, then skipped, then success. The whitelist below
+    # accepts exactly `success`: anything else — a failed cell, a
+    # cancelled cell or a skipped cell — exits 1. A lane that is
+    # legitimately non-applicable must itself execute a deterministic
+    # no-op/pass rather than being skipped (nothing in this workflow is
+    # path-filtered today, so no lane is ever skipped; a future path
+    # filter must keep that contract). The job runs even when a cell
+    # failed, via the `if: always()`.
+    name: Symfony supported-matrix
+    needs: [symfony]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: every required Symfony matrix cell succeeded
+        run: |
+          set -euo pipefail
+          case '${{ needs.symfony.result }}' in
+            success)
+              echo "Symfony supported-matrix OK: every required cell succeeded"
+              ;;
+            skipped)
+              echo "::error::Symfony supported-matrix: a required cell was skipped — a lane that is non-applicable must execute a deterministic no-op/pass, never skip"
+              exit 1
+              ;;
+            *)
+              echo "::error::Symfony supported-matrix: a required matrix cell failed or was cancelled"
+              exit 1
+              ;;
+          esac
+
+  redis:
+    name: Real-Redis concurrency (consumed transitions, leases, rate limits)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha/integrations/symfony
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+      - name: real-redis integration tests
+        # The lane owns the bundle real-Redis suites AND the protocol-v3
+        # upgrade walk (the walk class name does not match the RealRedis
+        # filter); KIWI_REQUIRE_REAL_REDIS_TESTS=1 makes the walk fail
+        # instead of skip when the Redis env is lost.
+        env:
+          KC_REDIS_URL: tcp://127.0.0.1:6379
+          TEST_REDIS_URL: tcp://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
+
+  docker-reference-deployment:
+    # The deploy/ reference image must build and run as the audit
+    # demands. This lane builds the image, boots the compose stack
+    # (Valkey + captcha) and walks the full sequence against the real
+    # storage. The sequence: /healthz until 200, POST /challenge, a
+    # SHA-256 solve inside the container, POST /verify success and the
+    # replay rejection of the same token. Then a captcha restart,
+    # /healthz again and a second issue/solve/verify against the
+    # persistent Valkey volume. The secret is a fresh random value
+    # written to deploy/.env in the lane (gitignored), so the repo
+    # test credentials are never touched.
+    name: Docker reference deployment e2e
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: docker build the deploy image
+        run: docker build -f deploy/Dockerfile -t kiwicaptcha/reference-deployment .
+      - name: write a fresh random secret to deploy/.env
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'KIWI_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" > .env
+          printf 'KIWI_SHA_TARGET_BITS=8\n' >> .env
+          # The Valkey requirepass credential of the compose stack: a
+          # fresh random value, generated once here and preserved by
+          # every later .env rewrite in this lane.
+          printf 'VALKEY_PASSWORD=%s\n' "$(openssl rand -hex 16)" >> .env
+      - name: docker compose up (valkey + captcha)
+        working-directory: deploy
+        run: docker compose up -d
+      - name: retry /healthz until 200
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs captcha
+          echo "healthz never answered 200 within 120s" >&2
+          exit 1
+      - name: POST /challenge and capture the challenge document
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/challenge.json -X POST -H 'Content-Type: application/json' \
+            -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+      - name: solve the SHA-256 proof inside the captcha container
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          docker compose cp /tmp/challenge.json captcha:/tmp/challenge.json
+          docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge.json > /tmp/token.txt
+          test -s /tmp/token.txt
+          printf '%s' "$(tr -d '\r\n' < /tmp/token.txt)" > /tmp/token-clean.txt
+      - name: POST /verify with the solved token (success)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          TOKEN="$(cat /tmp/token-clean.txt)"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/verify1.json
+          php -r 'exit(json_decode(file_get_contents("/tmp/verify1.json"), true)["ok"] === true ? 0 : 1);'
+      - name: POST the same /verify again (replay rejection)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          TOKEN="$(cat /tmp/token-clean.txt)"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/replay.json
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '$d = json_decode(file_get_contents("/tmp/replay.json"), true); exit($d["ok"] === false && $d["code"] === "already_consumed" ? 0 : 1);'
+      - name: F1 algorithm-ownership table (sha256 profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          challenge_row() {  # $1 = request body; asserts a 200 challenge
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+              -d "$1" http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+          }
+          challenge_row '{"scope":"login"}'
+          grep -q '"algorithm":"sha256"' /tmp/f1-challenge.json
+          challenge_row '{"scope":"login","algorithm":"sha256"}'
+          grep -q '"algorithm":"sha256"' /tmp/f1-challenge.json
+          # The field stays accepted but only validated: a nonsense value
+          # is refused with a 422 before any issuance.
+          STATUS="$(curl -sS -o /tmp/f1-invalid.json -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"scope":"login","algorithm":"nonsense"}' \
+            http://127.0.0.1:8080/challenge)"
+          test "$STATUS" = "422"
+          grep -q '"code":"INVALID_ALGORITHM"' /tmp/f1-invalid.json
+      - name: F1 algorithm-ownership table (argon2id profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+          test -n "$SECRET"
+          test -n "$VALKEY_PASSWORD"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'KIWI_ALGORITHM=argon2id\n'
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt under the argon2id profile"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+          for body in '{"scope":"login"}' '{"scope":"login","algorithm":"argon2id"}' \
+            '{"scope":"login","algorithm":"sha256"}'; do
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+            grep -q '"algorithm":"argon2id"' /tmp/f1-challenge.json
+          done
+      - name: F1 algorithm-ownership table (rsw profile rows)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          test -n "$SECRET"
+          # The committed rsw fixture pair (packages/kiwicaptcha-php
+          # tests/Support/RswFixture.php) supplies the trapdoor values
+          # for the CI-only profile rows; the container's php reads them.
+          docker compose cp ../packages/kiwicaptcha-php/tests/Support/RswFixture.php \
+            captcha:/tmp/RswFixture.php
+          MODULUS_N="$(docker compose exec -T captcha php -r \
+            'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;')"
+          LAMBDA="$(docker compose exec -T captcha php -r \
+            'require "/tmp/RswFixture.php"; echo \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;')"
+          test -n "$MODULUS_N"
+          test -n "$LAMBDA"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+          test -n "$VALKEY_PASSWORD"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'KIWI_ALGORITHM=rsw\n'
+            printf 'KIWI_RSW_MODULUS_N=%s\n' "$MODULUS_N"
+            printf 'KIWI_RSW_LAMBDA=%s\n' "$LAMBDA"
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt under the rsw profile"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+          for body in '{"scope":"login","algorithm":"sha256"}' \
+            '{"scope":"login","algorithm":"argon2id"}'; do
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f1-challenge.json
+            grep -q '"algorithm":"rsw"' /tmp/f1-challenge.json
+          done
+      - name: "F1 table done: restore the default sha256 profile"
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          SECRET="$(sed -n 's/^KIWI_SECRET_KEY=//p' .env | head -1)"
+          VALKEY_PASSWORD="$(sed -n 's/^VALKEY_PASSWORD=//p' .env | head -1)"
+          test -n "$SECRET"
+          test -n "$VALKEY_PASSWORD"
+          {
+            printf 'KIWI_SECRET_KEY=%s\n' "$SECRET"
+            printf 'KIWI_SHA_TARGET_BITS=8\n'
+            printf 'VALKEY_PASSWORD=%s\n' "$VALKEY_PASSWORD"
+          } > .env
+          docker compose up -d --force-recreate captcha
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt after the profile restore"
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200"
+      - name: F2 request-binding table (real /verify, one challenge per row)
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          issue() {  # $1 = issue binding (empty = unbound)
+            local body='{"scope":"login"}'
+            if [ -n "$1" ]; then
+              body="{\"scope\":\"login\",\"request_binding\":\"$1\"}"
+            fi
+            curl -fsS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/challenge > /tmp/f2-challenge.json
+            docker compose cp /tmp/f2-challenge.json captcha:/tmp/f2-challenge.json
+            docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \
+              /tmp/f2-challenge.json > /tmp/f2-token.txt
+            test -s /tmp/f2-token.txt
+            tr -d '\r\n' < /tmp/f2-token.txt > /tmp/f2-token-clean.txt
+            sleep 0.15
+          }
+          verify() {  # $1 = presented binding (empty = absent)
+            local token
+            token="$(cat /tmp/f2-token-clean.txt)"
+            local body="{\"token\":\"$token\",\"scope\":\"login\"}"
+            if [ -n "$1" ]; then
+              body="{\"token\":\"$token\",\"scope\":\"login\",\"request_binding\":\"$1\"}"
+            fi
+            curl -sS -X POST -H 'Content-Type: application/json' -d "$body" \
+              http://127.0.0.1:8080/verify > /tmp/f2-verify.json
+          }
+          # Issue bound to txn-A, verify with txn-A -> success.
+          issue txn-A
+          verify txn-A
+          grep -q '"ok":true' /tmp/f2-verify.json
+          # Issue bound to txn-A, verify with txn-B -> request_binding_mismatch.
+          issue txn-A
+          verify txn-B
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          # Issue bound to txn-A, verify with no binding -> request_binding_mismatch.
+          issue txn-A
+          verify ''
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          # Issue unbound, verify with no binding -> success.
+          issue ''
+          verify ''
+          grep -q '"ok":true' /tmp/f2-verify.json
+          # Issue unbound, verify with txn-A -> request_binding_mismatch.
+          # The mismatch is the core verifier's own hard cheap-phase
+          # verdict, which retires the pending record (one-shot
+          # anti-oracle semantics): the same token is then gone.
+          issue ''
+          verify txn-A
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          verify ''
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"record_not_found"' /tmp/f2-verify.json
+          # Correct binding, second redemption -> already_consumed.
+          issue txn-A
+          verify txn-A
+          grep -q '"ok":true' /tmp/f2-verify.json
+          verify txn-A
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"already_consumed"' /tmp/f2-verify.json
+          # One-shot row: a wrong-binding attempt is a hard cheap-phase
+          # verdict that retires the pending record, so the same token
+          # can never be re-tried against the correct binding. The
+          # pinned core outcome of the corrected retry is
+          # record_not_found (verified locally against the real core on
+          # PHP 8.5: the mismatch answers first, then the record is
+          # gone). No adapter-level preflight may keep the record
+          # alive for a free retry oracle.
+          issue txn-A
+          verify txn-B
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"request_binding_mismatch"' /tmp/f2-verify.json
+          verify txn-A
+          grep -q '"ok":false' /tmp/f2-verify.json
+          grep -q '"code":"record_not_found"' /tmp/f2-verify.json
+      - name: restart the captcha container
+        working-directory: deploy
+        run: docker compose restart captcha
+      - name: retry /healthz after the restart
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "healthz answered 200 on attempt $attempt after the restart"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs captcha
+          echo "healthz never answered 200 after the restart" >&2
+          exit 1
+      - name: issue, solve and verify again against the persistent store
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/challenge2.json -X POST -H 'Content-Type: application/json' \
+            -d '{"scope":"login"}' http://127.0.0.1:8080/challenge
+          docker compose cp /tmp/challenge2.json captcha:/tmp/challenge2.json
+          docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > /tmp/token2.txt
+          TOKEN2="$(tr -d '\r\n' < /tmp/token2.txt)"
+          test -n "$TOKEN2"
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"token\":\"$TOKEN2\",\"scope\":\"login\"}" \
+            http://127.0.0.1:8080/verify | tee /tmp/verify2.json
+          php -r 'exit(json_decode(file_get_contents("/tmp/verify2.json"), true)["ok"] === true ? 0 : 1);'
+      - name: docker compose down
+        if: always()
+        working-directory: deploy
+        run: docker compose down
+        # The compose file interpolates its required variables with :?
+        # for every command, so a teardown after an early failure (the
+        # docker build step runs before deploy/.env is written) would
+        # abort on the first missing variable and mask the real error.
+        # compose down only removes containers and networks; dummy
+        # values keep it working without any real credential. Both :?
+        # variables are covered: the valkey requirepass (VALKEY_PASSWORD)
+        # and the app secret (KIWI_SECRET_KEY) — either one alone still
+        # fails interpolation when deploy/.env does not exist yet.
+        env:
+          VALKEY_PASSWORD: ci-teardown
+          KIWI_SECRET_KEY: ci-teardown
+
+  php-core-real-redis:
+    # The real-Redis fault/topology/death coverage of the PHP core
+    # must actually RUN in CI: the default PHP core matrix lanes have
+    # no Redis service and no `KC_REDIS_URL`/`TEST_REDIS_URL`, so the
+    # four real-Redis suites they reach would silently skip. This
+    # dedicated required lane publishes the Redis env AND the
+    # KIWI_REQUIRE_REAL_REDIS_TESTS=1 flag: the suites fail instead of
+    # skipping when the Redis service, the redis-server/redis-cli
+    # binaries or the pcntl/posix extensions are missing, so a future
+    # change that breaks real failover boundary behavior,
+    # worker-death recovery, Sentinel/Cluster behavior or the
+    # two-phase protocol transition fails this required context
+    # instead of staying green on skipped tests.
+    name: PHP core real-Redis fault/topology
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: pcntl, posix, json, openssl, sodium
+          coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install local redis binaries (topology suites)
+        # The cluster and sentinel suites boot their own redis-server
+        # processes from the binaries on `PATH`, and the ubuntu-latest
+        # runner image does not ship them, so the lane installs the apt
+        # packages. The apt postinst starts a systemd redis on 6379,
+        # which would fight the docker service published on the same
+        # port: the service is stopped right away, leaving the binaries
+        # for the suites.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y redis-server redis-tools
+          sudo systemctl stop redis-server || true
+      - name: real-redis tooling preflight
+        # The suites fail on a missing piece only when the run reaches
+        # them; this preflight fails the lane loudly and immediately
+        # when redis-server/redis-cli or the pcntl/posix extensions are
+        # missing, so a broken runner image can never no-op the lane.
+        run: |
+          set -euo pipefail
+          command -v redis-server >/dev/null || { echo "::error::redis-server is missing on PATH" >&2; exit 1; }
+          command -v redis-cli >/dev/null || { echo "::error::redis-cli is missing on PATH" >&2; exit 1; }
+          php -r 'if (!extension_loaded("pcntl") || !extension_loaded("posix")) { fwrite(STDERR, "pcntl/posix missing\n"); exit(1); } echo "pcntl/posix OK\n";'
+      - name: install Symfony bundle vendor (cluster semaphore tests)
+        # The cluster suite's RedisAdmissionSemaphore tests run the
+        # bundle's real semaphore against the live cluster; without the
+        # bundle vendor they skip (the keyslot tests cover the key
+        # shapes instead). The lane installs the vendor so every test
+        # of the four real-Redis suites runs — the lane's fail-on-skip
+        # contract is that a missing piece fails the lane, never that a
+        # test silently no-ops.
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: real-Redis fault/topology/death suites
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          TEST_REDIS_URL: redis://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+
+  phpredis-siteverify:
+    # The Siteverify idempotency store and the invalid-secret log gate
+    # accept both Predis and native PhpRedis, so the \Redis branch
+    # (Redis::eval with the array-argument form) is validated here. This
+    # required lane runs the Siteverify + idempotency suites with the
+    # phpredis extension loaded and smokes the \Redis branch of the
+    # idempotency store directly against the real Redis container.
+    name: PhpRedis Siteverify (idempotency + log gate, real Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+          # The Siteverify suites hard-code tcp://127.0.0.1:6399 (repo
+          # convention: docker run -d -p 6399:6379 redis:7-alpine) — the
+          # PhpRedis smoke and SiteVerify(Concurrency)Test need that host
+          # port; the container port stays 6379 like every other lane.
+          - 6399:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.3'
+          extensions: redis, json, openssl, sodium
+          coverage: none
+      - name: install PHP core (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (cached)
+        # predis is a DEV dependency of the bundle (composer.json
+        # require-dev) — the install brings it without an explicit require.
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: verify phpredis extension is loaded
+        run: php -r 'if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";'
+      - name: phpredis idempotency-store smoke (real Redis, \Redis branch)
+        # The Siteverify suites construct Predis clients explicitly and the
+        # store branches on the client type — this smoke proves the \Redis
+        # branch (Redis::eval with the array-argument form) against the
+        # real Redis at 127.0.0.1:6399 before the suites run.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: |
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '
+            require "vendor/autoload.php";
+            $r = new \Redis();
+            $r->connect("127.0.0.1", 6399);
+            $r->ping();
+            $store = new BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisSiteVerifyIdempotencyStore($r);
+            $backendId = hash("sha256", "smoke-secret");
+            $uuid = "8f2a1c3e-4b5d-4e6f-9a0b-1c2d3e4f5a6b";
+            $key = "{kiwi:kiwicaptcha}:siteverify-idem:" . $backendId . ":" . $uuid;
+            $r->del($key);
+            // The writer identity must be canonical (64-hex response
+            // hash, no-ip|64-hex fingerprint): the store refuses a
+            // non-canonical claim before any write.
+            $responseHash = hash("sha256", "smoke-response");
+            [$claim, $owner] = $store->claim($backendId, $uuid, $responseHash, 60, "no-ip");
+            if ($claim !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::Claimed || !is_string($owner)) {
+                fwrite(STDERR, "first claim was not CLAIMED\n"); exit(1);
+            }
+            $store->finalize($backendId, $uuid, $responseHash, $owner, ["success" => true, "challenge_ts" => null, "hostname" => null]);
+            [$claim2, $owner2] = $store->claim($backendId, $uuid, $responseHash, 60, "no-ip");
+            if ($claim2 !== BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim::CompleteSame || $owner2 !== null) {
+                fwrite(STDERR, "re-claim was not COMPLETE_SAME\n"); exit(1);
+            }
+            // The operation-bound acceptance read: the exact operation
+            // identity, classified in one atomic script.
+            $lookup = $store->storedForOperation($backendId, $uuid, $responseHash, "no-ip", "");
+            if ($lookup->kind !== BelConsulting\KiwiCaptchaBundle\SiteVerify\StoredLookupKind::CompleteSame
+                || ($lookup->result["success"] ?? null) !== true
+            ) {
+                fwrite(STDERR, "stored canonical response missing\n"); exit(1);
+            }
+            $r->del($key);
+            echo "OK\n";
+          '
+      - name: siteverify + idempotency suites (real Redis)
+        # The smoke above already proved the \Redis branch of the
+        # idempotency store; this step runs the full Siteverify +
+        # concurrency coverage once (the standard Symfony lane owns the
+        # full-suite regression run).
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        run: vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
+
+  redis-compat:
+    # Non-gating forward-compatibility probe against newer Redis (8.x,
+    # digest-pinned): the risk real-Redis suites (Rust and PHP), the
+    # PHP core real-Redis suites and the Symfony real-Redis suites all
+    # run against the Redis 8 service, so future Redis behavior
+    # changes surface as visible warnings while the release gate keeps
+    # testing the deterministic pinned Redis 7 digest. Deliberately
+    # NOT in the protected-main required-check set; the reference
+    # deployment ships Valkey 8, so this lane is the coherence bridge
+    # to the 8.x line.
+    name: Redis 8 compatibility (non-gating)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    services:
+      redis:
+        image: redis@sha256:344e3945a0b431c8ff1eecd58c5573538126bd756f02fc7e218ddf1fc2546366 # Redis 8.x (digest of the redis:8 tag as of 2026-08-15)
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - name: risk Rust real-Redis suite on Redis 8
+        env:
+          RISK_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, pcntl, posix, json, openssl, sodium
+          coverage: none
+      - name: install local redis binaries (PHP core topology suites)
+        # The PHP core cluster and sentinel suites boot their own
+        # redis-server processes from the binaries on `PATH`; the apt
+        # postinst starts a systemd redis on 6379 which would fight the
+        # docker service published on the same port, so it is stopped
+        # right away, leaving the binaries for the suites.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y redis-server redis-tools
+          sudo systemctl stop redis-server || true
+      - name: risk PHP real-Redis suite on Redis 8 (cached install)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
+      - name: risk PHP real-Redis suite on Redis 8
+        working-directory: packages/kiwicaptcha-risk-php
+        env:
+          RISK_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit
+      - name: install PHP core (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: PHP core real-Redis fault/topology/death suites on Redis 8
+        # The same four suites the required Redis 7 lane runs, against
+        # the Redis 8 service; KIWI_REQUIRE_REAL_REDIS_TESTS=1 fails
+        # instead of skipping when the Redis env or the local binaries
+        # are missing.
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          TEST_REDIS_URL: redis://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+      - name: install Symfony bundle (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: Symfony real-Redis suite on Redis 8
+        # The real-Redis bundle suites and the protocol-v3 upgrade walk
+        # against the Redis 8 service, mirroring the required Redis 7
+        # concurrency lane's filter and env.
+        working-directory: packages/kiwicaptcha/integrations/symfony
+        env:
+          KC_REDIS_URL: tcp://127.0.0.1:6379
+          TEST_REDIS_URL: tcp://127.0.0.1:6379
+          KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+        run: vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
+
+  risk-rust:
+    name: Risk Rust (fmt, clippy, test + Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test (incl. real-Redis suite)
+        env:
+          RISK_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test
+
+  risk-php:
+    name: Risk PHP (phpunit + Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-risk-php
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
+      - name: phpunit (incl. real-Redis suite)
+        env:
+          RISK_REDIS_URL: tcp://127.0.0.1:6379
+        run: vendor/bin/phpunit
+
+  risk-parity:
+    # Protocol parity, not score parity: the shared fixture hash covers the
+    # contract scores, the HKDF identity keys, canonical IP encoding and
+    # IPv4-mapped normalization, subnet masking, the ephemeral pseudonyms
+    # (session included, from the decoded cookie bytes) and the deployment
+    # namespace derivation, so a representation split between the two
+    # implementations fails here.
+    name: Risk parity (Rust == PHP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer install (cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-risk-php
+      - name: PHP protocol parity hash
+        working-directory: packages/kiwicaptcha-risk-php
+        run: php tools/fixture_hash.php
+      - name: Rust protocol parity hash
+        working-directory: packages/kiwicaptcha-risk
+        run: cargo run --example fixture_hash
+      - name: assert identical protocol parity hashes
+        working-directory: packages/kiwicaptcha-risk
+        run: |
+          PHP_HASH=$(cd ../kiwicaptcha-risk-php && php tools/fixture_hash.php)
+          RUST_HASH=$(cargo run --quiet --example fixture_hash)
+          echo "php=$PHP_HASH rust=$RUST_HASH"
+          test "$PHP_HASH" = "$RUST_HASH"
+
+  browser:
+    name: Native browser runtime (solver + lifecycle, Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
+        with:
+          node-version: '22'
+      - name: install PHP core (fixture server, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (real ApiJsController for the compat endpoints, cached)
+        # The fixture router serves /kiwi-captcha/api.js and
+        # /kiwi-captcha/widget.css through the real bundle controller: the
+        # bundle vendor must exist so the production code path (not a
+        # hard-coded concat) is what the browser tests exercise.
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: cache the Playwright Chromium browser
+        # Keyed on the committed lockfile, so a Playwright bump
+        # reinstalls and an ordinary push reuses the engine bytes; the
+        # install step below still runs and is a cheap no-op on a hit.
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
+      - name: install Playwright
+        working-directory: tests/browser
+        run: |
+          # npm ci installs exactly the committed package-lock.json
+          # (reproducible browser-suite deps).
+          npm ci --no-audit --no-fund
+          npx playwright install chromium
+      - name: run browser tests
+        working-directory: tests/browser
+        run: npx playwright test
+      - name: adversarial measurement-freeze corpus
+        # The client-performance experiment is frozen
+        # at startup (immutable snapshot of every benchmark-defining
+        # source) and every acceptance mutation that changes an authority
+        # — an opcode remap, a trace-name change, a router
+        # reinterpretation, an Argon fixture envelope change — must
+        # refuse inherited evidence, while the excluded qualification
+        # page must not. The runtime cases start the real harness,
+        # mutate the tree mid-cell, and require a contamination abort (or
+        # the frozen bytes recorded) with no completion marker.
+        run: node tools/client-perf/test-measurement-freeze.mjs
+      - name: certifiable-run authority gates
+        # An occupied fixture port is a hard refusal; a --no-fixture run
+        # (external fixture, including a fake server that serves
+        # byte-identical assets while reinterpreting bits) can never be
+        # promoted or indexed; an in-process run can never be indexed; a
+        # run executed through the frozen launcher from a detached
+        # worktree of the committed bytes is certifiable, and a
+        # working-tree mutation while it runs never reaches its recorded
+        # identity.
+        run: node tools/client-perf/test-authority-gates.mjs
+
+
+  # The accessibility acceptance suite and the curated cross-browser
+  # critical-path suite run across Chromium + Firefox + WebKit
+  # (playwright.a11y.config.mjs). This is a required status check —
+  # three-engine evidence is part of the AA conformance claim.
+  browser-a11y:
+    name: Browser accessibility + cross-browser (Chromium + Firefox + WebKit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (node24)
+        with:
+          node-version: '22'
+      - name: install PHP core (fixture server, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (real controllers for the fixture, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: cache the Playwright browser engines
+        # All three engines keyed on the committed lockfile; the
+        # install step below still runs and is a cheap no-op on a hit.
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3, SHA-pinned
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-all-engines-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
+      - name: install Playwright + all three engines
+        working-directory: tests/browser
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium firefox webkit
+      - name: run WCAG + cross-browser suite (three engines)
+        working-directory: tests/browser
+        run: npx playwright test --config=playwright.a11y.config.mjs
+
+  n1-compat:
+    # N-1 compatibility evidence for the capability header: the lane
+    # adds the last revision that predates Kiwi-Execution-Max-Version
+    # (b32ec01e) as a git worktree and boots its own fixture server
+    # plus its real ChallengeController, then drives the current
+    # widget's request shapes against that frozen backend. The foreign
+    # capability header must be ignored (HTTP 200, op_version 1), a
+    # foreign body field must still answer 422 with error code
+    # `UNKNOWN_FIELDS` (the strict closed body set is why the
+    # capability rides a header, never a body field), and a headerless
+    # request must keep issuing version-1 programs. No Redis service is
+    # needed: the frozen fixture mints with ArrayStorage and temp
+    # files. The current backend's side of the rectangle stays owned
+    # by the browser and Symfony lanes.
+    name: N-1 compatibility (frozen previous release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # The lane adds the frozen revision as a git worktree, so
+          # this checkout must carry the full history.
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: add the frozen revision as a worktree
+        run: |
+          git -C "$GITHUB_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
+          git -C "$GITHUB_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
+      - name: N-1 compatibility (frozen previous release)
+        run: bash tools/ci/n1-compat.sh /tmp/kiwi-n1
+      - name: remove the frozen worktree
+        if: always()
+        run: git -C "$GITHUB_WORKSPACE" worktree remove --force /tmp/kiwi-n1
+
+  repo-sanity:
+    # Semantic repository/release sanity gate: a mechanically valid
+    # release pipeline must never sign and attest the wrong product
+    # content. Checks the product identity of the `README`, the Cargo
+    # package, the Composer packages and the release asset names.
+    name: Repo semantic sanity (product identity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+        with:
+          # Full history: the baseline-integrity step resolves its
+          # comparison base (the PR base / the push's previous head) from
+          # the repository, and the docs-lint scan covers workflow prose,
+          # so a shallow checkout would make the base unresolvable.
+          fetch-depth: 0
+      - name: product identity checks
+        run: |
+          set -euo pipefail
+          KIWI_HDR='# KiwiCaptcha'
+          APEX_HDR='# ApexM''ail'
+          grep -q "^$KIWI_HDR" README.md || { echo "README is not the KiwiCaptcha README" >&2; exit 1; }
+          if grep -q "^$APEX_HDR" README.md; then echo "README contains the wrong product header" >&2; exit 1; fi
+          grep -q 'packages/kiwicaptcha' README.md || { echo "README lost the package references" >&2; exit 1; }
+          grep -q '"name": "bel-consulting/kiwicaptcha-symfony"' packages/kiwicaptcha/integrations/symfony/composer.json || { echo "bundle composer name wrong" >&2; exit 1; }
+          grep -q '^name = "kiwicaptcha"' packages/kiwicaptcha/Cargo.toml || { echo "Cargo package name wrong" >&2; exit 1; }
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            test -f "packages/kiwicaptcha-wasm/assets/$asset" || { echo "missing release asset $asset" >&2; exit 1; }
+          done < packages/kiwicaptcha-wasm/release-assets.txt
+          test -f tests/browser/compat-capabilities.json || { echo "missing capability matrix" >&2; exit 1; }
+          # The packages/ hierarchy is the only source root — top-level
+          # mirrors must never reappear (they diverged in
+          # security-adjacent source before removal).
+          for d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do
+            test ! -d "$d" || { echo "duplicate source root $d/ exists — packages/ is canonical" >&2; exit 1; }
+          done
+          echo "product identity OK"
+      - name: accessibility documents must be byte-identical
+        # The canonical accessibility document lives in the WASM package;
+        # the Symfony bundle ships a packaged copy that must never drift
+        # from it (the conformance claim is a single canonical text).
+        run: |
+          set -euo pipefail
+          cmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \
+            packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md \
+            || { echo "ACCESSIBILITY.md drift: packages/kiwicaptcha-wasm/ACCESSIBILITY.md and packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md differ — the packaged Symfony copy must stay byte-identical to the canonical WASM document" >&2; exit 1; }
+          echo "accessibility documents byte-identical"
+      - name: Install gawk (deterministic prose lint)
+        run: sudo apt-get update && sudo apt-get install -y gawk
+
+      - name: docs-lint adoption-manifest one-shot tests
+        # The adoption manifest's one-shot semantics (an entry applies
+        # once, is consumed when its path lands, and never re-adopts a
+        # reintroduced path) are behavior, not convention — this step
+        # runs the shell-level test suite against throwaway
+        # baselines/manifests before the lint steps enforce them.
+        run: sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
+
+      - name: error-code parity (PHP enum vs Rust code() mapping)
+        # The cross-language wire-vocabulary drift gate: parses the PHP
+        # VerifyError enum's case values and greps the Rust core's
+        # code() mapping, failing on any PHP code without a Rust twin
+        # (outside the script's documented-divergence table). A
+        # handwritten Rust-side list cannot detect PHP-side drift; this
+        # reads both sources directly.
+        run: sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
+
+      - name: docs-lint (prose lint, baseline ratchet)
+        # Baseline ratchet: the committed baseline
+        # (packages/kiwicaptcha/tools/docs-lint-baseline.txt) is tracked
+        # and intentionally reduced over time; this step fails when any
+        # scanned file exceeds its per-file row (a scanned file without
+        # a row counts as a new file with baseline 0) or the total
+        # exceeds the baseline total. Scan roots: the five kiwicaptcha
+        # package families, the browser test suite under tests/browser,
+        # the design docs under protocol/, the workflow prose under
+        # .github/workflows/, and the product root files `README.md` and
+        # `SECURITY.md` (root-level roots are scanned only when present).
+        # After deliberate rewrites, --update-baseline regenerates the
+        # per-file baseline; once it reaches zero, advisory mode is
+        # removed.
+        run: |
+          set -euo pipefail
+          bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
+      - name: docs-lint (prose lint, baseline integrity)
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        # The comparison base is the PR base branch or the push's
+        # previous head, so a whole proposed change may only decrease the
+        # baseline; a single-commit comparison is insufficient. The
+        # committed baseline must be monotonic against the base baseline:
+        # every tracked path's row may only stay equal or decrease (a
+        # path dropped from the baseline is a deletion and is fine), a
+        # path newly tracked by the current baseline is allowed only when
+        # adopted in packages/kiwicaptcha/tools/docs-lint-adopted.txt,
+        # and the total may only stay equal or decrease. Regeneration
+        # with --update-baseline may only reduce the rows, so a scan that
+        # needs headroom must be fixed by a rewrite, never by
+        # regenerating the baseline. The adoption manifest is one-shot:
+        # every entry must be absent from the base baseline, and an entry
+        # that already has a row there is stale (its adoption landed) and
+        # fails the step, forcing its removal. The step-level gate runs
+        # the comparison only on push and pull_request, the events with
+        # a defined base; a workflow_dispatch has no base commit, so a
+        # manual run skips this step instead of failing on it. Within
+        # the gated events an unresolvable base still fails closed: a
+        # baseline that cannot be compared cannot be trusted.
+        run: |
+          set -euo pipefail
+          # The comparison base is resolved from the explicit event
+          # context only: a pull_request compares against its base branch
+          # head, a push against the previous head. The step-level gate
+          # above keeps this step off workflow_dispatch and every other
+          # event with no defined base, so the fallback below is a
+          # defensive guard: it fails closed with a clear message
+          # instead of silently comparing against an arbitrary commit
+          # (an environment-variable probe with unconditional parent
+          # fallbacks could compare a single-commit window and
+          # understate a whole change).
+          case "${{ github.event_name }}" in
+            pull_request)
+              BASE_SHA="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              BASE_SHA="${{ github.event.before }}"
+              ;;
+            *)
+              echo "::error::baseline-integrity requires a pull_request or push event context (got ${{ github.event_name }}); no comparison base is defined"
+              exit 1
+              ;;
+          esac
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            # A push with no readable 'before' (a tag push or a new
+            # branch push — GitHub reports the zero SHA) still has a
+            # defined comparison base: the pushed commit's parent. The
+            # tag-triggered CI run is the release pipeline's gate, so
+            # this path must stay comparable, never skipped.
+            BASE_SHA="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+            if [ -z "$BASE_SHA" ]; then
+              echo "::error::baseline-integrity cannot run: the push carries no 'before' and HEAD has no parent (a root commit has no comparison base)"
+              exit 1
+            fi
+            echo "note: no 'before' in the event context — comparing against the parent $BASE_SHA"
+          fi
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::error::baseline-integrity cannot run: base $BASE_SHA is not readable in this checkout"
+            exit 1
+          fi
+          if ! git cat-file -e "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" 2>/dev/null; then
+            echo "::error::baseline-integrity cannot run: no baseline file at the base $BASE_SHA"
+            exit 1
+          fi
+          git show "$BASE_SHA:packages/kiwicaptcha/tools/docs-lint-baseline.txt" > /tmp/base-baseline.txt
+          # Adoption one-shot enforcement: every entry must be absent
+          # from the base baseline; an entry with a row there is stale
+          # and fails the step, forcing its removal from the manifest.
+          while IFS= read -r entry; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"
+            entry="${entry%%#*}"
+            entry="${entry%"${entry##*[![:space:]]}"}"
+            [ -n "$entry" ] || continue
+            if awk -v p="$entry" '!/^TOTAL[ \t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then
+              echo "::error::stale adoption manifest entry: $entry already has a row in the base baseline; remove it from packages/kiwicaptcha/tools/docs-lint-adopted.txt"
+              exit 1
+            fi
+          done < packages/kiwicaptcha/tools/docs-lint-adopted.txt
+          bash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt
+
+  release-contract:
+    # Release governance semantic gate, required like its repo-sanity
+    # neighbors: the release asset contract (every manifest asset must
+    # ride every release carrier list and the manifests, as one set),
+    # the tag-ruleset parser fixture matrix (the release workflow's
+    # ruleset preflight logic, proven without network), and the
+    # version-prose ratchet (stale execution-version and bypass
+    # governance claims anywhere in the scanned roots fail CI).
+    name: Release asset contract + governance fixtures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: release asset contract (workflow asset lists == manifests)
+        run: bash tools/ci/release-asset-contract.sh
+      - name: protocol manifest check (execution-v1 register coherence)
+        # The execution register must stay coherent across the four
+        # consumers (the manifest, the PHP core, the Rust core and the
+        # interpreter asset) on every push: the gate runs on plain
+        # `POSIX` tooling with no network, composer or cargo.
+        run: bash tools/ci/protocol-manifest-check.sh
+      - name: limits parity check (shared security/solver register)
+        # The solver-hash ceiling, the secret/execution-key floors and
+        # the browser challenge-contract bounds must be identical in
+        # PHP, Rust and the widget/worker; the register gate reads each
+        # implementation's own declarations, so a split (a 20M browser
+        # vs 5M server, a 16-byte vs 32-byte key floor) cannot pass.
+        run: bash tools/ci/limits-parity-check.sh
+      - name: deploy image pin check (immutable reference stack)
+        # Two builds at the same commit must execute the same
+        # PHP/Alpine/Valkey bytes: every upstream image reference in
+        # deploy/ must carry a sha256 digest.
+        run: bash tools/ci/deploy-image-pin-check.sh
+      - name: release governance fixtures (tag-ruleset parser matrix)
+        run: bash tools/ci/release-governance-fixture.sh
+      - name: version prose lint (stale execution-version/bypass claims)
+        run: bash tools/ci/version-prose-lint.sh
+      - name: latency comparator unit fixtures (known answers)
+        # The paired base/head comparator is a performance oracle: its
+        # extracted AWK carries deterministic fixtures (nearest-rank p90,
+        # confident regression, ambiguous/non-blocking, noisy window,
+        # missing measurements) so the gate itself stays tested.
+        run: bash tools/ci/latency-compare-test.sh
+
+  doc-hygiene:
+    # Static-doc hygiene gate: production source, browser release assets,
+    # public READMEs and the workflows themselves must never carry
+    # internal-history commentary (review identifiers, round labels, severity
+    # tags, behavior-history narration, or references to the wrong
+    # upstream product). Changelogs and release notes are the designated
+    # home for history and are excluded from the scan; an informational
+    # step surfaces drift in those excluded categories without failing.
+    name: Doc hygiene (no internal-history commentary in product source)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: install ripgrep
+        # The scan below is rg-based and the ubuntu runners do not ship
+        # ripgrep: the `if rg` gate would fail open (command-not-found)
+        # and the lane would silently never gate, so rg is installed
+        # before the scan.
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: scan product source for internal-history commentary
+        run: |
+          set -euo pipefail
+          # Production source, browser release assets, public READMEs and
+          # the workflows themselves must not carry internal-history
+          # commentary (review identifiers, round labels, severity tags,
+          # behavior-history narration, or references to the wrong
+          # upstream product). Changelogs and release notes are the
+          # designated home for history; an informational step surfaces
+          # drift there without failing.
+          # round labels must be whole-word (an unanchored 'round[- ]?[0-9]+'
+          # also matches CSS transitions like 'background 0.2s ease').
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
+          if rg -n -i \
+            --glob '!CHANGELOG*' \
+            --glob '!**/CHANGELOG*' \
+            --glob '!**/vendor/**' \
+            --glob '!**/node_modules/**' \
+            --glob '!**/target/**' \
+            "$PATTERN" \
+            packages tests README.md SECURITY.md .github/workflows .woodpecker; then
+            echo "internal-history commentary found in product source/docs (see matches above)" >&2
+            exit 1
+          fi
+          echo "doc hygiene OK: no internal-history commentary in product source"
+      - name: excluded-category match count (changelogs/workflows, informational)
+        run: |
+          echo "excluded-category matches (changelogs/workflows):"
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|\bP[0-3]\b'
+          rg -n -i --glob '*CHANGELOG*' --glob '.github/**' "$PATTERN" . 2>/dev/null | wc -l
+
+  package-cargo:
+    name: Package (cargo publish readiness)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - name: cargo package (risk crate)
+        working-directory: packages/kiwicaptcha-risk
+        run: |
+          cargo package --list | grep -q 'resources/risk-v1.lua' || { echo 'resources/risk-v1.lua missing from the .crate'; exit 1; }
+      - name: standalone build outside the monorepo (no include_str escape)
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/crate-check
+          mkdir -p /tmp/crate-check
+          cp -r packages/kiwicaptcha-risk /tmp/crate-check/
+          cd /tmp/crate-check/kiwicaptcha-risk
+          rm -rf target
+          # Point the versioned dependency at the local core (as crates.io
+          # resolution would once kiwicaptcha 1.7.0 is published). The
+          # include_str!("../resources/risk-v1.lua") must resolve here.
+          sed -i 's|path = "../kiwicaptcha"|path = "'"$GITHUB_WORKSPACE"'/packages/kiwicaptcha"|' Cargo.toml
+          cargo check
+      - name: quick-start end-to-end
+        # The example's #[test] is also executed in the package-readiness
+        # job: the artifact a publisher ships must pass the documented
+        # flow.
+        working-directory: packages/kiwicaptcha
+        run: cargo test -p kiwicaptcha --example quickstart
+      - name: cargo package (core crate, REAL verification)
+        # `cargo package --locked` runs Cargo's full verification build of
+        # the packaged representation (tarball -> unpack -> compile), not
+        # just `--no-verify` list checks. The core crate's dependencies
+        # are all registry crates, so verification is genuine. (The risk
+        # crate keeps --no-verify until kiwicaptcha 1.7.0 is on the
+        # registry — its path+version dependency cannot be verified from
+        # the tarball alone.)
+        working-directory: packages/kiwicaptcha
+        run: cargo package --locked
+
+  package-composer:
+    name: Package (composer clean-room install)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: clean-room install outside the monorepo
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/composer-clean/packages
+          cp -r packages/kiwicaptcha-php /tmp/composer-clean/packages/
+          cp -r packages/kiwicaptcha-risk-php /tmp/composer-clean/packages/
+          rm -rf /tmp/composer-clean/packages/*/vendor /tmp/composer-clean/packages/*/composer.lock
+          cd /tmp/composer-clean
+          composer init --no-interaction --name=ci/smoke
+          composer config repositories.php '{"type": "path", "url": "/tmp/composer-clean/packages/kiwicaptcha-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-php": "1.0.0"}}}'
+          composer config repositories.risk '{"type": "path", "url": "/tmp/composer-clean/packages/kiwicaptcha-risk-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-risk-php": "0.1.0"}}}'
+          composer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist
+          test -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \
+            || { echo 'risk-v1.lua not shipped in the published package'; exit 1; }
+          # Smoke: the store constructor resolves the bundled Lua without
+          # the monorepo (no Redis needed — Predis connects lazily).
+          # shellcheck disable=SC2016 # PHP variable inside single-quoted code
+          php -r 'require "vendor/autoload.php"; $s = new KiwiCaptcha\Risk\Storage\RedisRiskStateStore(new Predis\Client(), "smoke"); echo "OK\n";'
+
+  lua-parity:
+    name: Package (canonical Lua byte parity)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: every canonical Lua file exists in all three locations and is byte-identical
+        # Explicit existence + cmp per file fails unambiguously on any
+        # drift: hashing a non-existent path collapses the pipeline to a
+        # single unique hash and proves nothing, so every canonical file
+        # is asserted to exist in all three locations and byte-compared.
+        run: |
+          set -euo pipefail
+          for f in risk-v1.lua assess_v2.lua calibration.lua confirm.lua correction.lua \
+                    outcome_confirm.lua outcome_correct.lua outcome_register.lua \
+                    register_decision.lua sampling_metrics.lua; do
+            test -f "protocol/risk-v1/$f" || { echo "missing protocol/risk-v1/$f"; exit 1; }
+            test -f "packages/kiwicaptcha-risk/resources/$f" || { echo "missing packages/kiwicaptcha-risk/resources/$f"; exit 1; }
+            test -f "packages/kiwicaptcha-risk-php/resources/$f" || { echo "missing packages/kiwicaptcha-risk-php/resources/$f"; exit 1; }
+            cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk/resources/$f" \
+              || { echo "mismatch: $f (protocol vs rust)"; exit 1; }
+            cmp -s "protocol/risk-v1/$f" "packages/kiwicaptcha-risk-php/resources/$f" \
+              || { echo "mismatch: $f (protocol vs php)"; exit 1; }
+          done
+          echo "all 10 canonical Lua copies byte-identical"
+
+  rust-redis-verify:
+    name: Rust core Redis verifier (redis feature)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - name: redis_verify integration tests (real Redis)
+        # The production RedisChallengeStore + verifier are feature-gated
+        # behind `redis`, so the default-feature build never compiles or
+        # runs them. This job exercises them against a real Redis
+        # (consumed-state transitions, leases, replica-wait barriers,
+        # concurrency) on every push.
+        env:
+          RISK_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test redis_verify
+
+  # INDEPENDENT-runner reproducibility: the in-runner double build
+  # (build-reproducibility) proves cache independence; this pair proves
+  # environment independence (two separate runners), byte-compared by the
+  # follow-up job.
+  build-repro-a:
+    name: Build reproducibility A (independent runner)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The standalone wasm crate (excluded from the root
+          # workspace, its own target directory).
+          workspaces: packages/kiwicaptcha-wasm
+      - name: clean strict build (runner A)
+        env:
+          WASM_OPT_STRICT: "1"
+        run: |
+          bash build.sh
+          mkdir -p /tmp/repro-a
+          ls assets/
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            cp "assets/$asset" /tmp/repro-a/
+          done < release-assets.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: repro-a
+          path: /tmp/repro-a
+          if-no-files-found: error
+
+  build-repro-b:
+    name: Build reproducibility B (independent runner)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/kiwicaptcha-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The standalone wasm crate (excluded from the root
+          # workspace, its own target directory).
+          workspaces: packages/kiwicaptcha-wasm
+      - name: clean strict build (runner B)
+        env:
+          WASM_OPT_STRICT: "1"
+        run: |
+          bash build.sh
+          mkdir -p /tmp/repro-b
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            cp "assets/$asset" /tmp/repro-b/
+          done < release-assets.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: repro-b
+          path: /tmp/repro-b
+          if-no-files-found: error
+
+  build-repro-compare:
+    name: Build reproducibility (independent byte-compare)
+    needs: [build-repro-a, build-repro-b]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Only the manifest is read from the checkout: the compared assets
+      # come from the two independent build artifacts, and the asset list
+      # must be the repository's single canonical manifest rather than a
+      # third copy maintained in this job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 # v5.0.1 (node24)
+        with:
+          name: repro-a
+          path: /tmp/repro-a
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 # v5.0.1 (node24)
+        with:
+          name: repro-b
+          path: /tmp/repro-b
+      - name: byte-compare the independent artifacts
+        run: |
+          set -euo pipefail
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            cmp "/tmp/repro-a/$asset" "/tmp/repro-b/$asset" || { echo "independent builds differ on $asset" >&2; exit 1; }
+            shasum -a 256 "/tmp/repro-a/$asset"
+          done < packages/kiwicaptcha-wasm/release-assets.txt
+          echo "two INDEPENDENT runners produced byte-identical assets"
+
+  symfony-assets:
+    name: Symfony widget assets (byte parity)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: Spiral Lock geometry and widget skins stay synchronized
+        run: node packages/kiwicaptcha/tools/sync-brand.mjs --check
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+        with:
+          # The embed-worker glue tool runs from its own standalone
+          # crate directory (excluded from the root workspace).
+          workspaces: packages/kiwicaptcha-wasm/tools/embed-worker
+      - name: core crate resources must be byte-identical to the canonical assets
+        # The core crate embeds assets from its own resources/ directory
+        # (cargo package verification cannot reach outside the crate);
+        # build.sh regenerates the copies and they must never drift from
+        # the canonical wasm assets.
+        run: |
+          set -euo pipefail
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
+              "packages/kiwicaptcha/resources/$f" \
+              || { echo "stale $f in packages/kiwicaptcha/resources — run packages/kiwicaptcha-wasm/build.sh"; exit 1; }
+          done < packages/kiwicaptcha-wasm/release-assets.txt
+          echo "core crate resources byte-identical to the canonical assets"
+      - name: bundle copies must be byte-identical to the canonical assets
+        # The bundle's public copies must be byte-identical to the
+        # canonical built assets: a generated duplicate that drifts is
+        # mechanically impossible to merge while stale, enforced here with
+        # cmp on every push.
+        run: |
+          set -euo pipefail
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            cmp -s "packages/kiwicaptcha-wasm/assets/$f" \
+              "packages/kiwicaptcha/integrations/symfony/Resources/public/$f" \
+              || { echo "stale $f in the Symfony bundle — run bin/sync-assets.sh"; exit 1; }
+          done < packages/kiwicaptcha-wasm/release-assets.txt
+          echo "Symfony widget assets byte-identical to the canonical build"
+      - name: worker source is generated into the glue and the worker asset (no manual drift)
+        # The worker solver source (the tail of assets/kiwi-worker.js) is
+        # the source of truth; the kiwicaptcha-embed-worker Rust tool (run
+        # by build.sh) regenerates the glue's KIWI_WORKER_SRC literal AND
+        # the glue-embedded head of assets/kiwi-worker.js from it — a
+        # hand-edited copy of either fails here.
+        run: |
+          cargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check
+
+  perf-budget:
+    # Deterministic performance budgets. The hard byte limits run first
+    # and are gating: the three widget-driver copies (raw, gzip and
+    # brotli) and the decoy-armed and execution-armed
+    # challenge-response JSON must stay under their caps
+    # or this job fails. The synthetic-load benchmark steps then measure
+    # issuance and verification p50/p95 under fixed workloads — the
+    # ArrayStorage SHA baseline, the real-Redis SHA path (a redis
+    # service on 6399, the KC_REDIS_URL contract of perf-bench.php), the
+    # Argon2id admission path (64 MiB, t=3), the risk-enabled
+    # controller path, the real-Redis concurrent risk-enabled path
+    # (forked workers through the DSN-built client, the --redis mode of
+    # perf-bench-risk.php) and the verified-WAIT fixtures: the
+    # single-node round trip (perf-wait.php, the shortfall/fail-closed
+    # path) and the local primary+replica fixture (perf-wait-replica.php,
+    # the successful-acknowledgment path), both non-gating by design.
+    # Every timing step is
+    # non-gating by design (a shared GitHub runner is too noisy for a
+    # hard latency gate), so a timing regression surfaces loudly without
+    # blocking the merge lane while a byte regression blocks it. The
+    # benchmark's relative ratchets are documented as
+    # noisy-runner-tolerant in tools/perf-bench.php, tools/perf-bench-risk.php
+    # and tools/perf-load.php. The manually dispatched hard-ratchet benchmark lives in the
+    # separate "Performance latency (manual hard-ratchet benchmark)"
+    # job, which is workflow_dispatch-only and runs these same timing
+    # steps without continue-on-error.
+    name: Performance budgets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6399:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: install brotli (compressed widget-driver budgets)
+        # The ubuntu runners ship gzip but no brotli; the compressed
+        # budget is enforced only when a brotli encoder exists, so the
+        # runner installs the CLI (perf-budget.sh falls back to the
+        # python3 brotli module and notes a skipped cap when neither is
+        # available on a local machine).
+        run: sudo apt-get update && sudo apt-get install -y brotli
+      - name: install PHP core (the challenge-response measure issues real challenges, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (risk-enabled controller benchmark, cached)
+        # perf-bench-risk.php drives the real ChallengeController with
+        # the adaptive risk engine wired, so the bundle vendor must
+        # exist (the kiwicaptcha-php/risk-php dependencies ride along).
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: hard byte budgets (widget-driver raw/gzip/brotli copies + challenge responses)
+        run: bash packages/kiwicaptcha/tools/perf-budget.sh
+      - name: install browser fixture deps (the measured Node runtime identity)
+        # The measurement context binds the exact Playwright trees; npm ci
+        # from the committed lockfile is verified to reproduce
+        # byte-identical @playwright/test, playwright and playwright-core
+        # trees (scripts skipped: no browser download is needed here).
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund --ignore-scripts
+      - name: client-performance release-baseline gate (CI mode)
+        # The release-baseline validator enforces that every
+        # release-required cell in tools/client-perf/release-budgets.json
+        # (every released solver mode x qualified tier x cold/warm) has a
+        # measured p95 under budget in the committed baseline, and prints
+        # the current performance-qualification status. CI mode never
+        # fails solely on the status: a lab-status gate is an honest
+        # not-yet-certified signal. The release workflow re-runs the same
+        # validator with --release, where a non-physical qualification
+        # status is a hard failure (the release boundary is physical-device
+        # data, per tools/client-perf/README.md).
+        # A rejected evidence file no longer aborts the job: the step
+        # records the failure in a marker file and exits 0, so the
+        # diagnostic steps below still run and print the current
+        # measurements. The aggregation step at the end of the job
+        # fails the run when the marker exists, so a stale evidence
+        # file keeps this required check red while the diagnostics
+        # still ran.
+        run: node tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json || echo gate_failed > "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed"
+      - name: client-performance release-baseline preflight (release mode on committed evidence)
+        # The tag workflow runs the same validator with --release; this
+        # cheap push/PR preflight applies the stricter release parser to
+        # the committed evidence now, so a change that would break the tag
+        # gate fails the merge lane instead of the tag. It reruns no
+        # measurements and needs no device. Marker semantics match the
+        # CI-mode step: diagnostics still run, the aggregation step below
+        # fails the job.
+        run: node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json || echo gate_failed > "${RUNNER_TEMP}/kiwicaptcha-release-baseline-release-gate-failed"
+      - name: synthetic-load benchmark (SHA-256 array, p50/p95, non-gating timing)
+        # This step and every benchmark step below it run even when the
+        # release-baseline gate above recorded a failure: the
+        # diagnostics are still collected on stale evidence. A benchmark
+        # failure stays advisory: continue-on-error keeps the later
+        # steps running and never blocks the merge lane on runner noise.
+        if: always()
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench.php
+      - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, non-gating timing)
+        if: always()
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-bench.php --redis
+      - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, non-gating timing)
+        if: always()
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench.php --argon
+      - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, non-gating timing)
+        if: always()
+        continue-on-error: true
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php
+      - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, non-gating timing)
+        if: always()
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+      - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1 on the single-node service, advisory timings)
+        if: always()
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-wait.php
+      - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory)
+        # perf-wait-replica.php boots its own local master + replica on
+        # free ports, so it needs redis-server/redis-cli on the runner;
+        # when they are missing (or the gate Redis is unreachable) the
+        # script prints a loud note and exits 0. Advisory like every
+        # other timing step: the fixture has no ratchet.
+        if: always()
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6399
+        run: php packages/kiwicaptcha/tools/perf-wait-replica.php
+      - name: fail the job when the release-baseline gates recorded a failure
+        # The gate steps record a rejected evidence file in markers
+        # instead of failing, so the diagnostics above still run. This
+        # step restores the gate semantics at the end of the job: it
+        # fails the run when either marker (CI mode or the release-mode
+        # preflight) exists and passes otherwise.
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-gate-failed" ] || [ -f "${RUNNER_TEMP}/kiwicaptcha-release-baseline-release-gate-failed" ]; then
+            echo "::error::release-baseline evidence gate rejected the committed baseline (CI and/or release mode); the diagnostic steps still ran. See the gate step logs."
+            exit 1
+          fi
+          echo "release-baseline evidence gates passed (CI and release mode); the diagnostic steps above ran"
+
+  perf-latency-quiet:
+    # Manually dispatched hard-ratchet benchmark on a GitHub-hosted
+    # runner. The same timing benchmarks as the "Performance budgets"
+    # job, but without continue-on-error, so a failure inside a manual
+    # run is visible. This job is NOT a merge gate: it is skipped on
+    # every push and pull_request, it is not a protected-main required
+    # context, and the release workflow does not consult it. A shared
+    # GitHub runner is too noisy to gate on, so the hard ratchets here
+    # only certify a quiet, dedicated machine; until such a runner
+    # exists, treat the 3x-p95 failures as signals, not blockers. Every
+    # ratchet step sets KIWI_STRICT_BASELINE=1, so a missing
+    # timing-baseline leaf fails the run: a hard-ratchet run with no
+    # baseline is not a hard ratchet. The noisy CI timing steps in the
+    # "Performance budgets" job never set the flag and keep the note
+    # degradation. The byte budgets are not part of this job; they stay
+    # gating in "Performance budgets" on every push. The job publishes
+    # the same digest-pinned Redis service as the "Performance budgets"
+    # job, mapped to the 6399 host port that the benchmark scripts
+    # hard-code: the default KC_REDIS_URL of a manual run
+    # (redis://127.0.0.1:6399) reaches a live instance instead of a
+    # connection refusal. A dispatch that supplies an external redis_url
+    # still benchmarks that external instance; the local service then
+    # simply sits idle.
+    if: github.event_name == 'workflow_dispatch'
+    name: Performance latency (manual hard-ratchet benchmark)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6399:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: install PHP core (the benchmarks issue real challenges, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: install Symfony bundle (risk-enabled controller benchmark, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha/integrations/symfony
+          composer-options: --no-scripts
+      - name: manual-benchmark Redis preflight (the hard-ratchet run requires a reachable Redis)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: |
+          # shellcheck disable=SC2016 # PHP variables inside single-quoted code
+          php -r '
+            require "packages/kiwicaptcha-php/vendor/autoload.php";
+            $url = getenv("KC_REDIS_URL") ?: "redis://127.0.0.1:6399";
+            $client = new Predis\Client($url, ["timeout" => 5.0, "read_write_timeout" => 5.0]);
+            $client->ping();
+            echo "manual-benchmark preflight: Redis answers at $url\n";
+          '
+      - name: synthetic-load benchmark (SHA-256 array, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
+        run: php packages/kiwicaptcha/tools/perf-bench.php
+      - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-bench.php --redis
+      - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
+        run: php packages/kiwicaptcha/tools/perf-bench.php --argon
+      - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --json-out "${RUNNER_TEMP}/perf-risk-inmemory.json"
+      - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, hard ratchet gate)
+        env:
+          KIWI_STRICT_BASELINE: '1'
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis --json-out "${RUNNER_TEMP}/perf-risk-redis.json"
+      - name: retain the latency run records (qualification evidence)
+        if: always()
+        # The controlled run must be auditable, not only terminal
+        # scrollback. The JSON records carry command, configuration,
+        # PHP/OS/CPU, Redis version, source commit, the measured
+        # distribution and the ratchet verdict.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: perf-risk-latency-records
+          path: ${{ runner.temp }}/perf-risk-*.json
+          if-no-files-found: warn
+          retention-days: 90
+      - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1, barrier invariants gate; timings advisory)
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-wait.php
+      - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory-only)
+        # The replica fixture has no ratchet and spins its own local
+        # topology, so it stays advisory even in the manual benchmark: it
+        # notes loudly and exits 0 when redis-server/redis-cli are
+        # missing, and its invariants gate only the barrier semantics.
+        continue-on-error: true
+        env:
+          KC_REDIS_URL: ${{ inputs.redis_url }}
+        run: php packages/kiwicaptcha/tools/perf-wait-replica.php
+
+  cross-language:
+    name: Cross-language (both directions)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis@sha256:e9b2e45ecd47fbb69b877cf8d045d5cccaaaed52524b6e098b4abe8212994f73 # Redis 7.x.y (digest of the redis:7 tag as of 2026-08-05), digest-pinned
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # @stable branch head (rolling, 2026-08-05)
+        with:
+          toolchain: 1.96.0 # pinned — matches rust-toolchain.toml
+      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1, SHA-pinned
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2.37.2 (node24)
+        with:
+          tools: composer:v2.9
+          php-version: '8.2'
+          extensions: gmp, json, openssl, sodium
+          coverage: none
+      - name: composer install (PHP core, cached)
+        uses: ramsey/composer-install@65e4f84970763564f46a70b8a54b90d033b3bdda # 4.0.0, SHA-pinned
+        with:
+          working-directory: packages/kiwicaptcha-php
+      - name: PHP issues a SHA-256 challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record.json
+          KC_PHP_ALGO: sha256
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued SHA-256 challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record.json
+        run: cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+      - name: PHP issues an Argon2id challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_argon.json
+          KC_PHP_ALGO: argon2id
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued Argon2id challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_argon.json
+        run: cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
+      - name: Rust issues a SHA-256 challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record.json
+          KC_RUST_ALGO: sha256
+        run: cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued SHA-256 challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record.json
+        run: php tests/CrossLanguageVerify.php
+      - name: Rust issues an Argon2id challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
+          KC_RUST_ALGO: argon2id
+        run: cargo test --test cross_language rust_issues_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued Argon2id challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_argon.json
+        run: php tests/CrossLanguageVerify.php
+      - name: PHP issues an rsw challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_PHP_RECORD: /tmp/kc_php_record_rsw.json
+          KC_PHP_ALGO: rsw
+        run: php tests/CrossLanguageIssue.php
+      - name: Rust verifies the PHP-issued rsw challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_PHP_RSW_RECORD: /tmp/kc_php_record_rsw.json
+        run: cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture
+      - name: Rust issues an rsw challenge
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_RUST_RSW_RECORD: /tmp/kc_rust_record_rsw.json
+        run: cargo test --test cross_language rust_issues_rsw_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued rsw challenge
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_rsw.json
+        run: php tests/CrossLanguageVerify.php
+      - name: Redis runtime-state interoperability (PHP/Rust consume, commit, recovery claims)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_runtime_state_interop_with_php -- --nocapture
+      - name: Protocol-v3 decoy interoperability (PHP/Rust armed issuance, v2-plus-decoy rejection)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_v3_decoy_interop_with_php -- --nocapture
+      - name: Protocol-v4 execution interoperability (PHP issues the real digest:trace token, Rust decodes and verifies through the production verifier)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
+      - name: RSW time-lock interoperability (PHP issues and solves into Redis, Rust verifies through the production verifier, and the reverse direction)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test cross_language redis_rsw_interop_with_php -- --nocapture
+      - name: Rust issues the v4 execution record and serializes the digest:trace token (reverse direction)
+        working-directory: packages/kiwicaptcha
+        env:
+          KC_REDIS_URL: redis://127.0.0.1:6379
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+        run: cargo test --features redis --test cross_language rust_issues_v4_execution_record_for_php -- --nocapture
+      - name: PHP verifies the Rust-issued v4 execution record (digest:trace recomputed from the stored program)
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+        run: php tests/CrossLanguageVerify.php
+      - name: PHP rejects the tampered digest on the Rust-issued v4 execution record (deterministic rejection)
+        working-directory: packages/kiwicaptcha-php
+        env:
+          KC_RUST_RECORD: /tmp/kc_rust_record_v4.json
+          KC_RUST_EXPECT_TAMPER: '1'
+        run: php tests/CrossLanguageVerify.php
+
+  release-validator-mutation-suite:
+    # Adversarial mutation corpus of the release-baseline validator:
+    # the ordinary "Performance budgets" check
+    # runs the validator against the committed lab baseline, which
+    # only proves today's real file is accepted/rejected as expected.
+    # This self-contained node job generates temporary budget/baseline
+    # fixtures in os.tmpdir() and runs the validator as a subprocess
+    # against them, asserting on exit codes AND on the specific reason
+    # substrings of the validator's own messages: the per-mode
+    # schema-3 matrix coverage (deleting sha18:cold:files while inline
+    # survives is caught, and vice versa), the device-indexed physical
+    # evidence proofs (per-device coverage, per-device sample floors
+    # and failure budgets, worst-physical-p95, provenance), the
+    # tested_at freshness/chronology rules, the physical-claim-in-CI
+    # rules, and the legacy schema-1 path. The same job carries the
+    # autofill-qualification mutation corpus (the release-touching-decoy
+    # gate): schema, registry integrity, duplicate rows in both status
+    # orders, version placeholders, platform classes and mismatches,
+    # strict ISO dates, stale/future dates, non-pass required rows,
+    # advisory surfaces, and the committed fail-closed matrix. New job
+    # only: it does not touch the existing perf-budget or docker/no-GMP
+    # steps.
+    name: Release-validator mutation suite
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: install browser fixture deps (the measured Node runtime identity)
+        # The validator corpus computes the current measurement context,
+        # which binds the exact Playwright trees; npm ci from the committed
+        # lockfile reproduces them byte-identically (scripts skipped).
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund --ignore-scripts
+      - name: adversarial mutation corpus of the release-baseline validator
+        run: node tools/ci/test-validate-release-baseline.mjs
+      - name: adversarial mutation corpus of the autofill-qualification validator
+        run: node tools/ci/test-validate-autofill-qualification.mjs
+      - name: adversarial mutation corpus of the accessibility-qualification validator
+        run: node tools/ci/test-validate-accessibility-qualification.mjs

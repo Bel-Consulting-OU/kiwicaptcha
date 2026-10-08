@@ -1,0 +1,1936 @@
+{
+  "config": {
+    "argv": [
+      "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node",
+      "/workspace/scratch/cac0637ee945/kiwicaptcha/tests/browser/node_modules/@playwright/test/cli.js",
+      "test",
+      "--config=/workspace/scratch/cac0637ee945/integration-check.config.mjs"
+    ],
+    "configFile": "/workspace/scratch/cac0637ee945/integration-check.config.mjs",
+    "rootDir": "/workspace/scratch/cac0637ee945/kiwicaptcha/tests/browser/specs",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 1,
+    "metadata": {
+      "actualWorkers": 2
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/workspace/scratch/cac0637ee945/ui-test-output",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 2
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/workspace/scratch/cac0637ee945/kiwicaptcha/tests/browser/specs",
+        "testIgnore": [],
+        "testMatch": [
+          "/(brand-ui|migration|compat-controls)\\.spec\\.mjs/"
+        ],
+        "timeout": 120000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "dot",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "/workspace/scratch/cac0637ee945/integration-test-results.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 2,
+    "webServer": {
+      "command": "/workspace/scratch/cac0637ee945/tooling/bin/php -S 127.0.0.1:8085 router.php",
+      "cwd": "/workspace/scratch/cac0637ee945/kiwicaptcha/tests/browser",
+      "url": "http://127.0.0.1:8085/",
+      "reuseExistingServer": false,
+      "timeout": 30000
+    }
+  },
+  "suites": [
+    {
+      "title": "brand-ui.spec.mjs",
+      "file": "brand-ui.spec.mjs",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "framework theme classes override the host and OS palettes",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 120000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 275,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T01:10:27.163Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "70d9268ace472cc0cc56-4197a64f30d473a5ec59",
+          "file": "brand-ui.spec.mjs",
+          "line": 3,
+          "column": 1
+        },
+        {
+          "title": "a per-widget data-theme pin overrides the host palette",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 120000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "",
+              "projectName": "",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 144,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-08T01:10:27.524Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "70d9268ace472cc0cc56-7e1f2c04e4c759d83876",
+          "file": "brand-ui.spec.mjs",
+          "line": 24,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "compat-controls.spec.mjs",
+      "file": "compat-controls.spec.mjs",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "KiwiCaptcha provider-control compatibility",
+          "file": "compat-controls.spec.mjs",
+          "line": 37,
+          "column": 6,
+          "specs": [
+            {
+              "title": "invisible button: the challenge waits for the click, then runs exactly once",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 3266,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:27.237Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-a12c63cf084fc2a67292",
+              "file": "compat-controls.spec.mjs",
+              "line": 38,
+              "column": 3
+            },
+            {
+              "title": "button control: the widget lives in an adjacent holder and the full provider surface works",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 770,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:30.593Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-966634f0f1053ed96b9c",
+              "file": "compat-controls.spec.mjs",
+              "line": 60,
+              "column": 3
+            },
+            {
+              "title": "submit input: the control keeps its semantics and the holder carries the widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 182,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:31.380Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-6b825296edb5547c9d12",
+              "file": "compat-controls.spec.mjs",
+              "line": 104,
+              "column": 3
+            },
+            {
+              "title": "dynamic insertion: nested subtrees, multiple widgets, reinsertion and a late invisible control",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 269,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:31.570Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-10ac3c1b39969e3ad61b",
+              "file": "compat-controls.spec.mjs",
+              "line": 122,
+              "column": 3
+            },
+            {
+              "title": "axe: the control migration pages pass the widget-scope rules",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 973,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:31.850Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-a113ecd3e17466b6d784",
+              "file": "compat-controls.spec.mjs",
+              "line": 170,
+              "column": 3
+            },
+            {
+              "title": "settled execute() promises retire their cancellation hooks",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 156,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:32.831Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-9e082babc5b3150f75d5",
+              "file": "compat-controls.spec.mjs",
+              "line": 182,
+              "column": 3
+            }
+          ]
+        },
+        {
+          "title": "KiwiCaptcha standalone provider shims",
+          "file": "compat-controls.spec.mjs",
+          "line": 237,
+          "column": 6,
+          "specs": [
+            {
+              "title": "grecaptcha: render auto-solves, the response field and the token field agree, getResponse and reset round-trip",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 258,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:32.994Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-5264d84016fc9a3c5e41",
+              "file": "compat-controls.spec.mjs",
+              "line": 238,
+              "column": 3
+            },
+            {
+              "title": "grecaptcha: the sitekey table knob resolves the scope and an invisible control defers to execute",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 1723,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:33.259Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-4e5c49738db7cf176708",
+              "file": "compat-controls.spec.mjs",
+              "line": 295,
+              "column": 3
+            },
+            {
+              "title": "grecaptcha v3: execute(sitekey, action) solves a hidden widget and cleans it up",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 139,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:34.991Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-a4d8de8241596cd65da9",
+              "file": "compat-controls.spec.mjs",
+              "line": 332,
+              "column": 3
+            },
+            {
+              "title": "hcaptcha: both provider response fields carry the token and the async form answers the pair",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 198,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:35.137Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-3fef0b03a786b399d78a",
+              "file": "compat-controls.spec.mjs",
+              "line": 347,
+              "column": 3
+            },
+            {
+              "title": "turnstile: render starts the implicit challenge, reset re-runs and remove tears down",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 245,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:35.343Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-627242047f3033e30ca7",
+              "file": "compat-controls.spec.mjs",
+              "line": 370,
+              "column": 3
+            },
+            {
+              "title": "altcha markup: the altcha-widget element auto-solves into its named field",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 173,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:35.596Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-3339b50f8cfd4ba67123",
+              "file": "compat-controls.spec.mjs",
+              "line": 400,
+              "column": 3
+            },
+            {
+              "title": "friendly markup: the frc-captcha element auto-solves into its solution field",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 150,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:35.778Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-3557a27463cdaf962729",
+              "file": "compat-controls.spec.mjs",
+              "line": 409,
+              "column": 3
+            },
+            {
+              "title": "axe: the shims pages pass the widget-scope rules",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 1,
+                      "status": "passed",
+                      "duration": 922,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:35.938Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23008ce8c3abb55f97b8-10445c1784057ee0bc53",
+              "file": "compat-controls.spec.mjs",
+              "line": 418,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "migration.spec.mjs",
+      "file": "migration.spec.mjs",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "KiwiCaptcha migration compatibility",
+          "file": "migration.spec.mjs",
+          "line": 19,
+          "column": 6,
+          "specs": [
+            {
+              "title": "reCAPTCHA v2: implicit render, data-callback, g-recaptcha-response alias",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 154,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:27.701Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-06aebf1f8183210fa156",
+              "file": "migration.spec.mjs",
+              "line": 20,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: widget ids + getResponse resolve to a real widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 143,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:27.863Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-d208bed7804deff7941b",
+              "file": "migration.spec.mjs",
+              "line": 28,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: omitted widget id defaults to the first created widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 6194,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:28.015Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-cae143976156de84ec82",
+              "file": "migration.spec.mjs",
+              "line": 41,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2 explicit loading: render=explicit suppresses auto-render and onload renders",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 153,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:34.220Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-657ba31e3bfff40d3830",
+              "file": "migration.spec.mjs",
+              "line": 62,
+              "column": 3
+            },
+            {
+              "title": "Turnstile: action/cData bound at issuance, returned from verified server state, request forging ignored",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 166,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:34.383Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-cd14b1c319c872500ac4",
+              "file": "migration.spec.mjs",
+              "line": 81,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v3: execute(sitekey, {action}) transmits the REAL pair and the server-owned policy resolves the scope",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3209,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:34.557Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-8366ba533645d757a822",
+              "file": "migration.spec.mjs",
+              "line": 114,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: Retry after terminal failure preserves the FULL security configuration",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3515,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:37.776Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-72bc67794787caf88b26",
+              "file": "migration.spec.mjs",
+              "line": 163,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: expiry -> Retry keyboard reacquisition preserves host form fields",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 2008,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:41.301Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-68716d86a52762f19606",
+              "file": "migration.spec.mjs",
+              "line": 195,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2 explicit mode: dynamically inserted containers NEVER auto-render until an explicit render()",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 8728,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:43.316Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-1925da19fabba7dd4026",
+              "file": "migration.spec.mjs",
+              "line": 210,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2 implicit mode: dynamically inserted containers still auto-render",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 646,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:52.051Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-a2fd15e34310e12e62f9",
+              "file": "migration.spec.mjs",
+              "line": 233,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: grecaptcha.render(\"id\", params) and render(element, params) actually render",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 6141,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:52.703Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-b285ba4ed8979920c46c",
+              "file": "migration.spec.mjs",
+              "line": 260,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: provider errorCallback fires exactly once on terminal failure",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 7445,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:10:58.851Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-6c2a3f06e36f012e5f7a",
+              "file": "migration.spec.mjs",
+              "line": 297,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: reset during an in-flight challenge cancels generation 1",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 8718,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:06.303Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-c4691e79174b941611af",
+              "file": "migration.spec.mjs",
+              "line": 313,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: reset clears and reacquires",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 4175,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:15.033Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-718923a35a95b7d47262",
+              "file": "migration.spec.mjs",
+              "line": 355,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: execute(id) resolves with the token",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 155,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:19.215Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-90fe29947447403fc5a7",
+              "file": "migration.spec.mjs",
+              "line": 371,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2 Argon: grecaptcha.ready() queues behind glue readiness for explicit render",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1653,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:19.378Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-f0c8563d1a7372bcbc1a",
+              "file": "migration.spec.mjs",
+              "line": 382,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: v3-style execute(sitekey) tears down the hidden widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 664,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:21.037Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-fd3cbe7d85ea7dcc63dd",
+              "file": "migration.spec.mjs",
+              "line": 411,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: execute() rejects with the ACTUAL failure reason",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3136,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:21.709Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-9cf65870375b3ed3b9fe",
+              "file": "migration.spec.mjs",
+              "line": 436,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: expiry clears the token + field + fires the expired callback",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 2108,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:24.853Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-cdd6b3defba1c8934964",
+              "file": "migration.spec.mjs",
+              "line": 455,
+              "column": 3
+            },
+            {
+              "title": "reCAPTCHA v2: remove(id) destroys the widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 202,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:26.970Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-5db113ce931c5f30cfcb",
+              "file": "migration.spec.mjs",
+              "line": 475,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha: implicit render + h-captcha-response alias + callbacks",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 157,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:27.180Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-35f81ce1c5604ed9f822",
+              "file": "migration.spec.mjs",
+              "line": 490,
+              "column": 3
+            },
+            {
+              "title": "Turnstile: implicit render + cf-turnstile-response alias + callbacks",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 140,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:27.345Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-e422d742c76a33905b0e",
+              "file": "migration.spec.mjs",
+              "line": 497,
+              "column": 3
+            },
+            {
+              "title": "Argon2id solves through the external compatibility loader (worker glue path)",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 139,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:27.491Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-2c793544b69d61897b78",
+              "file": "migration.spec.mjs",
+              "line": 504,
+              "column": 3
+            },
+            {
+              "title": "the visible .kiwi-widget carries the done state",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 129,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:27.638Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-75936a76f1d12ad0735a",
+              "file": "migration.spec.mjs",
+              "line": 518,
+              "column": 3
+            },
+            {
+              "title": "a failed compat widget shows the failed state and the Retry button",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3485,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:27.775Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-99dd00d7161319b2bb7f",
+              "file": "migration.spec.mjs",
+              "line": 527,
+              "column": 3
+            },
+            {
+              "title": "the provider alias and the native token carry the SAME credential",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 146,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:31.267Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-808f1c9c807a0c23e903",
+              "file": "migration.spec.mjs",
+              "line": 552,
+              "column": 3
+            },
+            {
+              "title": "Turnstile execution=execute: render registers a pending widget, zero challenge hits until execute(id), getResponse works",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 2751,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:31.421Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-43fb8b6910c080f29cb4",
+              "file": "migration.spec.mjs",
+              "line": 559,
+              "column": 3
+            },
+            {
+              "title": "Turnstile execution=execute: execute(container-id) and execute(selector) resolve and fire",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 196,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:34.178Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-34e222eb95816e1b6296",
+              "file": "migration.spec.mjs",
+              "line": 592,
+              "column": 3
+            },
+            {
+              "title": "Turnstile execution=auto (default) still auto-solves without execute()",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 152,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:34.381Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-d8a2ecffa2ffa8b7e334",
+              "file": "migration.spec.mjs",
+              "line": 627,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha: getRespKey returns a distinct, stable, non-empty per-widget key, never the token",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 156,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:34.541Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-386d44f481f91753012b",
+              "file": "migration.spec.mjs",
+              "line": 644,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute resolves {response, key} with key === getRespKey(id)",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 144,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:34.704Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-02f765c55e54c1d76799",
+              "file": "migration.spec.mjs",
+              "line": 668,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute(undefined) resolves {response, key} against the FIRST created widget",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 148,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:34.855Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-cc8f1482ea5dd8322c62",
+              "file": "migration.spec.mjs",
+              "line": 685,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute(undefined) rejects with the STRING \"missing-captcha\" when no widget exists",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 96,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:35.009Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-a9e2113b643b8e8f96de",
+              "file": "migration.spec.mjs",
+              "line": 702,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute(non-resolving target) rejects with the STRING \"invalid-captcha-id\"",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 150,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:35.112Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-c3e69dca4fea28f7af4b",
+              "file": "migration.spec.mjs",
+              "line": 728,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute rejects with the STRING \"network-error\" when the challenge endpoint fails",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3119,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:35.270Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-cdcc2b300e8f7a8e5249",
+              "file": "migration.spec.mjs",
+              "line": 747,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha async execute rejects with the STRING \"challenge-error\" on a malformed challenge payload",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3114,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:38.397Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-1b27a57055bb27b43df0",
+              "file": "migration.spec.mjs",
+              "line": 770,
+              "column": 3
+            },
+            {
+              "title": "hCaptcha BARE execute still rejects with an Error object on failure",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3120,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-10-08T01:11:41.519Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "94dbda98a2b05a3033e6-bee7bca155d634ffbcdd",
+              "file": "migration.spec.mjs",
+              "line": 793,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-10-08T01:10:26.442Z",
+    "duration": 78261.34,
+    "expected": 53,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

@@ -9,13 +9,23 @@ use Symfony\Component\HttpFoundation\Request;
 /**
  * The session binding of step-up completion: the completion of a
  * challenge is only ever accepted for the same principal that began it
- * AND inside the same PHP session. {@see \BelConsulting\KiwiCaptchaBundle\Controller\StepUpController::complete()}
+ * AND under exactly one per-challenge binding. {@see \BelConsulting\KiwiCaptchaBundle\Controller\StepUpController::complete()}
  * re-resolves the principal of the current request and binds it (plus
  * the session id) here before dispatching to a handler. Every handler
- * then requires the bound principal and session to equal the challenge
- * record's own. A stolen ticket presented under another session is
- * refused and never completed. A principal-level success marker alone
- * never authorizes enrollment: that proof is session-scoped.
+ * then requires the bound principal and the challenge's own binding to
+ * hold. A stolen ticket presented under another session is refused and
+ * never completed. A principal-level success marker alone never
+ * authorizes enrollment: that proof is session-scoped.
+ *
+ * Exactly one binding per challenge, both fail-closed:
+ *
+ * 1. Session binding (the normal browser case): a challenge begun with
+ *    a started session records that session's hash and mints no client
+ *    secret — only that session may complete it.
+ * 2. Stateless binding (API / SPA): a challenge begun with no session
+ *    mints a one-time client secret (returned once at begin, stored
+ *    only as its SHA-256 hash) — only a request presenting that secret
+ *    may complete it.
  *
  * A request that carries no binding (a handler reached without the
  * controller) matches nothing: fail closed, never open.
@@ -39,7 +49,9 @@ final class StepUpSessionBinding
      * Bind the resolved principal pseudonym and the current session id
      * onto the request. The session id is read from the Symfony session
      * bag when one is started; without a started session the binding
-     * carries an empty session and matches nothing (fail closed).
+     * carries an empty session and a session-bound challenge matches
+     * nothing (fail closed) — only a stateless challenge may then be
+     * completed, and only with its client secret.
      */
     public static function bind(Request $request, string $principalPseudonym): void
     {
@@ -69,20 +81,16 @@ final class StepUpSessionBinding
      * began the challenge is refused, even for the same principal
      * (cross-session ticket replay / session fixation).
      *
-     * An empty session id NEVER matches — on either side. A stateless
-     * request (no started PHP session) can therefore never complete a
-     * challenge, whatever the challenge recorded: the binding fails
-     * closed rather than degenerating to a principal-only check.
-     */
-    /**
-     * Whether the request may complete the challenge. Two bindings are
-     * accepted, both fail-closed:
+     * Exactly one binding per challenge, both fail-closed:
      *
-     * 1. Session binding: the completing session's hash equals the
-     *    challenge's recorded session hash.
-     * 2. Stateless binding: the request carries the challenge's own
-     *    client secret (a per-challenge value the begin response
-     *    returns), for API clients and SPAs that cannot hold a session.
+     * 1. Session binding (the normal browser case): the challenge was
+     *    begun with a started session, records that session's hash, and
+     *    only that session may complete it. A presented client secret
+     *    is meaningless here — the challenge never minted one.
+     * 2. Stateless binding (API / SPA): the challenge was begun with no
+     *    session, mints a one-time client secret (returned once at
+     *    begin, stored only as a SHA-256 hash), and only a request
+     *    presenting that secret may complete it.
      */
     public static function matches(Request $request, StepUpChallenge $challenge): bool
     {
@@ -93,26 +101,28 @@ final class StepUpSessionBinding
         if (!hash_equals($challenge->principalPseudonym, $bound)) {
             return false;
         }
-        // Stateless path: the per-challenge client secret.
-        if ($challenge->clientSecret !== null && $challenge->clientSecret !== '') {
-            $presented = $request->request->get(self::CLIENT_SECRET_FIELD, '');
-            if (\is_string($presented) && $presented !== ''
-                && hash_equals($challenge->clientSecret, $presented)) {
-                return true;
-            }
-        }
+        // Session-bound challenge: only the recorded session may
+        // complete it. A client secret is not minted for these, so a
+        // stolen ticket from one session can never be finished in
+        // another (the whole point of the session binding).
         $requestSession = self::sessionId($request);
-        if ($requestSession === '') {
-            return false;
-        }
-        $requestHash = StepUpChallenge::sessionHash($requestSession);
         $boundHash = $challenge->sessionHash;
-        if ($boundHash === null || $boundHash === '') {
-            // A challenge begun without a recorded session can never be
-            // completed (an empty session id never matches).
-            return false;
+        if ($boundHash !== null && $boundHash !== '') {
+            if ($requestSession === '') {
+                return false;
+            }
+            $requestHash = StepUpChallenge::sessionHash($requestSession);
+
+            return $requestHash !== null && hash_equals($boundHash, $requestHash);
+        }
+        // Stateless challenge: the per-challenge client secret, compared
+        // against the stored hash (never a plaintext secret).
+        if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
+            $presented = (string) $request->request->get(self::CLIENT_SECRET_FIELD, '');
+
+            return $presented !== '' && $challenge->clientSecretMatches($presented);
         }
 
-        return $requestHash !== null && hash_equals($boundHash, $requestHash);
+        return false;
     }
 }

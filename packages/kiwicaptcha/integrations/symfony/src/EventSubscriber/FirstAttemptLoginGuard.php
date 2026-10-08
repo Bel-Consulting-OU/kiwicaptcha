@@ -13,6 +13,7 @@ use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
 
 /**
  * The post-credential, pre-session first-attempt gate (P0-1).
@@ -43,6 +44,14 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
     public const TOKEN_CREATED_PRIORITY = 512;
 
     public const TOKEN_CREATED_EVENT = 'Symfony\Component\Security\Http\Event\AuthenticationTokenCreatedEvent';
+
+    /**
+     * The passport badge that marks an interactive password login (the
+     * FormLogin / JsonLogin / HttpBasic shape). A string FQCN so the
+     * guard duck-types even when security-http is not on the autoloader
+     * at parse time.
+     */
+    private const PASSWORD_CREDENTIALS = 'Symfony\Component\Security\Http\Authenticator\Passport\Credentials\PasswordCredentials';
 
     public function __construct(
         private readonly LoginDecisionGate $gateway,
@@ -78,7 +87,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             // Scope: only interactive (form/login) authenticators. A
             // remember-me or stateless API token must never be swapped
             // for a pending token the client cannot complete.
-            if (!$this->isInteractiveAuthenticator($event)) {
+            if (!$this->isInteractiveAuthenticator($event, $token)) {
                 return;
             }
             $request = $this->requestOf($event);
@@ -148,12 +157,35 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
     }
 
     /**
-     * Whether the event's authenticator is an interactive login. The
-     * passport's auth class tells us: UsernamePassword / FormLogin are
-     * interactive; RememberMe and JWT/Token authenticators are not.
+     * Whether the event's authenticator is an interactive credential
+     * login. The gate must only withhold sessions a client can actually
+     * win back through the step-up flow: a remember-me cookie or a
+     * stateless API token carries no interactive completion path, so a
+     * pending token would strand that client forever.
+     *
+     * The rules, in order:
+     *
+     * 1. A {@see RememberMeToken} is never interactive (checked on the
+     *    token itself: the remember-me authenticator's passport is
+     *    self-validating and would otherwise slip through).
+     * 2. A real passport counts as interactive only when it carries a
+     *    PasswordCredentials badge — the shape FormLogin, JsonLogin and
+     *    HttpBasic all build. Passport exposes no getAuthClass() API,
+     *    so the credential badge is the only reliable signal of a
+     *    password login; a passport without it (remember-me, JWT/Token
+     *    authenticators, custom self-validating passports) is not
+     *    interactive. Fail closed: an unknown passport shape never
+     *    counts, because the harm of a stranded pending token is
+     *    permanent lockout while the harm of skipping the gate is the
+     *    pre-guard posture.
+     * 3. A duck-typed event without getPassport() (tests) is treated as
+     *    interactive so the guard still exercises its logic.
      */
-    private function isInteractiveAuthenticator(object $event): bool
+    private function isInteractiveAuthenticator(object $event, object $token): bool
     {
+        if ($token instanceof RememberMeToken || str_contains($token::class, 'RememberMeToken')) {
+            return false;
+        }
         if (!method_exists($event, 'getPassport')) {
             // A duck-typed event (tests) is treated as interactive so
             // the guard still exercises its logic.
@@ -164,26 +196,25 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             if ($passport === null) {
                 return false;
             }
-            $authClass = method_exists($passport, 'getAuthClass') ? (string) $passport->getAuthClass() : '';
-            if ($authClass === '') {
-                return true;
+            if (method_exists($passport, 'hasBadge')) {
+                return (bool) $passport->hasBadge(self::PASSWORD_CREDENTIALS);
             }
-            $interactive = [
-                'form_login',
-                'form_login_ldap',
-                'json_login',
-                'json_login_ldap',
-                'http_basic',
-                'http_basic_ldap',
-                'x509',
-                'remote_user',
-            ];
+            if (method_exists($passport, 'getBadges')) {
+                foreach ($passport->getBadges() as $badge) {
+                    if (is_object($badge) && (is_a($badge, self::PASSWORD_CREDENTIALS)
+                        || str_ends_with($badge::class, 'PasswordCredentials'))) {
+                        return true;
+                    }
+                }
 
-            return \in_array(strtolower($authClass), $interactive, true);
+                return false;
+            }
+
+            return false;
         } catch (\Throwable) {
-            // Unknown passport shape: treat as interactive (the gate
-            // is the conservative path).
-            return true;
+            // Unknown passport shape: never interactive (fail closed —
+            // a stuck pending token is worse than a skipped gate).
+            return false;
         }
     }
 

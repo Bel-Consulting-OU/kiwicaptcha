@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use KiwiCaptcha\Risk\Asn\AsnDataset;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -28,6 +29,7 @@ final class SessionRestorer
         private readonly ?RequestStack $requestStack = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly ?AsnDataset $asnDataset = null,
+        private readonly ?RiskIdentityFactory $identityFactory = null,
     ) {
     }
 
@@ -44,7 +46,13 @@ final class SessionRestorer
                 // The pending token's principal must be the one that
                 // completed the step-up: a stolen ticket for another
                 // account can never upgrade THIS session.
-                $pendingPrincipal = $token->getUserIdentifier();
+                // The token carries the raw user identifier; the
+                // challenge carries the 32-hex principal pseudonym.
+                // Compare like with like or every restore fails.
+                $pendingRaw = $token->getUserIdentifier();
+                $pendingPrincipal = $this->identityFactory !== null
+                    ? $this->identityFactory->principalId($pendingRaw)
+                    : $pendingRaw;
                 if ($principalPseudonym !== '' && $pendingPrincipal !== ''
                     && !hash_equals($pendingPrincipal, $principalPseudonym)) {
                     $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');
@@ -52,17 +60,18 @@ final class SessionRestorer
                     return;
                 }
                 $this->tokenStorage?->setToken($token->getWrapped());
-                // Rotate the session id on the privilege upgrade so a
-                // fixation captured before the step-up cannot ride the
-                // new session.
-                if ($request !== null && $request->hasSession()) {
-                    $session = $request->getSession();
-                    if ($session->isStarted()) {
-                        $session->migrate(true);
-                    }
-                }
             }
             $request ??= $this->requestStack?->getCurrentRequest();
+            // Rotate the session id on the privilege upgrade so a
+            // fixation captured before the step-up cannot ride the new
+            // session. Runs after the request-stack fallback so a caller
+            // that omitted the request still gets the rotation.
+            if ($token instanceof StepUpPendingToken && $request !== null && $request->hasSession()) {
+                $session = $request->getSession();
+                if ($session->isStarted()) {
+                    $session->migrate(true);
+                }
+            }
             if ($request === null || $this->principalNetworks === null || $principalPseudonym === '') {
                 return;
             }
@@ -101,13 +110,22 @@ final class SessionRestorer
         return bin2hex("\x06".substr($packed, 0, 8));
     }
 
+    /**
+     * The ASN tag spelling of the engine's novel-network gate
+     * ({@see \KiwiCaptcha\Risk\AdaptiveRiskEngine}): the ASN number when
+     * the dataset resolved one, else the bucket id. The restorer must
+     * record exactly the key the engine later looks up — compare like
+     * with like, or the second login stays novel forever.
+     */
     private function asnBucket(string $ip): string
     {
         if ($this->asnDataset === null) {
             return '';
         }
         try {
-            return $this->asnDataset->bucketId($ip);
+            $info = $this->asnDataset->lookup($ip);
+
+            return (string) ($info->asn ?? $info->bucket);
         } catch (\Throwable) {
             return '';
         }
