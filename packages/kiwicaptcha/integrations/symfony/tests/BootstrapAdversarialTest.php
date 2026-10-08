@@ -269,4 +269,82 @@ final class BootstrapAdversarialTest extends TestCase
         self::assertNotSame('raw-login@example.com', $pseudonym);
         self::assertTrue($gate->allowsFirstEnrollment($request, $pseudonym));
     }
+
+    /**
+     * Full-chain (finding 1): write the challenge, serialize it
+     * (toArray), read it back (fromArray), and confirm the bootstrap
+     * flag SURVIVES the store round trip. The in-memory object check
+     * is not enough — fromArray() is the real path every store takes.
+     */
+    public function testTheBootstrapFlagSurvivesTheStoreRoundTrip(): void
+    {
+        $challenge = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::WebAuthn,
+            'aabbccddeeff00112233445566778899',
+            null,
+            'login',
+            null,
+            'enroll',
+            1700000000,
+            300,
+            5,
+            'hash',
+            'creation',
+            'sess-00000000000000000000000001',
+            false,
+            true,
+        );
+        $wire = $challenge->toArray();
+        self::assertSame(1, $wire['bootstrap'], 'the wire form carries the bootstrap flag');
+        $back = StepUpChallenge::fromArray($wire);
+        self::assertTrue(
+            $back->bootstrapAuthorized,
+            'fromArray() must restore the bootstrap flag: a store round trip is the real path',
+        );
+        // The other invariants survive too.
+        self::assertSame($challenge->sessionHash, $back->sessionHash);
+        self::assertNull($back->clientSecretHash);
+        self::assertSame($challenge->id, $back->id);
+    }
+
+    /**
+     * Full-chain: a non-bootstrap challenge must not gain the flag
+     * through the round trip.
+     */
+    public function testANonBootstrapChallengeStaysFalseAfterARoundTrip(): void
+    {
+        $challenge = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::WebAuthn,
+            'aabbccddeeff00112233445566778899',
+            null,
+            'login',
+            null,
+            'enroll',
+            1700000000,
+            300,
+            5,
+            'hash',
+            'creation',
+            'sess-00000000000000000000000001',
+        );
+        $back = StepUpChallenge::fromArray($challenge->toArray());
+        self::assertFalse($back->bootstrapAuthorized);
+    }
+
+    /**
+     * Full-chain: the external combined script branches on the
+     * ceremony (finding 3). A single external file must drive both
+     * create() and get().
+     */
+    public function testTheCombinedScriptBranchesOnTheCeremony(): void
+    {
+        $combined = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler::CEREMONY_COMBINED_SCRIPT;
+        self::assertStringContainsString("doc.ceremony === 'creation'", $combined);
+        self::assertStringContainsString('navigator.credentials.create', $combined);
+        self::assertStringContainsString('navigator.credentials.get', $combined);
+        self::assertStringContainsString('attestationObject', $combined);
+        self::assertStringContainsString('authenticatorData', $combined);
+    }
 }

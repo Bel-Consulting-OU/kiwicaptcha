@@ -104,35 +104,12 @@ function scaleNote(run) {
 
 /**
  * A run is stale when the source fingerprint it recorded no longer
- * matches the current tree. File mtimes are not usable: git does not
- * preserve them, so a fresh clone or CI checkout gives every file
- * roughly the same time and nothing ever looks stale. The fingerprint
- * is a content hash of the measured source tree (packages/protocol/
- * integrations-platforms), recorded in the run document at generation
- * time. Any error is treated as STALE (fail closed).
+ * matches the current tree. The fingerprint is a content hash of the
+ * measured source tree, computed by the shared engine/fingerprint.mjs
+ * (the orchestrator records it in every run document). Any error is
+ * treated as STALE (fail closed).
  */
-function sourceFingerprint() {
-    const roots = ["packages", "protocol", "integrations-platforms"];
-    const parts = [];
-    const walk = (dir) => {
-        for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-            if (["node_modules", "vendor", "target", ".git", "deps", "build"].includes(e.name)) continue;
-            const full = join(dir, e.name);
-            if (e.isDirectory()) walk(full);
-            else if (e.isFile()) {
-                try {
-                    parts.push(e.name + ":" + createHash("sha256").update(readFileSync(full)).digest("hex"));
-                } catch {
-                    parts.push(e.name + ":unreadable");
-                }
-            }
-        }
-    };
-    for (const r of roots) {
-        if (existsSync(r)) walk(r);
-    }
-    return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
-}
+import { sourceFingerprint } from "./fingerprint.mjs";
 
 function isStaleRun(run) {
     if (!run) return true;
@@ -201,7 +178,13 @@ const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
 
 // The method note and the engine-loop facts (escalations and triage),
 // read from the engine's own ledger documents.
-let methodNote = "the engine method is recorded per run (see the run documents) (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer";
+// The method note is generated from the run documents themselves:
+    // each run records how the engine produced it (offline grammar or a
+    // consulted model). Nothing is hard-coded here.
+    const methodNotes = [...byCampaign.values()].map((r) => r && r.method).filter(Boolean);
+    let methodNote = methodNotes.length > 0
+        ? "the engine method is recorded per run: " + [...new Set(methodNotes)].join("; ")
+        : "the engine method is recorded per run (see the run documents)";
 let escalationNote = "no escalation record yet";
 let triageNote = "no triage report yet";
 try {

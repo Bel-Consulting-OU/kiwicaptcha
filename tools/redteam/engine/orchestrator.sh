@@ -182,15 +182,17 @@ for campaign in $CAMPAIGNS; do
     doc="$RUNS_DIR/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
     node -e '
 const fs = require("fs");
-const [campaign, cls, seed, started, duration, rc, verdict, detail, metric, economic, shaUs] = process.argv.slice(2);
+const { sourceFingerprint } = require(process.argv[2]);
+const [campaign, cls, seed, started, duration, rc, verdict, detail, metric, economic, shaUs] = process.argv.slice(3);
 fs.writeFileSync(process.argv[process.argv.length - 1], JSON.stringify({
     schema: "kiwicaptcha.redteam.run/1",
     campaign, attackClass: cls, seed, started, duration_s: Number(duration),
     exit: Number(rc), result: verdict, detail,
+    source_fingerprint: sourceFingerprint(),
     metrics: { raw: metric, sha16_solve_us: shaUs ? Number(shaUs) : null },
     economic,
 }, null, 2) + "\n");
-' - "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$doc"
+' - "$RT_DIR/engine/fingerprint.mjs" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$doc"
     log "campaign $campaign -> $verdict in ${duration}s (ledger: $(basename "$doc"))"
 done
 
