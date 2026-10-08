@@ -28,6 +28,11 @@ use Symfony\Component\Security\Core\User\InMemoryUser;
  */
 final class SessionRestorerTest extends TestCase
 {
+    private function identity(): RiskIdentityFactory
+    {
+        return new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x42", 32)));
+    }
+
     private const RAW_USER = 'alice@example.com';
 
     private RiskIdentityFactory $identity;
@@ -95,7 +100,7 @@ final class SessionRestorerTest extends TestCase
             tokenStorage: $tokenStorage,
             principalNetworks: $this->networks,
             requestStack: null,
-            identityFactory: null,
+            identityFactory: $this->identity(),
         );
 
         $restorer->restore($this->identity->principalId(self::RAW_USER), $request);

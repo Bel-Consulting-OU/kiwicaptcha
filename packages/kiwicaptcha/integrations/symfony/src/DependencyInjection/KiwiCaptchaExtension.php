@@ -1878,15 +1878,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     (bool) ($riskConfig['step_up']['allow_signup_bootstrap'] ?? false),
                 ]))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$identityFactory', new Reference('kiwi_captcha.risk.identity_factory'))
                     ->setPublic(true));
-                $container->setDefinition(SessionRestorer::class, (new Definition(SessionRestorer::class, []))
+                $container->setDefinition(SessionRestorer::class, (new Definition(SessionRestorer::class, [
+                        new Reference('kiwi_captcha.risk.identity_factory'),
+                    ]))
                     ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
-                    ->setArgument('$identityFactory', new Reference('kiwi_captcha.risk.identity_factory'))
                     ->setPublic(true));
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')

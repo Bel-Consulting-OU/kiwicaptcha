@@ -16,8 +16,8 @@
  * the engine version is the seed, and regeneration is idempotent.
  */
 
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readdirSync, readFileSync, writeFileSync, statSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -101,8 +101,48 @@ function scaleNote(run) {
     return bits.join("; ") || "no scale metric recorded in the run document";
 }
 
+/**
+ * A run is stale when it predates the source it measures: a GREEN row
+ * backed by a run older than the newest package/protocol source file
+ * is never trusted. The comparison uses file mtimes; the margin is one
+ * minute to absorb clock granularity.
+ */
+function isStaleRun(run) {
+    if (!run || !run.generated_at) return true;
+    try {
+        const runMtime = statSync(run.path).mtimeMs;
+        // The measured surface: first-party source, not test fixtures.
+        const roots = ["packages", "protocol", "integrations-platforms"];
+        let newest = 0;
+        const walk = (dir) => {
+            for (const e of readdirSync(dir, { withFileTypes: true })) {
+                if (e.name === "node_modules" || e.name === "vendor" || e.name === "target" || e.name === ".git") continue;
+                const full = join(dir, e.name);
+                if (e.isDirectory()) walk(full);
+                else if (e.isFile()) {
+                    const m = statSync(full).mtimeMs;
+                    if (m > newest) newest = m;
+                }
+            }
+        };
+        for (const r of roots) {
+            if (existsSync(r)) walk(r);
+        }
+        return newest > runMtime + 60000;
+    } catch {
+        return false;
+    }
+}
+
 function statusOf(run) {
     if (!run) return { status: "NOT RUN", verdict: "no recorded run under tools/redteam/engine/runs/", evidence: "NOT RUN: this environment has no run document for this campaign; it is not a pass" };
+    if (isStaleRun(run)) {
+        return {
+            status: "RED",
+            verdict: "stale run: the recorded evidence predates the source it measures",
+            evidence: "STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass.",
+        };
+    }
     if (run.result === "PASS") {
         return { status: "GREEN", verdict: run.economic ?? "attacker uneconomic", evidence: scaleNote(run) };
     }

@@ -25,3 +25,4 @@ __pycache__/
 _build/
 sqlite3_nif.so
 packages/kiwicaptcha-elixir/deps/
+.DS_Store
