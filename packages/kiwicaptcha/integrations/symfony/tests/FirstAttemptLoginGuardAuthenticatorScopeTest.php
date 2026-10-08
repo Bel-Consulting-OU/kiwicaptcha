@@ -126,8 +126,11 @@ final class FirstAttemptLoginGuardAuthenticatorScopeTest extends TestCase
     private function event(object $token, object $passport): object
     {
         return new class ($token, $passport) {
-            public function __construct(private readonly object $token, private readonly object $passport)
+            private object $token;
+
+            public function __construct(object $token, private readonly object $passport)
             {
+                $this->token = $token;
             }
 
             public function getAuthenticatedToken(): object
