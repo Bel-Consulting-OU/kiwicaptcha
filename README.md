@@ -1,5 +1,13 @@
 # KiwiCaptcha
 
+The primary brand mark is the Spiral Lock: a computational spiral forming
+the lock body beneath a raised shackle. The widget uses the same mark,
+clear state labels, a single progress track, and a native Retry button.
+See the [interactive brand and UI preview](packages/kiwicaptcha/design/brand-preview.html)
+for light/dark themes, 240–352 px containers, six languages and 200% text sizing.
+The [preview image](packages/kiwicaptcha/design/brand-preview.png) shows the default design.
+
+
 Authenticated one-shot proof-of-work anti-abuse protection with an adaptive anti-abuse layer: risk assessment, resource controls, authenticated challenge-bound decoys, replay-resistant state, transaction and IP binding, chained challenges, security epochs, key rotation and revocation, SiteVerify and migration compatibility, and first-party privacy.
 Hybrid Rust (WASM) + optimized JS solving, no external services.
 No third-party tracking.

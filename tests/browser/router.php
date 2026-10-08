@@ -2006,18 +2006,20 @@ if ($path === '/' || $path === '/index.html') {
     if ($cspHeader !== null) {
         header('Content-Security-Policy: '.$cspHeader);
     }
+    $mark = trim((string) file_get_contents($repo.'/packages/kiwicaptcha/resources/kiwi-mark.svg'));
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
         $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$telemetryAttr}{$fetchTimeoutAttr}{$runtimeAttr}{$workerAttrFiles}{$moduleAttrs}{$executionAttr}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
-  <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
-    <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
+  <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\" role=\"group\" aria-label=\"KiwiCaptcha security check\">
+    <div class=\"kiwi-icon-wrapper\" aria-hidden=\"true\">{$mark}</div>
     <div class=\"kiwi-main\">
       <div class=\"kiwi-top\"><span class=\"kiwi-label\" data-kiwi-label>Security Check</span><span class=\"kiwi-badge\" data-kiwi-badge>Idle</span></div>
       <div class=\"kiwi-track\" aria-hidden=\"true\"><div class=\"kiwi-bar\" data-kiwi-bar></div></div>
       <div class=\"kiwi-bottom\"><p class=\"kiwi-info\" data-kiwi-info>Protected</p><span class=\"kiwi-timer\" data-kiwi-timer></span></div>
     </div>
+    <span class=\"kiwi-sr-only\" data-kiwi-status role=\"status\" aria-live=\"polite\"></span>
   </div>
 </div>
 ";
