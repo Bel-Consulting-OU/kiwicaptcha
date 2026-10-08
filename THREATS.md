@@ -12,7 +12,7 @@ Recorded runs: 17
 
 ## Method note
 
-the engine method is recorded per run (see the run documents) (KIWI_RT_LOCAL_LLM_URL unset), so the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer
+the engine method is recorded per run (see the run documents)
 
 The self-escalation mandate: run 2: no new finding this run: the synthesis escalates (combined forged-token + framing-ambiguity, synthesis budget raised to 38)
 

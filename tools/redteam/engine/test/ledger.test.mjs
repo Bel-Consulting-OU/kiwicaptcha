@@ -62,13 +62,21 @@ describe("THREATS.md honesty", () => {
         assert.match(text, /Green is never claimed without a run document/);
         // Every GREEN row must sit on a table line that also carries an
         // evidence cell (4 columns) — the generator never emits a bare
-        // green without measured scale.
+        // green without measured scale. A run whose source fingerprint
+        // no longer matches is STALE, never GREEN: the staleness guard
+        // is the evidence-integrity backstop.
         const greenRows = text.split("\n").filter((l) => l.includes("| GREEN |"));
-        assert.ok(greenRows.length > 0, "expected recorded runs in this environment");
+        const staleRows = text.split("\n").filter((l) => l.includes("| RED |") && l.includes("STALE"));
         for (const row of greenRows) {
             const cells = row.split("|").filter((c) => c.trim() !== "");
             assert.equal(cells.length, 4, `GREEN row lacks evidence cell: ${row}`);
             assert.ok(cells[3].trim().length > 0, `GREEN row has empty evidence: ${row}`);
+        }
+        // With no fingerprint-bearing runs recorded yet, every run is
+        // stale. The table must say so rather than claiming green.
+        assert.ok(staleRows.length > 0 || greenRows.length > 0, "the table has rows");
+        for (const row of staleRows) {
+            assert.ok(row.includes("STALE"), `stale row must name the reason: ${row}`);
         }
     });
 

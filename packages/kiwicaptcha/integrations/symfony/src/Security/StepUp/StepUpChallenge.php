@@ -315,6 +315,7 @@ final class StepUpChallenge
         if (($sessionHash !== null) === ($clientSecretHash !== null)) {
             throw $fail('exactly one of session_hash / client_secret_hash must be present');
         }
+        $bootstrapAuthorized = ((int) ($record['bootstrap'] ?? 0)) === 1;
         $challenge = new self(
             $challenge->id,
             $challenge->kind,
@@ -332,6 +333,7 @@ final class StepUpChallenge
             $sessionHash,
             $clientSecretHash,
             $challenge->targetOwned,
+            $bootstrapAuthorized,
         );
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
