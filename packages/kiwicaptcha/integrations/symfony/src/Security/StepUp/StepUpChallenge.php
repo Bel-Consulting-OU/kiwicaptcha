@@ -51,6 +51,14 @@ final class StepUpChallenge
          */
         public readonly ?string $clientSecretHash = null,
         public readonly bool $targetOwned = false,
+        /**
+         * The creation challenge carries the bootstrap authorization it
+         * was begun under. The grant is consumed at begin (single-use),
+         * so the completion must read THIS flag — re-consulting the
+         * gate would find nothing and refuse a legitimate bootstrap
+         * enrollment at the finish line.
+         */
+        public readonly bool $bootstrapAuthorized = false,
     ) {
     }
 
@@ -81,6 +89,7 @@ final class StepUpChallenge
         ?string $ceremony = null,
         ?string $sessionId = null,
         bool $targetOwned = false,
+        bool $bootstrapAuthorized = false,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
@@ -121,6 +130,7 @@ final class StepUpChallenge
             self::sessionHash($sessionId),
             $clientSecretHash,
             $targetOwned && $targetPseudonym !== null,
+            $bootstrapAuthorized,
         );
         $challenge->issuedClientSecret = $clientSecret;
 
@@ -195,6 +205,7 @@ final class StepUpChallenge
             $this->sessionHash,
             $this->clientSecretHash,
             $this->targetOwned,
+            $this->bootstrapAuthorized,
         );
     }
 
@@ -228,6 +239,7 @@ final class StepUpChallenge
             'ceremony' => $this->ceremony,
             'session_hash' => $this->sessionHash,
             'client_secret_hash' => $this->clientSecretHash,
+            'bootstrap' => $this->bootstrapAuthorized ? 1 : 0,
             'target_owned' => $this->targetOwned,
         ];
     }

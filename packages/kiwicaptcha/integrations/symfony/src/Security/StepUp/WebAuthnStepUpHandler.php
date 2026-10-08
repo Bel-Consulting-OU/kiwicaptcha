@@ -95,6 +95,59 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      * external (same-origin file) presentations. It reads the options
      * document from the page and drives navigator.credentials.get.
      */
+    /**
+     * The creation ceremony script: navigator.credentials.create() with
+     * the user, pubKeyCredParams and excludeCredentials fields, and an
+     * attestationObject serializer. The assertion script cannot enroll
+     * a credential — calling get() on a creation challenge is a
+     * functional dead end.
+     */
+    public const CEREMONY_CREATION_SCRIPT = <<<'JS'
+            (function () {
+              var doc = JSON.parse(document.getElementById('kiwi-webauthn-options').dataset.options);
+              var opts = doc.public_key;
+              function buf(v) {
+                var b = atob(v.replace(/-/g, '+').replace(/_/g, '/'));
+                var a = new Uint8Array(b.length);
+                for (var i = 0; i < b.length; i++) { a[i] = b.charCodeAt(i); }
+                return a.buffer;
+              }
+              function b64(v) {
+                var b = '';
+                var u = new Uint8Array(v);
+                for (var i = 0; i < u.length; i++) { b += String.fromCharCode(u[i]); }
+                return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+              }
+              opts.challenge = buf(opts.challenge);
+              if (opts.user && opts.user.id) { opts.user.id = buf(opts.user.id); }
+              if (opts.excludeCredentials) {
+                opts.excludeCredentials = opts.excludeCredentials.map(function (c) {
+                  return { id: buf(c.id), type: c.type };
+                });
+              }
+              navigator.credentials.create({ publicKey: opts }).then(function (cred) {
+                document.getElementById('kiwi-webauthn-credential').value = JSON.stringify({
+                  id: cred.id,
+                  rawId: b64(cred.rawId),
+                  type: cred.type,
+                  response: {
+                    clientDataJSON: b64(cred.response.clientDataJSON),
+                    attestationObject: b64(cred.response.attestationObject)
+                  }
+                });
+                document.getElementById('kiwi-webauthn-form').submit();
+              }).catch(function (e) {
+                document.getElementById('kiwi-webauthn-status').textContent =
+                  'Security key enrollment failed: ' + (e && e.message ? e.message : String(e));
+              });
+            })();
+    JS;
+
+    /**
+     * The assertion ceremony script body shared by the inline (nonce)
+     * and the external (same-origin file) presentations. It reads the
+     * options document from the page and drives navigator.credentials.get.
+     */
     public const CEREMONY_SCRIPT = <<<'JS'
             (function () {
               var doc = JSON.parse(document.getElementById('kiwi-webauthn-options').dataset.options);
@@ -473,6 +526,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
         $enrolled = $this->registry->registeredCredentialsOf($context->principalPseudonym);
         $challengeBytes = random_bytes(32);
+        // The session id binds the creation challenge (never minted as a
+        // stateless challenge) and the bootstrap flag records the
+        // authorization the single-use grant just conferred — the
+        // completion reads the flag instead of re-consulting the gate.
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::WebAuthn,
@@ -486,6 +543,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             $this->maxAttempts,
             $this->challengeHash($challengeBytes),
             self::CEREMONY_CREATION,
+            $sessionId,
+            false,
+            $bootstrapOk,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
@@ -519,10 +579,18 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $sessionId = $boundSessionId !== '' ? $boundSessionId : StepUpSessionBinding::sessionId($request);
         $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
-        // The grant is consumed at enrollBegin; the completion honors
-        // it too, so a bootstrap enrollment cannot die at the finish
-        // line. A session proof also satisfies this check.
-        $bootstrapOk = $this->bootstrapGate?->allowsFirstEnrollment($request, $challenge->principalPseudonym) === true;
+        // The grant is single-use and was consumed at enrollBegin: the
+        // completion reads the flag the begin recorded on the challenge
+        // (never re-consults the gate). A session proof also satisfies
+        // this check. The binding is enforced like every other
+        // challenge: the completing session must be the one that began
+        // it (or the stateless client-secret path).
+        if (!StepUpSessionBinding::matches($request, $challenge)) {
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
+        }
+        $bootstrapOk = $challenge->bootstrapAuthorized;
         if (!$bootstrapOk
             && !$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
             $this->store->consume($challenge->id);
@@ -771,9 +839,14 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $scriptOpen = $this->scriptSrc !== null && $this->scriptSrc !== ''
             ? '<script src="'.htmlspecialchars($this->scriptSrc, ENT_QUOTES).'"'.$nonceAttr.'>'
             : '<script'.$nonceAttr.'>';
+        // A creation ceremony needs navigator.credentials.create(); the
+        // assertion script would call get() and could never enroll.
+        $inlineScript = $ceremony === self::CEREMONY_CREATION
+            ? self::CEREMONY_CREATION_SCRIPT
+            : self::CEREMONY_SCRIPT;
         $scriptBody = $this->scriptSrc !== null && $this->scriptSrc !== ''
             ? ''
-            : self::CEREMONY_SCRIPT;
+            : $inlineScript;
         $html = <<<HTML
             <!DOCTYPE html>
             <html lang="en">
