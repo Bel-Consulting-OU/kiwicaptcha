@@ -67,9 +67,9 @@ final class MarksEscalation
 
     /**
      * The scope failure-ratio pressure floor for first-attempt login
-     * escalation (Rust mirror: marks::SCOPE_PRESSURE_FLOOR): at/above
+     * escalation (Rust mirror: marks::`SCOPE_PRESSURE`_FLOOR): at/above
      * this global_pressure signal (or global level
-     * SCOPE_PRESSURE_LEVEL) every login escalates to the interactive
+     * `SCOPE_PRESSURE`_LEVEL) every login escalates to the interactive
      * step-up, not only the attacked target's.
      */
     public const SCOPE_PRESSURE_FLOOR = 300;

@@ -21,10 +21,10 @@ use Symfony\Component\HttpFoundation\Request;
  *
  * 1. Session binding (the normal browser case): a challenge begun with
  *    a started session records that session's hash and mints no client
- *    secret — only that session may complete it.
+ *    secret, only that session may complete it.
  * 2. Stateless binding (API / SPA): a challenge begun with no session
  *    mints a one-time client secret (returned once at begin, stored
- *    only as its SHA-256 hash) — only a request presenting that secret
+ *    only as its SHA-256 hash), only a request presenting that secret
  *    may complete it.
  *
  * A request that carries no binding (a handler reached without the
@@ -50,7 +50,7 @@ final class StepUpSessionBinding
      * onto the request. The session id is read from the Symfony session
      * bag when one is started; without a started session the binding
      * carries an empty session and a session-bound challenge matches
-     * nothing (fail closed) — only a stateless challenge may then be
+     * nothing (fail closed), only a stateless challenge may then be
      * completed, and only with its client secret.
      */
     public static function bind(Request $request, string $principalPseudonym): void
@@ -86,7 +86,7 @@ final class StepUpSessionBinding
      * 1. Session binding (the normal browser case): the challenge was
      *    begun with a started session, records that session's hash, and
      *    only that session may complete it. A presented client secret
-     *    is meaningless here — the challenge never minted one.
+     *    is meaningless here, the challenge never minted one.
      * 2. Stateless binding (API / SPA): the challenge was begun with no
      *    session, mints a one-time client secret (returned once at
      *    begin, stored only as a SHA-256 hash), and only a request

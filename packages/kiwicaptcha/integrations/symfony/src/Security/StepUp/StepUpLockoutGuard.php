@@ -8,27 +8,27 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The cross-challenge brute-force budget of the step-up plane. The
- * per-challenge attempt cap alone allows ~1440 guesses/day (3 begins
- * per 15-minute window × 5 attempts × 96 windows). The verification
+ * per-challenge attempt cap alone allows ~1440 guesses a day. That is
+ * 3 begins per 15-minute window times 5 attempts times 96 windows. The verification
  * failures therefore feed an escalating lockout with three budget
  * keys:
  *
- *  - the CONTEXT key — the pair (principal, requesting session or
+ *  - the context key, the pair (principal, requesting session or
  *    network bucket). This is the primary ladder: it locks exactly the
  *    failing context, never the owner's other sessions. An attacker
  *    failing from their own session burns their own budget only.
- *  - the principal key — the account-wide backstop. It escalates on
+ *  - the principal key, the account-wide backstop. It escalates on
  *    the same ladder with its thresholds multiplied by
- *    ACCOUNT_BACKSTOP_MULTIPLIER (5 by default), so it arms only under
+ *    account_BACKSTOP_MULTIPLIER (5 by default), so it arms only under
  *    a sustained cross-context campaign, never under a handful of
  *    typos.
- *  - the target key — the shared target budget, on the same
+ *  - the target key, the shared target budget, on the same
  *    high-threshold ladder as the account-wide backstop (a shared key
  *    must never be cheap to arm against the owner).
  *
  * A begin (and the matching completion) from the owner's trusted
- * context — a session that recently completed a step-up, or the
- * WebAuthn assertion path (the stronger enrolled factor) — bypasses
+ * context, a session that recently completed a step-up, or the
+ * WebAuthn assertion path (the stronger enrolled factor), bypasses
  * the shared keys (principal + target): the owner can always start a
  * step-up despite an attacker-induced account lock. The requesting
  * context's own budget is never bypassed: the requester's own failures
@@ -37,7 +37,7 @@ use Symfony\Component\HttpFoundation\Request;
  * Each failure bumps the context key and both shared keys; at every
  * threshold the matching lockout is armed (or extended) and the owner
  * is notified through the configured hook exactly when the ladder rung
- * changes (first arm or an escalation) — never on every failure past
+ * changes (first arm or an escalation), never on every failure past
  * the threshold. begin() and complete() both refuse while the
  * applicable lockouts hold, so the budget can never be farmed across
  * fresh challenges.
@@ -122,7 +122,7 @@ final class StepUpLockoutGuard
         $this->ladder = array_map(static fn (array $rung): array => [(int) $rung[0], (int) $rung[1]], $ladder);
         // The shared keys (account-wide, target-wide) arm only at a
         // high threshold: the same ladder with every failure count
-        // multiplied by ACCOUNT_BACKSTOP_MULTIPLIER, same durations.
+        // multiplied by account_BACKSTOP_MULTIPLIER, same durations.
         $this->accountLadder = array_map(
             static fn (array $rung): array => [$rung[0] * self::ACCOUNT_BACKSTOP_MULTIPLIER, $rung[1]],
             $this->ladder,
@@ -134,7 +134,7 @@ final class StepUpLockoutGuard
 
     /**
      * The budget key of the requesting context: the started session when
-     * there is one, else the client's network bucket. Hashed — the store
+     * there is one, else the client's network bucket. Hashed, the store
      * keys carry opaque ids only, never a raw session id or address.
      */
     public static function contextKeyOf(Request $request): string
@@ -161,7 +161,7 @@ final class StepUpLockoutGuard
     /**
      * Whether the request rides the owner's trusted context: a session
      * that completed a step-up (any factor) within the lookback. Such a
-     * begin — and its matching completion — may proceed despite an
+     * begin — and its matching completion, may proceed despite an
      * attacker-induced lock on the shared keys. A stateless request can
      * never be trusted (fail closed).
      */
@@ -185,7 +185,7 @@ final class StepUpLockoutGuard
      * The seconds the request must still wait, 0 when admissible. The
      * requesting context's own deadline always applies; the shared
      * (account-wide, target-wide) deadlines apply only when the request
-     * is not trusted — a trusted context or the WebAuthn assertion path
+     * is not trusted, a trusted context or the WebAuthn assertion path
      * begins (and completes) despite an attacker-induced shared lock.
      */
     public function retryAfterSecs(

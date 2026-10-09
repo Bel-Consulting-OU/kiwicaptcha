@@ -20,7 +20,7 @@ use Symfony\Component\Security\Core\User\InMemoryUser;
 /**
  * The step-up session restore (findings 2 and 3): the token carries the
  * raw user identifier while the challenge carries the 32-hex principal
- * pseudonym — compare like with like, or every restore fails. A
+ * pseudonym, compare like with like, or every restore fails. A
  * successful step-up restores the wrapped token (no longer pending) and
  * records the network; a stolen ticket for another account upgrades
  * nothing. The session id rotates after the request-stack fallback, so

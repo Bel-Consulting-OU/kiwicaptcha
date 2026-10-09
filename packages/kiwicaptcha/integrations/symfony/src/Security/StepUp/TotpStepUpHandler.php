@@ -8,7 +8,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * The RFC 6238 time-based one-time passcode reference handler: a 30 s
+ * The RFC 6238 time-based one-time passcode reference handler. A 30 s
  * step, a plus-or-minus one step acceptance window, and a replay guard
  * that refuses the same time-step twice per principal. The algorithm
  * is in-bundle ({@see TotpCode}, hash_hmac based, SHA-1 or SHA-256,
@@ -26,7 +26,7 @@ use Symfony\Component\HttpFoundation\Response;
  * this key cannot open (data predating the seal, a tampered store, a
  * cross-principal transplant) fails closed with the typed
  * {@see TotpSecretUnsealException}, which complete() maps to a typed
- * failure verdict — never an uncaught error.
+ * failure verdict, never an uncaught error.
  *
  * The completion credit runs through {@see StepUpCompletionCredit} on
  * the one consumed record, exactly once per challenge.
@@ -127,16 +127,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
      * secret, sealed at rest; the replay guard is left untouched.
      *
      * Every enrollment (first OR re-enroll) demands a step-up completed
-     * in this session within the lookback window — the same rule as the
+     * in this session within the lookback window, the same rule as the
      * WebAuthn enrollment surface. A first enrollment with no step-up is
      * exactly the credential-stuffing takeover path (a stolen password
      * plants the attacker's own authenticator), so it is refused like a
      * cross-session re-enroll. The factor floor is strongest-factor:
-     * re-enrollment must prove with the current TOTP factor, a first
+     * re-enrollment must prove with the current totp factor, a first
      * enrollment with any already-established factor (email_otp is the
      * weakest, so `minFactor = 'email_otp'` accepts any enrolled
      * factor). A principal-level success marker never authorizes
-     * enrollment — only the session-scoped one does.
+     * enrollment, only the session-scoped one does.
      *
      * @param string|null $sessionId the PHP session requesting enrollment;
      *                               required for any enrollment (first or
@@ -404,7 +404,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     /**
      * The begin presentation: the code-entry form for the html mode,
      * the challenge document for the json mode. A stateless begin (no
-     * session) also returns its one-time client secret here — the only
+     * session) also returns its one-time client secret here, the only
      * channel that ever carries the plaintext.
      */
     private function presentation(StepUpContext $context, StepUpChallenge $challenge, int $now): Response

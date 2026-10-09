@@ -18,7 +18,7 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
 /**
  * The post-credential, pre-session first-attempt gate (P0-1).
  *
- * AuthenticationTokenCreatedEvent fires BEFORE the token is stored, so
+ * AuthenticationTokenCreatedEvent fires before the token is stored, so
  * this is the only hook that can actually withhold the session. On a
  * StepUp (or stronger) decision the just-created token is replaced with
  * {@see StepUpPendingToken}, which grants only IS_KIWI_STEP_UP_PENDING.
@@ -33,7 +33,7 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
  *
  * Client IP comes from the bundle's own {@see ClientIpResolver} so the
  * novelty decision follows the same trust rules as every other
- * component. An unexpected error fails CLOSED to the pending token:
+ * component. An unexpected error fails closed to the pending token:
  * a programming or wiring bug must never silently disable stuffing
  * protection (the store-failure path already degrades to a
  * conservative decision inside the pipeline).

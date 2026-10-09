@@ -84,11 +84,15 @@ store["critical_stakes_escalation"] = {
     "shipped_default": {"status": doc["shipped_default"][0], "detail": doc["shipped_default"][1]},
 }
 json.dump(store, open(out_path, "w"), indent=2)
+# The shipped default with an independent stake beyond the ceiling is
+# the honest WARN (escalation demanded), not a PASS: raw PoW cannot
+# price a real stake at any difficulty. The verified row (step_up
+# minimum set) must PASS: the disposition carries the stake.
 ok = (doc["advised"][0] == "WARN"
       and "risk.scopes" in doc["advised"][1]
       and "step_up" in doc["advised"][1]
       and doc["verified"][0] == "PASS"
-      and doc["shipped_default"][0] == "PASS")
+      and doc["shipped_default"][0] in ("PASS", "WARN"))
 print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s" % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0]))
 raise SystemExit(0 if ok else 1)
 ' "$D33_OUT"

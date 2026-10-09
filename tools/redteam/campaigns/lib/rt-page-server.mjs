@@ -13,7 +13,7 @@
  *                                 on), bytes read from disk per request
  *   POST /challenge, POST /verify proxied verbatim to the wire target
  *                                 (--wire base url), so the page stays
- *                                 same-origin while the REAL issuer and
+ *                                 same-origin while the real issuer and
  *                                 verifier answer every request
  *   GET  /__page-source           the exact page bytes (the decoy
  *                                 secrecy and provenance assertions

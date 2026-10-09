@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run-proof.sh — the version-6 envelope fail-harness runner.
+# run-proof.sh, the version-6 envelope fail-harness runner.
 #
 # Four legs over one deterministic synthetic corpus: the nonce is
 # sha256 over the corpus index, the programs come from the real PHP
@@ -10,8 +10,8 @@
 #             state-machine oracle that forges every v1-v5 trace,
 #             forges a trace per program with pure-sim placeholders;
 #             the PHP envelope walker judges it. This leg rejects 100
-#             percent ONLY because the naive forger never implemented
-#             the envelopes — that figure is NOT a full-knowledge number.
+#             percent only because the naive forger never implemented
+#             the envelopes, that figure is NOT a full-knowledge number.
 #   whitebox  the full-knowledge forger (WhiteBoxEnvelopeForger) that
 #             reimplements the five published envelopes from the
 #             open-source verifier and emits in-band entries without a

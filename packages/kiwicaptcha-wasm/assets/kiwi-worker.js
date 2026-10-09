@@ -470,7 +470,7 @@ window.__kiwiCaptchaWasm.glueBoot = "/* @ts-self-types=\"./kiwicaptcha_wasm.d.ts
  *   (1) inline mode: the Blob worker is built from the page glue plus
  *       this source read off the glue's workerSource copy — zero
  *       requests, wasm at boot;
- *   (2) files mode: a SAME-ORIGIN Worker constructed by the driver from
+ *   (2) files mode: a same-ORIGIN Worker constructed by the driver from
  *       the versioned worker.<hash>.js asset it fetched and
  *       cryptographically preflight-verified (the fetched bytes are
  *       hashed and compared against the page-issued digest, then the

@@ -8,8 +8,8 @@ namespace KiwiCaptcha\Risk\Marks;
  * The first-attempt prevention evidence (D3.5 P0-1): the signals that
  * must stop a valid stolen credential on its very first attempt, before
  * any failure has accumulated anywhere. Each flag is independent
- * evidence for the interactive step-up (never a deny, the legitimate
- * owner must always be able to finish the login):
+ * evidence for the interactive step-up. It is never a deny: the
+ * legitimate owner must always be able to finish the login.
  *
  * - novelNetwork: the principal has never been seen from this network
  *   bucket (/64 or IPv4) OR the account has no prior trusted network,
@@ -18,7 +18,7 @@ namespace KiwiCaptcha\Risk\Marks;
  *   (caller-supplied corpus verdict, same step-up-worthy shape as
  *   honeypot evidence).
  * - scopePressure: the scope failure-ratio pressure is running at/above
- *   MarksEscalation::SCOPE_PRESSURE_FLOOR / SCOPE_PRESSURE_LEVEL, so
+ *   MarksEscalation::`SCOPE_PRESSURE`_FLOOR / `SCOPE_PRESSURE`_LEVEL, so
  *   every first-attempt login escalates, not only the attacked
  *   target's.
  *

@@ -7,19 +7,18 @@ namespace KiwiCaptcha\Risk;
 /**
  * The additive risk-v2 signal fields (each 0..1000), in a fixed order.
  *
- * These are a separate surface from the 13 risk-v1 contract fields: they
+ * These are a separate surface from the 13 risk-v1 contract fields. They
  * are derived from the risk-v2 context (honeypot evidence, session
  * client-context consistency, trusted-edge TLS consistency) at assessment
  * time and never mutate the risk-v1 state script or the v1 SignalVector.
  * Both crates use the identical field names and fixed-point semantics
  * (Rust mirror: honeypot, session_inconsistency, tls_inconsistency).
  *
- * There is deliberately no execution-evidence field: execution traces
+ * There is deliberately no execution-evidence field. Execution traces
  * and digests are forgeable without a browser by a full-knowledge
- * forger (the v6 envelopes are public functions of the shipped
- * operands; see WhiteBoxEnvelopeForger, pass rate 1.0), so they are
- * never weighted as proof of a real browser anywhere in the risk
- * engine.
+ * forger. The v6 envelopes are public functions of the shipped
+ * operands. See WhiteBoxEnvelopeForger, pass rate 1.0. They are never
+ * weighted as proof of a real browser anywhere in the risk engine.
  */
 final class RiskV2Signals
 {

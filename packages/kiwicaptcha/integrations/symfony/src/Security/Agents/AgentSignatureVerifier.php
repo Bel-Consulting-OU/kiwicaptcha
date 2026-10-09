@@ -26,11 +26,11 @@ use Symfony\Component\HttpFoundation\Request;
  * request body is present. Anything else in the covered list is
  * refused (this verifier cannot derive it, so it must not pretend
  * to), and a body-bearing request without a covered, matching
- * content-digest is refused — the header-strip defense.
+ * content-digest is refused, the header-strip defense.
  *
  * The signature parameters are enforced, not advisory. The alg must
  * be exactly "ed25519" (any other value, including a lookalike,
- * fails closed — the alg-confusion defense). The tag must be this
+ * fails closed, the alg-confusion defense). The tag must be this
  * plane's fixed tag, created must sit inside the ±skew window,
  * expires must be honored. The nonce is single-use through the
  * Redis ledger, claimed only after the signature itself verified.

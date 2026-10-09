@@ -141,7 +141,7 @@ protocol v5:
 
 ```text
 # 1. Deploy the v5-reading binaries fleet-wide (the switch still off).
-# 2. Confirm no old binary remains — set the central floor on the
+# 2. Confirm no old binary remains, set the central floor on the
 #    security Redis (a HASH: SecurityEpochMonitor reads it with
 #    HGETALL, so HSET, never SET) and watch readiness drain every
 #    binary whose max protocol is below it.
@@ -435,7 +435,7 @@ The procedure:
 # 1. Deploy the new binaries EVERYWHERE (accept v2 + v3, still emitting v2).
 #    Confirm no old binary remains; the readiness probe keeps any binary
 #    whose max protocol is below the floor out of the pool.
-# 2. Raise the central floor to 3 — only now may v3 be emitted.
+# 2. Raise the central floor to 3, only now may v3 be emitted.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 3 min_policy_epoch 2
 # 3. Enable the writer switch on every node.
@@ -456,8 +456,8 @@ The doctor's protocol-v3 writer check keys on it:
 
 | high_abuse | `risk.decoy_v3_enabled` | `protocol_rollout.mode` | Doctor status |
 |---|---|---|---|
-| yes | false | normal (or absent) | **FAIL** — a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
-| yes | false | migration | **WARN** (exit 0) — the deliberate two-phase deferral |
+| yes | false | normal (or absent) | **FAIL**, a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
+| yes | false | migration | **WARN** (exit 0), the deliberate two-phase deferral |
 | yes | true | any | PASS once the central floor confirms v3 AND the v4 floor confirms the execution surface (high_abuse turns `risk.execution_challenge` on by default, so a floor of 3 alone fails with the protocol-v4 message; see "Protocol v4 execution rollout"); FAIL while either floor is absent or below its rung |
 | no | any | any | unchanged (protocol v2 emission passes; the armed-but-unconfirmed floor keeps its warn) |
 
@@ -498,7 +498,7 @@ The v4 rollout procedure:
 #    still emitting at most v3). Confirm no older binary remains; the
 #    readiness probe keeps any binary whose max protocol is below the
 #    floor out of the pool.
-# 3. Raise the central floor to 4 — only now may v4 be emitted.
+# 3. Raise the central floor to 4, only now may v4 be emitted.
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 4 min_policy_epoch 2
 # 4. Enable the execution gate on every node.
@@ -751,7 +751,7 @@ The ingress caps exist so a single source can never saturate a worker's connecti
 Scale the captcha workers on the admission-side metrics, not on CPU.
 The deployment-wide issuance rate (the `{kiwi:<ns>}:issuance:<second>` counter the controller increments on every minted challenge, exposed via the resource-pressure provider / Redis) and the outstanding-challenge pressure are the honest demand signals.
 A hostile flood that is being denied (rate limiter, risk engine, emergency cap) must not trigger scale-up.
-Those requests never mint and never consume verification CPU on the workers.
+Those requests never mint. They never consume verification CPU on the workers.
 Example:
 
 ```yaml
@@ -761,7 +761,7 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: kiwicaptcha
 spec:
-  maxReplicas: 12            # hard cost ceiling — NEVER unbounded
+  maxReplicas: 12            # hard cost ceiling, NEVER unbounded
   metrics:
     - type: External
       external:

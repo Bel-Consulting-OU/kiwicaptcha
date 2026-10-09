@@ -143,7 +143,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
     }
 
     /**
-     * First-time TOTP enrollment under the enrollment gate: the handler
+     * First-time totp enrollment under the enrollment gate: the handler
      * refuses it without a session-scoped step-up completed in the
      * enrolling session, so the test books that proof first (the
      * established-factor floor accepts the email_otp completion).

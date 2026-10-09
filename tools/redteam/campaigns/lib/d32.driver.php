@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 /**
  * d32.driver.php — the risk-plane leg of D3.2: every stealth solve the
- * browser paid is scored through the REAL php risk engine over the
- * REAL Redis marks store, and the required ladder behavior is asserted
+ * browser paid is scored through the real php risk engine over the
+ * real Redis marks store, and the required ladder behavior is asserted
  * from the engine's own outputs:
  *
  *   base        a clean stealth session is priced at its own price

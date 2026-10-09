@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 /**
  * d38.driver.php — the verified-agent plane of D3.8: the RFC 9421
- * machine-client path driven through the REAL bundle classes (Agents
+ * machine-client path driven through the real bundle classes (Agents
  * namespace, the AgentSigner fixture signing per the RFC's base-string
- * grammar) over the REAL Redis nonce and quota stores.
+ * grammar) over the real Redis nonce and quota stores.
  *
  * Required results, asserted here:
  *   - every signed request inside the agent's quota verifies, at its

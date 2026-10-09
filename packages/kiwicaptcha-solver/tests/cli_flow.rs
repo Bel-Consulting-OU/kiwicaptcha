@@ -1,6 +1,6 @@
 //! The CLI integration tests: a stub deployment on 127.0.0.1 that answers
-//! the challenge route by minting a REAL challenge through the workspace
-//! issuer and the siteverify route by running the REAL core verifier, so
+//! the challenge route by minting a real challenge through the workspace
+//! issuer and the siteverify route by running the real core verifier, so
 //! the binary's whole flow (fetch, solve, post, exit code) is proven
 //! against the same verifier a deployment runs.
 

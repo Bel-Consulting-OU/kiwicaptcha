@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 /**
  * d39.driver.php — the D3.9 risk-engine gaming driver: the five
- * gaming strategies of the spec, each against the REAL risk engine
- * surfaces over the REAL Redis.
+ * gaming strategies of the spec, each against the real risk engine
+ * surfaces over the real Redis.
  *
  *   trust farming       a session earns credit in its home ASN bucket
  *                       and the cookie is then shared across a botnet
@@ -19,7 +19,7 @@ declare(strict_types=1);
  *                       action, never a per-request flip.
  *
  *   calibration poison  the label-flood shape of the 10^5-labels test
- *                       re-driven through the REAL outcome plane
+ *                       re-driven through the real outcome plane
  *                       (register + confirm through the real store) at
  *                       the stated downscale: forged
  *                       confirmed-legitimate labels move the scope

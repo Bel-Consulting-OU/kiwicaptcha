@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * The /healthz handler logic of the reference deployment.
  *
- * The probe is a REAL round trip through the configured store, never a
+ * The probe is a real round trip through the configured store, never a
  * process-local check. The default full mode runs the storage round
  * trip: the storage interface exposes no ping, so the probe stores a
  * synthetic pending record with a fresh random nonce, reads it back,

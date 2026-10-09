@@ -114,11 +114,11 @@ final class SolutionToken
         // The execution digest is an optional fifth segment: an unarmed
         // token stays byte-identical to the four-segment shape.
         if ($this->executionDigest !== null) {
-            // The trace travels on the wire as base64url, unpadded — the
+            // The trace travels on the wire as base64url, unpadded, the
             // driver's format (btoa + url-safe translation): the field
             // already holds the standard base64 of the plain trace, so
             // only the alphabet/padding translation applies ('+'/'-',
-            // '/'/'_', '=' stripped) — never a second encode.
+            // '/'/'_', '=' stripped), never a second encode.
             $plain .= '.'.$this->executionDigest.($this->executionTrace !== null ? ':'.rtrim(strtr($this->executionTrace, '+/', '-_'), '=') : '');
         }
         // The rsw final value rides as the final segment, after the
@@ -164,7 +164,7 @@ final class SolutionToken
 
         // The wire grammar splits on ALL dots: the first three segments
         // are nonce/counter/duration, and everything from the fourth
-        // segment onward is telemetry plus — at the tail — the optional
+        // segment onward is telemetry plus — at the tail, the optional
         // execution-evidence segment and the optional rsw final value.
         // The suffix peels run independently, right-to-left: the rsw
         // final value is peeled first exactly when the last segment is

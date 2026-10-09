@@ -5,8 +5,8 @@ declare(strict_types=1);
 /**
  * d38.risk.php — the unauthenticated computer-use agent's risk-plane
  * leg of D3.8: the scripted browser driver (webdriver visible, no
- * stealth) has its solve events scored through the REAL php risk
- * engine over the REAL Redis. The required behavior for an
+ * stealth) has its solve events scored through the real php risk
+ * engine over the real Redis. The required behavior for an
  * UNAUTHENTICATED agent is exactly the commodity-bot treatment: priced
  * at its own band while clean, escalated by its own velocity as the
  * run accumulates, never credited as human, and its verification pass

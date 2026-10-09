@@ -9,9 +9,9 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 
 /**
- * The first-factor bootstrap gate: applications without email OTP have
- * no prior factor to complete a step-up with, so a first enrollment
- * would be a dead end. When enabled, a freshly verified signup or
+ * The first-factor bootstrap gate. Applications without email OTP have
+ * no prior factor to complete a step-up with. A first enrollment would
+ * then be a dead end. When enabled, a freshly verified signup or
  * recovery session may enroll a first factor.
  *
  * The grant is never a request attribute (any client could set one).
@@ -71,7 +71,7 @@ final class StepUpBootstrapGate
      * Whether this request may proceed to a first factor enrollment.
      * $principalPseudonym is the engine's 32-hex principal pseudonym
      * (the spelling the handlers carry). The gate pseudonymizes nothing
-     * here — it compares against the already-pseudonymized grant.
+     * here, it compares against the already-pseudonymized grant.
      * Consumes the session's grant on success (single-use); a missing
      * or expired grant, a disabled gate, or a principal other than the
      * granted one answers false and leaves the marker for the principal
@@ -109,7 +109,7 @@ final class StepUpBootstrapGate
 
     /**
      * The engine pseudonym of a raw identifier. Returns null when the
-     * identity factory is not wired (fail closed — no grant is minted).
+     * identity factory is not wired (fail closed, no grant is minted).
      */
     private function pseudonymize(string $rawIdentifier): ?string
     {

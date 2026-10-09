@@ -733,7 +733,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      * or a non-nonce CSP).
      */
     /**
-     * The CSP nonce of the presentation. Only a PER-REQUEST nonce from
+     * The CSP nonce of the presentation. Only a per-request nonce from
      * the server-set attribute is honored: a static configured nonce is
      * a single-use value reused across responses and is refused. With
      * no per-request nonce the page uses the external-script mode.

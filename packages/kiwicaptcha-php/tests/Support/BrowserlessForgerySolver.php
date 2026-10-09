@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests\Support;
 
 /**
- * The browserless shadow solver of the execution grammars: a dev-only
- * oracle that forges verifier-accepted executed traces without a
- * browser for the pure-semantics rungs, versions 1 through 5, the
+ * The browserless shadow solver of the execution grammars. A dev-only
+ * oracle forges verifier-accepted executed traces without a browser
+ * for the pure-semantics rungs, versions 1 through 5. The
  * causal object-graph rung included. On version 6 this naive solver is
  * rejected only because it emits the pure-sim placeholders rather than
  * the operand-derived envelope entries; a forger who implements the

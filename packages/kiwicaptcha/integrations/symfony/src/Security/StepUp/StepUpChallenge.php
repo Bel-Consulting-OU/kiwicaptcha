@@ -43,7 +43,7 @@ final class StepUpChallenge
         public readonly ?string $ceremony = null,
         public readonly ?string $sessionHash = null,
         /**
-         * The SHA-256 of a per-challenge client secret, minted ONLY for
+         * The SHA-256 of a per-challenge client secret, minted only for
          * stateless begins (a begin request with no started session).
          * A session-bound challenge stores null: each challenge has
          * exactly one binding. The plaintext secret is returned once at
@@ -54,7 +54,7 @@ final class StepUpChallenge
         /**
          * The creation challenge carries the bootstrap authorization it
          * was begun under. The grant is consumed at begin (single-use),
-         * so the completion must read this flag — re-consulting the
+         * so the completion must read this flag, re-consulting the
          * gate would find nothing and refuse a legitimate bootstrap
          * enrollment at the finish line.
          */
@@ -315,7 +315,7 @@ final class StepUpChallenge
         if (($sessionHash !== null) === ($clientSecretHash !== null)) {
             throw $fail('exactly one of session_hash / client_secret_hash must be present');
         }
-        // Strict: when present, exactly the integer 0 or 1 — never a
+        // Strict: when present, exactly the integer 0 or 1, never a
         // stringly-typed "1" / "1abc", a boolean, or null. Absent means
         // 0 (the pre-bootstrap wire shape). Every other field decodes
         // fail-closed; the bootstrap flag is no exception.

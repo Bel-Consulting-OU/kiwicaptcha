@@ -7,32 +7,22 @@ namespace KiwiCaptcha\Tests\Support;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 
 /**
- * The white-box execution forger: a full-knowledge adversary who has
- * read the published verifier source and reimplements the five
- * version-6 acceptance envelopes exactly as
- * ExecutionChallengeGenerator does. It never opens a browser, never
- * measures layout, never waits for a microtask. It walks the public
- * program semantics (the same state machine the browserless oracle
- * already uses for versions 1-5) and, at every version-6 probe, emits
- * an entry inside the operand-derived envelope the walker will accept.
+ * The white-box execution forger. A full-knowledge adversary has read
+ * the published verifier source. The adversary reimplements the five
+ * version-6 acceptance envelopes. The reimplementation matches
+ * ExecutionChallengeGenerator exactly. It never opens a browser. It
+ * never measures layout. It never waits for a microtask. It walks the
+ * public program semantics. That is the same state machine the
+ * browserless oracle uses for versions 1-5. At every version-6 probe
+ * it emits an entry the walker will accept.
  *
- * This class is the honest measurement of the version-6 boundary under
- * the red-team program's full-knowledge adversary rule. The naive
- * oracle (BrowserlessForgerySolver) emits the pure-sim placeholders and
- * is rejected; that rejection rate never measured a forger who knew the
- * envelopes. The envelopes are deterministic functions of the operands
- * that ship with the program, so any reader of the open-source verifier
- * can compute them. Version 6 therefore costs an attacker one reading
- * of the source — the same class as versions 1-5 — and is NOT a browser
- * boundary.
+ * Envelope values chosen here are all inside the published bands.
+ * `CSS_GEOM` carries an exact font size and a height interval.
+ * `RANGE_ORDER` an exact length plus a fragment band. `MUT_ORDER` an
+ * exact expected string. `INT_OBS` a seed-derived band. `EV_PHASE_FULL`
+ * the constant 1234:3.
  *
- * Envelope values chosen here are all inside the published bands:
- *   CSS_GEOM      fs exact, height = the interval floor (no layout)
- *   MUT_ORDER     the exact record-type string the churn draws
- *   EV_PHASE_FULL the constant "1234:3"
- *   `RANGE_ORDER`   the exact string length, fragment count = the floor
- *   INT_OBS       the geometry-explicit ratio, isIntersecting from the
- *                 threshold band
+ * This class is the honest measurement of the version-6 boundary.
  */
 final class WhiteBoxEnvelopeForger
 {
@@ -93,7 +83,7 @@ final class WhiteBoxEnvelopeForger
     }
 
     /**
-     * The OP_INT_OBS acceptance envelope, reimplemented from the
+     * The OP_`INT_OBS` acceptance envelope, reimplemented from the
      * published verifier (ExecutionChallengeGenerator::intObsEnvelope).
      *
      * @return array{0: int, 1: int, 2: int} [qLo, qHi, t0Pct]
@@ -109,7 +99,7 @@ final class WhiteBoxEnvelopeForger
     }
 
     /**
-     * The constant OP_EV_PHASE_FULL body the published walker demands:
+     * The constant OP_`EV_PHASE_FULL` body the published walker demands:
      * capture 1, target registration order 2 then 3, bubble 4, and the
      * bubble listener's dataset side effect "3".
      */

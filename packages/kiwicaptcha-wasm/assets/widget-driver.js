@@ -25,7 +25,7 @@
   var encoder = new TextEncoder();
 
   // ── Solver PROTOCOL id ──
-  // Bumped when the worker protocol changes. The worker reports the SAME
+  // Bumped when the worker protocol changes. The worker reports the same
   // id and verifies the glue's protocol version before ready; the driver
   // refuses a differing id (protocol compatibility only — artifact
   // identity is the release tag + SHA256SUMS + SRI + attestation).
@@ -609,7 +609,7 @@
   }
   // Manual retry is a genuine native <button> (focusable, Enter/Space
   // activation built in) rendered in the error/unavailable states. It
-  // triggers the SAME re-init path as the click/tap reacquire.
+  // triggers the same re-init path as the click/tap reacquire.
   function createRetryButton(W, retryLabel) {
     var b = document.createElement("button");
     b.type = "button";
@@ -1206,7 +1206,7 @@
         // Algorithm selection: the client may only choose among the
         // server-offered profiles (sha256 / argon2id / rsw); anything
         // else normalizes to the default, and a solver failure never
-        // downgrades a request (failed paths retry the SAME profile).
+        // downgrades a request (failed paths retry the same profile).
         var algorithm = kiwiConfigValue(W, container, "data-kiwi-algorithm") || "sha256";
         if (algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw") algorithm = "sha256";
         var requestBinding = kiwiConfigValue(W, container, "data-kiwi-request-binding");
@@ -1614,7 +1614,7 @@
   // ── Provider-style public API ──
   // Native KiwiCaptcha exposes the incumbent lifecycle: render() ->
   // stable id, reset/getResponse/execute/remove/isExpired/ready. The
-  // compatibility globals delegate to the SAME instances.
+  // compatibility globals delegate to the same instances.
   function kiwiResolveTarget(target) {
     if (!target) return null;
     if (typeof target === "string") {
