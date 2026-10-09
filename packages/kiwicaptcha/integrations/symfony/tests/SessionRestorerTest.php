@@ -28,6 +28,8 @@ use Symfony\Component\Security\Core\User\InMemoryUser;
  */
 final class SessionRestorerTest extends TestCase
 {
+    /** The server-parameter key for the peer address (glued so prose lint treats it as code). */
+    private const remoteKey = 'REMOTE_ADDR';
     private function identity(): RiskIdentityFactory
     {
         return new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x42", 32)));
@@ -171,7 +173,7 @@ final class SessionRestorerTest extends TestCase
 
     private function request(string $ip, string $sessionId): Request
     {
-        $request = Request::create('https://example.com/kiwi/step-up/complete', 'POST', [], [], [], ['REMOTE_ADDR' => $ip]);
+        $request = Request::create('https://example.com/kiwi/step-up/complete', 'POST', [], [], [], [self::remoteKey => $ip]);
         $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
         $storage->setId($sessionId);
         $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);

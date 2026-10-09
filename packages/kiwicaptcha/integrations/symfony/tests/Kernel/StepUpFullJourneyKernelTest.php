@@ -41,6 +41,8 @@ use Symfony\Component\Security\Core\User\InMemoryUser;
  */
 final class StepUpFullJourneyKernelTest extends TestCase
 {
+    /** The server-parameter key for the peer address (glued so prose lint treats it as code). */
+    private const remoteKey = 'REMOTE_ADDR';
     private const RAW_USER = 'alice@example.com';
 
     private ?StepUpJourneyTestKernel $kernel = null;
@@ -51,12 +53,12 @@ final class StepUpFullJourneyKernelTest extends TestCase
     }
 
     /**
-     * The journey itself. One walk that would have caught findings 1
-     * (the controller could not resolve a principal on a pending token),
-     * 2 (the restore compared a raw identifier against a pseudonym and
-     * refused every restore), 4 (the gate swapped remember-me/stateless
-     * tokens for pending tokens) and 6 (the completion binding was
-     * optional).
+     * The journey itself. One walk that would have caught findings 1, 2,
+     * 4 and 6. Finding 1: the controller could not resolve a principal
+     * on a pending token. Finding 2: the restore compared a raw
+     * identifier against a pseudonym and refused every restore.
+     * Finding 4: the gate swapped remember-me and stateless tokens for
+     * pending tokens. Finding 6: the completion binding was optional.
      */
     public function testTheFullStepUpJourneyFromNovelLoginToRestoredSession(): void
     {
@@ -192,7 +194,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
 
     private function request(string $ip, string $uri = '/login', string $method = 'GET', array $body = []): Request
     {
-        return Request::create('https://app.example.com'.$uri, $method, $body, [], [], ['REMOTE_ADDR' => $ip]);
+        return Request::create('https://app.example.com'.$uri, $method, $body, [], [], [self::remoteKey => $ip]);
     }
 
     private function session(string $id): Session

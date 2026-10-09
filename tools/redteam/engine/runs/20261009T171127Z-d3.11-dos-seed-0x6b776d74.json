@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.11-dos",
+  "attackClass": "D3.11 denial of service",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T17:11:08Z",
+  "duration_s": 19,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "metrics": {
+    "raw": "bounds=5x_measured_baseline floors=2000ms_challenge_1000ms_probe",
+    "sha16_solve_us": null
+  },
+  "economic": "garbage_verify_marginal_cost=cheap_phase_p99_0.8ms amplification_return=negative accepted_abuses=0"
+}

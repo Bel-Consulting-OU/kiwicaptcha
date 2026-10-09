@@ -88,7 +88,7 @@ final class StepUpKernelTest extends TestCase
         $totp = $container->get(TotpStepUpHandler::class);
         // First enrollment is gated: only a session-scoped step-up
         // completed in the enrolling session authorizes it (the
-        // stuffing-takeover fix), so the test books that proof first.
+        // stuffing-takeover rule), so the test books that proof first.
         $store = $container->get('kiwi_captcha.step_up.store');
         \assert($store instanceof \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore);
         $store->markSessionStepUpSuccess('sess-kernel', $principal, 'email_otp', 900, time());

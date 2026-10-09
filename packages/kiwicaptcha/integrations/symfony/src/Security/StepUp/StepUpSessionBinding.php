@@ -33,10 +33,10 @@ final class StepUpSessionBinding
     /**
      * Bind the resolved principal pseudonym and the current session id
      * onto the request. The session id is read from the Symfony session
-     * bag when one is started; without a started session the binding
-     * carries an empty session and a session-bound challenge matches
-     * nothing (fail closed), only a stateless challenge may then be
-     * completed, and only with its client secret.
+     * bag when one is started. Without a started session the binding
+     * carries an empty session. A session-bound challenge then matches
+     * nothing. That is fail closed. Only a stateless challenge may then
+     * be completed. It must present its client secret.
      */
     public static function bind(Request $request, string $principalPseudonym): void
     {
