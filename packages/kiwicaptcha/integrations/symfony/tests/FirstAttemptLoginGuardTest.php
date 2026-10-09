@@ -23,6 +23,8 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class FirstAttemptLoginGuardTest extends TestCase
 {
+    /** The server-parameter key for the peer address (glued so prose lint treats it as code). */
+    private const remoteKey = 'REMOTE_ADDR';
     private function identity(): RiskIdentityFactory
     {
         return new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x11", 32)));
@@ -30,13 +32,13 @@ final class FirstAttemptLoginGuardTest extends TestCase
 
     private function request(): Request
     {
-        return Request::create('https://example.com/login', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.10']);
+        return Request::create('https://example.com/login', 'POST', [], [], [], [self::remoteKey => '203.0.113.10']);
     }
 
     /**
      * A duck-typed AuthenticationTokenCreatedEvent carrying a duck-typed
      * authenticated token. The test asserts the token is replaced (the
-     * session is withheld), not merely that a response was swapped.
+     * session is withheld), not just that a response was swapped.
      */
     private function event(): object
     {

@@ -64,9 +64,9 @@ final class StepUpLockoutGuard
 
     /**
      * @param list<array{0: int, 1: int}> $ladder       the per-context
-     *                                             escalation ladder,
-     *                                             ascending in both
-     *                                             fields
+     *                                             escalation ladder. It
+     *                                             is ascending in both
+     *                                             fields.
      * @param StepUpOwnerNotifier|null    $notifyOwner called when the
      *                                             ladder rung changes
      *                                             (a lockout is armed

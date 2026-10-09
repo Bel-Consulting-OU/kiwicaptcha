@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.3-pow-economics",
+  "attackClass": "D3.3 PoW farm economics",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T18:18:13Z",
+  "duration_s": 18,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "value-class verdicts recorded honestly; the FAIL rows feed the gate row",
+  "metrics": {
+    "raw": "table_complete=true honest_solves_verified=3 accepted_abuses=0 fail_rows=low,standard,high,critical",
+    "sha16_solve_us": null
+  },
+  "economic": "cost_per_accepted_abuse=unbounded accepted_abuses=0 honest_solves_verified=3 value_class_fails=low,standard,high,critical table=tools/redteam/runs/env/d33-economics-redis.json"
+}

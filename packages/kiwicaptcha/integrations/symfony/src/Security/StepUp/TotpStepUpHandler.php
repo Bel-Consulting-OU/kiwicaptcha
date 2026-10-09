@@ -81,11 +81,12 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
     /**
      * Unseal a stored secret under the owning principal's key. A value
-     * this key cannot open (data written before sealing existed, a
-     * tampered store, or a ciphertext copied across principal slots)
-     * fails closed with the typed {@see TotpSecretUnsealException}: the
-     * operator re-enrolls the account rather than the deployment
-     * silently downgrading to plaintext or erroring as a 500.
+     * this key cannot open fails closed with the typed
+     * {@see TotpSecretUnsealException}. That includes data written
+     * before sealing existed, a tampered store, and a ciphertext
+     * copied across principal slots. The operator re-enrolls the
+     * account. The deployment never silently downgrades to plaintext
+     * and never errors as a 500.
      *
      * @throws TotpSecretUnsealException when the stored value cannot be decrypted for this principal
      */

@@ -23,10 +23,10 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
  * Kernel for the full-journey gate test. The risk engine and the
  * step-up plane are armed. Novelty enforcement is 'enforce'. An ASN
  * dataset fixture is present. The real TokenStorage is the firewall's
- * storage (security.token_storage),
- * the typical TokenStorage-backed principal resolver ($security->getUser()
- * semantics), and the journey's in-memory risk surface as the engine
- * state store AND the kiwi_captcha.risk.principal_networks seam. The
+ * storage, the security token storage.
+ * The typical TokenStorage-backed principal resolver is used, with
+ * the getUser semantics. The journey in-memory risk surface is the
+ * engine state store and also the kiwi_captcha.risk.principal_networks seam. The
  * step-up code sender and the outcome reporter are swapped for the
  * capturer and the spy. The outcomes trust gate is fail_closed (the
  * store-backed gate is typed to the concrete Redis store).
