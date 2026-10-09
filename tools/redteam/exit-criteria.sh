@@ -232,17 +232,20 @@ elif [ -f "$D33_JSON" ]; then
     complete=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["table_complete"]).lower())' "$D33_JSON")
     # The honest economics: raw PoW cannot price a real stake at any
     # difficulty. The answer is the documented disposition escalation
-    # (the scope's step_up/deny minimum). The row is GREEN when the
-    # table is complete AND the critical-stakes escalation path was
-    # demonstrated (advised WARN + verified PASS), which the D3.3
-    # campaign asserts. A table with no fail rows is also green.
-    escalated=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if e.get("verified_with_step_up_minimum",{}).get("status")=="PASS" else "no")' "$D33_JSON")
+    # (the scope's step_up/deny minimum). The row is GREEN only when
+    # the table is complete AND the SHIPPED profile sets a step_up/deny
+    # minimum for the failing classes. A hand-written step_up minimum in
+    # the campaign script is a function test, not a deployment: the gate
+    # reads shipped_escalates, which is the shipped scope minimums.
+    escalated=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if e.get("shipped_escalates") else "no")' "$D33_JSON")
     if [ "$complete" = "true" ] && [ "$fails" = "-" ]; then
         record value-class-costs d3.3 GREEN "every value class priced above its independent declared stake"
     elif [ "$complete" = "true" ] && [ "$escalated" = "yes" ]; then
-        record value-class-costs d3.3 GREEN "raw PoW cannot price the independent stakes; the documented disposition escalation (step_up/deny minimum) carries them (verified)"
+        record value-class-costs d3.3 GREEN "raw PoW cannot price the independent stakes; the shipped step_up/deny minimum carries them (shipped_escalates=yes)"
     elif [ "$complete" != "true" ]; then
         record value-class-costs d3.3 RED "the measured table is incomplete"
+    elif [ "$escalated" != "yes" ]; then
+        record value-class-costs d3.3 RED "escalation required: value classes $fails price below their declared stake and the shipped profile leaves them on a PoW rung or allow (set risk.scopes.<name>.minimum to step_up or deny)"
     else
         record value-class-costs d3.3 RED "priced below the declared abuse value and no escalation demonstrated: $fails"
     fi

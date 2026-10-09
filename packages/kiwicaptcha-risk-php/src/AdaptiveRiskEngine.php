@@ -691,14 +691,30 @@ final class AdaptiveRiskEngine
         $novelNetwork = false;
         $scopePressure = false;
         if ($isLogin) {
+            // Scope pressure is judged first: it is an independent
+            // first-attempt signal and also the override that keeps a
+            // big-ISP ASN match from passing during an active storm.
+            if (
+                $this->enableGlobalPressure
+                && $decision->globalLevel >= MarksEscalation::SCOPE_PRESSURE_LEVEL
+            ) {
+                $scopePressure = true;
+            }
+            if (
+                $this->enableGlobalPressure
+                && $vector->globalPressure >= MarksEscalation::SCOPE_PRESSURE_FLOOR
+            ) {
+                $scopePressure = true;
+            }
             if ($this->principalNetworks !== null && $observation->principalId !== null) {
                 // Novelty is judged on the ASN bucket first: carriers
                 // rotate IPv6 /64s and cgnat addresses per connection,
                 // so a /64 key alone would step up most mobile logins.
-                // A known ASN is never novel; an unknown ASN is novel.
-                // The /64 bucket is a contributing signal only (it can
-                // raise novelty when the principal has no trusted
-                // network at all, never on its own against a known ASN).
+                // An unknown ASN is novel. A known ASN is NOT an
+                // automatic pass: ISP-matched residential proxies ride
+                // the victim's own ASN on a fresh /64, so the same-ASN
+                // new-/64 shape is a WEAKER novelty signal that fires
+                // unless device continuity vouches for the browser.
                 $network = self::networkBucket($c->sourceIp);
                 $asn = $this->asnBucketOf($c->sourceIp);
                 try {
@@ -712,17 +728,38 @@ final class AdaptiveRiskEngine
                     $trusted = null;
                     $netSeen = null;
                 }
+                // Device continuity: the request carries a session
+                // pseudonym from the first-party continuity cookie. A
+                // returning browser is the stronger legitimacy signal;
+                // a cookie-less request on a fresh /64 of a known ASN
+                // is exactly the residential-proxy shape.
+                $deviceContinuity = $observation->sessionId !== null && $observation->sessionId !== '';
+                $newPrefix = ($netSeen === false);
                 $isNovel = false;
                 if ($asnSeen === false) {
                     // Never-seen ASN: novel regardless of the /64.
                     $isNovel = true;
                 } elseif ($asnSeen === true) {
-                    // Known ASN: /64 novelty alone never fires.
-                    $isNovel = false;
+                    // Known ASN: the /64 novelty is weak, never a free
+                    // pass. It fires when the prefix is new and no
+                    // device continuity vouches for the browser, or
+                    // when scope-wide stuffing pressure is running (a
+                    // big-ISP match never overrides an active storm).
+                    $isNovel = $newPrefix && (!$deviceContinuity || $scopePressure);
                 } else {
                     // No ASN data: fall back to the /64 bucket, and to
                     // the no-trusted-network condition.
-                    $isNovel = ($netSeen === false) || ($trusted === false);
+                    $isNovel = $newPrefix || ($trusted === false);
+                }
+                // A returning browser on its known network is exempt
+                // from the scope-pressure override: the storm targets
+                // stolen credentials from new sessions, not the
+                // owner's own device. Without this exemption the
+                // campaign cannot tell "stops stuffing" from "steps up
+                // everyone" — the legitimate baseline would trip the
+                // 0.1% false-positive bound on every returning user.
+                if ($scopePressure && $deviceContinuity && !$isNovel && $netSeen === true) {
+                    $scopePressure = false;
                 }
                 // Migration grace: in 'learn' mode a novel network is
                 // recorded but never escalates. Every existing account
@@ -739,18 +776,6 @@ final class AdaptiveRiskEngine
                     }
                 }
                 $novelNetwork = $isNovel && $this->noveltyEnforcement === 'enforce';
-            }
-            if (
-                $this->enableGlobalPressure
-                && $decision->globalLevel >= MarksEscalation::SCOPE_PRESSURE_LEVEL
-            ) {
-                $scopePressure = true;
-            }
-            if (
-                $this->enableGlobalPressure
-                && $vector->globalPressure >= MarksEscalation::SCOPE_PRESSURE_FLOOR
-            ) {
-                $scopePressure = true;
             }
         }
 
