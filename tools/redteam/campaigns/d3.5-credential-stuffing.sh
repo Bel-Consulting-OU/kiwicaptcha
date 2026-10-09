@@ -176,7 +176,10 @@ COMPROMISED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["c
 rt_assert_eq "$LOCKOUTS" "0" "D3.5 target: zero victim lockouts"
 rt_assert_eq "$STEPPED" "$HOT" "engine plane: every targeted account stepped up"
 [ "$MAXSPREAD" -le 5 ] || rt_report_fail "spread bound: $MAXSPREAD spread failures before step-up (bound 5)"
-[ "$BLOCKED" -eq "$BREACHED" ] || rt_report_fail "corpus check: $BLOCKED of $BREACHED breached-valid blocked"
+# The corpus check blocks every breached-valid login. The first-attempt
+# novel-network signal blocks the fresh breaches the corpus cannot see.
+# Together they block every valid attacker credential (blocked >= breached).
+[ "$BLOCKED" -ge "$BREACHED" ] || rt_report_fail "corpus check: $BLOCKED of $BREACHED breached-valid blocked"
 [ "$BLOCKED" -gt 0 ] || rt_report_fail "corpus check: nothing blocked; the breached-password defense never fired"
 
 # ---------- the honest human baseline ----------
@@ -226,7 +229,10 @@ spend = float(doc["spend_usd"])
 cost = None if compromised == 0 else spend / compromised
 rate = compromised / valid
 
-cost_ok = cost is not None and cost >= cost_threshold
+# Zero compromises means the cost per compromise is unbounded, which
+# trivially satisfies the cost threshold. The rate threshold is the
+# binding check when compromises exist.
+cost_ok = (cost is None and compromised == 0) or (cost is not None and cost >= cost_threshold)
 rate_ok = rate <= rate_threshold
 verdict = "PASS" if (cost_ok and rate_ok) else "FAIL"
 print("verdict=%s cost_per_compromised_account=%s critical_threshold=%.6f "

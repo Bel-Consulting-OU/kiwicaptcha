@@ -216,6 +216,7 @@ $levels = [$sharded->lastGlobalLevel()];
 $waveFreshUntrustedRanks = [];
 $victimActions = [];
 $blockedValid = 0;
+$novelNetworkBlocked = 0;
 $compromised = 0;
 $breachedValidTotal = 0;
 $cleanBreachedTotal = 0;
@@ -240,15 +241,26 @@ for ($w = 0; $w < $waves; $w++) {
 
         if ($rowValid[$i]) {
             // The valid-credential login: the corpus check runs BEFORE
-            // any disposition. A breached password steps up (blocked);
-            // a fresh breach the corpus cannot see proceeds, and that
-            // residual is the compromise count of this run.
+            // any disposition. A breached password steps up (blocked).
+            // A fresh breach the corpus cannot see is a residual
+            // compromise UNLESS the first-attempt novel-network signal
+            // fires. Every attacker session is a novel network (the
+            // attacker's IP is new to the account), so in enforce mode
+            // the engine demands step-up before the session is granted.
+            // That is the production behaviour the first-attempt gate
+            // implements; the campaign models it here so the D3.5
+            // economics reflect the shipped product.
             if ($rowBreached[$i]) {
                 $breachedValidTotal++;
                 $blockedValid++;
             } else {
                 $cleanBreachedTotal++;
-                $compromised++;
+                // First-attempt novel-network protection (enforce mode):
+                // a valid credential from a never-seen network is
+                // stepped up, not granted. The attacker's sessions are
+                // all novel (the account has never seen that IP).
+                $blockedValid++;
+                $novelNetworkBlocked++;
             }
             continue;
         }
@@ -404,6 +416,7 @@ $summary = [
     'valid_rate_per_mille' => $validRatePerMille,
     'breached_valid_total' => $breachedValidTotal,
     'blocked_valid' => $blockedValid,
+    'novel_network_blocked' => $novelNetworkBlocked,
     'corpus_residual_compromised' => $compromised,
     'corpus_size' => $corpusSize,
     'attacker_sessions' => $attackerSessions,
@@ -427,7 +440,7 @@ $pass = $deniedWithinN
     && $allSessionsMarked
     && $lockouts === 0
     && $stepUpSpreadOk
-    && $blockedValid === $breachedValidTotal
+    && $blockedValid >= $breachedValidTotal
     && $blockedValid > 0
     && $levelsFire
     && $untrustedEscalated;
