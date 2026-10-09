@@ -1,3 +1,5 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
 warning: value assigned to `crashes` is never read
    --> src/coverage_fuzz.rs:151:17
     |
@@ -8,4 +10,4 @@ warning: value assigned to `crashes` is never read
     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
 warning: `kiwicaptcha-redteam-fuzz` (bin "coverage-fuzz") generated 1 warning
-    Finished `release` profile [optimized] target(s) in 0.04s
+    Finished `release` profile [optimized] target(s) in 0.16s

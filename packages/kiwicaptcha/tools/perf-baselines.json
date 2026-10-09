@@ -126,6 +126,15 @@
       "note": "The standalone incumbent API shims (widget-shims.js), three byte-identical copies. Fetched only by a page that presents the provider globals (grecaptcha / hcaptcha / turnstile) over a plain driver bootstrap, or that keeps Altcha / Friendly Captcha element markup; an ordinary widget page pays zero bytes. The /api.js?compat=... loader route carries widget-compat.js instead, so the two compat surfaces never load together. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
       "gzip_bytes_zlib12": 7332,
       "gzip_bytes_zlib13": 7332
+    },
+    "webauthn_ceremony": {
+      "raw_bytes": 2103,
+      "brotli_bytes": 781,
+      "raw_cap_bytes": 4096,
+      "gzip_cap_bytes": 2048,
+      "brotli_cap_bytes": 2048,
+      "copies_identical": true,
+      "note": "The combined WebAuthn ceremony script (create vs get, branched on doc.ceremony), three byte-identical copies, served from the content-addressed asset route for strict-CSP deployments without per-request nonces."
     }
   },
   "bench": {

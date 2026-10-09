@@ -124,7 +124,7 @@ final class ExecutionTraceFixture
 
     /**
      * The white-box forge entry: the browser-equivalent state machine
-     * with the version-6 probe entries synthesized INSIDE the published
+     * with the version-6 probe entries synthesized inside the published
      * operand-derived envelopes (see WhiteBoxEnvelopeForger) instead of
      * the pure-sim placeholders. Every reported observation is written
      * through into the u8 state exactly as the verifier replays it, so

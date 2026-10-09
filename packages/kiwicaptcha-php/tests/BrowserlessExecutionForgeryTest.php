@@ -9,7 +9,7 @@ use KiwiCaptcha\Tests\Support\BrowserlessForgerySolver;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The browserless execution forgery regression oracle (LAZY FORGER).
+ * The browserless execution forgery regression oracle (lazy forger).
  *
  * The shadow solver must succeed on every pure-semantics grammar the
  * generator emits, versions 1 through 5, the causal object-graph rung
@@ -19,7 +19,7 @@ use PHPUnit\Framework\TestCase;
  * of versions 1-5 is supplementary evidence, reproducible by any
  * implementation of the public semantics, never a browser attestation.
  *
- * Version 6 is rejected by THIS solver only because it emits the
+ * Version 6 is rejected by this solver only because it emits the
  * pure-sim placeholders rather than the operand-derived envelope
  * entries. That 100 percent rejection is a lazy-forger number, NOT a
  * full-knowledge number. The white-box forger (WhiteBoxExecutionForgeryTest

@@ -376,7 +376,7 @@ pub trait SessionTlsTagStore {
 /// reports no record surface and the engine degrades the novel-network
 /// gate to neutral (never novel), never breaking an assessment.
 ///
-/// The record marks a network bucket as ESTABLISHED for the principal
+/// The record marks a network bucket as established for the principal
 /// (written when the session credit is granted — a completed step-up
 /// from that network), so a bare password check never vouches for the
 /// network and a retried stuffed login stays novel until the victim

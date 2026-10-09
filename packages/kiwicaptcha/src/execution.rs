@@ -141,7 +141,7 @@
 //! which are deterministic functions of the operands that ship with the
 //! program, published in this module. A full-knowledge forger who reads
 //! the source reimplements those five functions and emits passing
-//! traces WITHOUT any browser (the white-box forger,
+//! traces without any browser (the white-box forger,
 //! `fixtures::white_box_envelope_forgery_solver`, measures a 100
 //! percent pass rate). Version 6 therefore costs an attacker one
 //! reading of the source — the same class as versions 1-5 — and is
@@ -2312,7 +2312,7 @@ pub mod fixtures {
 
     /// The white-box envelope forger: the same state machine as
     /// [`executed_trace_for_with_observed_height`], but the five
-    /// version-6 probe entries are synthesized INSIDE the published
+    /// version-6 probe entries are synthesized inside the published
     /// operand-derived envelopes instead of the pure-sim placeholders.
     /// Every reported observation is written through into the u8 state
     /// exactly as the verifier replays it, so later checksum/read

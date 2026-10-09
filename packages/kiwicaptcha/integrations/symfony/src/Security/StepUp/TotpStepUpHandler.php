@@ -127,7 +127,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
      * secret, sealed at rest; the replay guard is left untouched.
      *
      * Every enrollment (first OR re-enroll) demands a step-up completed
-     * in THIS session within the lookback window — the same rule as the
+     * in this session within the lookback window — the same rule as the
      * WebAuthn enrollment surface. A first enrollment with no step-up is
      * exactly the credential-stuffing takeover path (a stolen password
      * plants the attacker's own authenticator), so it is refused like a

@@ -54,7 +54,7 @@ final class StepUpChallenge
         /**
          * The creation challenge carries the bootstrap authorization it
          * was begun under. The grant is consumed at begin (single-use),
-         * so the completion must read THIS flag — re-consulting the
+         * so the completion must read this flag — re-consulting the
          * gate would find nothing and refuse a legitimate bootstrap
          * enrollment at the finish line.
          */
@@ -315,7 +315,19 @@ final class StepUpChallenge
         if (($sessionHash !== null) === ($clientSecretHash !== null)) {
             throw $fail('exactly one of session_hash / client_secret_hash must be present');
         }
-        $bootstrapAuthorized = ((int) ($record['bootstrap'] ?? 0)) === 1;
+        // Strict: when present, exactly the integer 0 or 1 — never a
+        // stringly-typed "1" / "1abc", a boolean, or null. Absent means
+        // 0 (the pre-bootstrap wire shape). Every other field decodes
+        // fail-closed; the bootstrap flag is no exception.
+        if (\array_key_exists('bootstrap', $record)) {
+            $bootstrapRaw = $record['bootstrap'];
+            if (!\is_int($bootstrapRaw) || ($bootstrapRaw !== 0 && $bootstrapRaw !== 1)) {
+                throw $fail('bootstrap must be the integer 0 or 1');
+            }
+            $bootstrapAuthorized = $bootstrapRaw === 1;
+        } else {
+            $bootstrapAuthorized = false;
+        }
         $challenge = new self(
             $challenge->id,
             $challenge->kind,

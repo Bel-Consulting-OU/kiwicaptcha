@@ -14,7 +14,7 @@ namespace KiwiCaptcha\Risk;
  * Both crates use the identical field names and fixed-point semantics
  * (Rust mirror: honeypot, session_inconsistency, tls_inconsistency).
  *
- * There is deliberately NO execution-evidence field: execution traces
+ * There is deliberately no execution-evidence field: execution traces
  * and digests are forgeable without a browser by a full-knowledge
  * forger (the v6 envelopes are public functions of the shipped
  * operands; see WhiteBoxEnvelopeForger, pass rate 1.0), so they are

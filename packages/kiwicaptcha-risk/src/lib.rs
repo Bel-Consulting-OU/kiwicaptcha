@@ -1299,7 +1299,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // plane's posture: a server-confirmed spam identity with a clean
         // request quarantines instead of escalating, wire-identical to
         // The first-attempt prevention evidence (P0-1): the signals that
-        // stop a VALID stolen credential on its very first attempt —
+        // stop a valid stolen credential on its very first attempt —
         // before any failure has accumulated anywhere. The engine derives
         // them beside the frozen risk-v1 wire and hands them to the marks
         // stage (or applies the gate directly when no marks reader is
@@ -1473,7 +1473,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// The first-attempt prevention evidence (P0-1) of one assessment:
-    /// the signals that stop a VALID stolen credential before any
+    /// the signals that stop a valid stolen credential before any
     /// failure has accumulated anywhere.
     ///
     /// - `novel_network`: on an AuthenticationSuccess / first login,
@@ -1947,7 +1947,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     }
 
     /// The spread elements one outcome report contributes to the target
-    /// dimension's HLLs: a NON-ROTATING element scoped to the target.
+    /// dimension's HLLs: a non-rotating element scoped to the target.
     /// The source element is `HMAC(spread_key, target_id || '/' ||
     /// /64-or-IPv4)` (the full IPv4 address, or the IPv6 /64) and the
     /// ASN element `HMAC(spread_key, target_id || '/' || asn_bucket)`.

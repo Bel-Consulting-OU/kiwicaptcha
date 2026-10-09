@@ -8,11 +8,11 @@ namespace KiwiCaptcha\Tests\Support;
  * Wire-valid shapes for hand-built storage fixtures.
  *
  * The record decode boundary (ChallengeRecord::fromArray, the twin of
- * the Rust serde reconstruction) applies the full structural contract:
- * the nonce is the 44-char standard-base64 encoding of 32 bytes, the
- * salt the 24-char encoding of 16 bytes, and the prefix the derived
+ * the Rust serde reconstruction) applies the full structural contract.
+ * The nonce is the 44-char standard-base64 encoding of 32 bytes. The
+ * salt is the 24-char encoding of 16 bytes. The prefix is the derived
  * `challenge|salt|`. Storage-contract fixtures keep their readable
- * logical labels; the labels are hashed into the wire nonce shape so a
+ * logical labels. The labels are hashed into the wire nonce shape so a
  * fixture round-trips exactly like a real issued record.
  */
 final class WireFixture

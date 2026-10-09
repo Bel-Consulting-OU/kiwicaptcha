@@ -18,7 +18,7 @@ use KiwiCaptcha\Risk\RiskReason;
  * `evidence` module; the two cores must stay byte-identical.
  *
  * Execution-dimension evidence (ExecutionChallengeV1 traces/digests) is
- * NEVER an input here and is NEVER weighted as proof of a real browser:
+ * never an input here and is never weighted as proof of a real browser:
  * every version's trace is forgeable without a browser by a
  * full-knowledge forger who reads the published envelopes (see
  * WhiteBoxEnvelopeForger / the D3.2 whitebox stage; version 6 pass

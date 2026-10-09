@@ -109,7 +109,7 @@ final class FirstAttemptLoginGuardAuthenticatorScopeTest extends TestCase
             }
         };
         $stack = new RequestStack();
-        $stack->push(Request::create('https://example.com/login', 'POST', [], [], [], ['REMOTE_ADDR' => '203.0.113.10']));
+        $stack->push(Request::create('https://example.com/login', 'POST', [], [], [], ['Remote_ADDR' => '203.0.113.10']));
 
         return new FirstAttemptLoginGuard(
             $gateway,

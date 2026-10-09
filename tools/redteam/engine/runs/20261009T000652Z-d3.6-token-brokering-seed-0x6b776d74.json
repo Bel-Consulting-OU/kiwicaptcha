@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.6-token-brokering",
+  "attackClass": "D3.6 token brokering",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T00:06:50Z",
+  "duration_s": 2,
+  "exit": 1,
+  "result": "FAIL",
+  "detail": "1 failed assertions",
+  "metrics": {
+    "raw": "",
+    "sha16_solve_us": null
+  },
+  "economic": ""
+}

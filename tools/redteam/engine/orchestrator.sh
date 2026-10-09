@@ -147,6 +147,13 @@ class_of() {
     esac
 }
 
+# The engine method recorded in every run document: offline grammar
+# when no local model is configured, the consulted model otherwise.
+method_line="offline-grammar (no local model consulted)"
+if [ -n "${KIWI_RT_LOCAL_LLM_URL:-}" ]; then
+    method_line="local-model consulted (KIWI_RT_LOCAL_LLM_URL set)"
+fi
+
 for campaign in $CAMPAIGNS; do
     now=$(date +%s)
     if [ "$now" -ge "$BUDGET_DEADLINE" ]; then
@@ -180,19 +187,16 @@ for campaign in $CAMPAIGNS; do
     run_doc=$(printf '%s\n' "$OUT" | grep '^RESULT' | head -n 1 | sed 's/ //g' | head -c 40)
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RUNS_DIR/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
-    node -e '
-const fs = require("fs");
-const { sourceFingerprint } = require(process.argv[2]);
-const [campaign, cls, seed, started, duration, rc, verdict, detail, metric, economic, shaUs] = process.argv.slice(3);
-fs.writeFileSync(process.argv[process.argv.length - 1], JSON.stringify({
-    schema: "kiwicaptcha.redteam.run/1",
-    campaign, attackClass: cls, seed, started, duration_s: Number(duration),
-    exit: Number(rc), result: verdict, detail,
-    source_fingerprint: sourceFingerprint(),
-    metrics: { raw: metric, sha16_solve_us: shaUs ? Number(shaUs) : null },
-    economic,
-}, null, 2) + "\n");
-' - "$RT_DIR/engine/fingerprint.mjs" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$doc"
+    # The writer is a real ES module (write-run.mjs): require() of an
+    # ESM fingerprint module throws ERR_REQUIRE_ESM on older Node and
+    # would silently skip the run document. The return code is checked:
+    # a failed write is a failed campaign, never a silent NOT RUN.
+    if ! node "$RT_DIR/engine/write-run.mjs" \
+        "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$method_line" "$doc"; then
+        log "campaign $campaign failed to write its run document"
+        RESULT=1
+        continue
+    fi
     log "campaign $campaign -> $verdict in ${duration}s (ledger: $(basename "$doc"))"
 done
 

@@ -26,11 +26,11 @@ use KiwiCaptcha\ExecutionChallengeGenerator;
  * of the source — the same class as versions 1-5 — and is NOT a browser
  * boundary.
  *
- * Envelope values chosen here (all inside the published bands):
+ * Envelope values chosen here are all inside the published bands:
  *   CSS_GEOM      fs exact, height = the interval floor (no layout)
  *   MUT_ORDER     the exact record-type string the churn draws
  *   EV_PHASE_FULL the constant "1234:3"
- *   RANGE_ORDER   the exact string length, fragment count = the floor
+ *   `RANGE_ORDER`   the exact string length, fragment count = the floor
  *   INT_OBS       the geometry-explicit ratio, isIntersecting from the
  *                 threshold band
  */
@@ -74,7 +74,7 @@ final class WhiteBoxEnvelopeForger
     }
 
     /**
-     * The OP_RANGE_ORDER acceptance envelope, reimplemented from the
+     * The OP_`RANGE_ORDER` acceptance envelope, reimplemented from the
      * published verifier (ExecutionChallengeGenerator::rangeOrderEnvelope).
      *
      * @return array{0: int, 1: int, 2: int} [tExact, rectsLo, rectsHi]

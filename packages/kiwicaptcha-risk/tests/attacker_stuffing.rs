@@ -271,7 +271,7 @@ fn run_simulation(
     assert_eq!(victim_denies, 0, "the victim is never locked out");
 }
 
-/// First-attempt valid stuffing (P0-1 success criterion): a VALID
+/// First-attempt valid stuffing (P0-1 success criterion): a valid
 /// stolen credential on its very first attempt — no prior failures
 /// anywhere, and a network the principal has never been seen from —
 /// must yield StepUp, never Allow. The engine derives the novel-network

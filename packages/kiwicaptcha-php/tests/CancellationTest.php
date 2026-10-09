@@ -40,10 +40,10 @@ final class CancellationTest extends TestCase
 {
 
     /**
-     * The wire nonce of a logical fixture label: the record decode
-     * boundary requires the 44-char standard-base64 shape of 32 bytes
-     * (the strict serde twin), so logical labels map to it here and the
-     * storage keys stay readable at the call sites.
+     * The wire nonce of a logical fixture label. The record decode
+     * boundary requires the 44-char standard-base64 shape of 32 bytes.
+     * That is the strict serde twin. Logical labels map to it here and
+     * the storage keys stay readable at the call sites.
      */
     private static function wn(string $logical): string
     {

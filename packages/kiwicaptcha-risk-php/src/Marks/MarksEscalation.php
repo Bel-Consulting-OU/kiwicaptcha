@@ -188,7 +188,7 @@ final class MarksEscalation
             $stageReasons[] = RiskReason::TargetUnderAttack;
         }
 
-        // Rule 4: first-attempt prevention (P0-1). A VALID credential on
+        // Rule 4: first-attempt prevention (P0-1). A valid credential on
         // its very first attempt carries no marks and no target history,
         // so rules 1-3 stay silent — exactly the D3.5 hole. Any of the
         // three signals (novel network, a known-breached credential, or

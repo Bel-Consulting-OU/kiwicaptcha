@@ -55,7 +55,7 @@ final class ValueClassCeiling
         }
         if ($stakeUsd !== null && $stakeUsd > 0) {
             // A per-action stake override: the value of one successful
-            // abuse of THIS action replaces the class default.
+            // abuse of this action replaces the class default.
             $row = [
                 'rung' => $row['rung'],
                 'declared_usd_per_1000' => $stakeUsd * 1000,
