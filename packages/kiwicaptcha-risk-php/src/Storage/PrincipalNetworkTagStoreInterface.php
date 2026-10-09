@@ -5,17 +5,11 @@ declare (strict_types=1);
 namespace KiwiCaptcha\Risk\Storage;
 
 /**
- * Optional capability: the principal's first-seen network tag records.
- * One record per principal and network-bucket pair, written with SET NX.
- * This mirrors the Rust `PrincipalNetworkTagStore` trait.
- *
- * The record marks a network bucket as established for the principal
- * (written when the session credit is granted, a completed step-up from
- * that network), so a bare password check never vouches for the network
- * and a retried stuffed login stays novel until the victim really proves
- * themselves. Stores without the surface report `null` on every read and
- * the engine degrades the novel-network gate to neutral (never novel),
- * never breaking an assessment.
+ * Optional capability: the principal first-seen network tag records.
+ * One record per principal and network bucket. Written with SET NX.
+ * This mirrors the Rust PrincipalNetworkTagStore trait. The record
+ * marks a network bucket as established. The write is once-only. A
+ * later login from the same bucket is no longer novel.
  */
 interface PrincipalNetworkTagStoreInterface
 {

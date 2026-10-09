@@ -8,28 +8,12 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * The RFC 6238 time-based one-time passcode reference handler. A 30 s
- * step, a plus-or-minus one step acceptance window, and a replay guard
- * that refuses the same time-step twice per principal. The algorithm
- * is in-bundle ({@see TotpCode}, hash_hmac based, SHA-1 or SHA-256,
- * with the base32 codec of RFC 4648), so this handler adds no composer
- * dependency.
- *
- * Enrollment surface: enroll() generates a fresh 160-bit secret,
- * persists it server-side keyed by the principal pseudonym and answers
- * its base32 form for the application to render. A QR label is the
- * application's own surface. The secret is sealed at rest with
- * XSalsa20-Poly1305 (sodium_crypto_secretbox) under a seal key derived
- * from the step-up master and bound to the owning principal's
- * pseudonym, so a ciphertext copied across principal slots never
- * decrypts; only the sealed blob is ever persisted. Unsealing a value
- * this key cannot open (data predating the seal, a tampered store, a
- * cross-principal transplant) fails closed with the typed
- * {@see TotpSecretUnsealException}, which complete() maps to a typed
- * failure verdict, never an uncaught error.
- *
- * The completion credit runs through {@see StepUpCompletionCredit} on
- * the one consumed record, exactly once per challenge.
+ * The RFC 6238 time-based one-time passcode reference handler. A 30
+ * second step. A plus-or-minus one step acceptance window. A replay
+ * guard refuses the same time-step twice per principal. The secret is
+ * sealed at rest with XSalsa20-Poly1305. The key derives from the
+ * deployment master through HKDF under the principal pseudonym. A
+ * storage writer cannot copy one account secret into another slot.
  */
 final class TotpStepUpHandler implements StepUpHandlerInterface
 {

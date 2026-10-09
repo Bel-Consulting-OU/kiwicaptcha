@@ -35,7 +35,7 @@ final class FirstAttemptLoginGuardTest extends TestCase
 
     /**
      * A duck-typed AuthenticationTokenCreatedEvent carrying a duck-typed
-     * authenticated token. The test asserts the TOKEN is replaced (the
+     * authenticated token. The test asserts the token is replaced (the
      * session is withheld), not merely that a response was swapped.
      */
     private function event(): object
